@@ -1,0 +1,60 @@
+import logging
+import dask.array as da
+import zarr
+import os
+import tifffile
+import numpy as np
+
+
+def report_chunks(data):
+    """Log the number of chunks and their sizes for each dimension in the volumes.
+
+    Parameters
+    ----------
+    data : dask.array.Array
+        Dask array containing the data
+    """
+    if isinstance(data, da.Array):
+        chunks = data.chunks
+        dim_labels = ['Position', 'Channel', 'Z', 'Y', 'X']
+        dim = len(chunks)
+
+        if dim > len(dim_labels):
+            logging.warning(f"Unsupported number of dimensions: {dim}")
+            return
+
+        chunk_info = "Chunk Information:\n"
+        for i in range(dim):
+            chunk_info += f"{dim_labels[-dim + i]} - Chunk Size: {chunks[i][0]}, Chunk Length: {len(chunks[i])}\n"
+
+        logging.info(chunk_info)
+    else:
+        logging.warning("Input is not a Dask array.")
+
+def tiff_to_zarr(data_path, output_path, position=0, channel=0):
+    """Convert a set of TIFF files to a Zarr dataset."""
+
+    data = tifffile.imread(data_path)  # Load TIFF into memory
+    size_z, size_y, size_x = data.shape  # Image dimensions
+
+    # Open or create the Zarr dataset
+    zarr_store = zarr.open(
+        output_path,
+        mode='a',
+        shape=(1, 1, size_z, size_y, size_x),  # Default initial shape
+        chunks=(1, 1, 256, 256, 256),
+        dtype='uint16'
+    )
+
+    # Ensure the dataset is large enough
+    new_shape = (
+        max(zarr_store.shape[0], position + 1),
+        max(zarr_store.shape[1], channel + 1),
+        size_z,
+        size_y,
+        size_x
+    )
+    if new_shape != zarr_store.shape:
+        zarr_store.resize(new_shape)
+
+    zarr_store[position, channel, :, :, :] = data
