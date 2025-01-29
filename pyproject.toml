@@ -1,16 +1,46 @@
 [project]
 name = "clearex"
 version = "0.1.0"
-description = ""
-authors = [
-    {name = "Kevin M. Dean",email = "kevin.dean@utsouthwestern.edu"}
-]
+description = "Scalable analytics for cleared and expanded tissue imaging."
+authors = [{name = "The Dean Lab, UT Southwestern Medical Center"}]
 readme = "README.md"
+license = {file = "LICENSE.md"}
 requires-python = ">=3.12"
 dependencies = [
-]
-
+    'dask==2025.1.0',
+    'dask-jobqueue',
+    'distributed==2025.1.0',
+    'matplotlib',
+    'numpy',
+    'opencv-python',
+    'pandas',
+    'scikit-image',
+    'scipy',
+    'tifffile==2025.1.10',
+    'zarr'
+    ]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-xvfb",
+    "pytest-cov",
+    "pre-commit",
+    ]
+
+docs = [
+    "numpydoc",
+    "nbconvert",
+    "sphinx",
+    "sphinx_rtd_theme",
+    "sphinx-copybutton",
+    "sphinx-issues",
+    "sphinx-design",
+    "pyyaml",
+    "pydata_sphinx_theme",
+    "sphinx-toolbox"
+]
