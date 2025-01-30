@@ -1,12 +1,12 @@
 # Standard Library Imports
-import numpy as np
 
 # Third Party Imports
+import numpy as np
 
 # Local Imports
 
 
-def add_median_border(image_data):
+def add_median_border(image_data: np.ndarray) -> np.ndarray:
     """Add a border to the image data with the median intensity value.
 
     Parameters

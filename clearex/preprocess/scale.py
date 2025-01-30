@@ -1,5 +1,11 @@
+
+# Standard Library Imports
+
+# Third-Party Imports
 from skimage.transform import resize
 import numpy as np
+
+# Local Imports
 
 def resize_data(data: np.array, axial_pixel_size: float, lateral_pixel_size: float) -> np.array:
     """Resize the data to isotropic resolution with linear interpolation.

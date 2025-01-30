@@ -1,4 +1,5 @@
 # Standard Library Imports
+from typing import Optional
 
 # Third Party Imports
 from skimage.filters import threshold_otsu
@@ -9,21 +10,38 @@ from skimage.morphology import dilation, erosion
 import skimage.filters as filters
 import skimage.measure as measure
 
-from filter.kernels import gaussian_kernel, second_derivative_gaussian_kernel
-
 # Local Imports
-from filter.filters import dog
+from clearex.filter.kernels import gaussian_kernel, second_derivative_gaussian_kernel
+from clearex.filter.filters import dog
+from clearex.filter.kernels import make_3d_structured_element
 
-# Local Imports
-from filter.kernels import make_3d_structured_element
-
-# Local Imports
-
-def difference_of_gaussian(vol, sigma_high=50, sigma_low=200, down_sampling=4,
-                          n_classes=3):
+def difference_of_gaussian(
+        vol: np.ndarray,
+        sigma_high: Optional[float]=50,
+        sigma_low: Optional[float]=200,
+        down_sampling: Optional[int]=4,
+        n_classes: Optional[int]=3
+) -> np.ndarray:
     """
-    vol: a 3D NumPy array of shape (Z, Y, X).
-    Returns a 3D labeled volume of shape (Z, Y, X).
+    Apply Difference of Gaussian (DoG) filter to a 3D volume and threshold using Otsu's method.
+
+    Parameters
+    ----------
+    vol : np.ndarray
+        A 3D NumPy array of shape (Z, Y, X).
+    sigma_high : Optional[float]
+        The standard deviation of the high-pass Gaussian kernel.
+    sigma_low : Optional[float]
+        The standard deviation of the low-pass Gaussian kernel.
+    down_sampling : Optional[int]
+        The factor to downsample the image data by.
+    n_classes : Optional[int]
+        The number of classes to threshold the image data into. Default is 3.
+
+    Returns
+    -------
+    np.ndarray
+        The binary image data.
     """
 
     # Difference of Gaussian
@@ -35,7 +53,7 @@ def difference_of_gaussian(vol, sigma_high=50, sigma_low=200, down_sampling=4,
     return binary
 
 
-def otsu(image_data, down_sampling=4):
+def otsu(image_data: np.ndarray, down_sampling: Optional[int]=4) -> np.ndarray:
     """Apply Otsu thresholding to a 3D image.
 
     Parameters
@@ -55,7 +73,7 @@ def otsu(image_data, down_sampling=4):
     image_binary = image_data > threshold
     return image_binary
 
-def noise_normalized_otsu(image_data, down_sampling=4):
+def noise_normalized_otsu(image_data: np.ndarray, down_sampling: Optional[int]=4):
     """Normalized Otsu Thresholding for 3D images.
 
     Identifies the threshold for the image data using Otsu's method and normalizes
@@ -78,7 +96,11 @@ def noise_normalized_otsu(image_data, down_sampling=4):
     return normalized_cell
 
 
-def gamma_otsu(image_data, gamma=0.5, gaussian_kernel=1, down_sampling=4):
+def gamma_otsu(
+        image_data: np.ndarray,
+        gamma: Optional[float]=0.5,
+        gaussian_kernel: Optional[float]=1,
+        down_sampling: Optional[int]=4) -> np.ndarray:
     """Apply gamma correction and Otsu thresholding to a 3D image.
 
     Applies a gamma correction to the image data, followed by a Gaussian blur,

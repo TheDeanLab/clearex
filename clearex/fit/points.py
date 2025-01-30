@@ -1,7 +1,15 @@
+# Standard imports
+
+# Third party imports
 import numpy as np
 from scipy.optimize import curve_fit
 
-def gaussian_fit(x: np.ndarray, amplitude: float, x_offset: float, sigma: float,
+# Local imports
+
+def gaussian_fit(x: np.ndarray,
+                 amplitude: float,
+                 x_offset: float,
+                 sigma: float,
                  y_offset: float) -> np.ndarray:
     """ Fit a Gaussian to a line profile.
 
@@ -26,8 +34,9 @@ def gaussian_fit(x: np.ndarray, amplitude: float, x_offset: float, sigma: float,
     return amplitude * np.exp(-((x - x_offset) ** 2) / (2 * sigma**2)) + y_offset
 
 
-def fit_line_profile(x_axis: np.ndarray, line_profile: np.ndarray,
-                     lateral_pixel_size: float):
+def fit_line_profile(x_axis: np.ndarray,
+                     line_profile: np.ndarray,
+                     lateral_pixel_size: float) -> float:
     """ Fit a Gaussian to a line profile and calculate the FWHM
 
     Parameters
@@ -52,11 +61,8 @@ def fit_line_profile(x_axis: np.ndarray, line_profile: np.ndarray,
     y_offset = np.min(line_profile)
 
     # Fit the Gaussian
-    params, cov = curve_fit(
-        gaussian_fit,
-        x_axis,
-        line_profile,
-        p0=[amplitude, x_offset, sigma, y_offset]
+    params, cov = curve_fit(gaussian_fit, x_axis, line_profile,
+                            p0=[amplitude, x_offset, sigma, y_offset]
     )
 
     # Unpack the parameters

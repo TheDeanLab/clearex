@@ -1,6 +1,7 @@
 import os
 
-import pylab as plt
+#import pylab as plt
+import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 
@@ -115,7 +116,18 @@ def mips(*channels,
         plt.close()
 
 
-def draw_points(ax, point: np.ndarray, axis: int) -> None:
+def draw_points(ax: plt.subplot, point: np.ndarray, axis: int) -> None:
+    """ Draw points on the MIP image.
+
+    Parameters
+    ----------
+    ax : plt.subplot
+        The axis to draw the points on.
+    point : np.ndarray
+        The points to draw.
+    axis : int
+        The axis along which the MIP was taken (0, 1, or 2)
+    """
     # Project 3D point coordinates onto the 2D plane of the current MIP
     coords2d = []
     if axis == 0:
@@ -129,17 +141,15 @@ def draw_points(ax, point: np.ndarray, axis: int) -> None:
                     alpha=0.75)
 
 
-def draw_bbox(ax, bbox, axis):
-    """
-    Draw a bounding-box rectangle on the MIP image, given the axis (0, 1, or 2).
-    bbox format: (zmin, ymin, xmin, zmax, ymax, xmax)
+def draw_bbox(ax: plt.subplot, bbox: tuple, axis: int) -> None:
+    """ Draw a bounding-box rectangle on the MIP image, given the axis (0, 1, or 2).
 
     Parameters
     ----------
     ax : matplotlib.axes.Axes
         The axis to draw the bounding box on.
     bbox : tuple of 6 ints
-        The bounding box to draw.
+        The bounding box to draw. (zmin, ymin, xmin, zmax, ymax, xmax)
     axis : int
         The axis along which the MIP was taken (0, 1, or 2)
     """

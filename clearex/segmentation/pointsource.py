@@ -1,7 +1,11 @@
+# Standard Library Imports
 
+# Third Party Imports
 import numpy as np
 
-def remove_close_blobs(blobs, min_dist):
+# Local Imports
+
+def remove_close_blobs(blobs: np.ndarray, min_dist: float) -> np.ndarray:
     """ Remove blobs that are too close to each other.
 
     Takes into account the sigma value to calculate the minimum distance.
@@ -17,6 +21,11 @@ def remove_close_blobs(blobs, min_dist):
     -------
     np.ndarray
         An Nx4 array of blobs where the columns are [z, y, x, sigma].
+
+    Raises
+    ------
+    ValueError
+        If the blobs array has the wrong shape.
     """
     final_blobs = []
     for b in blobs:

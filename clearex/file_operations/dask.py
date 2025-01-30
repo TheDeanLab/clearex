@@ -1,12 +1,17 @@
+
+# Standard imports
 import logging
+from typing import Optional
+
+# Third-party imports
 import dask.array as da
 import zarr
-import os
 import tifffile
-import numpy as np
+
+# Local imports
 
 
-def report_chunks(data):
+def report_chunks(data: da.Array) -> None:
     """Log the number of chunks and their sizes for each dimension in the volumes.
 
     Parameters
@@ -31,8 +36,25 @@ def report_chunks(data):
     else:
         logging.warning("Input is not a Dask array.")
 
-def tiff_to_zarr(data_path, output_path, position=0, channel=0):
-    """Convert a set of TIFF files to a Zarr dataset."""
+def tiff_to_zarr(
+        data_path: str,
+        output_path: str,
+        position: Optional[int]=0,
+        channel: Optional[int]=0
+) -> None:
+    """Convert a set of TIFF files to a Zarr dataset.
+
+    Parameters
+    ----------
+    data_path : str
+        The path to the TIFF file to convert.
+    output_path : str
+        The path to save the Zarr dataset.
+    position : int
+        The position index to save the data to.
+    channel : int
+        The channel index to save the data to.
+    """
 
     data = tifffile.imread(data_path)  # Load TIFF into memory
     size_z, size_y, size_x = data.shape  # Image dimensions
