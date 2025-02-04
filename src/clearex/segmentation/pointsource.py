@@ -43,29 +43,22 @@ def remove_close_blobs(
     for blob in sorted_blobs:
         blob_center = blob[:3]
 
-        # Define the ellipsoidal radii based on sigma values:
-        if blob.size == 4:
-            # Isotropic case: same sigma for all dimensions
-            radii = np.array([blob[3]] * 3) * min_dist
-        elif blob.size == 6:
-            # Anisotropic: each dimension has its own sigma
-            radii = np.array([blob[3], blob[4], blob[5]]) * min_dist
-        else:
-            raise ValueError(f"Unexpected blob format with length {len(blob)}")
-
         too_close = False
         # Check against every already accepted blob
         for accepted_blob in final_blobs:
             accepted_center = accepted_blob[:3]
-            # Get the accepted blob's ellipsoidal radii
+
             if accepted_blob.size == 4:
+                # Isotropic sigma
                 accepted_radii = np.array([accepted_blob[3]] * 3) * min_dist
             elif accepted_blob.size == 6:
+                # Anisotropic sigma
                 accepted_radii = np.array(
                     [accepted_blob[3], accepted_blob[4], accepted_blob[5]]) * min_dist
+            else:
+                raise ValueError(f"Unexpected blob format with length {len(blob)}")
 
-            # Determine if the current blob center falls within the accepted blob's ellipsoidal region.
-            # Here we use the accepted blob's radii to define the region.
+            # Calculate the difference vector
             diff = blob_center - accepted_center
 
             # Normalized squared distance
@@ -220,7 +213,7 @@ def eliminate_insignificant_point_sources(
 
     Returns
     -------
-    np.ndarray
+    significant_blobs : np.ndarray
         The significant blobs.
     """
 

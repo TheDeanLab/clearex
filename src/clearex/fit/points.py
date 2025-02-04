@@ -1,4 +1,5 @@
 # Standard imports
+from typing import Any
 
 # Third party imports
 import numpy as np
@@ -36,7 +37,7 @@ def gaussian_fit(x: np.ndarray,
 
 def fit_line_profile(x_axis: np.ndarray,
                      line_profile: np.ndarray,
-                     lateral_pixel_size: float) -> float:
+                     lateral_pixel_size: float) -> (float | Any, Any, Any, Any, Any):
     """ Fit a Gaussian to a line profile and calculate the FWHM
 
     Parameters
@@ -50,7 +51,7 @@ def fit_line_profile(x_axis: np.ndarray,
 
     Returns
     -------
-    float
+    fit_results : tuple(float | Any, Any, Any, Any)
         The full width half maximum of the Gaussian fit.
     """
 
