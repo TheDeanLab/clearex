@@ -11,8 +11,10 @@ from dask.distributed import Client
 # Local Imports
 
 
-def apply_meijering(slice2d: np.ndarray, sigmas: list[float], black_ridges: bool) -> np.ndarray:
-    """ Apply the Meijering filter to a 2D slice.
+def apply_meijering(
+    slice2d: np.ndarray, sigmas: list[float], black_ridges: bool
+) -> np.ndarray:
+    """Apply the Meijering filter to a 2D slice.
 
     Parameters
     ----------
@@ -30,8 +32,12 @@ def apply_meijering(slice2d: np.ndarray, sigmas: list[float], black_ridges: bool
     """
     return skfilters.meijering(slice2d, sigmas=sigmas, black_ridges=black_ridges)
 
-if __name__ == '__main__':
-    base_path = "/archive/bioinformatics/Danuser_lab/Dean/publication/2024-multiscale/Figure5/38x"
+
+if __name__ == "__main__":
+    base_path = (
+        "/archive/bioinformatics/Danuser_lab/"
+        "Dean/publication/2024-multiscale/Figure5/38x"
+    )
     schedule_path = os.path.join(base_path, "nerves_2025_01_02_v2.json")
 
     with SLURMRunner(scheduler_file=schedule_path) as runner:
@@ -39,7 +45,7 @@ if __name__ == '__main__':
             client.wait_for_workers(runner.n_workers)
 
             # Read data as a Dask array
-            data_path = os.path.join(base_path, 'output.zarr')
+            data_path = os.path.join(base_path, "output.zarr")
             data = da.from_zarr(data_path).astype(np.float32)
             segmentation_channel = 1
             data = data[:, segmentation_channel, :, :, :]  # shape: (positions, z, y, x)
@@ -55,8 +61,5 @@ if __name__ == '__main__':
             )
 
             # Write out once using Dask's to_zarr method.
-            save_path = os.path.join(base_path, 'nerves_v2.zarr')
-            filtered.to_zarr(
-                save_path,
-                overwrite=True  # or mode='w'
-            )
+            save_path = os.path.join(base_path, "nerves_v2.zarr")
+            filtered.to_zarr(save_path, overwrite=True)  # or mode='w'

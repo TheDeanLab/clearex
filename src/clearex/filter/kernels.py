@@ -5,7 +5,8 @@ import numpy as np
 
 # Local Imports
 
-def make_3d_structured_element(radius, shape='sphere'):
+
+def make_3d_structured_element(radius, shape="sphere"):
     """Create a 3D structuring element.
 
     Parameters
@@ -25,15 +26,16 @@ def make_3d_structured_element(radius, shape='sphere'):
     structured_element = np.zeros((radius, radius, radius))
     (z_len, y_len, x_len) = structured_element.shape
 
-    if shape == 'sphere':
+    if shape == "sphere":
         for i in range(int(z_len)):
             for j in range(int(y_len)):
                 for k in range(int(x_len)):
-                    if ((i ** 2 + j ** 2 + k ** 2) / radius ** 2) < 1:
+                    if ((i**2 + j**2 + k**2) / radius**2) < 1:
                         structured_element[i, j, k] = 1
     else:
         raise ValueError("Invalid shape. Please choose 'sphere'.")
     return structured_element
+
 
 def gaussian_kernel(sigma):
     """Create a 1D Gaussian kernel.
@@ -50,9 +52,10 @@ def gaussian_kernel(sigma):
     """
     w = int(np.ceil(5 * sigma))
     x = np.arange(-w, w + 1, 1)
-    g = np.exp(-x ** 2 / (2 * sigma ** 2))
+    g = np.exp(-(x**2) / (2 * sigma**2))
     g /= g.sum()
     return g
+
 
 def second_derivative_gaussian_kernel(sigma):
     """Create a 1D second derivative Gaussian kernel.
@@ -69,6 +72,6 @@ def second_derivative_gaussian_kernel(sigma):
     """
     w = int(np.ceil(5 * sigma))
     x = np.arange(-w, w + 1, 1)
-    d2g = -(x ** 2 / sigma ** 2 - 1) / sigma ** 2 * np.exp(-x ** 2 / (2 * sigma ** 2))
+    d2g = -(x**2 / sigma**2 - 1) / sigma**2 * np.exp(-(x**2) / (2 * sigma**2))
     d2g /= d2g.sum()
     return d2g

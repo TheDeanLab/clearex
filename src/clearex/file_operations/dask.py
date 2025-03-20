@@ -1,4 +1,3 @@
-
 # Standard imports
 import logging
 from typing import Optional
@@ -21,7 +20,7 @@ def report_chunks(data: da.Array) -> None:
     """
     if isinstance(data, da.Array):
         chunks = data.chunks
-        dim_labels = ['Position', 'Channel', 'Z', 'Y', 'X']
+        dim_labels = ["Position", "Channel", "Z", "Y", "X"]
         dim = len(chunks)
 
         if dim > len(dim_labels):
@@ -30,17 +29,21 @@ def report_chunks(data: da.Array) -> None:
 
         chunk_info = "Chunk Information:\n"
         for i in range(dim):
-            chunk_info += f"{dim_labels[-dim + i]} - Chunk Size: {chunks[i][0]}, Chunk Length: {len(chunks[i])}\n"
+            chunk_info += (
+                f"{dim_labels[-dim + i]} - Chunk Size: {chunks[i][0]}, "
+                f"Chunk Length: {len(chunks[i])}\n"
+            )
 
         logging.info(chunk_info)
     else:
         logging.warning("Input is not a Dask array.")
 
+
 def tiff_to_zarr(
-        data_path: str,
-        output_path: str,
-        position: Optional[int]=0,
-        channel: Optional[int]=0
+    data_path: str,
+    output_path: str,
+    position: Optional[int] = 0,
+    channel: Optional[int] = 0,
 ) -> None:
     """Convert a set of TIFF files to a Zarr dataset.
 
@@ -62,10 +65,10 @@ def tiff_to_zarr(
     # Open or create the Zarr dataset
     zarr_store = zarr.open(
         output_path,
-        mode='a',
+        mode="a",
         shape=(1, 1, size_z, size_y, size_x),  # Default initial shape
         chunks=(1, 1, 256, 256, 256),
-        dtype='uint16'
+        dtype="uint16",
     )
 
     # Ensure the dataset is large enough
@@ -74,7 +77,7 @@ def tiff_to_zarr(
         max(zarr_store.shape[1], channel + 1),
         size_z,
         size_y,
-        size_x
+        size_x,
     )
     if new_shape != zarr_store.shape:
         zarr_store.resize(new_shape)

@@ -1,4 +1,3 @@
-
 # Standard imports
 import sys
 import pickle
@@ -8,8 +7,9 @@ import os
 
 # Local imports
 
+
 def get_variable_size(variable: any) -> float:
-    """ Get the size of a variable in MB.
+    """Get the size of a variable in MB.
 
     Parameters
     ----------
@@ -23,8 +23,9 @@ def get_variable_size(variable: any) -> float:
     """
     return sys.getsizeof(variable) / 1024**2
 
+
 def save_variable_to_disk(variable: any, path: str) -> None:
-    """ Save a variable to disk.
+    """Save a variable to disk.
 
     Parameters
     ----------
@@ -33,11 +34,12 @@ def save_variable_to_disk(variable: any, path: str) -> None:
     path : str
         The path to save the variable to.
     """
-    with open(path, 'wb') as f:
+    with open(path, "wb") as f:
         pickle.dump(variable, f)
 
+
 def load_variable_from_disk(path: str) -> any:
-    """ Load a variable from disk.
+    """Load a variable from disk.
 
     Parameters
     ----------
@@ -55,13 +57,14 @@ def load_variable_from_disk(path: str) -> any:
         If the file is not found.
     """
     if not os.path.exists(path):
-        raise FileNotFoundError(f'File not found: {path}')
+        raise FileNotFoundError(f"File not found: {path}")
 
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         return pickle.load(f)
 
+
 def delete_filetype(data_path: str, filetype: str) -> None:
-    """ Delete any files with the designated filetype in the specified directory.
+    """Delete any files with the designated filetype in the specified directory.
 
     Parameters
     ----------
@@ -70,8 +73,8 @@ def delete_filetype(data_path: str, filetype: str) -> None:
     filetype : str
         The filetype to delete. E.g. 'pdf'
     """
-    if filetype[0] != '.':
-        filetype = '.' + filetype
+    if filetype[0] != ".":
+        filetype = "." + filetype
 
     files = [f for f in os.listdir(data_path) if f.endswith(filetype)]
     for file in files:

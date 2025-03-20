@@ -8,10 +8,9 @@ import numpy as np
 
 # Local Imports
 
-def dog(sigma_high: float,
-        sigma_low: float,
-        vol: np.ndarray[...]) -> np.ndarray[...]:
-    """ Difference of Gaussian (DoG) filter.
+
+def dog(sigma_high: float, sigma_low: float, vol: np.ndarray[...]) -> np.ndarray[...]:
+    """Difference of Gaussian (DoG) filter.
 
     Parameters
     ----------
@@ -34,7 +33,7 @@ def dog(sigma_high: float,
 
 
 def dog_cv2(sigma_high: float, sigma_low: float, vol: np.ndarray) -> np.ndarray:
-    """ Difference of Gaussian (DoG) filter using OpenCV.
+    """Difference of Gaussian (DoG) filter using OpenCV.
 
     Parameters
     ----------
@@ -51,14 +50,19 @@ def dog_cv2(sigma_high: float, sigma_low: float, vol: np.ndarray) -> np.ndarray:
         The DoG filtered volume.
     """
 
-    # Determine kernel sizes. OpenCV requires kernel sizes to be odd and positive integers.
-    # A common rule of thumb is kernel_size = 6 * sigma + 1 to capture most of the Gaussian.
+    # Determine kernel sizes.
+    # OpenCV requires kernel sizes to be odd and positive integers.
+    # A common rule of thumb is kernel_size = 6 * sigma + 1 to capture most of Gaussian.
     ksize_high = int(6 * sigma_high + 1) | 1  # ensure odd
-    ksize_low  = int(6 * sigma_low  + 1) | 1  # ensure odd
+    ksize_low = int(6 * sigma_low + 1) | 1  # ensure odd
 
     # Apply Gaussian blur with the high sigma value.
-    high_blurred = cv2.GaussianBlur(vol, (ksize_high, ksize_high), sigmaX=sigma_high, borderType=cv2.BORDER_REFLECT)
-    low_blurred = cv2.GaussianBlur(vol, (ksize_low, ksize_low), sigmaX=sigma_low, borderType=cv2.BORDER_REFLECT)
+    high_blurred = cv2.GaussianBlur(
+        vol, (ksize_high, ksize_high), sigmaX=sigma_high, borderType=cv2.BORDER_REFLECT
+    )
+    low_blurred = cv2.GaussianBlur(
+        vol, (ksize_low, ksize_low), sigmaX=sigma_low, borderType=cv2.BORDER_REFLECT
+    )
     dog_result = low_blurred - high_blurred
     print("min/max high:", np.min(high_blurred), np.max(high_blurred))
     print("min/max low:", np.min(low_blurred), np.max(low_blurred))

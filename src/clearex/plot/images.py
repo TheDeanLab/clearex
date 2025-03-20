@@ -1,20 +1,21 @@
 import os
 
-#import pylab as plt
+# import pylab as plt
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 
 
-def mips(*channels,
-         bounding_boxes=None,
-         filepath=None,
-         filename=None,
-         block_info=None,
-         points=None,
-         scale_intensity=False,
-         lut='gray'
-         ):
+def mips(
+    *channels,
+    bounding_boxes=None,
+    filepath=None,
+    filename=None,
+    block_info=None,
+    points=None,
+    scale_intensity=False,
+    lut="gray",
+):
     """Display Maximum Intensity Projections (MIPs) for multiple channels.
 
     Optionally draws bounding box(es) on the MIPs: one bounding box per channel.
@@ -52,7 +53,8 @@ def mips(*channels,
     """
     num_channels = len(channels)
 
-    # If bounding_boxes is provided, make sure it has the same number of elements as channels
+    # If bounding_boxes is provided, make sure it has the same number of elements as
+    # channels
     if bounding_boxes is not None:
         if len(bounding_boxes) != num_channels:
             raise ValueError(
@@ -82,7 +84,7 @@ def mips(*channels,
                 ax.imshow(mip_channel, cmap=lut)
             else:
                 ax.imshow(mip_channel, cmap=lut, vmin=0, vmax=scale_intensity)
-            ax.axis('off')
+            ax.axis("off")
 
             # If we have a bbox for this channel, draw it
             if bbox is not None:
@@ -108,16 +110,16 @@ def mips(*channels,
         else:
             # Dask block information is a list of dictionaries.
             info = block_info[0]
-            chunk_location = info['chunk-location']
+            chunk_location = info["chunk-location"]
             chunk_id = "_".join(map(str, chunk_location))
-            filename=f"{chunk_id}_{filename}"
+            filename = f"{chunk_id}_{filename}"
             save_path = os.path.join(filepath, filename)
         plt.savefig(save_path, dpi=300)
         plt.close()
 
 
 def draw_points(ax: plt.subplot, point: np.ndarray, axis: int) -> None:
-    """ Draw points on the MIP image.
+    """Draw points on the MIP image.
 
     Parameters
     ----------
@@ -129,20 +131,22 @@ def draw_points(ax: plt.subplot, point: np.ndarray, axis: int) -> None:
         The axis along which the MIP was taken (0, 1, or 2)
     """
     # Project 3D point coordinates onto the 2D plane of the current MIP
-    coords2d = []
     if axis == 0:
-        ax.scatter(point[:, 2], point[:, 1], color='red', marker='x', linewidths=1,
-                    alpha=0.75)
+        ax.scatter(
+            point[:, 2], point[:, 1], color="red", marker="x", linewidths=1, alpha=0.75
+        )
     elif axis == 1:
-        ax.scatter(point[:, 2], point[:, 0], color='red', marker='x', linewidths=1,
-                    alpha=0.75)
+        ax.scatter(
+            point[:, 2], point[:, 0], color="red", marker="x", linewidths=1, alpha=0.75
+        )
     elif axis == 2:
-        ax.scatter(point[:, 1], point[:, 0], color='red', marker='x', linewidths=1,
-                    alpha=0.75)
+        ax.scatter(
+            point[:, 1], point[:, 0], color="red", marker="x", linewidths=1, alpha=0.75
+        )
 
 
 def draw_bbox(ax: plt.subplot, bbox: tuple, axis: int) -> None:
-    """ Draw a bounding-box rectangle on the MIP image, given the axis (0, 1, or 2).
+    """Draw a bounding-box rectangle on the MIP image, given the axis (0, 1, or 2).
 
     Parameters
     ----------
@@ -169,7 +173,6 @@ def draw_bbox(ax: plt.subplot, bbox: tuple, axis: int) -> None:
         width, height = (ymax - ymin), (zmax - zmin)
 
     rect = patches.Rectangle(
-        (x0, y0), width, height,
-        linewidth=1.5, edgecolor='r', facecolor='none'
+        (x0, y0), width, height, linewidth=1.5, edgecolor="r", facecolor="none"
     )
     ax.add_patch(rect)

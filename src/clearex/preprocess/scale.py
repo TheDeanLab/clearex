@@ -1,4 +1,3 @@
-
 # Standard Library Imports
 
 # Third-Party Imports
@@ -7,10 +6,9 @@ import numpy as np
 
 # Local Imports
 
+
 def resize_data(
-        data: np.array,
-        axial_pixel_size: float,
-        lateral_pixel_size: float
+    data: np.array, axial_pixel_size: float, lateral_pixel_size: float
 ) -> np.array:
     """Resize the data to isotropic resolution with linear interpolation.
 
@@ -40,14 +38,14 @@ def resize_data(
         new_dims = (
             int(original_dims[0] * (axial_pixel_size / lateral_pixel_size)),
             original_dims[1],
-            original_dims[2]
+            original_dims[2],
         )
     else:
         # Make lateral match axial
         new_dims = (
             original_dims[0],
             int(original_dims[1] * (lateral_pixel_size / axial_pixel_size)),
-            original_dims[2] * (lateral_pixel_size / axial_pixel_size)
+            original_dims[2] * (lateral_pixel_size / axial_pixel_size),
         )
 
     # linear interpolation specified by order. Should anti_aliasing=False?
