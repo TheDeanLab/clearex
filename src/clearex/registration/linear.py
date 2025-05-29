@@ -10,35 +10,113 @@ from tifffile import imwrite, imread
 from scipy.linalg import polar, rq
 from scipy.spatial.transform import Rotation
 
-def register_image(moving_image, fixed_image, accuracy="high", verbose=False):
-    """ Perform linear TRSAA-type Image Registration.
+def register_image(
+        moving_image: ants.core.ants_image.ANTsImage | np.ndarray,
+        fixed_image: ants.core.ants_image.ANTsImage | np.ndarray,
+        registration_type: str="TRSAA",
+        accuracy: str="high",
+        verbose: bool=False
+) -> tuple[ants.core.ants_image.ANTsImage, ants.core.ants_transform.ANTsTransform]:
+    """ Linear Image Registration.
 
-    Registration is performed via Translation->Rigid->Similarity->Affine (x2) in a
-    4-level multiscale format. By default, it applies shrink factors of 8x4x2x1 and
-    smoothing sigmas 3x2x1x0 (voxel units) over the four levels
+    Perform an image registration between the moving image and the fixed
+    image. Registration is by default performed via Translation -> Rigid ->
+    Similarity -> Affine -> Affine.
 
+    Parameters
+    ----------
+    moving_image : ants.core.ants_image.ANTsImage
+        The moving image.
+    fixed_image : ants.core.ants_image.ANTsImage
+        The image which the moving_image will be registered to. It remains fixed.
+    registration_type : str
+        The type of registration method to use. Options include Translation, Rigid,
+        Similarity, Affine, TRSAA, and more.
+    accuracy : str
+        Used for the TRSAA registration type. Registration performed in a 4-level
+        multiscale format. By default, it applies shrink factors of 8x4x2x1 and
+        smoothing sigmas 3x2x1x0 (voxel units) over the four levels.
+    verbose : bool
+        The verbosity of the registration routine, showing iteration index,
+        duration, registration error, etc.
+
+    Returns
+    -------
+    transformed_image : ants.core.ants_image.ANTsImage
+        The registered image, moved to the coordinate space of the fixed image.
+    transform : ants.core.ants_transform.ANTsTransform
+        The affine transform used in the transformation of the transformed_image.
+
+    Raises
+    ------
+    ValueError
+        If the fixed and moving images do not have the same number of dimensions,
+        or if an unsupported registration type is specified.
+
+    References
+    ----------
+    https://antspy.readthedocs.io/en/latest/registration.html
     """
-    # Multi-resolution iteration schedule
-    if accuracy=="high":
-        reg_iterations = (1000, 500, 250, 100)
-    else:
-        reg_iterations = (100, 70, 50, 20)
+    if fixed_image.ndim != moving_image.ndim:
+        raise ValueError("Both images must have the same number of dimensions.")
 
-    image_transform = ants.registration(
-        fixed=fixed_image,
-        moving=moving_image,
-        type_of_transform='TRSAA',
-        reg_iterations=reg_iterations,
-        aff_metric='mattes',
-        aff_sampling=32,
-        aff_random_sampling_rate=1.0,
-        verbose=verbose
+    if registration_type not in [
+        "Translation", "Rigid", "Similarity", "Affine", "TRSAA"
+    ]:
+        raise ValueError(f"Unsupported registration type: {registration_type}. "
+                         "Supported types are: Translation, Rigid, Similarity, Affine, TRSAA.")
+
+    # Convert images to ANTsImage if they are numpy arrays.
+    if isinstance(fixed_image, np.ndarray):
+        fixed_image = ants.from_numpy(fixed_image)
+    if isinstance(moving_image, np.ndarray):
+        moving_image = ants.from_numpy(moving_image)
+
+    kwargs = {
+        "fixed": fixed_image,
+        "moving": moving_image,
+        "type_of_transform": registration_type,
+        "aff_metric": "mattes",
+        "aff_sampling": 32,
+        "aff_random_sampling_rate": 1.0,
+        "verbose": verbose,
+        }
+
+    if registration_type=="TRSAA":
+        # Multi-resolution iteration schedule
+        if accuracy == "high":
+            kwargs["reg_iterations"] = (1000, 500, 250, 100)
+        else:
+            kwargs["reg_iterations"] = (100, 70, 50, 20)
+
+    # Register the images. This will return a dictionary with the results.
+    registered = ants.registration(**kwargs)
+
+    # Read the transform from the temporary disk location.
+    transform = ants.read_transform(registered['fwdtransforms'][0])
+
+    # Resample the registered image to the target image.
+    transformed_image = ants.resample_image_to_target(
+        image=registered["warpedmovout"],
+        target=fixed_image,
+        interp_type="linear"
     )
 
-    return image_transform
+    # Histogram match to original data.
+    transformed_image = ants.histogram_match_image(
+        source_image=transformed_image,
+        reference_image=moving_image
+        # number_of_match_points=...
+        # use_threshold_at_mean_intensity=...
+    )
+    return transformed_image, transform
 
-def transform_image(moving_image, fixed_image, affine_transform):
-    """ Register an image and perform histogram matching to original.
+def transform_image(moving_image: ants.core.ants_image.ANTsImage,
+                    fixed_image: ants.core.ants_image.ANTsImage,
+                    affine_transform: ants.core.ants_transform.ANTsTransform) -> (
+        ants.core.ants_image.ANTsImage):
+    """ Use a pre-existing affine transform to transform on a naive image to the
+    coordinate space of the fixed_image. Performs histogram matching to the original.
 
     Parameters
     ----------
@@ -61,12 +139,12 @@ def transform_image(moving_image, fixed_image, affine_transform):
     )
     return ants.histogram_match_image(warped_image, moving_image)
 
-def export_tiff(image, data_path):
+def export_tiff(image: ants.core.ants_image.ANTsImage, data_path: str) -> None:
     """ Export an ants.ANTsImage to a 16-bit tiff file.
 
     Parameters
     ----------
-    image: ants.ANTsImage
+    image: ants.core.ants_image.ANTsImage
         Image to export
     data_path: str
         The location and name of the file to save the data to.
@@ -100,9 +178,33 @@ def import_affine_transform(data_path: str):
     affine_transform = ants.read_transform(data_path)
     return affine_transform
 
-def export_affine_transform(affine_transform, data_path: str):
-    """ Export an ants Affine Transform to disk. """
-    np.savetxt(data_path, affine_transform)
+def export_affine_transform(
+        affine_transform: ants.core.ants_transform.ANTsTransform,
+        directory: str
+) -> None:
+    """ Export an ants Affine Transform to disk.
+
+    Parameters
+    ----------
+    affine_transform : ants.core.ants_transform.ANTsTransform
+        The affine transform to export.
+    directory : str
+        The directory where the transform will be saved. If it does not exist, it will
+        be created.
+
+    Raises
+    ------
+    ValueError
+        If the affine_transform is not an instance of ANTsTransform.
+    """
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
+    if not isinstance(affine_transform, ants.core.ants_transform.ANTsTransform):
+        raise ValueError("The affine_transform must be an instance of ANTsTransform.")
+
+    save_path=os.path.join(directory, str(affine_transform.type) + ".mat")
+    ants.write_transform(affine_transform, save_path)
 
 
 def inspect_affine_transform(affine_transform):
@@ -207,23 +309,30 @@ def _extract_rotation(affine_matrix):
 
 
 if __name__ == "__main__":
-    export_path = '/archive/bioinformatics/Danuser_lab/Dean/dean/2025-04-29-registration'
-    affine_transform = import_affine_transform(
-        os.path.join(export_path, 'ants_initial_affine.mat'))
-    print("Affine Transform Loaded.")
-
-    inspect_affine_transform(affine_transform)
+    import tifffile
+    import os
 
     channel = 1
-    fixed_image = import_tiff(
+    fixed_roi = tifffile.imread(
         f'/archive/bioinformatics/Danuser_lab/Dean/Seweryn/s2/Sytox_ppm1/250320/new_Cell4/1_CH0{channel}_000000.tif')
-    moving_image = import_tiff(
+    moving_roi = tifffile.imread(
         f'/archive/bioinformatics/Danuser_lab/Dean/Seweryn/s2/restained/Cell1/1_CH0{channel}_000000.tif')
-    print("Data loaded and converted to ANTs format.")
 
-    affine_transform = register_image(moving_image,
-                                      fixed_image,
-                                      accuracy="low",
-                                      verbose=True)
-    print("Registration Complete")
-    inspect_affine_transform(affine_transform)
+    transformed_image, transform = register_image(
+        moving_image=moving_roi,
+        fixed_image=fixed_roi,
+        registration_type="TRSAA",
+        accuracy="high",
+        verbose=True)
+
+    print(f"Transform: {transform}")
+    print("Type:", type(transform))
+
+    inspect_affine_transform(transform)
+    base_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-05-28-registration"
+    export_affine_transform(transform, base_path)
+    test = import_affine_transform(os.path.join(base_path, "AffineTransform.mat"))
+
+    export_tiff(
+        image=transformed_image,
+        data_path=os.path.join(base_path, "registered.tif"))

@@ -79,3 +79,44 @@ def delete_filetype(data_path: str, filetype: str) -> None:
     files = [f for f in os.listdir(data_path) if f.endswith(filetype)]
     for file in files:
         os.remove(os.path.join(data_path, file))
+
+def get_roi_indices(image, roi_size=256):
+    """   Get indices for a centered ROI of size roi_size x roi_size x roi_size
+
+    Parameters
+    ----------
+    image : np.ndarray
+        The input image from which to extract the ROI.
+    roi_size : int, optional
+        The size of the ROI to extract from the center of the image. Default is 256.
+
+    Returns
+    -------
+    tuple
+        A tuple containing the start and end indices for each dimension (z_start, z_end, y_start, y_end, x_start, x_end).
+    """
+    if len(image.shape) != 3:
+        raise ValueError("Input image must be a 3D array.")
+    if roi_size <= 0:
+        raise ValueError("ROI size must be a positive integer.")
+    if roi_size > min(image.shape):
+        raise ValueError("ROI size must be less than or equal to the smallest dimension of the image.")
+
+    # Calculate the start and end indices for the ROI
+    distance = roi_size // 2
+    b = image.shape
+    z_start = b[0] // 2 - distance
+    z_end = b[0] // 2 + distance
+    y_start = b[1] // 2 - distance
+    y_end = b[1] // 2 + distance
+    x_start = b[2] // 2 - distance
+    x_end = b[2] // 2 + distance
+
+    # Ensure indices are within bounds
+    z_start = max(0, z_start)
+    z_end = min(b[0], z_end)
+    y_start = max(0, y_start)
+    y_end = min(b[1], y_end)
+    x_start = max(0, x_start)
+    x_end = min(b[2], x_end)
+    return z_start, z_end, y_start, y_end, x_start, x_end
