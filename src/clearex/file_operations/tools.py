@@ -4,9 +4,12 @@ import pickle
 import os
 
 # Third-party imports
+import ants
+import numpy as np
+from numpy.core.multiarray import RAISE
 
 # Local imports
-
+from clearex.segmentation.otsu import otsu
 
 def get_variable_size(variable: any) -> float:
     """Get the size of a variable in MB.
@@ -120,3 +123,152 @@ def get_roi_indices(image, roi_size=256):
     x_start = max(0, x_start)
     x_end = min(b[2], x_end)
     return z_start, z_end, y_start, y_end, x_start, x_end
+
+def identify_minimal_bounding_box(image, down_sampling=8):
+    """Identify the minimal bounding box that encloses foreground signal in a 3D
+    image using Otsu thresholding.
+
+    This function performs downsampling-based Otsu thresholding to detect foreground
+    voxels, computes the minimal bounding box in the downsampled space, and scales
+    the result back to the original image resolution.
+
+    Parameters
+    ----------
+    image : np.ndarray or ants.core.ants_image.ANTsImage
+        A 3D image in either NumPy array or ANTsImage format. If an ANTsImage is
+        provided, it will be converted to a NumPy array internally.
+
+    down_sampling : int, optional
+        Downsampling factor applied to the input image before Otsu thresholding.
+        Used to speed up thresholding and bounding box computation. Default is 8.
+
+    Returns
+    -------
+    z_start : int
+        Starting index (inclusive) of the bounding box along the z-axis in full resolution.
+    z_end : int
+        Ending index (exclusive) of the bounding box along the z-axis in full resolution.
+    y_start : int
+        Starting index (inclusive) of the bounding box along the y-axis in full resolution.
+    y_end : int
+        Ending index (exclusive) of the bounding box along the y-axis in full resolution.
+    x_start : int
+        Starting index (inclusive) of the bounding box along the x-axis in full resolution.
+    x_end : int
+        Ending index (exclusive) of the bounding box along the x-axis in full resolution.
+
+    Raises
+    ------
+    TypeError
+        If the input image is not a NumPy array or ANTsImage.
+    ValueError
+        If no foreground signal is detected in the thresholded binary image.
+
+    Notes
+    -----
+    The bounding box is returned in `(z_start, z_end, y_start, y_end, x_start,
+    x_end)` order and is compatible with slicing: `image[z_start:z_end,
+    y_start:y_end, x_start:x_end]`.
+
+    Examples
+    --------
+    >>> bbox = identify_minimal_bounding_box(image, down_sampling=8)
+    >>> z0, z1, y0, y1, x0, x1 = bbox
+    >>> cropped = image[z0:z1, y0:y1, x0:x1]
+    """
+
+    # Make sure that the input image is a np.ndarray
+    if isinstance(image, ants.core.ants_image.ANTsImage):
+        image = image.numpy().astype(np.uint16)
+    elif isinstance(image, np.ndarray):
+        pass
+    else:
+        raise TypeError(f"Unsupported file type: {type(image)}. Supported types are: "
+                        f"np.ndarray and ANTsImage")
+
+    # Otsu Thresholding
+    binary_data = otsu(image_data=image, down_sampling=down_sampling)
+
+    # Get coordinates of foreground voxels in binary mask
+    coords = np.argwhere(binary_data)
+    if coords.size == 0:
+        raise ValueError("No foreground detected in binary image.")
+
+    # Compute bounding box in down sampled space
+    min_idx = coords.min(axis=0)
+    max_idx = coords.max(axis=0) + 1
+
+    # Ensure bounds do not exceed original image shape
+    max_idx = np.minimum(max_idx, image.shape)
+
+    z_start, y_start, x_start = min_idx
+    z_end, y_end, x_end = max_idx
+
+    return z_start, z_end, y_start, y_end, x_start, x_end
+
+def merge_bounding_boxes(box1, box2):
+    """Compute a minimal bounding box that encompasses two input bounding boxes.
+
+    This function takes two bounding boxes in the form of 6-element tuples
+    (z_start, z_end, y_start, y_end, x_start, x_end), and returns a new bounding box
+    that spans both inputs. It ensures start coordinates are minimized and end
+    coordinates are maximized to fully include both regions. The output is returned
+    as a tuple of `slice` objects for direct use in array indexing.
+
+    Parameters
+    ----------
+    box1 : tuple of int or np.integer
+        Bounding box coordinates in the format
+        (z_start, z_end, y_start, y_end, x_start, x_end).
+    box2 : tuple of int or np.integer
+        Another bounding box to merge, in the same format as `box1`.
+
+    Returns
+    -------
+    bounding_box_slices : tuple of slice
+        A merged bounding box that fully encompasses both `box1` and `box2`,
+        returned as a tuple of `slice` objects in the order (z, y, x), and
+        ready for use in array slicing.
+
+    Examples
+    --------
+    >>> box1 = (10, 50, 20, 60, 30, 80)
+    >>> box2 = (15, 55, 10, 70, 25, 85)
+    >>> merged_slices = merge_bounding_boxes(box1, box2)
+    >>> image[merged_slices]  # Direct indexing into a 3D image
+    """
+    merged_coords = tuple(
+        min(a, b) if i % 2 == 0 else max(a, b)
+        for i, (a, b) in enumerate(zip(box1, box2))
+    )
+    merged_coords = tuple(int(x) for x in merged_coords)
+
+    z_start, z_end, y_start, y_end, x_start, x_end = merged_coords
+    return (
+        slice(z_start, z_end),
+        slice(y_start, y_end),
+        slice(x_start, x_end),
+    )
+
+def crop_overlapping_datasets(fixed_roi, transformed_image):
+
+    # Identify z_start, z_end, y_start, y_end, x_start, x_end, for each image.
+    minimum_bounding_box_fixed = identify_minimal_bounding_box(fixed_roi)
+    minimum_bounding_box_moving = identify_minimal_bounding_box(transformed_image)
+
+    # Find the maximum overlapping region.
+    bounding_box = merge_bounding_boxes(
+        minimum_bounding_box_moving,
+        minimum_bounding_box_fixed)
+    print(f"Cropping data to: {bounding_box}")
+
+    # Convert to numpy to crop the data.
+    if isinstance(fixed_roi, ants.core.ants_image.ANTsImage):
+        fixed_roi = fixed_roi.numpy().astype(np.uint16)
+    fixed_roi = fixed_roi[bounding_box]
+
+    if isinstance(transformed_image, ants.core.ants_image.ANTsImage):
+        transformed_image = transformed_image.numpy().astype(np.uint16)
+    transformed_image = transformed_image[bounding_box]
+
+    return fixed_roi, transformed_image

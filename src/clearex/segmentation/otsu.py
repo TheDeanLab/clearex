@@ -67,7 +67,7 @@ def otsu(image_data: np.ndarray, down_sampling: Optional[int] = 4) -> np.ndarray
     Returns
     -------
     image_binary : np.ndarray
-        The thresholded image data.
+        The binary image data.
     """
     threshold = threshold_otsu(
         image_data[::down_sampling, ::down_sampling, ::down_sampling]

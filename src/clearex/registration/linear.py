@@ -132,6 +132,12 @@ def transform_image(moving_image: ants.core.ants_image.ANTsImage,
     registered_image: ants.core.ants_image.ANTsImage
         The registered image.
     """
+    # Convert images to ANTsImage if they are numpy arrays.
+    if isinstance(fixed_image, np.ndarray):
+        fixed_image = ants.from_numpy(fixed_image)
+    if isinstance(moving_image, np.ndarray):
+        moving_image = ants.from_numpy(moving_image)
+
     warped_image = affine_transform.apply_to_image(
         moving_image,
         reference=fixed_image,
@@ -149,7 +155,12 @@ def export_tiff(image: ants.core.ants_image.ANTsImage, data_path: str) -> None:
     data_path: str
         The location and name of the file to save the data to.
     """
-    image=image.numpy().astype(np.uint16)
+    if isinstance(image, ants.core.ants_image.ANTsImage):
+        image=image.numpy().astype(np.uint16)
+    elif isinstance(image, np.ndarray):
+        pass
+    else:
+        raise TypeError(f"Unsupported file type {type(image)}")
     imwrite(data_path, image)
 
 def import_tiff(data_path):
@@ -306,33 +317,3 @@ def _extract_rotation(affine_matrix):
     axis_labels = ['X (roll)', 'Y (pitch)', 'Z (yaw)']
     for axis, angle in zip(axis_labels, euler_angles_deg):
         print(f'Rotation around {axis} axis: {angle:.2f} degrees')
-
-
-if __name__ == "__main__":
-    import tifffile
-    import os
-
-    channel = 1
-    fixed_roi = tifffile.imread(
-        f'/archive/bioinformatics/Danuser_lab/Dean/Seweryn/s2/Sytox_ppm1/250320/new_Cell4/1_CH0{channel}_000000.tif')
-    moving_roi = tifffile.imread(
-        f'/archive/bioinformatics/Danuser_lab/Dean/Seweryn/s2/restained/Cell1/1_CH0{channel}_000000.tif')
-
-    transformed_image, transform = register_image(
-        moving_image=moving_roi,
-        fixed_image=fixed_roi,
-        registration_type="TRSAA",
-        accuracy="high",
-        verbose=True)
-
-    print(f"Transform: {transform}")
-    print("Type:", type(transform))
-
-    inspect_affine_transform(transform)
-    base_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-05-28-registration"
-    export_affine_transform(transform, base_path)
-    test = import_affine_transform(os.path.join(base_path, "AffineTransform.mat"))
-
-    export_tiff(
-        image=transformed_image,
-        data_path=os.path.join(base_path, "registered.tif"))
