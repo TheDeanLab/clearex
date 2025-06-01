@@ -43,7 +43,7 @@ def main(
         image=transformed_image,
         data_path=os.path.join(path_to_save_to, "cropped_moving.tif"))
     export_tiff(
-        image=transformed_image,
+        image=fixed_roi,
         data_path=os.path.join(path_to_save_to, "cropped_fixed.tif"))
 
     print("Performing nonlinear registration on the cropped data.")

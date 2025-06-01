@@ -24,9 +24,9 @@ def register_image(
 
     Parameters
     ----------
-    moving_image : ants.core.ants_image.ANTsImage
+    moving_image : ants.core.ants_image.ANTsImage | np.ndarry
         The moving image.
-    fixed_image : ants.core.ants_image.ANTsImage
+    fixed_image : ants.core.ants_image.ANTsImage | np.ndarray
         The image which the moving_image will be registered to. It remains fixed.
     registration_type : str
         The type of registration method to use. Options include Elastic, SyN,

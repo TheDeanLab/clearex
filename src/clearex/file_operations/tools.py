@@ -124,7 +124,49 @@ def get_roi_indices(image, roi_size=256):
     x_end = min(b[2], x_end)
     return z_start, z_end, y_start, y_end, x_start, x_end
 
-def identify_minimal_bounding_box(image, down_sampling=8):
+def identify_robust_bounding_box(binary, lower_pct=5, upper_pct=95):
+    """Compute a robust bounding box from binary 3D mask by ignoring outliers.
+
+    Parameters
+    ----------
+    binary : np.ndarray
+        3D binary array (dtype=bool or 0/1).
+    lower_pct : float
+        Lower percentile cutoff (e.g., 5).
+    upper_pct : float
+        Upper percentile cutoff (e.g., 95).
+
+    Returns
+    -------
+    (z0, z1, y0, y1, x0, x1) : tuple of ints
+        Bounding box indices in the form: [z_start:z_end, y_start:y_end, x_start:x_end]
+    """
+
+    assert binary.ndim == 3, "Input must be a 3D array."
+    binary = binary.astype(np.uint8)
+
+    # Sum across two axes to get marginal sums
+    z_dist = binary.sum(axis=(1, 2)).astype(np.int32)
+    y_dist = binary.sum(axis=(0, 2)).astype(np.int32)
+    x_dist = binary.sum(axis=(0, 1)).astype(np.int32)
+
+    def find_bounds(dist, low, high):
+        cumsum = np.cumsum(dist)
+        total = cumsum[-1]
+        if total == 0:
+            raise ValueError("No foreground found.")
+        lower_idx = np.searchsorted(cumsum, total * (low / 100))
+        upper_idx = np.searchsorted(cumsum, total * (high / 100))
+        return lower_idx, upper_idx + 1  # upper bound is exclusive
+
+    z0, z1 = find_bounds(z_dist, lower_pct, upper_pct)
+    y0, y1 = find_bounds(y_dist, lower_pct, upper_pct)
+    x0, x1 = find_bounds(x_dist, lower_pct, upper_pct)
+
+    return z0, z1, y0, y1, x0, x1
+
+def identify_minimal_bounding_box(
+        image, down_sampling=8, robust=False, lower_pct=5, upper_pct=95):
     """Identify the minimal bounding box that encloses foreground signal in a 3D
     image using Otsu thresholding.
 
@@ -142,6 +184,16 @@ def identify_minimal_bounding_box(image, down_sampling=8):
         Downsampling factor applied to the input image before Otsu thresholding.
         Used to speed up thresholding and bounding box computation. Default is 8.
 
+    robust : bool
+        Run the robust boundary detection method. Default is False.
+
+    lower_pct : float
+        Lower percentage for cut-off for robust boundary detection. Values between 0
+        and 100 and valid.
+
+    upper_pct : float
+        Upper percentage for cut-off for robust boundary detection. Values between 0
+        and 100 and valid.
     Returns
     -------
     z_start : int
@@ -188,6 +240,12 @@ def identify_minimal_bounding_box(image, down_sampling=8):
 
     # Otsu Thresholding
     binary_data = otsu(image_data=image, down_sampling=down_sampling)
+    if robust:
+        bounding_box = identify_robust_bounding_box(
+            binary_data, lower_pct=lower_pct, upper_pct=upper_pct
+        )
+        z_start, z_end, y_start, y_end, x_start, x_end = bounding_box
+        return z_start, z_end, y_start, y_end, x_start, x_end
 
     # Get coordinates of foreground voxels in binary mask
     coords = np.argwhere(binary_data)
@@ -250,11 +308,59 @@ def merge_bounding_boxes(box1, box2):
         slice(x_start, x_end),
     )
 
-def crop_overlapping_datasets(fixed_roi, transformed_image):
+def crop_overlapping_datasets(fixed_roi, transformed_image, robust=False, lower_pct=5, upper_pct=95):
+    """Crop two 3D images to the maximal overlapping bounding box containing
+    foreground signal.
 
+    This function computes the minimal foreground bounding boxes for each input image
+    and then determines a merged bounding box that encompasses both regions. Each image
+    is then cropped to this merged region. Foreground detection is based on intensity
+    thresholding (e.g., Otsu), with an optional robust mode to reduce sensitivity to
+    outliers.
+
+    Parameters
+    ----------
+    fixed_roi : np.ndarray or ants.core.ants_image.ANTsImage
+        The fixed image or ROI volume. Must be a 3D image.
+
+    transformed_image : np.ndarray or ants.core.ants_image.ANTsImage
+        The transformed moving image aligned to the fixed ROI. Must also be 3D.
+
+    robust : bool, optional
+        If True, uses a robust method to detect foreground and exclude outliers when
+        computing the bounding boxes. If False, uses strict minimum and maximum
+        coordinates. Default is False.
+
+    Returns
+    -------
+    fixed_cropped : np.ndarray
+        Cropped version of the fixed image limited to the shared bounding box.
+
+    transformed_cropped : np.ndarray
+        Cropped version of the transformed image limited to the shared bounding box.
+
+    Raises
+    ------
+    ValueError
+        If no foreground is detected in either image.
+
+    Notes
+    -----
+    If input images are ANTsImage objects, they will be converted to NumPy arrays (
+    dtype uint16) before cropping. The bounding box is computed in `(z_start:z_end,
+    y_start:y_end, x_start:x_end)` order.
+
+    Examples
+    --------
+    >>> fixed_crop, moving_crop = crop_overlapping_datasets(fixed_img, moving_img, robust=True)
+    >>> print(fixed_crop.shape)
+    (128, 256, 256)
+    """
     # Identify z_start, z_end, y_start, y_end, x_start, x_end, for each image.
-    minimum_bounding_box_fixed = identify_minimal_bounding_box(fixed_roi)
-    minimum_bounding_box_moving = identify_minimal_bounding_box(transformed_image)
+    minimum_bounding_box_fixed = identify_minimal_bounding_box(
+        fixed_roi, robust=robust, lower_pct=lower_pct, upper_pct=upper_pct)
+    minimum_bounding_box_moving = identify_minimal_bounding_box(
+        transformed_image, robust=robust, lower_pct=lower_pct, upper_pct=upper_pct)
 
     # Find the maximum overlapping region.
     bounding_box = merge_bounding_boxes(
