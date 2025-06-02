@@ -60,3 +60,6 @@ docs = [
 
 [project.urls]
 Source = "https://github.com/TheDeanLab/clearex"
+
+[project.scripts]
+clearex = "clearex.main:app"
