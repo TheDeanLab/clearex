@@ -32,7 +32,7 @@ dependencies = [
 
 [project.optional-dependencies]
 
-depricated = [
+deprecated = [
     "bigstream @ file:///archive/bioinformatics/Danuser_lab/Dean/dean/git/bigstream",
 ]
 
