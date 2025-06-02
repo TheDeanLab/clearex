@@ -13,9 +13,10 @@
 We recommend installing ClearEx in a dedicated Anaconda environment:
 
 ```bash
-conda create -n clearex python=3.11
+conda create -n clearex python=3.12
 conda activate clearex
-pip install clearex
+cd to/your/cloned/clearex/directory
+pip install -e .
 ```
 
 ## Launching the CLI
