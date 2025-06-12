@@ -26,32 +26,56 @@
 
 # Standard Library Imports
 import os
+import logging
+import io
+import contextlib
+import shutil
 
 # Third Party Imports
 import typer
 import tifffile
-import numpy as np
 
 # Local Imports
-import clearex.registration.linear
-
+import clearex.registration.linear as linear
+import clearex.registration.nonlinear as nonlinear
+from clearex import setup_logger
+from clearex.file_operations.tools import crop_overlapping_datasets
 
 class Registration:
     """ A class to register data. """
 
     def __init__(self):
         #: str: The path to the reference data.
-        self.reference_path = typer.prompt("What directory is the reference data in?")
+        # self.reference_path = typer.prompt("What directory is the reference data in?")
+        self.reference_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
+                               "-12-registration/fixed")
 
         #: str: The path to the moving data.
-        self.moving_path = typer.prompt("What directory is the moving data in?")
+        #self.moving_path = typer.prompt("What directory is the moving data in?")
+        self.moving_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
+                               "-12-registration/moving")
 
         # str: The path to save the data to
         self.saving_path = os.path.join(self.moving_path, "registration")
         os.makedirs(self.saving_path, exist_ok=True)
 
+        #: logging.Logger: The logger for documenting registration steps.
+        self.logger = setup_logger(
+            name='registration',
+            log_file=os.path.join(
+                self.moving_path,
+                "registration",
+                "registration.log"),
+            level=logging.DEBUG)
+
+        # Log paths.
+        self.logger.info("...Initializing new registration runtime...")
+        self.logger.info(f"Moving path: {self.moving_path}")
+        self.logger.info(f"Registration path: {self.reference_path}")
+
         #: str: The channel to use for registration.
-        self.channel = None
+        self.channel = "CH01"
+        # self.channel = None
 
         #: np.ndarray: The reference image data.
         self.reference_data = None
@@ -59,34 +83,74 @@ class Registration:
         #: np.ndarray: The image data to register to the reference.
         self.moving_data = None
 
+        #: ants.core.ants_transform.ANTsTransform: The linear affine transform.
+        self.transform = None
+
+        #: ants.core
+        self.transformed_image = None
+
+        #: tuple[slice, slice, slice]: a slicing object for the minimum bounding box.
+        self.bounding_box = None
+
         self.load_data()
-
-        typer.echo(f"Starting linear registration.")
-
         self.linear_registration()
+        self.nonlinear_registration()
+
+    def _log_and_echo(self, message: str, level: str = "info"):
+        """
+        Log a message using the specified logging level and print it to the console.
+
+        This method logs the provided message to the class logger using the given
+        severity level (e.g., 'info', 'warning', 'error', 'debug'), and then echoes
+        the same message to the console using `typer.echo`.
+
+        Parameters
+        ----------
+        message : str
+            The message to log and display.
+        level : str, optional
+            The severity level for logging. Must be one of:
+            {'info', 'warning', 'error', 'debug'}. Defaults to 'info'.
+            If an unrecognized level is provided, it falls back to 'info'.
+
+        Returns
+        -------
+        None
+        """
+        if level == "info": self.logger.info(message)
+        elif level == "warning": self.logger.warning(message)
+        elif level == "error": self.logger.error(message)
+        elif level == "debug": self.logger.debug(message)
+        else: self.logger.log(logging.INFO, message)  # fallback
+        typer.echo(message)
 
     def load_data(self):
         """Load the image data as indicated by the prompt."""
 
+        self._log_and_echo("Loading data...")
+
         def _load_data(channel):
-            reference_contents = os.listdir(self.reference_path)
-            for file in reference_contents:
-                if channel in file:
-                    image_path = str(os.path.join(self.reference_path, channel))
-                    self.reference_data = tifffile.imread(image_path)
-                    continue
+            def load_image_from_directory(directory, attr_name, label):
+                print(os.listdir())
+                for file in os.listdir(directory):
+                    if channel in file:
+                        image_path = os.path.join(directory, file)
+                        setattr(self, attr_name, tifffile.imread(image_path))
+                        self._log_and_echo(f"{label} loaded: {image_path}")
+                        break
 
-            moving_contents = os.listdir(self.moving_path)
-            for file in moving_contents:
-                if channel in file:
-                    image_path = str(os.path.join(self.moving_path, channel))
-                    self.moving_data = tifffile.imread(image_path)
-                    continue
+                if getattr(self, attr_name) is None:
+                    self._log_and_echo(f"{label} not found.", level="error")
+                    raise typer.Abort
 
-            if self.reference_data is None:
-                typer.Abort("Reference data not found.")
-            if self.moving_data is None:
-                typer.Abort("Moving data not found.")
+            load_image_from_directory(self.reference_path,
+                                      attr_name='reference_data',
+                                      label='Reference data'
+                                      )
+            load_image_from_directory(self.moving_path,
+                                      attr_name='moving_data',
+                                      label='Moving data'
+                                      )
 
         self.channel = typer.prompt(
             text="What Channel would you like to use for the registration? \n \n "
@@ -106,28 +170,89 @@ class Registration:
         elif self.channel == "ch02" or self.channel == "3": _load_data("CH02")
         elif self.channel == "average" or self.channel == "4": pass
         else:
-            typer.echo("Invalid channel. Please type 1 or CH00, 2 or CH01, etc.")
+            self._log_and_echo(
+                message="Invalid channel. Please type 1 or CH00, 2 or CH01, etc.",
+                level="debug"
+            )
             self.load_data()
 
     def linear_registration(self):
         """ Perform the linear TRSAA-type registration."""
 
-        transformed_image, transform = linear.register_image(
-            moving_image=self.moving_data,
-            fixed_image=self.reference_data,
-            registration_type="TRSAA",
-            accuracy="high",
-            verbose=True)
+        self._log_and_echo(f"Shape of the fixed data: {self.reference_data.shape}")
+        self._log_and_echo(f"ape of the moving data: {self.moving_data.shape}")
+        self._log_and_echo("Beginning linear registration.")
 
-        print("Inspecting transform:")
-        linear.inspect_affine_transform(transform)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self.transformed_image, self.transform = linear.register_image(
+                moving_image=self.moving_data,
+                fixed_image=self.reference_data,
+                registration_type="TRSAA",
+                accuracy="high",
+                verbose=True)
+            self.logger.info(buffer.getvalue())
+            buffer.flush()
 
-        print("Exporting the affine transform to:", self.saving_path)
-        linear.export_affine_transform(transform, self.saving_path)
+            linear.inspect_affine_transform(self.transform)
+            self.logger.info(buffer.getvalue())
 
-        print("Exporting the registered data to:", self.saving_path)
+        self._log_and_echo(f"Exporting the affine transform to: {self.saving_path}")
+        linear.export_affine_transform(self.transform, self.saving_path)
+
+        self._log_and_echo(f"Exporting the registered data to: {self.saving_path}")
+        linear.export_tiff(
+            image=self.transformed_image,
+            data_path=os.path.join(self.saving_path, "linearly_registered.tif"))
+
+        self._log_and_echo("Linear registration complete.")
+
+    def nonlinear_registration(self):
+        """ Perform the diffeomorphic SyN warp transform. """
+        self._log_and_echo("Beginning nonlinear registration.")
+
+        self._log_and_echo("Identifying the smallest ROI that encapsulates the data.")
+        fixed_roi, moving_roi, self.bounding_box = crop_overlapping_datasets(
+            self.reference_data,
+            self.transformed_image,
+            robust=True,
+            lower_pct=2,
+            upper_pct=98
+        )
+        self._log_and_echo(f"Cropped fixed image shape: {fixed_roi.shape}")
+        self._log_and_echo(f"Cropped moving image shape: {moving_roi.shape}")
+
+        self._log_and_echo("Exporting cropped reference and moving images.")
+        linear.export_tiff(
+            image=moving_roi,
+            data_path=os.path.join(self.saving_path, "cropped_moving.tif"))
+        linear.export_tiff(
+            image=fixed_roi,
+            data_path=os.path.join(self.saving_path, "cropped_fixed.tif"))
+
+        self._log_and_echo("Performing nonlinear registration on the cropped data.")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            transformed_image, transform_path = nonlinear.register_image(
+                moving_image=moving_roi,
+                fixed_image=fixed_roi,
+                accuracy="high",
+                verbose=True)
+            self.logger.info(buffer.getvalue())
+            buffer.flush()
+
+        self._log_and_echo("Exporting the registered data to:", self.saving_path)
         linear.export_tiff(
             image=transformed_image,
-            data_path=os.path.join(self.saving_path, "registered.tif"))
+            data_path=os.path.join(self.saving_path, "non_linear_registered.tif"))
 
-        print("Done.")
+        self._log_and_echo(f"Exporting nonlinear warping transform from "
+                           f"{transform_path} to {self.saving_path}. ")
+        shutil.copyfile(
+            transform_path,
+            os.path.join(self.saving_path, 'movingToFixed1Warp.nii.gz')
+        )
+        print("Nonlinear registration complete.")
+
+if __name__ == "__main__":
+    Registration()

@@ -365,6 +365,9 @@ def crop_overlapping_datasets(fixed_roi, transformed_image, robust=False, lower_
     transformed_cropped : np.ndarray
         Cropped version of the transformed image limited to the shared bounding box.
 
+    bounding_box : np.ndarray
+        The bounding box used to slice the data.
+
     Raises
     ------
     ValueError
@@ -378,9 +381,10 @@ def crop_overlapping_datasets(fixed_roi, transformed_image, robust=False, lower_
 
     Examples
     --------
-    >>> fixed_crop, moving_crop = crop_overlapping_datasets(fixed_img, moving_img, robust=True)
+    >>> fixed_crop, moving_crop, bounding_box = crop_overlapping_datasets(
+        fixed_img, moving_img, robust=True, lower_pct=2, upper_pct=98)
     >>> print(fixed_crop.shape)
-    (128, 256, 256)
+        (128, 256, 256)
     """
     # Identify z_start, z_end, y_start, y_end, x_start, x_end, for each image.
     minimum_bounding_box_fixed = identify_minimal_bounding_box(
@@ -403,4 +407,4 @@ def crop_overlapping_datasets(fixed_roi, transformed_image, robust=False, lower_
         transformed_image = transformed_image.numpy().astype(np.uint16)
     transformed_image = transformed_image[bounding_box]
 
-    return fixed_roi, transformed_image
+    return fixed_roi, transformed_image, bounding_box

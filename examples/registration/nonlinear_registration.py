@@ -59,7 +59,7 @@ def main(
     transformed_image = transform_image(moving_roi, fixed_roi, transform)
 
     print("Identifying smallest ROI that encapsulates the data.")
-    fixed_roi, transformed_image = crop_overlapping_datasets(
+    fixed_roi, transformed_image, _ = crop_overlapping_datasets(
         fixed_roi,
         transformed_image
     )

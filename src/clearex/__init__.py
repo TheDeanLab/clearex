@@ -24,3 +24,45 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
+import logging
+import os
+
+
+def setup_logger(name='my_logger', log_file='app.log', level=logging.INFO):
+    """Set up a basic logger that writes to a file and the console.
+
+    Parameters
+    ----------
+    name : str
+        Name of the logger.
+    log_file : str
+        File path for the log file.
+    level : int
+        Logging level (e.g., logging.INFO, logging.DEBUG).
+
+    Returns
+    -------
+    logger : logging.Logger
+        Configured logger instance.
+    """
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # Create file handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+
+    # Create console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    # Create or get the logger
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    # Prevent duplicate handlers if logger already exists
+    if not logger.handlers:
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+
+    return logger

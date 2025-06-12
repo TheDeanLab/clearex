@@ -116,7 +116,8 @@ def register_image(
     registered = ants.registration(**kwargs)
 
     # Read the transform from the temporary disk location.
-    transform = ants.read_transform(registered['fwdtransforms'][0])
+    # transform = ants.read_transform(registered['fwdtransforms'][0])
+    transform = registered['fwdtransforms'][0]
 
     # Resample the registered image to the target image.
     transformed_image = ants.resample_image_to_target(
