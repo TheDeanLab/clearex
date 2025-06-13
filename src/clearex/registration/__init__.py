@@ -41,35 +41,36 @@ import clearex.registration.linear as linear
 import clearex.registration.nonlinear as nonlinear
 from clearex import setup_logger, log_and_echo as log
 from clearex.file_operations.tools import crop_overlapping_datasets
+import clearex.registration.common
+
 
 class Registration:
     """ A class to register data. """
 
     def __init__(self):
-        # self.reference_path = typer.prompt("What directory is the reference data in?")
-        self.reference_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
-                               "-12-registration/fixed")
-
-        #: str: The path to the moving data.
         #self.moving_path = typer.prompt("What directory is the moving data in?")
         self.moving_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
                                "-12-registration/moving")
 
+        #: str: The path to the moving data.
+        # self.reference_path = typer.prompt("What directory is the reference data in?")
+        self.reference_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
+                               "-12-registration/fixed")
+
         # str: The base path to save the data to
         self.saving_path = os.path.join(self.moving_path, "registration")
-        os.makedirs(self.saving_path, exist_ok=True)
 
         #: str: The path to save the linear registration results.
         self.linear_path = os.path.join(self.saving_path, "linear")
-        os.makedirs(self.linear_path, exist_ok=True)
 
         #: str: The path to save the nonlinear registration results.
         self.nonlinear_path = os.path.join(self.saving_path, "nonlinear")
-        os.makedirs(self.nonlinear_path, exist_ok=True)
 
         #: str: The path to save the fixed reference data.
         self.fixed_path = os.path.join(self.saving_path, "fixed")
-        os.makedirs(self.fixed_path, exist_ok=True)
+
+        # Make sure the directories exist.
+        self.make_directories()
 
         #: logging.Logger: The logger for documenting registration steps.
         self.logger = setup_logger(
@@ -157,6 +158,16 @@ class Registration:
         self.linear_registration()
         self.nonlinear_registration()
 
+    def make_directories(self):
+        """ Create the necessary directories for registration results. """
+        for path in [
+            self.saving_path,
+            self.linear_path,
+            self.nonlinear_path,
+            self.fixed_path
+        ]:
+            os.makedirs(path, exist_ok=True)
+
     def parse_directory(self, directory, attr_name, label, channel):
         """ Parse a directory for .tif files and load the specified channel.
 
@@ -230,7 +241,7 @@ class Registration:
         linear.inspect_affine_transform(self.transform)
 
         log(self, message=f"Exporting the affine transform to: {self.linear_path}")
-        linear.export_affine_transform(
+        clearex.registration.common.export_affine_transform(
             affine_transform=self.transform,
             directory=self.linear_path)
 
@@ -246,10 +257,10 @@ class Registration:
         log(self, message=f"Cropped moving image shape: {self.transformed_image.shape}")
 
         log(self, message="Exporting cropped reference and moving images.")
-        linear.export_tiff(
+        clearex.registration.common.export_tiff(
             image=self.reference_data,
             data_path=os.path.join(self.fixed_path, self.reference_data_filename))
-        linear.export_tiff(
+        clearex.registration.common.export_tiff(
             image=self.transformed_image,
             data_path=os.path.join(self.linear_path, self.moving_data_filename))
 
@@ -264,7 +275,7 @@ class Registration:
                         os.path.join(self.moving_path, file))
 
                     # Apply the linear transform
-                    transformed_image = linear.transform_image(
+                    transformed_image = clearex.registration.common.transform_image(
                         moving_image=moving_image,
                         fixed_image=fixed_image,
                         affine_transform=self.transform)
@@ -275,10 +286,10 @@ class Registration:
                     fixed_image = fixed_image[self.bounding_box]
 
                     # Export the transformed and cropped image
-                    linear.export_tiff(
+                    clearex.registration.common.export_tiff(
                         image=transformed_image,
                         data_path=os.path.join(self.linear_path, file))
-                    linear.export_tiff(
+                    clearex.registration.common.export_tiff(
                         image=fixed_image,
                         data_path=os.path.join(self.fixed_path, file))
 
@@ -300,16 +311,43 @@ class Registration:
             buffer.flush()
 
         log(self, message=f"Exporting the registered data to: {self.nonlinear_path}")
-        linear.export_tiff(
+        clearex.registration.common.export_tiff(
             image=transformed_image,
             data_path=os.path.join(self.nonlinear_path, self.moving_data_filename))
 
-        log(self, message=f"Exporting nonlinear warping transform from "
+        log(self, message=f"Copying nonlinear warping transform from "
                            f"{transform_path} to {self.nonlinear_path}. ")
         shutil.copyfile(
             transform_path,
             os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz')
         )
+
+        # Load the nonlinear transform
+        warp_transform = ants.image_read(
+            os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz'))
+
+        # If other images exist, import previously transformed and cropped data,
+        # apply nonlinear transformation, and export.
+        if hasattr(self, 'moving_data_other_filenames'):
+            for file in self.moving_data_other_filenames:
+                if file in self.reference_data_other_filenames:
+                    log(self, message=f"Processing additional file: {file}")
+                    fixed_image = tifffile.imread(
+                        os.path.join(self.fixed_path, file))
+                    moving_image = tifffile.imread(
+                        os.path.join(self.linear_path, file))
+
+                    # Apply the linear transform
+                    transformed_image = clearex.registration.common.transform_image(
+                        moving_image=moving_image,
+                        fixed_image=fixed_image,
+                        affine_transform=warp_transform)
+
+                    # Export the transformed and cropped image
+                    clearex.registration.common.export_tiff(
+                        image=transformed_image,
+                        data_path=os.path.join(self.nonlinear_path, file))
+
         log(self, message="Nonlinear registration complete.")
 
 if __name__ == "__main__":

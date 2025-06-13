@@ -26,7 +26,6 @@
 
 
 # Standard Library Imports
-import os
 import logging
 
 # Local Imports
@@ -34,7 +33,6 @@ import logging
 # Third Party Imports
 import ants
 import numpy as np
-from tifffile import imwrite, imread
 from scipy.linalg import polar, rq
 from scipy.spatial.transform import Rotation
 
@@ -147,113 +145,6 @@ def register_image(
         # use_threshold_at_mean_intensity=...
     )
     return transformed_image, transform
-
-def transform_image(moving_image: ants.core.ants_image.ANTsImage,
-                    fixed_image: ants.core.ants_image.ANTsImage,
-                    affine_transform: ants.core.ants_transform.ANTsTransform) -> (
-        ants.core.ants_image.ANTsImage):
-    """ Use a pre-existing affine transform to transform on a naive image to the
-    coordinate space of the fixed_image. Performs histogram matching to the original.
-
-    Parameters
-    ----------
-    moving_image: ants.core.ants_image.ANTsImage
-        The image that will be transformed.
-    fixed_image: ants.core.ants_image.ANTsImage
-        The stationary image.
-    affine_transform: ants.core.ants_transform.ANTsTransform
-        The affine transform to apply to the moving_image.
-
-    Returns
-    -------
-    registered_image: ants.core.ants_image.ANTsImage
-        The registered image.
-    """
-    # Convert images to ANTsImage if they are numpy arrays.
-    if isinstance(fixed_image, np.ndarray):
-        fixed_image = ants.from_numpy(fixed_image)
-    if isinstance(moving_image, np.ndarray):
-        moving_image = ants.from_numpy(moving_image)
-
-    warped_image = affine_transform.apply_to_image(
-        moving_image,
-        reference=fixed_image,
-        interpolation='linear'
-    )
-    return ants.histogram_match_image(warped_image, moving_image)
-
-def export_tiff(image: ants.core.ants_image.ANTsImage, data_path: str) -> None:
-    """ Export an ants.ANTsImage to a 16-bit tiff file.
-
-    Parameters
-    ----------
-    image: ants.core.ants_image.ANTsImage
-        Image to export
-    data_path: str
-        The location and name of the file to save the data to.
-    """
-    if isinstance(image, ants.core.ants_image.ANTsImage):
-        image=image.numpy().astype(np.uint16)
-    elif isinstance(image, np.ndarray):
-        pass
-    else:
-        raise TypeError(f"Unsupported file type {type(image)}")
-    imwrite(data_path, image)
-
-def import_tiff(data_path):
-    """ Import a tiff file and convert to an ANTsImage.
-
-    Parameters
-    ----------
-    data_path: str
-        The path to the file to import.
-    """
-    return ants.from_numpy(imread(data_path))
-
-def import_affine_transform(data_path: str):
-    """ Import an ants Affine Transform.
-
-    Parameters
-    ----------
-    data_path: str
-        The path to the Affine Transform.
-
-    Returns
-    ------
-    affine_transform: ants.core.ants_transform.ANTsTransform
-        The affine transform.
-    """
-    affine_transform = ants.read_transform(data_path)
-    return affine_transform
-
-def export_affine_transform(
-        affine_transform: ants.core.ants_transform.ANTsTransform,
-        directory: str
-) -> None:
-    """ Export an ants Affine Transform to disk.
-
-    Parameters
-    ----------
-    affine_transform : ants.core.ants_transform.ANTsTransform
-        The affine transform to export.
-    directory : str
-        The directory where the transform will be saved. If it does not exist, it will
-        be created.
-
-    Raises
-    ------
-    ValueError
-        If the affine_transform is not an instance of ANTsTransform.
-    """
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-
-    if not isinstance(affine_transform, ants.core.ants_transform.ANTsTransform):
-        raise ValueError("The affine_transform must be an instance of ANTsTransform.")
-
-    save_path=os.path.join(directory, str(affine_transform.type) + ".mat")
-    ants.write_transform(affine_transform, save_path)
-
 
 def inspect_affine_transform(affine_transform):
     """ Evaluate the affine transform and report it's decomposed parts.

@@ -33,11 +33,11 @@ import tifffile
 
 # Local Imports
 from clearex.registration.linear import (
-    inspect_affine_transform,
-    import_affine_transform,
-    export_tiff,
-    transform_image
+    inspect_affine_transform
 )
+from clearex.registration.common import transform_image, export_tiff, \
+    import_affine_transform
+
 
 def main(
     fixed_path: str,
