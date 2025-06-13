@@ -34,6 +34,7 @@ import shutil
 # Third Party Imports
 import typer
 import tifffile
+import numpy as np
 
 # Local Imports
 import clearex.registration.linear as linear
@@ -94,11 +95,17 @@ class Registration:
         #: str: The filename of the reference data.
         self.reference_data_filename = None
 
+        #: list[str]: A list of other filenames in the reference directory.
+        self.reference_data_other_filenames = None
+
         #: np.ndarray: The image data to register to the reference.
         self.moving_data = None
 
         #: str: The filename of the moving data.
         self.moving_data_filename = None
+
+        #: list[str]: A list of other filenames in the moving directory.
+        self.moving_data_other_filenames = None
 
         #: ants.core.ants_transform.ANTsTransform: The linear affine transform.
         self.transform = None
@@ -141,40 +148,62 @@ class Registration:
         else: self.logger.log(logging.INFO, message)  # fallback
         typer.echo(message)
 
+    def parse_directory(self, directory, attr_name, label, channel):
+        """ Parse a directory for .tif files and load the specified channel.
+
+        Parameters
+        ----------
+        directory : str
+            The directory to search for .tif files.
+        attr_name : str
+            The attribute name to set for the loaded image data.
+        label : str
+            A label for logging purposes, indicating the type of data being loaded.
+        channel : str
+            The channel to look for in the .tif files (e.g., 'CH00', 'CH01', 'CH02').
+
+        Raises
+        ------
+        typer.Abort
+            If the specified channel is not found in the directory, an error message
+            is logged and the program is aborted.
+
+        """
+        all_tif_files = [file for file in os.listdir(directory) if
+                         file.endswith('.tif')]
+        target_file = None
+
+        for file in all_tif_files:
+            if channel in file:
+                target_file = file
+                image_path = os.path.join(directory, file)
+
+                # Set the filename attribute
+                setattr(self, attr_name + "_filename", file)
+
+                # Load and set the image data
+                setattr(self, attr_name, tifffile.imread(image_path))
+                self._log_and_echo(f"{label} loaded: {image_path}")
+                break
+
+        # Create list of other .tif files excluding the target file
+        if target_file:
+            other_files = [file for file in all_tif_files if
+                           file != target_file]
+
+            # Store the list of other .tif files
+            setattr(self, attr_name + "_other_filenames", other_files)
+            self._log_and_echo(
+                f"Found {len(other_files)} additional .tif files in {label} directory")
+
+        if getattr(self, attr_name) is None:
+            self._log_and_echo(f"{label} not found.", level="error")
+
     def load_data(self):
         """Load the image data as indicated by the prompt."""
 
         self._log_and_echo("Loading data...")
-
-        def _load_data(channel):
-            def load_image_from_directory(directory, attr_name, label):
-                print(os.listdir())
-                for file in os.listdir(directory):
-                    if channel in file:
-                        image_path = os.path.join(directory, file)
-
-                        # self.reference_data_name = "1_CH00_000.tif", etc.
-                        setattr(self, attr_name + "_filename", file)
-
-                        # self.reference_data = 3D tiff image
-                        setattr(self, attr_name, tifffile.imread(image_path))
-                        self._log_and_echo(f"{label} loaded: {image_path}")
-                        break
-
-                if getattr(self, attr_name) is None:
-                    self._log_and_echo(f"{label} not found.", level="error")
-                    raise typer.Abort
-
-            load_image_from_directory(self.reference_path,
-                                      attr_name='reference_data',
-                                      label='Reference data'
-                                      )
-            load_image_from_directory(self.moving_path,
-                                      attr_name='moving_data',
-                                      label='Moving data'
-                                      )
-
-        self.channel = typer.prompt(
+        channel = typer.prompt(
             text="What Channel would you like to use for the registration? \n \n "
                 "1. CH00 \n "
                 "2. CH01 \n "
@@ -185,18 +214,28 @@ class Registration:
             show_choices=True,
         )
 
-        self.channel = self.channel.lower()
-
-        if self.channel == "ch00" or self.channel == "1": _load_data("CH00")
-        elif self.channel == "ch01" or self.channel == "2": _load_data("CH01")
-        elif self.channel == "ch02" or self.channel == "3": _load_data("CH02")
-        elif self.channel == "average" or self.channel == "4": pass
+        if channel == "1": channel = "CH00"
+        elif channel == "2": channel = "CH01"
+        elif channel == "3": channel = "CH02"
+        elif channel == "4": pass
         else:
             self._log_and_echo(
                 message="Invalid channel. Please type 1 or CH00, 2 or CH01, etc.",
                 level="debug"
             )
-            self.load_data()
+
+        self.parse_directory(
+            directory=self.reference_path,
+            attr_name='reference_data',
+            label='Reference data',
+            channel=channel)
+
+        self.parse_directory(
+            self.moving_path,
+            attr_name='moving_data',
+            label='Moving data',
+            channel=channel)
+
 
     def linear_registration(self):
         """ Perform the linear TRSAA-type registration."""
@@ -241,6 +280,36 @@ class Registration:
         linear.export_tiff(
             image=self.transformed_image,
             data_path=os.path.join(self.linear_path, self.moving_data_filename))
+
+        # If other images exist, import, transform, crop, and export.
+        if hasattr(self, 'moving_data_other_filenames'):
+            for file in self.moving_data_other_filenames:
+                if file in self.reference_data_other_filenames:
+                    self._log_and_echo(f"Processing additional file: {file}")
+                    fixed_image = tifffile.imread(
+                        os.path.join(self.reference_path, file))
+                    moving_image = tifffile.imread(
+                        os.path.join(self.moving_path, file))
+
+                    # Apply the linear transform
+                    transformed_image = linear.transform_image(
+                        moving_image=moving_image,
+                        fixed_image=fixed_image,
+                        affine_transform=self.transform)
+
+                    # Crop the images
+                    transformed_image = transformed_image.numpy().astype(np.uint16)
+                    transformed_image = transformed_image[self.bounding_box]
+                    fixed_image = fixed_image[self.bounding_box]
+
+                    # Export the transformed and cropped image
+                    linear.export_tiff(
+                        image=transformed_image,
+                        data_path=os.path.join(self.linear_path, file))
+                    linear.export_tiff(
+                        image=fixed_image,
+                        data_path=os.path.join(self.fixed_path, file))
+
 
         self._log_and_echo("Linear registration complete.")
 
