@@ -27,6 +27,7 @@
 
 # Standard Library Imports
 import os
+import logging
 
 # Local Imports
 
@@ -36,6 +37,11 @@ import numpy as np
 from tifffile import imwrite, imread
 from scipy.linalg import polar, rq
 from scipy.spatial.transform import Rotation
+
+# Set up logging
+logger = logging.getLogger('registration')
+if not logger.handlers:
+    logger.addHandler(logging.NullHandler())
 
 def register_image(
         moving_image: ants.core.ants_image.ANTsImage | np.ndarray,
@@ -51,7 +57,7 @@ def register_image(
 
     Parameters
     ----------
-    moving_image : ants.core.ants_image.ANTsImage | np.ndarry
+    moving_image : ants.core.ants_image.ANTsImage | np.ndarray
         The moving image.
     fixed_image : ants.core.ants_image.ANTsImage | np.ndarray
         The image which the moving_image will be registered to. It remains fixed.

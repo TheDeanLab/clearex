@@ -31,6 +31,7 @@ import io
 import contextlib
 import shutil
 
+import imageio
 # Third Party Imports
 import typer
 import tifffile
@@ -55,9 +56,24 @@ class Registration:
         self.moving_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
                                "-12-registration/moving")
 
-        # str: The path to save the data to
+        # str: The base path to save the data to
         self.saving_path = os.path.join(self.moving_path, "registration")
         os.makedirs(self.saving_path, exist_ok=True)
+
+        # Create the saving directory for linear registration results.
+        #: str: The path to save the linear registration results.
+        self.linear_path = os.path.join(self.saving_path, "linear")
+        os.makedirs(self.linear_path, exist_ok=True)
+
+        # Create the saving directory for nonlinear registration results.
+        #: str: The path to save the nonlinear registration results.
+        self.nonlinear_path = os.path.join(self.saving_path, "nonlinear")
+        os.makedirs(self.nonlinear_path, exist_ok=True)
+
+        # Create the fixed directory for the reference data.
+        #: str: The path to save the fixed reference data.
+        self.fixed_path = os.path.join(self.saving_path, "fixed")
+        os.makedirs(self.fixed_path, exist_ok=True)
 
         #: logging.Logger: The logger for documenting registration steps.
         self.logger = setup_logger(
@@ -80,8 +96,14 @@ class Registration:
         #: np.ndarray: The reference image data.
         self.reference_data = None
 
+        #: str: The filename of the reference data.
+        self.reference_data_name = None
+
         #: np.ndarray: The image data to register to the reference.
         self.moving_data = None
+
+        #: str: The filename of the moving data.
+        self.moving_data_name = None
 
         #: ants.core.ants_transform.ANTsTransform: The linear affine transform.
         self.transform = None
@@ -135,6 +157,11 @@ class Registration:
                 for file in os.listdir(directory):
                     if channel in file:
                         image_path = os.path.join(directory, file)
+
+                        # self.reference_data_name = "1_CH00_000.tif", etc.
+                        setattr(self, attr_name + "_filename", file)
+
+                        # self.reference_data = 3D tiff image
                         setattr(self, attr_name, tifffile.imread(image_path))
                         self._log_and_echo(f"{label} loaded: {image_path}")
                         break
@@ -178,7 +205,6 @@ class Registration:
 
     def linear_registration(self):
         """ Perform the linear TRSAA-type registration."""
-
         self._log_and_echo(f"Shape of the fixed data: {self.reference_data.shape}")
         self._log_and_echo(f"ape of the moving data: {self.moving_data.shape}")
         self._log_and_echo("Beginning linear registration.")
@@ -194,16 +220,32 @@ class Registration:
             self.logger.info(buffer.getvalue())
             buffer.flush()
 
-            linear.inspect_affine_transform(self.transform)
-            self.logger.info(buffer.getvalue())
+        self._log_and_echo(f"Inspecting the linear affine transform.")
+        linear.inspect_affine_transform(self.transform)
 
-        self._log_and_echo(f"Exporting the affine transform to: {self.saving_path}")
-        linear.export_affine_transform(self.transform, self.saving_path)
+        self._log_and_echo(f"Exporting the affine transform to: {linear_path}")
+        linear.export_affine_transform(
+            affine_transform=self.transform,
+            directory=linear_path)
 
-        self._log_and_echo(f"Exporting the registered data to: {self.saving_path}")
+        self._log_and_echo("Identifying the smallest ROI that encapsulates the data.")
+        self.reference_data, self.transformed_image, self.bounding_box = crop_overlapping_datasets(
+            self.reference_data,
+            self.transformed_image,
+            robust=True,
+            lower_pct=2,
+            upper_pct=98
+        )
+        self._log_and_echo(f"Cropped fixed image shape: {self.reference_data.shape}")
+        self._log_and_echo(f"Cropped moving image shape: {self.transformed_image.shape}")
+
+        self._log_and_echo("Exporting cropped reference and moving images.")
+        linear.export_tiff(
+            image=self.reference_data,
+            data_path=os.path.join(self.fixed_path, self.reference_data_name))
         linear.export_tiff(
             image=self.transformed_image,
-            data_path=os.path.join(self.saving_path, "linearly_registered.tif"))
+            data_path=os.path.join(self.linear_path, self.moving_data_name))
 
         self._log_and_echo("Linear registration complete.")
 
@@ -211,46 +253,26 @@ class Registration:
         """ Perform the diffeomorphic SyN warp transform. """
         self._log_and_echo("Beginning nonlinear registration.")
 
-        self._log_and_echo("Identifying the smallest ROI that encapsulates the data.")
-        fixed_roi, moving_roi, self.bounding_box = crop_overlapping_datasets(
-            self.reference_data,
-            self.transformed_image,
-            robust=True,
-            lower_pct=2,
-            upper_pct=98
-        )
-        self._log_and_echo(f"Cropped fixed image shape: {fixed_roi.shape}")
-        self._log_and_echo(f"Cropped moving image shape: {moving_roi.shape}")
-
-        self._log_and_echo("Exporting cropped reference and moving images.")
-        linear.export_tiff(
-            image=moving_roi,
-            data_path=os.path.join(self.saving_path, "cropped_moving.tif"))
-        linear.export_tiff(
-            image=fixed_roi,
-            data_path=os.path.join(self.saving_path, "cropped_fixed.tif"))
-
-        self._log_and_echo("Performing nonlinear registration on the cropped data.")
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
             transformed_image, transform_path = nonlinear.register_image(
-                moving_image=moving_roi,
-                fixed_image=fixed_roi,
+                moving_image=self.transformed_image,
+                fixed_image=self.reference_data,
                 accuracy="high",
                 verbose=True)
             self.logger.info(buffer.getvalue())
             buffer.flush()
 
-        self._log_and_echo("Exporting the registered data to:", self.saving_path)
+        self._log_and_echo("Exporting the registered data to:", self.nonlinear_path)
         linear.export_tiff(
             image=transformed_image,
-            data_path=os.path.join(self.saving_path, "non_linear_registered.tif"))
+            data_path=os.path.join(self.nonlinear_path, self.moving_data_name))
 
         self._log_and_echo(f"Exporting nonlinear warping transform from "
-                           f"{transform_path} to {self.saving_path}. ")
+                           f"{transform_path} to {self.nonlinear_path}. ")
         shutil.copyfile(
             transform_path,
-            os.path.join(self.saving_path, 'movingToFixed1Warp.nii.gz')
+            os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz')
         )
         print("Nonlinear registration complete.")
 

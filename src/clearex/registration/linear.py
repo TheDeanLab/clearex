@@ -27,6 +27,7 @@
 
 # Standard Library Imports
 import os
+import logging
 
 # Local Imports
 
@@ -36,6 +37,11 @@ import numpy as np
 from tifffile import imwrite, imread
 from scipy.linalg import polar, rq
 from scipy.spatial.transform import Rotation
+
+# Set up logging
+logger = logging.getLogger('registration')
+if not logger.handlers:
+    logger.addHandler(logging.NullHandler())
 
 def register_image(
         moving_image: ants.core.ants_image.ANTsImage | np.ndarray,
@@ -85,11 +91,14 @@ def register_image(
     https://antspy.readthedocs.io/en/latest/registration.html
     """
     if fixed_image.ndim != moving_image.ndim:
+        logger.error("Fixed and moving images must have the same number of dimensions.")
         raise ValueError("Both images must have the same number of dimensions.")
 
     if registration_type not in [
         "Translation", "Rigid", "Similarity", "Affine", "TRSAA"
     ]:
+        logger.error(f"Unsupported registration type: {registration_type}. "
+                     "Supported types are: Translation, Rigid, Similarity, Affine, TRSAA.")
         raise ValueError(f"Unsupported registration type: {registration_type}. "
                          "Supported types are: Translation, Rigid, Similarity, Affine, TRSAA.")
 
@@ -115,6 +124,7 @@ def register_image(
             kwargs["reg_iterations"] = (1000, 500, 250, 100)
         else:
             kwargs["reg_iterations"] = (100, 70, 50, 20)
+        logger.info(f"Using TRSAA registration with {kwargs['reg_iterations']} iterations.")
 
     # Register the images. This will return a dictionary with the results.
     registered = ants.registration(**kwargs)
@@ -262,6 +272,7 @@ def inspect_affine_transform(affine_transform):
     final_matrix = np.eye(4)
     final_matrix[:3, :3] = affine_matrix
     final_matrix[:3, 3] = offset
+    logger.info(f"Affine Transform Matrix:\n{final_matrix}")
     print("Complete Affine 4x4 matrix:\n", final_matrix)
 
     # Decompose the Affine Matrix into its Parts
@@ -284,6 +295,7 @@ def _extract_scale(affine_matrix):
     scale_vector = np.diagonal(scale)
     scale_labels = ['Z', 'Y', 'X']
     for label, scale in zip(scale_labels, scale_vector):
+        logger.info(f"{label} Scale: {scale:.2f}-fold')
         print(f'{label} Scale: {scale:.2f}-fold')
 
 def _extract_shear(affine_matrix):
@@ -308,6 +320,7 @@ def _extract_shear(affine_matrix):
     # Clearly print the results
     shear_labels = ['XY', 'XZ', 'YX', 'YZ', 'ZX', 'ZY']
     for label, angle in zip(shear_labels, angles_deg):
+        logger.info(f'Shear Angle {label}: {angle:.2f} degrees')
         print(f'Shear angle {label}: {angle:.2f} degrees')
 
 def _extract_translation(affine_matrix):
@@ -322,6 +335,7 @@ def _extract_translation(affine_matrix):
     translation = affine_matrix[:, 3]
     translation_labels = ['Z', 'Y', 'X']
     for label, distance in zip(translation_labels, translation):
+        logger.info(f'Translation {label}: {distance:.2f} voxels')
         print(f'Translation distance in {label}: {distance:.2f} voxels')
 
 def _extract_rotation(affine_matrix):
@@ -343,4 +357,5 @@ def _extract_rotation(affine_matrix):
     # Print angles clearly
     axis_labels = ['X (roll)', 'Y (pitch)', 'Z (yaw)']
     for axis, angle in zip(axis_labels, euler_angles_deg):
+        logger.info(f'Rotation {axis}: {angle:.2f} degrees')
         print(f'Rotation around {axis} axis: {angle:.2f} degrees')
