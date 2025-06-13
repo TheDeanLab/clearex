@@ -60,6 +60,11 @@ def setup_logger(name='my_logger', log_file='app.log', level=logging.INFO):
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
+    # Remove any NullHandlers that may have been added by other modules
+    for handler in list(logger.handlers):
+        if isinstance(handler, logging.NullHandler):
+            logger.removeHandler(handler)
+
     # Prevent duplicate handlers if logger already exists
     if not logger.handlers:
         logger.addHandler(file_handler)
