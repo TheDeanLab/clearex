@@ -23,6 +23,7 @@ dependencies = [
   "numpy",
   "opencv-python",
   "pandas",
+  "pre-commit",
   "scikit-image",
   "scipy",
   "seaborn",
@@ -42,7 +43,6 @@ dev = [
   "pytest",
   "pytest-xvfb",
   "pytest-cov",
-  "pre-commit",
 ]
 
 docs = [
