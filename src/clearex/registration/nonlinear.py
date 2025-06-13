@@ -40,6 +40,7 @@ from scipy.spatial.transform import Rotation
 
 # Set up logging
 logger = logging.getLogger('registration')
+print("**** loggers:", logger, logger.handlers)
 if not logger.handlers:
     logger.addHandler(logging.NullHandler())
 

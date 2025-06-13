@@ -25,7 +25,7 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 import logging
-import os
+import typer
 
 
 def setup_logger(name='my_logger', log_file='app.log', level=logging.INFO):
@@ -66,3 +66,39 @@ def setup_logger(name='my_logger', log_file='app.log', level=logging.INFO):
         logger.addHandler(console_handler)
 
     return logger
+
+
+def log_and_echo(self, message: str, level: str = "info"):
+    """
+    Log a message using the specified logging level and print it to the console.
+
+    This method logs the provided message to the class logger using the given
+    severity level (e.g., 'info', 'warning', 'error', 'debug'), and then echoes
+    the same message to the console using `typer.echo`.
+
+    Parameters
+    ----------
+    self : ...
+        The class object which has the logger attribute.
+    message : str
+        The message to log and display.
+    level : str, optional
+        The severity level for logging. Must be one of:
+        {'info', 'warning', 'error', 'debug'}. Defaults to 'info'.
+        If an unrecognized level is provided, it falls back to 'info'.
+
+    Returns
+    -------
+    None
+    """
+    if level == "info":
+        self.logger.info(message)
+    elif level == "warning":
+        self.logger.warning(message)
+    elif level == "error":
+        self.logger.error(message)
+    elif level == "debug":
+        self.logger.debug(message)
+    else:
+        self.logger.log(logging.INFO, message)  # fallback
+    typer.echo(message)
