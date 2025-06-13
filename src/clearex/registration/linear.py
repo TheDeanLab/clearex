@@ -295,7 +295,7 @@ def _extract_scale(affine_matrix):
     scale_vector = np.diagonal(scale)
     scale_labels = ['Z', 'Y', 'X']
     for label, scale in zip(scale_labels, scale_vector):
-        logger.info(f"{label} Scale: {scale:.2f}-fold')
+        logger.info(f"{label} Scale: {scale:.2f}-fold")
         print(f'{label} Scale: {scale:.2f}-fold')
 
 def _extract_shear(affine_matrix):

@@ -31,7 +31,6 @@ import io
 import contextlib
 import shutil
 
-import imageio
 # Third Party Imports
 import typer
 import tifffile
@@ -46,7 +45,6 @@ class Registration:
     """ A class to register data. """
 
     def __init__(self):
-        #: str: The path to the reference data.
         # self.reference_path = typer.prompt("What directory is the reference data in?")
         self.reference_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
                                "-12-registration/fixed")
@@ -60,17 +58,14 @@ class Registration:
         self.saving_path = os.path.join(self.moving_path, "registration")
         os.makedirs(self.saving_path, exist_ok=True)
 
-        # Create the saving directory for linear registration results.
         #: str: The path to save the linear registration results.
         self.linear_path = os.path.join(self.saving_path, "linear")
         os.makedirs(self.linear_path, exist_ok=True)
 
-        # Create the saving directory for nonlinear registration results.
         #: str: The path to save the nonlinear registration results.
         self.nonlinear_path = os.path.join(self.saving_path, "nonlinear")
         os.makedirs(self.nonlinear_path, exist_ok=True)
 
-        # Create the fixed directory for the reference data.
         #: str: The path to save the fixed reference data.
         self.fixed_path = os.path.join(self.saving_path, "fixed")
         os.makedirs(self.fixed_path, exist_ok=True)
@@ -97,13 +92,13 @@ class Registration:
         self.reference_data = None
 
         #: str: The filename of the reference data.
-        self.reference_data_name = None
+        self.reference_data_filename = None
 
         #: np.ndarray: The image data to register to the reference.
         self.moving_data = None
 
         #: str: The filename of the moving data.
-        self.moving_data_name = None
+        self.moving_data_filename = None
 
         #: ants.core.ants_transform.ANTsTransform: The linear affine transform.
         self.transform = None
@@ -223,10 +218,10 @@ class Registration:
         self._log_and_echo(f"Inspecting the linear affine transform.")
         linear.inspect_affine_transform(self.transform)
 
-        self._log_and_echo(f"Exporting the affine transform to: {linear_path}")
+        self._log_and_echo(f"Exporting the affine transform to: {self.linear_path}")
         linear.export_affine_transform(
             affine_transform=self.transform,
-            directory=linear_path)
+            directory=self.linear_path)
 
         self._log_and_echo("Identifying the smallest ROI that encapsulates the data.")
         self.reference_data, self.transformed_image, self.bounding_box = crop_overlapping_datasets(
@@ -242,10 +237,10 @@ class Registration:
         self._log_and_echo("Exporting cropped reference and moving images.")
         linear.export_tiff(
             image=self.reference_data,
-            data_path=os.path.join(self.fixed_path, self.reference_data_name))
+            data_path=os.path.join(self.fixed_path, self.reference_data_filename))
         linear.export_tiff(
             image=self.transformed_image,
-            data_path=os.path.join(self.linear_path, self.moving_data_name))
+            data_path=os.path.join(self.linear_path, self.moving_data_filename))
 
         self._log_and_echo("Linear registration complete.")
 
@@ -266,7 +261,7 @@ class Registration:
         self._log_and_echo("Exporting the registered data to:", self.nonlinear_path)
         linear.export_tiff(
             image=transformed_image,
-            data_path=os.path.join(self.nonlinear_path, self.moving_data_name))
+            data_path=os.path.join(self.nonlinear_path, self.moving_data_filename))
 
         self._log_and_echo(f"Exporting nonlinear warping transform from "
                            f"{transform_path} to {self.nonlinear_path}. ")
