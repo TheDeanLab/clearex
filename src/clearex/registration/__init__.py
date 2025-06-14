@@ -35,6 +35,7 @@ import shutil
 import typer
 import tifffile
 import numpy as np
+import ants
 
 # Local Imports
 import clearex.registration.linear as linear
@@ -155,8 +156,10 @@ class Registration:
             label='Moving data',
             channel=channel)
 
-        self.linear_registration()
-        self.nonlinear_registration()
+        #self.linear_registration()
+        #self.nonlinear_registration()
+
+        self.export_other_images()
 
     def make_directories(self):
         """ Create the necessary directories for registration results. """
@@ -223,7 +226,7 @@ class Registration:
     def linear_registration(self):
         """ Perform the linear TRSAA-type registration."""
         log(self, message=f"Shape of the fixed data: {self.reference_data.shape}")
-        log(self, message=f"ape of the moving data: {self.moving_data.shape}")
+        log(self, message=f"Shape of the moving data: {self.moving_data.shape}")
         log(self, message="Beginning linear registration.")
 
         buffer = io.StringIO()
@@ -293,7 +296,6 @@ class Registration:
                         image=fixed_image,
                         data_path=os.path.join(self.fixed_path, file))
 
-
         log(self, message="Linear registration complete.")
 
     def nonlinear_registration(self):
@@ -322,9 +324,11 @@ class Registration:
             os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz')
         )
 
+        log(self, message="Nonlinear registration complete.")
+
+    def export_other_images(self):
         # Load the nonlinear transform
-        warp_transform = ants.image_read(
-            os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz'))
+        warp_transform = os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz')
 
         # If other images exist, import previously transformed and cropped data,
         # apply nonlinear transformation, and export.
@@ -338,17 +342,17 @@ class Registration:
                         os.path.join(self.linear_path, file))
 
                     # Apply the linear transform
-                    transformed_image = clearex.registration.common.transform_image(
-                        moving_image=moving_image,
-                        fixed_image=fixed_image,
-                        affine_transform=warp_transform)
+                    transformed_image = ants.apply_ants_transform_to_image(
+                        transformlist=[warp_transform],
+                        image=moving_image,
+                        reference=fixed_image,
+                        interpolation="linear")
 
                     # Export the transformed and cropped image
                     clearex.registration.common.export_tiff(
                         image=transformed_image,
                         data_path=os.path.join(self.nonlinear_path, file))
 
-        log(self, message="Nonlinear registration complete.")
 
 if __name__ == "__main__":
     Registration()
