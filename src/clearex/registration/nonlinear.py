@@ -119,6 +119,13 @@ def register_image(
         "initial_transform": 'Identity'
         }
 
+    if accuracy == "high":
+        kwargs["reg_iterations"] = (100, 70)
+    elif accuracy == "low":
+        kwargs["reg_iterations"] = (5, 5)
+    elif accuracy == "dry run":
+        kwargs["reg_iterations"] = (1, 1)
+
     # Register the images. This will return a dictionary with the results.
     registered = ants.registration(**kwargs)
 
@@ -141,3 +148,39 @@ def register_image(
         # use_threshold_at_mean_intensity=...
     )
     return transformed_image, transform
+
+def transform_image(moving_image: ants.core.ants_image.ANTsImage,
+                    fixed_image: ants.core.ants_image.ANTsImage,
+                    transformed_image: ants.core.ants_image.ANTsImage) -> (
+        ants.core.ants_image.ANTsImage):
+    """ Use a pre-existing warp transform to transform on a naive image to the
+    coordinate space of the fixed_image. Performs histogram matching to the original.
+
+    Parameters
+    ----------
+    moving_image: ants.core.ants_image.ANTsImage
+        The image that will be transformed.
+    fixed_image: ants.core.ants_image.ANTsImage
+        The stationary image.
+    transformed_image: ants.core.ants_image.ANTsImage
+        The previously registered image, which contains a reference to the warp
+        transform.
+    Returns
+    -------
+    registered_image: ants.core.ants_image.ANTsImage
+        The registered image.
+    """
+    # Convert images to ANTsImage if they are numpy arrays.
+    if isinstance(fixed_image, np.ndarray):
+        fixed_image = ants.from_numpy(fixed_image)
+    if isinstance(moving_image, np.ndarray):
+        moving_image = ants.from_numpy(moving_image)
+
+    # Apply the linear transform
+    warped_image = ants.apply_transforms(
+        fixed=fixed_image,
+        moving=moving_image,
+        transformlist=transformed_image['fwdtransforms'],
+        interpolator="linear")
+
+    return ants.histogram_match_image(warped_image, moving_image)

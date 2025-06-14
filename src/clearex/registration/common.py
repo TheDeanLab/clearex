@@ -69,41 +69,6 @@ def export_affine_transform(
     ants.write_transform(affine_transform, save_path)
 
 
-def transform_image(moving_image: ants.core.ants_image.ANTsImage,
-                    fixed_image: ants.core.ants_image.ANTsImage,
-                    affine_transform: ants.core.ants_transform.ANTsTransform) -> (
-        ants.core.ants_image.ANTsImage):
-    """ Use a pre-existing affine transform to transform on a naive image to the
-    coordinate space of the fixed_image. Performs histogram matching to the original.
-
-    Parameters
-    ----------
-    moving_image: ants.core.ants_image.ANTsImage
-        The image that will be transformed.
-    fixed_image: ants.core.ants_image.ANTsImage
-        The stationary image.
-    affine_transform: ants.core.ants_transform.ANTsTransform
-        The affine transform to apply to the moving_image.
-
-    Returns
-    -------
-    registered_image: ants.core.ants_image.ANTsImage
-        The registered image.
-    """
-    # Convert images to ANTsImage if they are numpy arrays.
-    if isinstance(fixed_image, np.ndarray):
-        fixed_image = ants.from_numpy(fixed_image)
-    if isinstance(moving_image, np.ndarray):
-        moving_image = ants.from_numpy(moving_image)
-
-    warped_image = affine_transform.apply_to_image(
-        moving_image,
-        reference=fixed_image,
-        interpolation='linear'
-    )
-    return ants.histogram_match_image(warped_image, moving_image)
-
-
 def export_tiff(image: ants.core.ants_image.ANTsImage, data_path: str) -> None:
     """ Export an ants.ANTsImage to a 16-bit tiff file.
 

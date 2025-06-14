@@ -37,6 +37,7 @@ import tifffile
 import numpy as np
 import ants
 
+import clearex.registration.linear
 # Local Imports
 import clearex.registration.linear as linear
 import clearex.registration.nonlinear as nonlinear
@@ -58,6 +59,9 @@ class Registration:
         self.reference_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
                                "-12-registration/fixed")
 
+        # str: The accuracy to one the registration at. Low or High
+        self.accuracy = "dry run"
+
         # str: The base path to save the data to
         self.saving_path = os.path.join(self.moving_path, "registration")
 
@@ -74,13 +78,8 @@ class Registration:
         self.make_directories()
 
         #: logging.Logger: The logger for documenting registration steps.
-        self.logger = setup_logger(
-            name='registration',
-            log_file=os.path.join(
-                self.moving_path,
-                "registration",
-                "registration.log"),
-            level=logging.DEBUG)
+        self.logger = setup_logger(name='registration', log_file=os.path.join(
+            self.moving_path, "registration", "registration.log"), level=logging.DEBUG)
 
         # Log paths.
         log(self, message="*** Initializing New Registration Runtime ***")
@@ -119,30 +118,31 @@ class Registration:
         self.bounding_box = None
 
         log(self, message="Loading data...")
-        channel = typer.prompt(
-            text="What Channel would you like to use for the registration? \n \n "
-                 "1. CH00 \n "
-                 "2. CH01 \n "
-                 "3. CH02 \n "
-                 "4. Average \n ",
-            default="CH00",
-            show_default=False,
-            show_choices=True,
-        )
-
-        if channel == "1":
-            channel = "CH00"
-        elif channel == "2":
-            channel = "CH01"
-        elif channel == "3":
-            channel = "CH02"
-        elif channel == "4":
-            pass
-        else:
-            log(self,
-                message="Invalid channel. Please type 1 or CH00, 2 or CH01, etc.",
-                level="debug"
-            )
+        channel = self.channel
+        # channel = typer.prompt(
+        #     text="What Channel would you like to use for the registration? \n \n "
+        #          "1. CH00 \n "
+        #          "2. CH01 \n "
+        #          "3. CH02 \n "
+        #          "4. Average \n ",
+        #     default="CH00",
+        #     show_default=False,
+        #     show_choices=True,
+        # )
+        #
+        # if channel == "1":
+        #     channel = "CH00"
+        # elif channel == "2":
+        #     channel = "CH01"
+        # elif channel == "3":
+        #     channel = "CH02"
+        # elif channel == "4":
+        #     pass
+        # else:
+        #     log(self,
+        #         message="Invalid channel. Please type 1 or CH00, 2 or CH01, etc.",
+        #         level="debug"
+        #     )
 
         self.parse_directory(
             directory=self.reference_path,
@@ -156,9 +156,8 @@ class Registration:
             label='Moving data',
             channel=channel)
 
-        #self.linear_registration()
-        #self.nonlinear_registration()
-
+        self.linear_registration()
+        self.nonlinear_registration()
         self.export_other_images()
 
     def make_directories(self):
@@ -222,7 +221,6 @@ class Registration:
         if getattr(self, attr_name) is None:
             log(self, message=f"{label} not found.", level="error")
 
-
     def linear_registration(self):
         """ Perform the linear TRSAA-type registration."""
         log(self, message=f"Shape of the fixed data: {self.reference_data.shape}")
@@ -235,7 +233,7 @@ class Registration:
                 moving_image=self.moving_data,
                 fixed_image=self.reference_data,
                 registration_type="TRSAA",
-                accuracy="high",
+                accuracy=self.accuracy,
                 verbose=True)
             log(self, message=buffer.getvalue())
             buffer.flush()
@@ -278,7 +276,7 @@ class Registration:
                         os.path.join(self.moving_path, file))
 
                     # Apply the linear transform
-                    transformed_image = clearex.registration.common.transform_image(
+                    transformed_image = clearex.registration.linear.transform_image(
                         moving_image=moving_image,
                         fixed_image=fixed_image,
                         affine_transform=self.transform)
@@ -304,17 +302,17 @@ class Registration:
 
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
-            transformed_image, transform_path = nonlinear.register_image(
+            self.transformed_image, transform_path = nonlinear.register_image(
                 moving_image=self.transformed_image,
                 fixed_image=self.reference_data,
-                accuracy="high",
+                accuracy=self.accuracy,
                 verbose=True)
             log(self, message=buffer.getvalue())
             buffer.flush()
 
         log(self, message=f"Exporting the registered data to: {self.nonlinear_path}")
         clearex.registration.common.export_tiff(
-            image=transformed_image,
+            image=self.transformed_image,
             data_path=os.path.join(self.nonlinear_path, self.moving_data_filename))
 
         log(self, message=f"Copying nonlinear warping transform from "
@@ -326,10 +324,8 @@ class Registration:
 
         log(self, message="Nonlinear registration complete.")
 
-    def export_other_images(self):
-        # Load the nonlinear transform
-        warp_transform = os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz')
 
+    def export_other_images(self):
         # If other images exist, import previously transformed and cropped data,
         # apply nonlinear transformation, and export.
         if hasattr(self, 'moving_data_other_filenames'):
@@ -341,17 +337,36 @@ class Registration:
                     moving_image = tifffile.imread(
                         os.path.join(self.linear_path, file))
 
-                    # Apply the linear transform
-                    transformed_image = ants.apply_ants_transform_to_image(
-                        transformlist=[warp_transform],
-                        image=moving_image,
-                        reference=fixed_image,
-                        interpolation="linear")
+                    # Convert to ants Image type.
+                    fixed_image = ants.from_numpy(fixed_image)
+                    moving_image = ants.from_numpy(moving_image)
+
+                    transform_list = [
+                        os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz')]
+
+                    warped_image = ants.apply_transforms(
+                        fixed=fixed_image,
+                        moving=moving_image,
+                        transformlist=transform_list,
+                        interpolator='linear'
+                    )
+
+                    # Histogram match to original data.
+                    warped_image = ants.histogram_match_image(
+                        source_image=warped_image,
+                        reference_image=moving_image
+                        # number_of_match_points=...
+                        # use_threshold_at_mean_intensity=...
+                    )
+
+                    warped_image = warped_image.numpy().astype(np.uint16)
 
                     # Export the transformed and cropped image
                     clearex.registration.common.export_tiff(
-                        image=transformed_image,
+                        image=warped_image,
                         data_path=os.path.join(self.nonlinear_path, file))
+
+                    print("DONE?!?!?")
 
 
 if __name__ == "__main__":

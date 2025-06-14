@@ -120,8 +120,11 @@ def register_image(
         # Multi-resolution iteration schedule
         if accuracy == "high":
             kwargs["reg_iterations"] = (1000, 500, 250, 100)
-        else:
+        elif accuracy == "low":
             kwargs["reg_iterations"] = (100, 70, 50, 20)
+        elif accuracy == "dry run":
+            kwargs["reg_iterations"] = (1, 1, 1, 1)
+
         logger.info(f"Using TRSAA registration with {kwargs['reg_iterations']} iterations.")
 
     # Register the images. This will return a dictionary with the results.
@@ -250,3 +253,38 @@ def _extract_rotation(affine_matrix):
     for axis, angle in zip(axis_labels, euler_angles_deg):
         logger.info(f'Rotation {axis}: {angle:.2f} degrees')
         print(f'Rotation around {axis} axis: {angle:.2f} degrees')
+
+
+def transform_image(moving_image: ants.core.ants_image.ANTsImage,
+                    fixed_image: ants.core.ants_image.ANTsImage,
+                    affine_transform: ants.core.ants_transform.ANTsTransform) -> (
+        ants.core.ants_image.ANTsImage):
+    """ Use a pre-existing affine transform to transform on a naive image to the
+    coordinate space of the fixed_image. Performs histogram matching to the original.
+
+    Parameters
+    ----------
+    moving_image: ants.core.ants_image.ANTsImage
+        The image that will be transformed.
+    fixed_image: ants.core.ants_image.ANTsImage
+        The stationary image.
+    affine_transform: ants.core.ants_transform.ANTsTransform
+        The affine transform to apply to the moving_image.
+
+    Returns
+    -------
+    registered_image: ants.core.ants_image.ANTsImage
+        The registered image.
+    """
+    # Convert images to ANTsImage if they are numpy arrays.
+    if isinstance(fixed_image, np.ndarray):
+        fixed_image = ants.from_numpy(fixed_image)
+    if isinstance(moving_image, np.ndarray):
+        moving_image = ants.from_numpy(moving_image)
+
+    warped_image = affine_transform.apply_to_image(
+        moving_image,
+        reference=fixed_image,
+        interpolation='linear'
+    )
+    return ants.histogram_match_image(warped_image, moving_image)

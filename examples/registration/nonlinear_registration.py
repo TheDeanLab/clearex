@@ -32,8 +32,9 @@ import os
 import tifffile
 
 # Local Imports
-from clearex.registration.common import transform_image, export_tiff, \
+from clearex.registration.common import export_tiff, \
     import_affine_transform
+from clearex.registration.linear import transform_image
 from clearex.registration.nonlinear import register_image
 from clearex.file_operations.tools import crop_overlapping_datasets
 

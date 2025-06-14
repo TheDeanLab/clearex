@@ -33,9 +33,9 @@ import tifffile
 
 # Local Imports
 from clearex.registration.linear import (
-    inspect_affine_transform
+    inspect_affine_transform, transform_image
 )
-from clearex.registration.common import transform_image, export_tiff, \
+from clearex.registration.common import export_tiff, \
     import_affine_transform
 
 
