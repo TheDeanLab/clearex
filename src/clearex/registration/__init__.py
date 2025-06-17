@@ -27,8 +27,6 @@
 # Standard Library Imports
 import os
 import logging
-import io
-import contextlib
 import shutil
 
 # Third Party Imports
@@ -38,7 +36,6 @@ import numpy as np
 import ants
 
 # Local Imports
-# import clearex.registration.linear
 import clearex.registration.linear as linear
 import clearex.registration.nonlinear as nonlinear
 from clearex import setup_logger, log_and_echo as log, capture_c_level_output
@@ -227,13 +224,6 @@ class Registration:
         log(self, message=f"Shape of the moving data: {self.moving_data.shape}")
         log(self, message="Beginning linear registration.")
 
-        # self.transformed_image, self.transform = linear.register_image(
-        #     moving_image=self.moving_data,
-        #     fixed_image=self.reference_data,
-        #     registration_type="TRSAA",
-        #     accuracy=self.accuracy,
-        #     verbose=True)
-
         result, stdout, stderr = capture_c_level_output(
             linear.register_image,
             moving_image=self.moving_data,
@@ -265,9 +255,9 @@ class Registration:
             lower_pct=2,
             upper_pct=98
         )
+
         log(self, message=f"Cropped fixed image shape: {self.reference_data.shape}")
         log(self, message=f"Cropped moving image shape: {self.transformed_image.shape}")
-
         log(self, message="Exporting cropped reference and moving images.")
         clearex.registration.common.export_tiff(
             image=self.reference_data,
@@ -325,12 +315,6 @@ class Registration:
         if stderr:
             log(self, message=f"Errors during registration: {stderr}", level="error")
 
-        # self.transformed_image, transform_path = nonlinear.register_image(
-        #     moving_image=self.transformed_image,
-        #     fixed_image=self.reference_data,
-        #     accuracy=self.accuracy,
-        #     verbose=True)
-
         log(self, message=f"Exporting the registered data to: {self.nonlinear_path}")
         clearex.registration.common.export_tiff(
             image=self.transformed_image,
@@ -376,8 +360,6 @@ class Registration:
                     warped_image = ants.histogram_match_image(
                         source_image=warped_image,
                         reference_image=moving_image
-                        # number_of_match_points=...
-                        # use_threshold_at_mean_intensity=...
                     )
 
                     warped_image = warped_image.numpy().astype(np.uint16)
@@ -386,8 +368,6 @@ class Registration:
                     clearex.registration.common.export_tiff(
                         image=warped_image,
                         data_path=os.path.join(self.nonlinear_path, file))
-
-                    print("DONE?!?!?")
 
 
 if __name__ == "__main__":

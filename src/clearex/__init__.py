@@ -108,7 +108,6 @@ def log_and_echo(self, message: str, level: str = "info"):
         self.logger.debug(message)
     else:
         self.logger.log(logging.INFO, message)  # fallback
-    typer.echo(message)
 
 def capture_c_level_output(func, *args, **kwargs):
     """Capture stdout/stderr including C-level output from function calls."""
