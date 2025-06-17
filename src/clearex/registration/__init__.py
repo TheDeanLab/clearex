@@ -37,11 +37,11 @@ import tifffile
 import numpy as np
 import ants
 
-import clearex.registration.linear
 # Local Imports
+# import clearex.registration.linear
 import clearex.registration.linear as linear
 import clearex.registration.nonlinear as nonlinear
-from clearex import setup_logger, log_and_echo as log
+from clearex import setup_logger, log_and_echo as log, capture_c_level_output
 from clearex.file_operations.tools import crop_overlapping_datasets
 import clearex.registration.common
 
@@ -59,7 +59,7 @@ class Registration:
         self.reference_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
                                "-12-registration/fixed")
 
-        # str: The accuracy to one the registration at. Low or High
+        # str: The accuracy to one the registration at. dry run, Low, High
         self.accuracy = "dry run"
 
         # str: The base path to save the data to
@@ -227,16 +227,27 @@ class Registration:
         log(self, message=f"Shape of the moving data: {self.moving_data.shape}")
         log(self, message="Beginning linear registration.")
 
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            self.transformed_image, self.transform = linear.register_image(
-                moving_image=self.moving_data,
-                fixed_image=self.reference_data,
-                registration_type="TRSAA",
-                accuracy=self.accuracy,
-                verbose=True)
-            log(self, message=buffer.getvalue())
-            buffer.flush()
+        # self.transformed_image, self.transform = linear.register_image(
+        #     moving_image=self.moving_data,
+        #     fixed_image=self.reference_data,
+        #     registration_type="TRSAA",
+        #     accuracy=self.accuracy,
+        #     verbose=True)
+
+        result, stdout, stderr = capture_c_level_output(
+            linear.register_image,
+            moving_image=self.moving_data,
+            fixed_image=self.reference_data,
+            registration_type="TRSAA",
+            accuracy=self.accuracy,
+            verbose=True
+        )
+        self.transformed_image, self.transform = result
+
+        # Log captured output
+        log(self, message=stdout)
+        if stderr:
+            log(self, message=f"Errors during registration: {stderr}", level="error")
 
         log(self, message=f"Inspecting the linear affine transform.")
         linear.inspect_affine_transform(self.transform)
@@ -300,15 +311,25 @@ class Registration:
         """ Perform the diffeomorphic SyN warp transform. """
         log(self, message="Beginning nonlinear registration.")
 
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            self.transformed_image, transform_path = nonlinear.register_image(
-                moving_image=self.transformed_image,
-                fixed_image=self.reference_data,
-                accuracy=self.accuracy,
-                verbose=True)
-            log(self, message=buffer.getvalue())
-            buffer.flush()
+        result, stdout, stderr = capture_c_level_output(
+            nonlinear.register_image,
+            moving_image=self.transformed_image,
+            fixed_image=self.reference_data,
+            accuracy=self.accuracy,
+            verbose=True
+        )
+        self.transformed_image, transform_path = result
+
+        # Log captured output
+        log(self, message=stdout)
+        if stderr:
+            log(self, message=f"Errors during registration: {stderr}", level="error")
+
+        # self.transformed_image, transform_path = nonlinear.register_image(
+        #     moving_image=self.transformed_image,
+        #     fixed_image=self.reference_data,
+        #     accuracy=self.accuracy,
+        #     verbose=True)
 
         log(self, message=f"Exporting the registered data to: {self.nonlinear_path}")
         clearex.registration.common.export_tiff(

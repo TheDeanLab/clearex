@@ -26,7 +26,9 @@
 
 import logging
 import typer
-
+import os
+import sys
+import tempfile
 
 def setup_logger(name='my_logger', log_file='app.log', level=logging.INFO):
     """Set up a basic logger that writes to a file and the console.
@@ -107,3 +109,46 @@ def log_and_echo(self, message: str, level: str = "info"):
     else:
         self.logger.log(logging.INFO, message)  # fallback
     typer.echo(message)
+
+def capture_c_level_output(func, *args, **kwargs):
+    """Capture stdout/stderr including C-level output from function calls."""
+
+    # Create temporary files for stdout and stderr
+    with tempfile.TemporaryFile(mode='w+') as stdout_file, \
+         tempfile.TemporaryFile(mode='w+') as stderr_file:
+
+        # Save original file descriptors
+        saved_stdout_fd = os.dup(sys.stdout.fileno())
+        saved_stderr_fd = os.dup(sys.stderr.fileno())
+
+        # Flush to avoid duplicate output
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        try:
+            # Redirect stdout and stderr to our temporary files
+            os.dup2(stdout_file.fileno(), sys.stdout.fileno())
+            os.dup2(stderr_file.fileno(), sys.stderr.fileno())
+
+            # Call the function
+            result = func(*args, **kwargs)
+
+            # Ensure all output is written
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            # Restore original stdout and stderr
+            os.dup2(saved_stdout_fd, sys.stdout.fileno())
+            os.dup2(saved_stderr_fd, sys.stderr.fileno())
+
+            # Close saved file descriptors
+            os.close(saved_stdout_fd)
+            os.close(saved_stderr_fd)
+
+        # Collect output
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout_content = stdout_file.read()
+        stderr_content = stderr_file.read()
+
+    return result, stdout_content, stderr_content
