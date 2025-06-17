@@ -34,6 +34,7 @@ import numpy as np
 from tifffile import imwrite, imread
 
 # Local Imports
+from clearex import log_and_echo as log
 
 # Set up logging
 logger = logging.getLogger('registration')
@@ -114,3 +115,50 @@ def import_affine_transform(data_path: str):
     """
     affine_transform = ants.read_transform(data_path)
     return affine_transform
+
+def calculate_metrics(
+        fixed, moving, mask=None, sampling='regular', sampling_pct=1.0):
+    """
+    Compute normalized cross-correlation band Mattes Mutual Information etween two
+    ANTsImage volumes.
+
+    Parameters:
+    -----------
+    fixed : ants.ANTsImage
+        The reference (fixed) image.
+    moving : ants.ANTsImage
+        The image to be compared or aligned.
+    mask : ants.ANTsImage or None
+        Optional mask applied to both fixed and moving.
+    sampling : {'regular', 'random', None}
+        Sampling strategy for computing metric.
+    sampling_pct : float
+        Fraction of voxels to sample (0–1).
+
+    Returns:
+    --------
+    metric_results : dict
+        Keys include 'Correlation' and 'MattesMutualInformation'. Values are metric
+        results. For Correlation coefficient, range is from -1 to 1, where where 1
+        indicates perfect alignment.
+    """
+
+    if isinstance(fixed, np.ndarray):
+        fixed=ants.from_numpy(fixed)
+    if isinstance(moving, np.ndarray):
+        moving=ants.from_numpy(moving)
+
+    metric_results = {}
+    for metric_type in ['Correlation', 'MattesMutualInformation']:
+        value = ants.image_similarity(
+            fixed, moving,
+            metric_type=metric_type,
+            fixed_mask=mask,
+            moving_mask=mask,
+            sampling_strategy=sampling,
+            sampling_percentage=sampling_pct
+        )
+        metric_results[metric_type] = -value
+
+    return metric_results
+

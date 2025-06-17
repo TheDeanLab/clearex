@@ -28,6 +28,7 @@
 import os
 import logging
 import shutil
+import re
 
 # Third Party Imports
 import typer
@@ -114,6 +115,9 @@ class Registration:
         #: tuple[slice, slice, slice]: a slicing object for the minimum bounding box.
         self.bounding_box = None
 
+        #: dict: Image metrics.
+        self.metrics = {}
+
         log(self, message="Loading data...")
         channel = self.channel
         # channel = typer.prompt(
@@ -153,9 +157,38 @@ class Registration:
             label='Moving data',
             channel=channel)
 
+        self.create_metrics_dictionary(self.reference_path)
+
+        #### RAW DATA
+        metrics = clearex.registration.common.calculate_metrics(
+            fixed=self.reference_data,
+            moving=self.moving_data
+        )
+        for key, val in metrics.items():
+            self.metrics[channel]["raw"][key] = val
+
+
+        #### LINEAR REGISTRATION
         self.linear_registration()
+        metrics = clearex.registration.common.calculate_metrics(
+            fixed=self.reference_data,
+            moving=self.transformed_image
+        )
+        for key, val in metrics.items():
+            self.metrics[channel]["linear"][key] = val
+
+        #### NONLINEAR REGISTRATION
         self.nonlinear_registration()
+        metrics = clearex.registration.common.calculate_metrics(
+            fixed=self.reference_data,
+            moving=self.transformed_image
+        )
+        for key, val in metrics.items():
+            self.metrics[channel]["nonlinear"][key] = val
+
         self.export_other_images()
+
+        self.log_metrics(self.metrics)
 
     def make_directories(self):
         """ Create the necessary directories for registration results. """
@@ -166,6 +199,26 @@ class Registration:
             self.fixed_path
         ]:
             os.makedirs(path, exist_ok=True)
+
+    def create_metrics_dictionary(self, directory):
+        files = [file for file in os.listdir(directory) if file.endswith('.tif')]
+
+        # Extract just the "CHxx" portion from filenames
+        channels = {
+            file[file.find('CH'):file.find('CH') + 4]
+            for file in files if 'CH' in file
+        }
+        sorted_channels = sorted(channels)
+
+        self.metrics = {}
+        self.metrics = {
+            channel: {
+                stage: {method: None for method in
+                        ['Correlation', 'MattesMutualInformation']}
+                for stage in ["raw", "linear", "nonlinear"]
+            }
+            for channel in sorted_channels
+        }
 
     def parse_directory(self, directory, attr_name, label, channel):
         """ Parse a directory for .tif files and load the specified channel.
@@ -192,7 +245,10 @@ class Registration:
                          file.endswith('.tif')]
         target_file = None
 
+        # Iterate through all files in the directory.
         for file in all_tif_files:
+
+            # If the string CH00, CH01, etc., is in the file name.
             if channel in file:
                 target_file = file
                 image_path = os.path.join(directory, file)
@@ -270,17 +326,34 @@ class Registration:
         if hasattr(self, 'moving_data_other_filenames'):
             for file in self.moving_data_other_filenames:
                 if file in self.reference_data_other_filenames:
-                    log(self, message=f"Processing additional file: {file}")
                     fixed_image = tifffile.imread(
                         os.path.join(self.reference_path, file))
                     moving_image = tifffile.imread(
                         os.path.join(self.moving_path, file))
+
+                    # Use regular expression to find the channel name.
+                    match = re.search(r'(CH\d{2})', file)
+                    channel = match.group(1)
+
+                    metrics = clearex.registration.common.calculate_metrics(
+                        fixed=fixed_image,
+                        moving=moving_image
+                    )
+                    for key, val in metrics.items():
+                        self.metrics[channel]["raw"][key] = val
 
                     # Apply the linear transform
                     transformed_image = clearex.registration.linear.transform_image(
                         moving_image=moving_image,
                         fixed_image=fixed_image,
                         affine_transform=self.transform)
+
+                    metrics = clearex.registration.common.calculate_metrics(
+                        fixed=fixed_image,
+                        moving=transformed_image
+                    )
+                    for key, val in metrics.items():
+                        self.metrics[channel]["linear"][key] = val
 
                     # Crop the images
                     transformed_image = transformed_image.numpy().astype(np.uint16)
@@ -310,7 +383,6 @@ class Registration:
         )
         self.transformed_image, transform_path = result
 
-        # Log captured output
         log(self, message=stdout)
         if stderr:
             log(self, message=f"Errors during registration: {stderr}", level="error")
@@ -329,7 +401,6 @@ class Registration:
 
         log(self, message="Nonlinear registration complete.")
 
-
     def export_other_images(self):
         # If other images exist, import previously transformed and cropped data,
         # apply nonlinear transformation, and export.
@@ -341,6 +412,9 @@ class Registration:
                         os.path.join(self.fixed_path, file))
                     moving_image = tifffile.imread(
                         os.path.join(self.linear_path, file))
+
+                    match = re.search(r'(CH\d{2})', file)
+                    channel = match.group(1)
 
                     # Convert to ants Image type.
                     fixed_image = ants.from_numpy(fixed_image)
@@ -362,6 +436,13 @@ class Registration:
                         reference_image=moving_image
                     )
 
+                    metrics = clearex.registration.common.calculate_metrics(
+                        fixed=fixed_image,
+                        moving=moving_image
+                    )
+                    for key, val in metrics.items():
+                        self.metrics[channel]["nonlinear"][key] = val
+
                     warped_image = warped_image.numpy().astype(np.uint16)
 
                     # Export the transformed and cropped image
@@ -369,6 +450,20 @@ class Registration:
                         image=warped_image,
                         data_path=os.path.join(self.nonlinear_path, file))
 
+    def log_metrics(self, d, parent_key=''):
+        """
+        Recursively print key-value pairs in a nested dictionary.
+
+        Parameters:
+        d (dict): Nested dictionary to print.
+        parent_key (str): Prefix of the current nested key (used in recursion).
+        """
+        for key, value in d.items():
+            current_key = f"{parent_key}.{key}" if parent_key else key
+            if isinstance(value, dict):
+                self.log_metrics(value, current_key)
+            else:
+                log(self, message=f"{current_key}: {value}")
 
 if __name__ == "__main__":
     Registration()
