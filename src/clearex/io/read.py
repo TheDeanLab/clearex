@@ -91,10 +91,6 @@ class Reader(ABC):
         """Return array (NumPy or Dask) and ImageInfo."""
 
 
-# --------------------------
-# Concrete Readers
-# --------------------------
-
 class TiffReader(Reader):
     """Reader for TIFF/OME-TIFF files using tifffile."""
     SUFFIXES = (".tif", ".tiff")
@@ -178,39 +174,69 @@ class ZarrReader(Reader):
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
     ) -> Tuple[ArrayLike, ImageInfo]:
+        """Open Zarr file.
+
+        Parameters
+        ----------
+        path : Path
+            The path to the TIFF file.
+        prefer_dask : bool, optional
+            If True, attempt to return a Dask array when possible.
+            Defaults to False (return NumPy array).
+        chunks : int or tuple of int, optional
+            Chunk size for Dask arrays. If None, use default chunking.
+            Ignored if `prefer_dask` is False. Defaults to None.
+        **kwargs : dict
+            Additional keyword arguments passed to zarr.open.
+        Returns
+        -------
+        arr : np.ndarray or dask.array.Array
+            The loaded image data as a NumPy or Dask array.
+        info : ImageInfo
+            Metadata about the loaded image.
+        Raises
+        ------
+        ImportError
+            If zarr is not installed.
+        ValueError
+            If the file cannot be read as a zarr store.
+        """
+
         if zarr is None:
+            logger.error("The zarr package is not installed.")
             raise ImportError("zarr is required to read .zarr stores")
 
         grp = zarr.open_group(str(path), mode="r")
+
         # Heuristic: if group, pick the first array key; if array, use directly
-        # arr_candidate = grp
-        # if hasattr(grp, "array_keys") and callable(grp.array_keys) and len(grp.array_keys()) > 0:
-        #     first_key = sorted(grp.array_keys())[0]
-        #     arr_candidate = grp[first_key]
+        arr_candidate = grp
+        if hasattr(grp, "array_keys") and callable(grp.array_keys) and len(grp.array_keys()) > 0:
+            first_key = sorted(grp.array_keys())[0]
+            arr_candidate = grp[first_key]
         print(grp.info)
         print(grp.attrs)
         print(grp.shape)
 
-        # axes = None
-        # meta = {}
-        # try:
-        #     attrs = getattr(arr_candidate, "attrs", {})
-        #     axes = attrs.get("multiscales", [{}])[0].get("axes") or attrs.get("axes")
-        #     meta = dict(attrs)
-        # except Exception:
-        #     pass
-        #
-        # if prefer_dask:
-        #     if da is None:
-        #         raise ImportError("dask[array] not available (install dask)")
-        #     darr = da.from_zarr(arr_candidate, chunks=chunks) if chunks else da.from_zarr(arr_candidate)
-        #     info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata=meta)
-        #     return darr, info
-        # else:
-        #     # Load to memory as NumPy
-        #     np_arr = np.array(arr_candidate) if np is not None else arr_candidate[:]
-        #     info = ImageInfo(path=path, shape=tuple(np_arr.shape), dtype=np_arr.dtype, axes=axes, metadata=meta)
-        #     return np_arr, info
+        axes = None
+        meta = {}
+        try:
+            attrs = getattr(arr_candidate, "attrs", {})
+            axes = attrs.get("multiscales", [{}])[0].get("axes") or attrs.get("axes")
+            meta = dict(attrs)
+        except Exception:
+            pass
+
+        if prefer_dask:
+            if da is None:
+                raise ImportError("dask[array] not available (install dask)")
+            darr = da.from_zarr(arr_candidate, chunks=chunks) if chunks else da.from_zarr(arr_candidate)
+            info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata=meta)
+            return darr, info
+        else:
+            # Load to memory as NumPy
+            np_arr = np.array(arr_candidate) if np is not None else arr_candidate[:]
+            info = ImageInfo(path=path, shape=tuple(np_arr.shape), dtype=np_arr.dtype, axes=axes, metadata=meta)
+            return np_arr, info
 
 
 class NpyReader(Reader):
