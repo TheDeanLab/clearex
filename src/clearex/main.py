@@ -37,6 +37,7 @@ from typing import Optional
 # Local Imports
 # from clearex.registration import Registration
 from clearex.io.read import ImageOpener
+from clearex import initiate_logger
 
 CLEAR_EX_LOGO = r"""
        _                          
@@ -48,18 +49,14 @@ CLEAR_EX_LOGO = r"""
                                   
 """
 
-def initiate_logger(base_path):
-    log_path = os.path.join(base_path, "distance3.log")
-    logging.basicConfig(
-        filename=log_path,
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s'
-    )
-    logging.getLogger().setLevel(logging.INFO)
 
 def main():
     """Run the ClearEx command line interface."""
     print(CLEAR_EX_LOGO)
+
+    base_path = os.getcwd()
+    initiate_logger(base_path)
+    logging.info("Starting ClearEx")
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Clearex Command Line Arguments")
@@ -94,6 +91,8 @@ def main():
     parser.add_argument(
         "--dask",
         action="store_true",
+        default=True,
+        type=bool,
         help="Return a Dask array when possible"
     )
     parser.add_argument(
@@ -140,8 +139,7 @@ def main():
     elif args.visualization:
         print("Launching visualization")
     else:
-        print("did not do this correct")
-    exit()
+        exit()
 
 
 if __name__ == "__main__":

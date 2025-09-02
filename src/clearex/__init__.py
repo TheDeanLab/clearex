@@ -24,11 +24,24 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
+# Standard Library Imports
 import logging
-import typer
 import os
 import sys
 import tempfile
+
+# Third Party Imports
+
+# Local Imports
+
+def initiate_logger(base_path):
+    log_path = os.path.join(base_path, "distance3.log")
+    logging.basicConfig(
+        filename=log_path,
+        level=logging.INFO,
+        format='%(asctime)s - %(message)s'
+    )
+    logging.getLogger().setLevel(logging.INFO)
 
 def setup_logger(name='my_logger', log_file='app.log', level=logging.INFO):
     """Set up a basic logger that writes to a file and the console.

@@ -30,6 +30,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple, Type, Union
+import logging
 
 # Optional deps (import guarded)
 try:
@@ -39,7 +40,7 @@ except ImportError:
 
 try:
     import dask.array as da  
-except Exception:  
+except ImportError
     da = None  
 
 try:
@@ -55,6 +56,9 @@ except Exception:
 
 ArrayLike = Union["np.ndarray", "da.Array"]  # noqa: F821
 
+# Start logging
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 @dataclass
 class ImageInfo:
@@ -92,6 +96,7 @@ class Reader(ABC):
 # --------------------------
 
 class TiffReader(Reader):
+    """Reader for TIFF/OME-TIFF files using tifffile."""
     SUFFIXES = (".tif", ".tiff")
 
     def open(
@@ -101,7 +106,35 @@ class TiffReader(Reader):
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
     ) -> Tuple[ArrayLike, ImageInfo]:
+        """Open TIFF/OME-TIFF file.
+
+        Parameters
+        ----------
+        path : Path
+            The path to the TIFF file.
+        prefer_dask : bool, optional
+            If True, attempt to return a Dask array when possible.
+            Defaults to False (return NumPy array).
+        chunks : int or tuple of int, optional
+            Chunk size for Dask arrays. If None, use default chunking.
+            Ignored if `prefer_dask` is False. Defaults to None.
+        **kwargs : dict
+            Additional keyword arguments passed to tifffile.imread.
+        Returns
+        -------
+        arr : np.ndarray or dask.array.Array
+            The loaded image data as a NumPy or Dask array.
+        info : ImageInfo
+            Metadata about the loaded image.
+        Raises
+        ------
+        ImportError
+            If tifffile is not installed.
+        ValueError
+            If the file cannot be read as a TIFF.
+        """
         if tifffile is None:
+            logger.error("The tifffile package is not installed.")
             raise ImportError("tifffile is required to read TIFF images")
 
         # Try OME-axes and metadata
@@ -115,17 +148,23 @@ class TiffReader(Reader):
                     axes = None
 
         if prefer_dask:
-            if da is None:
-                raise ImportError("dask[array] not available (install dask)")
             # Option A: use tifffile's OME-as-zarr path if possible
             # This keeps it lazy and chunked without loading into RAM
+
+            if da is None:
+                logger.error("The dask package is not installed.")
+                raise ImportError("dask[array] not available (install dask)")
+
             store = tifffile.imread(str(path), aszarr=True)
             darr = da.from_zarr(store, chunks=chunks) if chunks else da.from_zarr(store)
             info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata={})
+            logger.info(f"Loaded {path.name} as zarr. Image info: {ImageInfo}")
             return darr, info
         else:
+            # Load to memory as NumPy
             arr = tifffile.imread(str(path))
             info = ImageInfo(path=path, shape=tuple(arr.shape), dtype=arr.dtype, axes=axes, metadata={})
+            logger.info(f"Loaded {path.name} as NumPy array. Image info: {ImageInfo}")
             return arr, info
 
 
@@ -216,14 +255,14 @@ class NpyReader(Reader):
                 return arr, info
 
 
-# --------------------------
-# Dispatcher / Public API
-# --------------------------
 
 class ImageOpener:
     """Generic image opener that selects an appropriate reader."""
 
-    def __init__(self, readers: Optional[Iterable[Type[Reader]]] = None):
+    def __init__(
+            self,
+            readers: Optional[Iterable[Type[Reader]]] = None) -> None:
+
         # Registry order is priority order
         self._readers: Tuple[Type[Reader], ...] = tuple(
             readers or (TiffReader, ZarrReader, NpyReader)
@@ -236,23 +275,53 @@ class ImageOpener:
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
     ) -> Tuple[ArrayLike, ImageInfo]:
+        """Open image file with appropriate reader.
+
+        Parameters
+        ----------
+        path : str or os.PathLike
+            Path to the image file or directory.
+        prefer_dask : bool, optional
+            If True, attempt to return a Dask array when possible.
+            Defaults to False (return NumPy array).
+        chunks : int or tuple of int, optional
+            Chunk size for Dask arrays. If None, use default chunking.
+            Ignored if `prefer_dask` is False. Defaults to None.
+        **kwargs : dict
+            Additional keyword arguments passed to the reader's `open` method.
+        Returns
+        -------
+        arr : np.ndarray or dask.array.Array
+            The loaded image data as a NumPy or Dask array.
+        info : ImageInfo
+            Metadata about the loaded image.
+        Raises
+        ------
+        FileNotFoundError
+            If the specified path does not exist.
+        ValueError
+            If no suitable reader is found for the file.
+        """
+
         p = Path(path)
         if not p.exists():
+            logger.error(f"File {p} does not exist")
             raise FileNotFoundError(p)
 
         # 1) Extension-based selection
-        print("path:", p)
+        logger.info(f"Opening {p}")
         for reader_cls in self._readers:
             try:
-                print("reader_cls:", reader_cls, "claims", reader_cls.claims(p))
                 if reader_cls.claims(p):
                     reader = reader_cls()
+                    logger.info(f"Using reader: {reader_cls.__name__}.")
                     return reader.open(p, prefer_dask=prefer_dask, chunks=chunks, **kwargs)
             except Exception:
                 # If a reader "claims" but fails to open, fall through to next
                 pass
 
         # 2) Fallback: probe readers that didn't claim the file (e.g., exotic cases)
+        logger.info(f"No suitable reader found for {p}. Attempting fallback readers.")
         for reader_cls in self._readers:
             try:
                 reader = reader_cls()
@@ -260,6 +329,7 @@ class ImageOpener:
             except Exception:
                 continue
 
+        logger.error(f"No suitable reader found for {p}")
         raise ValueError(f"No suitable reader found for: {p}")
 
 
