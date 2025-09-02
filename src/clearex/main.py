@@ -71,17 +71,6 @@ def main():
         metadata = {k: type(v).__name__ for k, v in (info.metadata or {}).items()}
         logger.info(f"Image metadata: {metadata}")
 
-    # Example: force compute if Dask
-    try:
-        import dask.array as da  # re-import safe
-        if isinstance(arr, da.Array):
-            print("  (Dask) computing small checksum...")
-            print("  checksum:", da.nanmean(arr[:8]).compute())
-    except Exception:
-        pass
-
-
-
     if args.registration:
         print("Registration")
         # Registration()
