@@ -32,27 +32,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple, Type, Union
 import logging
 
-# Optional deps (import guarded)
-try:
-    import numpy as np
-except ImportError:  
-    np = None  
+# Third Party Imports
+import numpy as np
+import dask.array as da
+import tifffile
+import zarr
 
-try:
-    import dask.array as da  
-except ImportError:
-    da = None  
-
-try:
-    import tifffile  
-except ImportError:
-    tifffile = None  
-
-try:
-    import zarr  
-except ImportError:
-    zarr = None  
-
+# Local Imports
 
 ArrayLike = Union["np.ndarray", "da.Array"]  # noqa: F821
 
@@ -129,9 +115,6 @@ class TiffReader(Reader):
         ValueError
             If the file cannot be read as a TIFF.
         """
-        if tifffile is None:
-            logger.error("The tifffile package is not installed.")
-            raise ImportError("tifffile is required to read TIFF images")
 
         # Try OME-axes and metadata
         with tifffile.TiffFile(str(path)) as tf:
@@ -146,11 +129,6 @@ class TiffReader(Reader):
         if prefer_dask:
             # Option A: use tifffile's OME-as-zarr path if possible
             # This keeps it lazy and chunked without loading into RAM
-
-            if da is None:
-                logger.error("The dask package is not installed.")
-                raise ImportError("dask[array] not available (install dask)")
-
             store = tifffile.imread(str(path), aszarr=True)
             darr = da.from_zarr(store, chunks=chunks) if chunks else da.from_zarr(store)
             info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata={})
@@ -163,9 +141,140 @@ class TiffReader(Reader):
             logger.info(f"Loaded {path.name} as NumPy array.")
             return arr, info
 
+class N5Reader(Reader):
+    """Reader for N5 containers."""
+    SUFFIXES = (".n5", ".n5/")
+
+    def open(
+        self,
+        path: Path,
+        prefer_dask: bool = False,
+        chunks: Optional[Union[int, Tuple[int, ...]]] = None,
+        **kwargs: Any,
+    ) -> Tuple[ArrayLike, ImageInfo]:
+        """
+        Open an N5 container and return the highest-resolution dataset.
+
+        Parameters
+        ----------
+        path : Path
+            The path to the N5 container (e.g., /path/to/data.n5)
+        prefer_dask : bool, optional
+            If True, return a Dask array backed by the on-disk dataset.
+        chunks : int or tuple of int, optional
+            Desired Dask chunking. If None, tries to use the dataset's native chunk/block size.
+        **kwargs : dict
+            Unused; reserved for future compatibility.
+
+        Returns
+        -------
+        arr : np.ndarray or dask.array.Array
+            The loaded image data as a NumPy or Dask array.
+        info : ImageInfo
+            Metadata about the loaded image.
+
+        Raises
+        ------
+        ImportError
+            If zarr (or dask when prefer_dask=True) is not installed.
+        ValueError
+            If the container has no datasets.
+        """
+
+        # Normalize path and allow optional dataset subpath after ".n5"
+        path_str = str(path)
+        if path_str.endswith(os.sep):
+            path_str = path_str[:-1]
+
+        # Split potential "container.n5/some/sub/dataset" into (store_path, ds_sub_path)
+        store_path, ds_sub_path = path_str, None
+        split_idx = path_str.lower().find(".n5")
+        if split_idx != -1:
+            end = split_idx + len(".n5")
+            store_path = path_str[:end]
+
+            # If there's a subpath after ".n5", strip leading slash
+            tail = path_str[end:]
+            if tail.startswith(os.sep):
+                ds_sub_path = tail[len(os.sep):] if len(tail) > 1 else None
+
+        # Open the container
+        f = zarr.N5Store(store_path, mode="r")
+
+        # Recursively collect datasets (leaves) under a group-like node
+        def _collect_datasets(node):
+            items = []
+            try:
+                for k in node.keys():
+                    child = node[k]
+                    if hasattr(child, "shape") and hasattr(child, "__getitem__"):
+                        items.append(child)
+                    else:
+                        try:
+                            items.extend(_collect_datasets(child))
+                        except Exception:
+                            # Not a group; ignore
+                            pass
+            except Exception:
+                pass
+            return items
+
+        # Choose the dataset: explicit subpath if given, else the largest by voxel count
+        if ds_sub_path:
+            try:
+                ds = f[ds_sub_path]
+                if not (hasattr(ds, "shape") and hasattr(ds, "__getitem__")):
+                    raise ValueError(f"Path points to a group, not a dataset: {ds_sub_path}")
+                datasets = [ds]
+            except Exception as e:
+                logger.error(f"Dataset subpath not found in N5: {ds_sub_path}")
+                raise
+        else:
+            datasets = _collect_datasets(f)
+            if not datasets:
+                logger.error(f"No datasets found in N5 container: {store_path}")
+                raise ValueError(f"No datasets found in N5 container: {store_path}")
+
+        # Highest resolution ≈ largest number of elements
+        dataset = max(datasets, key=lambda d: int(np.prod(d.shape)))
+
+        # Extract basic metadata / axes if present
+        axes = None
+        meta: Dict[str, Any] = {}
+        try:
+            attrs = getattr(dataset, "attrs", {})
+            meta = dict(attrs) if isinstance(attrs, dict) else {}
+            axes = (
+                meta.get("axes")
+                or meta.get("dimensionNames")            # some tools store this
+                or (meta.get("multiscales", [{}])[0].get("axes") if "multiscales" in meta else None)
+            )
+        except Exception:
+            pass
+
+        # Dask or NumPy return
+        if prefer_dask:
+
+            # Prefer native block/chunk shape if available
+            native_chunks = getattr(dataset, "chunks", None)
+            eff_chunks = chunks or native_chunks
+            if eff_chunks is None:
+                # conservative fallback if chunk info is unavailable
+                eff_chunks = tuple(min(128, s) for s in dataset.shape)
+
+            darr = da.from_array(dataset, chunks=eff_chunks, name=f"n5::{getattr(dataset, 'path', 'dataset')}")
+            info = ImageInfo(path=Path(store_path), shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata=meta)
+            logger.info(f"Loaded {Path(store_path).name} (N5) as Dask array from '{getattr(dataset, 'path', '/')}'.")
+            return darr, info
+
+        # Eager NumPy read
+        np_arr = dataset[:]  # read all data into memory
+        info = ImageInfo(path=Path(store_path), shape=tuple(np_arr.shape), dtype=np_arr.dtype, axes=axes, metadata=meta)
+        logger.info(f"Loaded {Path(store_path).name} (N5) as NumPy array from '{getattr(dataset, 'path', '/')}'.")
+        return np_arr, info
 
 class ZarrReader(Reader):
-    SUFFIXES = (".zarr",)
+    SUFFIXES = (".zarr", ".zarr/")
 
     def open(
         self,
@@ -208,19 +317,22 @@ class ZarrReader(Reader):
 
         grp = zarr.open_group(str(path), mode="r")
 
-        # Heuristic: if group, pick the first array key; if array, use directly
-        arr_candidate = grp
-        if hasattr(grp, "array_keys") and callable(grp.array_keys) and len(grp.array_keys()) > 0:
-            first_key = sorted(grp.array_keys())[0]
-            arr_candidate = grp[first_key]
-        print(grp.info)
-        print(grp.attrs)
-        print(grp.shape)
+        # collect all arrays
+        arrays = []
+        if hasattr(grp, "array_keys") and callable(grp.array_keys):
+            arrays = [grp[k] for k in grp.array_keys()]
+
+        if not arrays:
+            logger.error(f"No arrays found in Zarr group: {path}")
+            raise ValueError(f"No arrays found in Zarr group: {path}")
+
+        # Pick array with the largest number of elements
+        array = max(arrays, key=lambda arr: np.prod(arr.shape))
 
         axes = None
         meta = {}
         try:
-            attrs = getattr(arr_candidate, "attrs", {})
+            attrs = getattr(array, "attrs", {})
             axes = attrs.get("multiscales", [{}])[0].get("axes") or attrs.get("axes")
             meta = dict(attrs)
         except Exception:
@@ -228,13 +340,16 @@ class ZarrReader(Reader):
 
         if prefer_dask:
             if da is None:
-                raise ImportError("dask[array] not available (install dask)")
-            darr = da.from_zarr(arr_candidate, chunks=chunks) if chunks else da.from_zarr(arr_candidate)
+                logger.error("The dask package is not installed.")
+                raise ImportError("The dask package is not installed.")
+            darr = da.from_zarr(array, chunks=chunks) if chunks else da.from_zarr(array)
+            logger.info(f"Loaded {path.name} as a Dask array.")
             info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata=meta)
             return darr, info
         else:
             # Load to memory as NumPy
-            np_arr = np.array(arr_candidate) if np is not None else arr_candidate[:]
+            np_arr = np.array(array) if np is not None else array[:]
+            logger.info(f"Loaded {path.name} as a NumPy array.")
             info = ImageInfo(path=path, shape=tuple(np_arr.shape), dtype=np_arr.dtype, axes=axes, metadata=meta)
             return np_arr, info
 
@@ -291,7 +406,7 @@ class ImageOpener:
 
         # Registry order is priority order
         self._readers: Tuple[Type[Reader], ...] = tuple(
-            readers or (TiffReader, ZarrReader, NpyReader)
+            readers or (TiffReader, ZarrReader, N5Reader, NpyReader)
         )
 
     def open(
@@ -343,10 +458,9 @@ class ImageOpener:
                     logger.info(f"Using reader: {reader_cls.__name__}.")
                     return reader.open(p, prefer_dask=prefer_dask, chunks=chunks, **kwargs)
             except Exception:
-                # If a reader "claims" but fails to open, fall through to next
                 pass
 
-        # 2) Fallback: probe readers that didn't claim the file (e.g., exotic cases)
+        # 2) Fallback: probe readers that didn't claim the file
         logger.info(f"No suitable reader found for {p}. Attempting fallback readers.")
         for reader_cls in self._readers:
             try:
@@ -356,6 +470,6 @@ class ImageOpener:
                 continue
 
         logger.error(f"No suitable reader found for {p}")
-        raise ValueError(f"No suitable reader found for: {p}")
+        raise ValueError("No suitable reader found for:", p)
 
 

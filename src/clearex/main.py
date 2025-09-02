@@ -49,6 +49,7 @@ def main():
     # Parse command line arguments.
     parser = create_parser()
     args = parser.parse_args()
+    logger.info(f"Command line arguments: {args}")
 
     # Specify chunking strategy.
     chunks_opt: Optional[Union[int, Tuple[int, ...]]] = None
@@ -75,7 +76,6 @@ def main():
         import dask.array as da  # re-import safe
         if isinstance(arr, da.Array):
             print("  (Dask) computing small checksum...")
-            # tiny checksum to avoid full materialization
             print("  checksum:", da.nanmean(arr[:8]).compute())
     except Exception:
         pass
