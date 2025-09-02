@@ -40,17 +40,17 @@ except ImportError:
 
 try:
     import dask.array as da  
-except ImportError
+except ImportError:
     da = None  
 
 try:
     import tifffile  
-except Exception:  
+except ImportError:
     tifffile = None  
 
 try:
     import zarr  
-except Exception:  
+except ImportError:
     zarr = None  
 
 
@@ -158,13 +158,13 @@ class TiffReader(Reader):
             store = tifffile.imread(str(path), aszarr=True)
             darr = da.from_zarr(store, chunks=chunks) if chunks else da.from_zarr(store)
             info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata={})
-            logger.info(f"Loaded {path.name} as zarr. Image info: {ImageInfo}")
+            logger.info(f"Loaded {path.name} as a Dask array.")
             return darr, info
         else:
             # Load to memory as NumPy
             arr = tifffile.imread(str(path))
             info = ImageInfo(path=path, shape=tuple(arr.shape), dtype=arr.dtype, axes=axes, metadata={})
-            logger.info(f"Loaded {path.name} as NumPy array. Image info: {ImageInfo}")
+            logger.info(f"Loaded {path.name} as NumPy array.")
             return arr, info
 
 

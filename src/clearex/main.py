@@ -26,83 +26,31 @@
 
 
 # Standard Library Imports
-import logging
 import os
 import argparse
-from pathlib import Path
-from typing import Optional
+from typing import Optional, Union, Tuple
 
 # Third Party Imports
 
 # Local Imports
 # from clearex.registration import Registration
 from clearex.io.read import ImageOpener
-from clearex import initiate_logger
-
-CLEAR_EX_LOGO = r"""
-       _                          
-      | |                         
-   ___| | ___  __ _ _ __ _____  __
-  / __| |/ _ \/ _` | '__/ _ \ \/ /
- | (__| |  __/ (_| | | |  __/>  < 
-  \___|_|\___|\__,_|_|  \___/_/\_\
-                                  
-"""
+from clearex import initiate_logger, display_logo, create_parser
 
 
 def main():
     """Run the ClearEx command line interface."""
-    print(CLEAR_EX_LOGO)
+    display_logo()
 
-    base_path = os.getcwd()
-    initiate_logger(base_path)
-    logging.info("Starting ClearEx")
+    # Initialize Logging
+    logger = initiate_logger(os.getcwd())
+    logger.info("Starting ClearEx")
 
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Clearex Command Line Arguments")
-    input_args = parser.add_argument_group("Input Arguments")
-
-    input_args.add_argument(
-        "-r",
-        "--registration",
-        required=False,
-        default=False,
-        action="store_true",
-        help="Registration Workflow",
-    )
-
-    input_args.add_argument(
-        "-v",
-        "--visualization",
-        required=False,
-        default=False,
-        action="store_true",
-        help="Visualization of the data with Neuroglancer",
-    )
-
-    parser.add_argument(
-        "-f",
-        "--file",
-        help="Path to image (TIFF/OME‑TIFF, .zarr, .npy/.npz)",
-        type=str,
-        required=True
-    )
-
-    parser.add_argument(
-        "--dask",
-        action="store_true",
-        default=True,
-        type=bool,
-        help="Return a Dask array when possible"
-    )
-    parser.add_argument(
-        "--chunks",
-        type=str,
-        default=None,
-        help="Chunk spec for Dask, e.g. '256,256,64' or single int"
-    )
+    # Parse command line arguments.
+    parser = create_parser()
     args = parser.parse_args()
 
+    # Specify chunking strategy.
     chunks_opt: Optional[Union[int, Tuple[int, ...]]] = None
     if args.chunks:
         if "," in args.chunks:
@@ -110,16 +58,17 @@ def main():
         else:
             chunks_opt = int(args.chunks)
 
+    # Open data
     opener = ImageOpener()
     arr, info = opener.open(args.file, prefer_dask=args.dask, chunks=chunks_opt)
 
-    print("Loaded:", info.path.name)
-    print("  shape:", info.shape)
-    print("  dtype:", info.dtype)
+    logger.info(f"Image shape: {info.shape}")
+    logger.info(f"Image dtype:, {info.dtype}")
     if info.axes:
-        print("  axes :", info.axes)
+        logger.info(f"Image axes: {info.axes}")
     if info.metadata:
-        print("  meta :", {k: type(v).__name__ for k, v in (info.metadata or {}).items()})
+        metadata = {k: type(v).__name__ for k, v in (info.metadata or {}).items()}
+        logger.info(f"Image metadata: {metadata}")
 
     # Example: force compute if Dask
     try:
@@ -143,5 +92,4 @@ def main():
 
 
 if __name__ == "__main__":
-    print("what's up?")
     main()

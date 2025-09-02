@@ -23,70 +23,32 @@
 #  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
-
+import argparse
 # Standard Library Imports
 import logging
 import os
 import sys
 import tempfile
+from datetime import datetime
 
 # Third Party Imports
 
 # Local Imports
 
 def initiate_logger(base_path):
-    log_path = os.path.join(base_path, "distance3.log")
+
+    # Format: YYYY-MM-DD-HH-SS.log
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%S")
+    log_filename = f"{timestamp}.log"
+    log_path = os.path.join(base_path, log_filename)
+
     logging.basicConfig(
         filename=log_path,
         level=logging.INFO,
         format='%(asctime)s - %(message)s'
     )
     logging.getLogger().setLevel(logging.INFO)
-
-def setup_logger(name='my_logger', log_file='app.log', level=logging.INFO):
-    """Set up a basic logger that writes to a file and the console.
-
-    Parameters
-    ----------
-    name : str
-        Name of the logger.
-    log_file : str
-        File path for the log file.
-    level : int
-        Logging level (e.g., logging.INFO, logging.DEBUG).
-
-    Returns
-    -------
-    logger : logging.Logger
-        Configured logger instance.
-    """
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    # Create file handler
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setFormatter(formatter)
-
-    # Create console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-
-    # Create or get the logger
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-
-    # Remove any NullHandlers that may have been added by other modules
-    for handler in list(logger.handlers):
-        if isinstance(handler, logging.NullHandler):
-            logger.removeHandler(handler)
-
-    # Prevent duplicate handlers if logger already exists
-    if not logger.handlers:
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
-
-    return logger
-
+    return logging
 
 def log_and_echo(self, message: str, level: str = "info"):
     """
@@ -164,3 +126,63 @@ def capture_c_level_output(func, *args, **kwargs):
         stderr_content = stderr_file.read()
 
     return result, stdout_content, stderr_content
+
+def create_parser():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Command Line Arguments")
+    input_args = parser.add_argument_group("Input Arguments")
+
+    input_args.add_argument(
+        "-r",
+        "--registration",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Registration Workflow",
+    )
+
+    input_args.add_argument(
+        "-v",
+        "--visualization",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Visualization of the data with Neuroglancer",
+    )
+
+    parser.add_argument(
+        "-f",
+        "--file",
+        help="Path to image (TIFF/OME‑TIFF, .zarr, .npy/.npz)",
+        type=str,
+        required=True
+    )
+
+    parser.add_argument(
+        "--dask",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Return a Dask array when possible (use --dask to enable, --no-dask to disable)"
+    )
+    parser.add_argument(
+        "--chunks",
+        type=str,
+        default=None,
+        help="Chunk spec for Dask, e.g. '256,256,64' or single int"
+    )
+
+    return parser
+
+
+def display_logo():
+    logo = r"""
+           _                          
+          | |                         
+       ___| | ___  __ _ _ __ _____  __
+      / __| |/ _ \/ _` | '__/ _ \ \/ /
+     | (__| |  __/ (_| | | |  __/>  < 
+      \___|_|\___|\__,_|_|  \___/_/\_\
+    
+    """
+    print(logo)
+
