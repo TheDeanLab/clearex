@@ -28,18 +28,15 @@
 # Standard Library Imports
 import logging
 import os
+import argparse
+from pathlib import Path
+from typing import Optional
 
 # Third Party Imports
-import typer
 
 # Local Imports
-from clearex.registration import Registration
-
-app = typer.Typer(
-    help="Command line interface for ClearEx",
-    name="clearex",
-    add_help_option=True
-)
+# from clearex.registration import Registration
+from clearex.io.read import ImageOpener
 
 CLEAR_EX_LOGO = r"""
        _                          
@@ -60,38 +57,93 @@ def initiate_logger(base_path):
     )
     logging.getLogger().setLevel(logging.INFO)
 
-def run_deconvolution():
-    reference = typer.prompt("Location of the data to deconvolve")
-    moving = typer.prompt("Location of the PSF")
-    output = typer.prompt("Location to save the data")
-    typer.echo("Starting deconvolution...")
-
-
-@app.command()
 def main():
     """Run the ClearEx command line interface."""
-    typer.echo(CLEAR_EX_LOGO)
-    operation = typer.prompt(
-        text="What type of image operation would you like to perform? \n \n "
-             "1. Registration \n "
-             "2. Deconvolution \n \n",
-        default="registration",
-        show_default=False,
-        show_choices=True,
+    print(CLEAR_EX_LOGO)
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Clearex Command Line Arguments")
+    input_args = parser.add_argument_group("Input Arguments")
+
+    input_args.add_argument(
+        "-r",
+        "--registration",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Registration Workflow",
     )
 
-    if operation.lower() == "registration" or operation == "1":
-        Registration()
-    elif operation.lower() == "deconvolution" or operation == "2":
-        run_deconvolution()
+    input_args.add_argument(
+        "-v",
+        "--visualization",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Visualization of the data with Neuroglancer",
+    )
+
+    parser.add_argument(
+        "-f",
+        "--file",
+        help="Path to image (TIFF/OME‑TIFF, .zarr, .npy/.npz)",
+        type=str,
+        required=True
+    )
+
+    parser.add_argument(
+        "--dask",
+        action="store_true",
+        help="Return a Dask array when possible"
+    )
+    parser.add_argument(
+        "--chunks",
+        type=str,
+        default=None,
+        help="Chunk spec for Dask, e.g. '256,256,64' or single int"
+    )
+    args = parser.parse_args()
+
+    chunks_opt: Optional[Union[int, Tuple[int, ...]]] = None
+    if args.chunks:
+        if "," in args.chunks:
+            chunks_opt = tuple(int(x) for x in args.chunks.split(","))
+        else:
+            chunks_opt = int(args.chunks)
+
+    opener = ImageOpener()
+    arr, info = opener.open(args.file, prefer_dask=args.dask, chunks=chunks_opt)
+
+    print("Loaded:", info.path.name)
+    print("  shape:", info.shape)
+    print("  dtype:", info.dtype)
+    if info.axes:
+        print("  axes :", info.axes)
+    if info.metadata:
+        print("  meta :", {k: type(v).__name__ for k, v in (info.metadata or {}).items()})
+
+    # Example: force compute if Dask
+    try:
+        import dask.array as da  # re-import safe
+        if isinstance(arr, da.Array):
+            print("  (Dask) computing small checksum...")
+            # tiny checksum to avoid full materialization
+            print("  checksum:", da.nanmean(arr[:8]).compute())
+    except Exception:
+        pass
+
+
+
+    if args.registration:
+        print("Registration")
+        # Registration()
+    elif args.visualization:
+        print("Launching visualization")
     else:
-        typer.echo("Only the registration and deconvolution routines are currently "
-                   "available.")
-        raise typer.Exit(code=1)
-
-typer.echo("Done.")
-
+        print("did not do this correct")
+    exit()
 
 
 if __name__ == "__main__":
-    typer.run(app())
+    print("what's up?")
+    main()

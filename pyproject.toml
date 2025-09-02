@@ -62,4 +62,4 @@ docs = [
 Source = "https://github.com/TheDeanLab/clearex"
 
 [project.scripts]
-clearex = "clearex.main:app"
+clearex = "clearex.main:main"

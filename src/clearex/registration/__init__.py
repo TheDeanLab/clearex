@@ -49,19 +49,17 @@ class Registration:
 
     def __init__(self):
         #self.moving_path = typer.prompt("What directory is the moving data in?")
-        self.moving_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
-                               "-12-registration/moving")
+        self.moving_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/original_moving")
 
         #: str: The path to the moving data.
         # self.reference_path = typer.prompt("What directory is the reference data in?")
-        self.reference_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06"
-                               "-12-registration/fixed")
+        self.reference_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/original_fixed")
 
         # str: The accuracy to one the registration at. dry run, Low, High
-        self.accuracy = "dry run"
+        self.accuracy = "High"
 
         # str: The base path to save the data to
-        self.saving_path = os.path.join(self.moving_path, "registration")
+        self.saving_path = os.path.join("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/", "registration")
 
         #: str: The path to save the linear registration results.
         self.linear_path = os.path.join(self.saving_path, "linear")
@@ -77,7 +75,7 @@ class Registration:
 
         #: logging.Logger: The logger for documenting registration steps.
         self.logger = setup_logger(name='registration', log_file=os.path.join(
-            self.moving_path, "registration", "registration.log"), level=logging.DEBUG)
+            self.saving_path, "registration.log"), level=logging.DEBUG)
 
         # Log paths.
         log(self, message="*** Initializing New Registration Runtime ***")

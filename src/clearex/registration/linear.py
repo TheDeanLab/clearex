@@ -118,6 +118,7 @@ def register_image(
 
     if registration_type=="TRSAA":
         # Multi-resolution iteration schedule
+        accuracy = accuracy.lower()
         if accuracy == "high":
             kwargs["reg_iterations"] = (1000, 500, 250, 100)
         elif accuracy == "low":
