@@ -31,7 +31,6 @@ import shutil
 import re
 
 # Third Party Imports
-import typer
 import tifffile
 import numpy as np
 import ants
@@ -39,27 +38,34 @@ import ants
 # Local Imports
 import clearex.registration.linear as linear
 import clearex.registration.nonlinear as nonlinear
-from clearex import setup_logger, log_and_echo as log, capture_c_level_output
+from clearex import log_and_echo as log, capture_c_level_output
 from clearex.file_operations.tools import crop_overlapping_datasets
 import clearex.registration.common
 
+# Start logging
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 class Registration:
     """ A class to register data. """
 
     def __init__(self):
-        #self.moving_path = typer.prompt("What directory is the moving data in?")
-        self.moving_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/original_moving")
+        #: logging.Logger: The logger for documenting registration steps.
+        self.logger = logger
+        log(self, message="*** Initializing New Registration Runtime ***")
+
+        self.moving_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/original_moving"
+        log(self, message=f"Moving path: {self.moving_path}")
 
         #: str: The path to the moving data.
-        # self.reference_path = typer.prompt("What directory is the reference data in?")
-        self.reference_path = ("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/original_fixed")
+        self.reference_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/original_fixed"
+        log(self, message=f"Registration path: {self.reference_path}")
 
         # str: The accuracy to one the registration at. dry run, Low, High
-        self.accuracy = "High"
+        self.accuracy = "dry run"
 
         # str: The base path to save the data to
-        self.saving_path = os.path.join("/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/", "registration")
+        self.saving_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/registration"
 
         #: str: The path to save the linear registration results.
         self.linear_path = os.path.join(self.saving_path, "linear")
@@ -72,15 +78,6 @@ class Registration:
 
         # Make sure the directories exist.
         self.make_directories()
-
-        #: logging.Logger: The logger for documenting registration steps.
-        self.logger = setup_logger(name='registration', log_file=os.path.join(
-            self.saving_path, "registration.log"), level=logging.DEBUG)
-
-        # Log paths.
-        log(self, message="*** Initializing New Registration Runtime ***")
-        log(self, message=f"Moving path: {self.moving_path}")
-        log(self, message=f"Registration path: {self.reference_path}")
 
         #: str: The channel to use for registration.
         self.channel = "CH01"
@@ -118,30 +115,6 @@ class Registration:
 
         log(self, message="Loading data...")
         channel = self.channel
-        # channel = typer.prompt(
-        #     text="What Channel would you like to use for the registration? \n \n "
-        #          "1. CH00 \n "
-        #          "2. CH01 \n "
-        #          "3. CH02 \n "
-        #          "4. Average \n ",
-        #     default="CH00",
-        #     show_default=False,
-        #     show_choices=True,
-        # )
-        #
-        # if channel == "1":
-        #     channel = "CH00"
-        # elif channel == "2":
-        #     channel = "CH01"
-        # elif channel == "3":
-        #     channel = "CH02"
-        # elif channel == "4":
-        #     pass
-        # else:
-        #     log(self,
-        #         message="Invalid channel. Please type 1 or CH00, 2 or CH01, etc.",
-        #         level="debug"
-        #     )
 
         self.parse_directory(
             directory=self.reference_path,
@@ -231,13 +204,6 @@ class Registration:
             A label for logging purposes, indicating the type of data being loaded.
         channel : str
             The channel to look for in the .tif files (e.g., 'CH00', 'CH01', 'CH02').
-
-        Raises
-        ------
-        typer.Abort
-            If the specified channel is not found in the directory, an error message
-            is logged and the program is aborted.
-
         """
         all_tif_files = [file for file in os.listdir(directory) if
                          file.endswith('.tif')]
@@ -464,4 +430,8 @@ class Registration:
                 log(self, message=f"{current_key}: {value}")
 
 if __name__ == "__main__":
+    print("Running registration locally")
+
+    from clearex import initiate_logger
+    logger = initiate_logger('/home2/kdean/Desktop')
     Registration()

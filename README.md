@@ -15,6 +15,9 @@ We recommend installing ClearEx in a dedicated Anaconda environment:
 ```bash
 conda create -n clearex python=3.12
 conda activate clearex
+
+# Install core dependencies to circumvent BioHPC-specific issues.
+conda install -c conda-forge pyarrow "numpy>=1.25" cython
 cd to/your/cloned/clearex/directory
 pip install -e .
 ```

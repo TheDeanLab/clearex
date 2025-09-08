@@ -23,8 +23,9 @@
 #  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
-import argparse
+
 # Standard Library Imports
+import argparse
 import logging
 import os
 import sys
@@ -155,7 +156,7 @@ def create_parser():
         "--file",
         help="Path to image (TIFF/OME‑TIFF, .zarr, .npy/.npz)",
         type=str,
-        required=True
+        required=False
     )
 
     parser.add_argument(

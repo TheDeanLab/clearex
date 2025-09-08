@@ -27,13 +27,12 @@
 
 # Standard Library Imports
 import os
-import argparse
 from typing import Optional, Union, Tuple
 
 # Third Party Imports
 
 # Local Imports
-# from clearex.registration import Registration
+from clearex.registration import Registration
 from clearex.io.read import ImageOpener
 from clearex import initiate_logger, display_logo, create_parser
 
@@ -51,33 +50,31 @@ def main():
     args = parser.parse_args()
     logger.info(f"Command line arguments: {args}")
 
-    # Specify chunking strategy.
-    chunks_opt: Optional[Union[int, Tuple[int, ...]]] = None
-    if args.chunks:
-        if "," in args.chunks:
-            chunks_opt = tuple(int(x) for x in args.chunks.split(","))
-        else:
-            chunks_opt = int(args.chunks)
+    if args.file:
+        # Specify chunking strategy.
+        chunks_opt: Optional[Union[int, Tuple[int, ...]]] = None
+        if args.chunks:
+            if "," in args.chunks:
+                chunks_opt = tuple(int(x) for x in args.chunks.split(","))
+            else:
+                chunks_opt = int(args.chunks)
 
-    # Open data
-    opener = ImageOpener()
-    arr, info = opener.open(args.file, prefer_dask=args.dask, chunks=chunks_opt)
+        opener = ImageOpener()
+        arr, info = opener.open(args.file, prefer_dask=args.dask, chunks=chunks_opt)
 
-    logger.info(f"Image shape: {info.shape}")
-    logger.info(f"Image dtype:, {info.dtype}")
-    if info.axes:
-        logger.info(f"Image axes: {info.axes}")
-    if info.metadata:
-        metadata = {k: type(v).__name__ for k, v in (info.metadata or {}).items()}
-        logger.info(f"Image metadata: {metadata}")
+        logger.info(f"Image shape: {info.shape}")
+        logger.info(f"Image dtype:, {info.dtype}")
+        if info.axes:
+            logger.info(f"Image axes: {info.axes}")
+        if info.metadata:
+            metadata = {k: type(v).__name__ for k, v in (info.metadata or {}).items()}
+            logger.info(f"Image metadata: {metadata}")
 
     if args.registration:
-        print("Registration")
-        # Registration()
-    elif args.visualization:
+        Registration()
+
+    if args.visualization:
         print("Launching visualization")
-    else:
-        exit()
 
 
 if __name__ == "__main__":

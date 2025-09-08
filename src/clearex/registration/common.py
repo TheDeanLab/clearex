@@ -36,10 +36,9 @@ from tifffile import imwrite, imread
 # Local Imports
 from clearex import log_and_echo as log
 
-# Set up logging
-logger = logging.getLogger('registration')
-if not logger.handlers:
-    logger.addHandler(logging.NullHandler())
+# Start logging
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 def export_affine_transform(
         affine_transform: ants.core.ants_transform.ANTsTransform,
@@ -139,7 +138,7 @@ def calculate_metrics(
     --------
     metric_results : dict
         Keys include 'Correlation' and 'MattesMutualInformation'. Values are metric
-        results. For Correlation coefficient, range is from -1 to 1, where where 1
+        results. For Correlation coefficient, range is from -1 to 1, where 1
         indicates perfect alignment.
     """
 
@@ -159,6 +158,7 @@ def calculate_metrics(
             sampling_percentage=sampling_pct
         )
         metric_results[metric_type] = -value
+        logger.info(f"Image Metric: {metric_type}, value: {-value}")
 
     return metric_results
 
