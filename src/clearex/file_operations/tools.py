@@ -37,6 +37,13 @@ from numpy.core.multiarray import RAISE
 # Local imports
 from clearex.segmentation.otsu import otsu
 
+def get_moving_image_paths(directory, idx):
+    directory = Path(directory)
+    # Match both .tif and .tiff
+    tif_files = list(directory.glob(f"Round{idx}_*.tif"))
+    tiff_files = list(directory.glob(f"Round{idx}_*.tiff"))
+    return tif_files + tiff_files
+
 def get_variable_size(variable: any) -> float:
     """Get the size of a variable in MB.
 

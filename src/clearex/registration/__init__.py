@@ -29,6 +29,7 @@ import os
 import logging
 import shutil
 import re
+from pathlib import Path
 
 # Third Party Imports
 import tifffile
@@ -36,11 +37,14 @@ import numpy as np
 import ants
 
 # Local Imports
+import clearex
 import clearex.registration.linear as linear
 import clearex.registration.nonlinear as nonlinear
 from clearex import log_and_echo as log, capture_c_level_output
-from clearex.file_operations.tools import crop_overlapping_datasets
+from clearex.file_operations.tools import crop_overlapping_datasets, identify_minimal_bounding_box
 import clearex.registration.common
+from clearex.registration.common import export_tiff
+from clearex.io.read import ImageOpener
 
 # Start logging
 logger = logging.getLogger(__name__)
@@ -428,6 +432,129 @@ class Registration:
                 self.log_metrics(value, current_key)
             else:
                 log(self, message=f"{current_key}: {value}")
+
+def register_round(fixed_image_path, moving_image_path, save_directory, round=0, crop=False):
+
+    # Confirm that the save_directory exists.
+    os.makedirs(save_directory, exist_ok=True)
+
+    # Load the fixed image data and convert to AntsImage...
+    image_opener = ImageOpener()
+    fixed_image, _ = image_opener.open(fixed_image_path, prefer_dask=False)
+    fixed_image = ants.from_numpy(fixed_image)
+    print(f"Loaded fixed image {fixed_image_path}. Shape: {fixed_image.shape}.")
+
+    # Load the moving image data
+    moving_image, _ = image_opener.open(
+        moving_image_path,
+        prefer_dask=False
+    )
+    print(f"Loaded moving image {moving_image_path}. Shape: {moving_image.shape}.")
+
+    # Only crop the moving data since the fixed data defines the coordinate space.
+    if crop:
+        z0, z1, y0, y1, x0, x1 = identify_minimal_bounding_box(
+                image=moving_image,
+                down_sampling=4,
+                robust=True,
+                lower_pct=0.1,
+                upper_pct=99.9
+        )
+        moving_image = ants.from_numpy(moving_image)
+        moving_image = ants.crop_indices(
+            moving_image,
+            lowerind=(z0, y0, x0),
+            upperind=(z1, y1, x1)
+        )
+        print(f"Moving image cropped to: {moving_image.shape}.")
+    else:
+        moving_image = ants.from_numpy(moving_image)
+
+    print(f"Performing Linear Registration...")
+    moving_image, transform = clearex.registration.linear.register_image(
+        moving_image=moving_image,
+        fixed_image=fixed_image,
+        registration_type="TRSAA",
+        accuracy="low",
+        verbose=True,
+    )
+    linear_transformation_path = os.path.join(save_directory, f"linear_transform_{round}.mat")
+    ants.write_transform(transform, linear_transformation_path)
+    print(f"Linear Registration Complete...")
+
+    print(f"Performing Nonlinear Registration...")
+    nonlinear_transformed, transform_path = clearex.registration.nonlinear.register_image(
+        moving_image=moving_image,
+        fixed_image=fixed_image,
+        accuracy="high",
+        verbose=True
+    )
+    nonlinear_transformation_path = os.path.join(save_directory, f"nonlinear_warp_{round}.nii.gz")
+    shutil.copyfile(transform_path, nonlinear_transformation_path)
+    print("Nonlinear Registration Complete...")
+
+def bulk_transform_directory(fixed_image_path, moving_image_paths, save_directory, round):
+
+    # Paths to transforms on disk
+    linear_transformation_path = os.path.join(save_directory, f"linear_transform_{round}.mat")
+    nonlinear_transformation_path   = os.path.join(save_directory, f"nonlinear_warp_{round}.nii.gz")
+    for p in (linear_transformation_path, nonlinear_transformation_path):
+        if not os.path.exists(p):
+            raise FileNotFoundError(p)
+
+    print("Linear Transformation Path:", linear_transformation_path)
+    print("Nonlinear Transformation Path;", nonlinear_transformation_path)
+
+
+    for moving_image_path in moving_image_paths:
+        transform_image(fixed_image_path, linear_transformation_path, moving_image_path,
+                        nonlinear_transformation_path, save_directory)
+
+
+def transform_image(fixed_image_path, linear_transformation_path, moving_image_path,
+                    nonlinear_transformation_path, save_directory):
+
+    if isinstance(moving_image_path, str):
+        moving_image_path = Path(moving_image_path)
+
+    if isinstance(fixed_image_path, str):
+        fixed_image_path = Path(fixed_image_path)
+
+    # Load the fixed image data and convert to AntsImage...
+    image_opener = ImageOpener()
+    fixed_image, _ = image_opener.open(
+        fixed_image_path,
+        prefer_dask=False
+    )
+    fixed_image = ants.from_numpy(fixed_image)
+    moving_image, _ = image_opener.open(
+        moving_image_path,
+        prefer_dask=False
+    )
+    min_value = float(moving_image.min())
+    max_value = float(moving_image.max())
+    moving_image = ants.from_numpy(moving_image)
+    print(f"Loaded {moving_image_path}. Shape: {moving_image.shape}.")
+    nonlinear_transformed = ants.apply_transforms(
+        fixed=fixed_image,
+        moving=moving_image,
+        transformlist=[linear_transformation_path, nonlinear_transformation_path],
+        whichtoinvert=[False, False],  # set True for any transform you want inverted
+        interpolator="linear"  # use "nearestNeighbor" for label images
+    )
+    print("Transformation Complete. Shape:", nonlinear_transformed.shape)
+
+    transformed_image_path = os.path.join(
+        save_directory, moving_image_path.name
+    )
+    export_tiff(
+        nonlinear_transformed,
+        min_value,
+        max_value,
+        transformed_image_path
+    )
+    print("Image saved to:", transformed_image_path)
+
 
 if __name__ == "__main__":
     print("Running registration locally")

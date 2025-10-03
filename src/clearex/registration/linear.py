@@ -88,9 +88,6 @@ def register_image(
     ----------
     https://antspy.readthedocs.io/en/latest/registration.html
     """
-    if fixed_image.ndim != moving_image.ndim:
-        logger.error("Fixed and moving images must have the same number of dimensions.")
-        raise ValueError("Both images must have the same number of dimensions.")
 
     if registration_type not in [
         "Translation", "Rigid", "Similarity", "Affine", "TRSAA"
@@ -106,13 +103,19 @@ def register_image(
     if isinstance(moving_image, np.ndarray):
         moving_image = ants.from_numpy(moving_image)
 
+    if fixed_image.dimension != moving_image.dimension:
+        logger.error("Fixed and moving images must have the same number of dimensions.")
+        raise ValueError("Both images must have the same number of dimensions.")
+
     kwargs = {
         "fixed": fixed_image,
         "moving": moving_image,
         "type_of_transform": registration_type,
         "aff_metric": "mattes",
         "aff_sampling": 32,
-        "aff_random_sampling_rate": 1.0,
+        "aff_random_sampling_rate": 0.50,  # Was 1.0
+        "smoothing_sigmas": (3,2,1,0), # Previously did not provide
+        "shrink_factors": (8,4,2,1), # Previously did not provide
         "verbose": verbose,
         }
 
@@ -135,18 +138,10 @@ def register_image(
     transform = ants.read_transform(registered['fwdtransforms'][0])
 
     # Resample the registered image to the target image.
-    transformed_image = ants.resample_image_to_target(
-        image=registered["warpedmovout"],
-        target=fixed_image,
-        interp_type="linear"
-    )
-
-    # Histogram match to original data.
-    transformed_image = ants.histogram_match_image(
-        source_image=transformed_image,
-        reference_image=moving_image
-        # number_of_match_points=...
-        # use_threshold_at_mean_intensity=...
+    transformed_image = transform.apply_to_image(
+        image=moving_image,
+        reference=fixed_image,
+        interpolation='linear'
     )
     return transformed_image, transform
 

@@ -89,9 +89,6 @@ def register_image(
     ----------
     https://antspy.readthedocs.io/en/latest/registration.html
     """
-    if fixed_image.ndim != moving_image.ndim:
-        raise ValueError("Both images must have the same number of dimensions.")
-
     if registration_type not in ["Elastic", "SyNOnly", "SyN"]:
         raise ValueError(f"Unsupported registration type: {registration_type}. "
                          "Supported types are: Elastic, SyNOnly, SyN.")
@@ -101,6 +98,9 @@ def register_image(
         fixed_image = ants.from_numpy(fixed_image)
     if isinstance(moving_image, np.ndarray):
         moving_image = ants.from_numpy(moving_image)
+
+    if fixed_image.dimension != moving_image.dimension:
+        raise ValueError("Both images must have the same number of dimensions.")
 
     kwargs = {
         "fixed": fixed_image,

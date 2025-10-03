@@ -69,7 +69,11 @@ def export_affine_transform(
     ants.write_transform(affine_transform, save_path)
 
 
-def export_tiff(image: ants.core.ants_image.ANTsImage, data_path: str) -> None:
+def export_tiff(
+        image: ants.core.ants_image.ANTsImage,
+        min_value: int,
+        max_value: int,
+        data_path: str) -> None:
     """ Export an ants.ANTsImage to a 16-bit tiff file.
 
     Parameters
@@ -80,11 +84,25 @@ def export_tiff(image: ants.core.ants_image.ANTsImage, data_path: str) -> None:
         The location and name of the file to save the data to.
     """
     if isinstance(image, ants.core.ants_image.ANTsImage):
-        image=image.numpy().astype(np.uint16)
+        image=image.numpy()
     elif isinstance(image, np.ndarray):
         pass
     else:
         raise TypeError(f"Unsupported file type {type(image)}")
+
+    # Get rid of NaNs and Infs
+    image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
+    image[image < 0] = 0.0
+
+    # Normalize to [0,1] with small offset.
+    image = (image - image.min()) / (image.max() - image.min() + 1e-8)
+
+    # Map into reference range
+    image = min_value + image * (max_value - min_value)
+
+    # Convert to uint16
+    image = image.astype(np.uint16)
+
     imwrite(data_path, image)
 
 

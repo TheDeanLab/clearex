@@ -186,4 +186,3 @@ def display_logo():
     
     """
     print(logo)
-
