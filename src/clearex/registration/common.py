@@ -34,7 +34,6 @@ import numpy as np
 from tifffile import imwrite, imread
 
 # Local Imports
-from clearex import log_and_echo as log
 
 # Start logging
 logger = logging.getLogger(__name__)
@@ -71,8 +70,8 @@ def export_affine_transform(
 
 def export_tiff(
         image: ants.core.ants_image.ANTsImage,
-        min_value: int,
-        max_value: int,
+        min_value: float,
+        max_value: float,
         data_path: str) -> None:
     """ Export an ants.ANTsImage to a 16-bit tiff file.
 
@@ -80,6 +79,10 @@ def export_tiff(
     ----------
     image: ants.core.ants_image.ANTsImage
         Image to export
+    min_value: float
+        Minimum value of the reference range to map the image to.
+    max_value: float
+        Maximum value of the reference range to map the image to.
     data_path: str
         The location and name of the file to save the data to.
     """

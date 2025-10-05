@@ -25,479 +25,188 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 # Standard Library Imports
-import os
 import logging
-import shutil
+import os
 import re
+import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
 # Third Party Imports
 import tifffile
-import numpy as np
 import ants
+import numpy as np
 
 # Local Imports
 import clearex
+import clearex.registration.common
 import clearex.registration.linear as linear
 import clearex.registration.nonlinear as nonlinear
-from clearex import log_and_echo as log, capture_c_level_output
-from clearex.file_operations.tools import crop_overlapping_datasets, identify_minimal_bounding_box
-import clearex.registration.common
-from clearex.registration.common import export_tiff
+from clearex import capture_c_level_output, initialize_logging
+from clearex import log_and_echo as log
+from clearex.file_operations.tools import (
+    crop_overlapping_datasets,
+    identify_minimal_bounding_box,
+)
 from clearex.io.read import ImageOpener
+from clearex.registration.common import export_tiff
 
-# Start logging
+
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-class Registration:
-    """ A class to register data. """
 
-    def __init__(self):
-        #: logging.Logger: The logger for documenting registration steps.
-        self.logger = logger
-        log(self, message="*** Initializing New Registration Runtime ***")
-
-        self.moving_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/original_moving"
-        log(self, message=f"Moving path: {self.moving_path}")
-
-        #: str: The path to the moving data.
-        self.reference_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/original_fixed"
-        log(self, message=f"Registration path: {self.reference_path}")
-
-        # str: The accuracy to one the registration at. dry run, Low, High
-        self.accuracy = "dry run"
-
-        # str: The base path to save the data to
-        self.saving_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-06-17-registration/registration"
-
-        #: str: The path to save the linear registration results.
-        self.linear_path = os.path.join(self.saving_path, "linear")
-
-        #: str: The path to save the nonlinear registration results.
-        self.nonlinear_path = os.path.join(self.saving_path, "nonlinear")
-
-        #: str: The path to save the fixed reference data.
-        self.fixed_path = os.path.join(self.saving_path, "fixed")
-
-        # Make sure the directories exist.
-        self.make_directories()
-
-        #: str: The channel to use for registration.
-        self.channel = "CH01"
-        # self.channel = None
-
-        #: np.ndarray: The reference image data.
-        self.reference_data = None
-
-        #: str: The filename of the reference data.
-        self.reference_data_filename = None
-
-        #: list[str]: A list of other filenames in the reference directory.
-        self.reference_data_other_filenames = None
-
-        #: np.ndarray: The image data to register to the reference.
-        self.moving_data = None
-
-        #: str: The filename of the moving data.
-        self.moving_data_filename = None
-
-        #: list[str]: A list of other filenames in the moving directory.
-        self.moving_data_other_filenames = None
-
-        #: ants.core.ants_transform.ANTsTransform: The linear affine transform.
-        self.transform = None
-
-        #: ants.core
-        self.transformed_image = None
-
-        #: tuple[slice, slice, slice]: a slicing object for the minimum bounding box.
-        self.bounding_box = None
-
-        #: dict: Image metrics.
-        self.metrics = {}
-
-        log(self, message="Loading data...")
-        channel = self.channel
-
-        self.parse_directory(
-            directory=self.reference_path,
-            attr_name='reference_data',
-            label='Reference data',
-            channel=channel)
-
-        self.parse_directory(
-            self.moving_path,
-            attr_name='moving_data',
-            label='Moving data',
-            channel=channel)
-
-        self.create_metrics_dictionary(self.reference_path)
-
-        #### RAW DATA
-        metrics = clearex.registration.common.calculate_metrics(
-            fixed=self.reference_data,
-            moving=self.moving_data
-        )
-        for key, val in metrics.items():
-            self.metrics[channel]["raw"][key] = val
-
-
-        #### LINEAR REGISTRATION
-        self.linear_registration()
-        metrics = clearex.registration.common.calculate_metrics(
-            fixed=self.reference_data,
-            moving=self.transformed_image
-        )
-        for key, val in metrics.items():
-            self.metrics[channel]["linear"][key] = val
-
-        #### NONLINEAR REGISTRATION
-        self.nonlinear_registration()
-        metrics = clearex.registration.common.calculate_metrics(
-            fixed=self.reference_data,
-            moving=self.transformed_image
-        )
-        for key, val in metrics.items():
-            self.metrics[channel]["nonlinear"][key] = val
-
-        self.export_other_images()
-
-        self.log_metrics(self.metrics)
-
-    def make_directories(self):
-        """ Create the necessary directories for registration results. """
-        for path in [
-            self.saving_path,
-            self.linear_path,
-            self.nonlinear_path,
-            self.fixed_path
-        ]:
-            os.makedirs(path, exist_ok=True)
-
-    def create_metrics_dictionary(self, directory):
-        files = [file for file in os.listdir(directory) if file.endswith('.tif')]
-
-        # Extract just the "CHxx" portion from filenames
-        channels = {
-            file[file.find('CH'):file.find('CH') + 4]
-            for file in files if 'CH' in file
-        }
-        sorted_channels = sorted(channels)
-
-        self.metrics = {}
-        self.metrics = {
-            channel: {
-                stage: {method: None for method in
-                        ['Correlation', 'MattesMutualInformation']}
-                for stage in ["raw", "linear", "nonlinear"]
-            }
-            for channel in sorted_channels
-        }
-
-    def parse_directory(self, directory, attr_name, label, channel):
-        """ Parse a directory for .tif files and load the specified channel.
-
-        Parameters
-        ----------
-        directory : str
-            The directory to search for .tif files.
-        attr_name : str
-            The attribute name to set for the loaded image data.
-        label : str
-            A label for logging purposes, indicating the type of data being loaded.
-        channel : str
-            The channel to look for in the .tif files (e.g., 'CH00', 'CH01', 'CH02').
-        """
-        all_tif_files = [file for file in os.listdir(directory) if
-                         file.endswith('.tif')]
-        target_file = None
-
-        # Iterate through all files in the directory.
-        for file in all_tif_files:
-
-            # If the string CH00, CH01, etc., is in the file name.
-            if channel in file:
-                target_file = file
-                image_path = os.path.join(directory, file)
-
-                # Set the filename attribute
-                setattr(self, attr_name + "_filename", file)
-
-                # Load and set the image data
-                setattr(self, attr_name, tifffile.imread(image_path))
-                log(self, message=f"{label} loaded: {image_path}")
-                break
-
-        # Create list of other .tif files excluding the target file
-        if target_file:
-            other_files = [file for file in all_tif_files if
-                           file != target_file]
-
-            # Store the list of other .tif files
-            setattr(self, attr_name + "_other_filenames", other_files)
-            log(self, message=
-                f"Found {len(other_files)} additional .tif files in {label} directory")
-
-        if getattr(self, attr_name) is None:
-            log(self, message=f"{label} not found.", level="error")
-
-    def linear_registration(self):
-        """ Perform the linear TRSAA-type registration."""
-        log(self, message=f"Shape of the fixed data: {self.reference_data.shape}")
-        log(self, message=f"Shape of the moving data: {self.moving_data.shape}")
-        log(self, message="Beginning linear registration.")
-
-        result, stdout, stderr = capture_c_level_output(
-            linear.register_image,
-            moving_image=self.moving_data,
-            fixed_image=self.reference_data,
-            registration_type="TRSAA",
-            accuracy=self.accuracy,
-            verbose=True
-        )
-        self.transformed_image, self.transform = result
-
-        # Log captured output
-        log(self, message=stdout)
-        if stderr:
-            log(self, message=f"Errors during registration: {stderr}", level="error")
-
-        log(self, message=f"Inspecting the linear affine transform.")
-        linear.inspect_affine_transform(self.transform)
-
-        log(self, message=f"Exporting the affine transform to: {self.linear_path}")
-        clearex.registration.common.export_affine_transform(
-            affine_transform=self.transform,
-            directory=self.linear_path)
-
-        log(self, message="Identifying the smallest ROI that encapsulates the data.")
-        self.reference_data, self.transformed_image, self.bounding_box = crop_overlapping_datasets(
-            self.reference_data,
-            self.transformed_image,
-            robust=True,
-            lower_pct=2,
-            upper_pct=98
-        )
-
-        log(self, message=f"Cropped fixed image shape: {self.reference_data.shape}")
-        log(self, message=f"Cropped moving image shape: {self.transformed_image.shape}")
-        log(self, message="Exporting cropped reference and moving images.")
-        clearex.registration.common.export_tiff(
-            image=self.reference_data,
-            data_path=os.path.join(self.fixed_path, self.reference_data_filename))
-        clearex.registration.common.export_tiff(
-            image=self.transformed_image,
-            data_path=os.path.join(self.linear_path, self.moving_data_filename))
-
-        # If other images exist, import, transform, crop, and export.
-        if hasattr(self, 'moving_data_other_filenames'):
-            for file in self.moving_data_other_filenames:
-                if file in self.reference_data_other_filenames:
-                    fixed_image = tifffile.imread(
-                        os.path.join(self.reference_path, file))
-                    moving_image = tifffile.imread(
-                        os.path.join(self.moving_path, file))
-
-                    # Use regular expression to find the channel name.
-                    match = re.search(r'(CH\d{2})', file)
-                    channel = match.group(1)
-
-                    metrics = clearex.registration.common.calculate_metrics(
-                        fixed=fixed_image,
-                        moving=moving_image
-                    )
-                    for key, val in metrics.items():
-                        self.metrics[channel]["raw"][key] = val
-
-                    # Apply the linear transform
-                    transformed_image = clearex.registration.linear.transform_image(
-                        moving_image=moving_image,
-                        fixed_image=fixed_image,
-                        affine_transform=self.transform)
-
-                    metrics = clearex.registration.common.calculate_metrics(
-                        fixed=fixed_image,
-                        moving=transformed_image
-                    )
-                    for key, val in metrics.items():
-                        self.metrics[channel]["linear"][key] = val
-
-                    # Crop the images
-                    transformed_image = transformed_image.numpy().astype(np.uint16)
-                    transformed_image = transformed_image[self.bounding_box]
-                    fixed_image = fixed_image[self.bounding_box]
-
-                    # Export the transformed and cropped image
-                    clearex.registration.common.export_tiff(
-                        image=transformed_image,
-                        data_path=os.path.join(self.linear_path, file))
-                    clearex.registration.common.export_tiff(
-                        image=fixed_image,
-                        data_path=os.path.join(self.fixed_path, file))
-
-        log(self, message="Linear registration complete.")
-
-    def nonlinear_registration(self):
-        """ Perform the diffeomorphic SyN warp transform. """
-        log(self, message="Beginning nonlinear registration.")
-
-        result, stdout, stderr = capture_c_level_output(
-            nonlinear.register_image,
-            moving_image=self.transformed_image,
-            fixed_image=self.reference_data,
-            accuracy=self.accuracy,
-            verbose=True
-        )
-        self.transformed_image, transform_path = result
-
-        log(self, message=stdout)
-        if stderr:
-            log(self, message=f"Errors during registration: {stderr}", level="error")
-
-        log(self, message=f"Exporting the registered data to: {self.nonlinear_path}")
-        clearex.registration.common.export_tiff(
-            image=self.transformed_image,
-            data_path=os.path.join(self.nonlinear_path, self.moving_data_filename))
-
-        log(self, message=f"Copying nonlinear warping transform from "
-                           f"{transform_path} to {self.nonlinear_path}. ")
-        shutil.copyfile(
-            transform_path,
-            os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz')
-        )
-
-        log(self, message="Nonlinear registration complete.")
-
-    def export_other_images(self):
-        # If other images exist, import previously transformed and cropped data,
-        # apply nonlinear transformation, and export.
-        if hasattr(self, 'moving_data_other_filenames'):
-            for file in self.moving_data_other_filenames:
-                if file in self.reference_data_other_filenames:
-                    log(self, message=f"Processing additional file: {file}")
-                    fixed_image = tifffile.imread(
-                        os.path.join(self.fixed_path, file))
-                    moving_image = tifffile.imread(
-                        os.path.join(self.linear_path, file))
-
-                    match = re.search(r'(CH\d{2})', file)
-                    channel = match.group(1)
-
-                    # Convert to ants Image type.
-                    fixed_image = ants.from_numpy(fixed_image)
-                    moving_image = ants.from_numpy(moving_image)
-
-                    transform_list = [
-                        os.path.join(self.nonlinear_path, 'movingToFixed1Warp.nii.gz')]
-
-                    warped_image = ants.apply_transforms(
-                        fixed=fixed_image,
-                        moving=moving_image,
-                        transformlist=transform_list,
-                        interpolator='linear'
-                    )
-
-                    # Histogram match to original data.
-                    warped_image = ants.histogram_match_image(
-                        source_image=warped_image,
-                        reference_image=moving_image
-                    )
-
-                    metrics = clearex.registration.common.calculate_metrics(
-                        fixed=fixed_image,
-                        moving=moving_image
-                    )
-                    for key, val in metrics.items():
-                        self.metrics[channel]["nonlinear"][key] = val
-
-                    warped_image = warped_image.numpy().astype(np.uint16)
-
-                    # Export the transformed and cropped image
-                    clearex.registration.common.export_tiff(
-                        image=warped_image,
-                        data_path=os.path.join(self.nonlinear_path, file))
-
-    def log_metrics(self, d, parent_key=''):
-        """
-        Recursively print key-value pairs in a nested dictionary.
-
-        Parameters:
-        d (dict): Nested dictionary to print.
-        parent_key (str): Prefix of the current nested key (used in recursion).
-        """
-        for key, value in d.items():
-            current_key = f"{parent_key}.{key}" if parent_key else key
-            if isinstance(value, dict):
-                self.log_metrics(value, current_key)
-            else:
-                log(self, message=f"{current_key}: {value}")
-
-def register_round(fixed_image_path, moving_image_path, save_directory, round=0, crop=False):
+def register_round(
+    fixed_image_path: str | Path,
+    moving_image_path: str | Path,
+    save_directory: str | Path,
+    imaging_round: int = 0,
+    crop: bool = False,
+    enable_logging: bool = True,
+) -> None:
+    """
+    Register a moving image to a fixed image using linear and nonlinear transformations.
+
+    Parameters
+    ----------
+    fixed_image_path : str or Path
+        The path to the fixed reference image (TIFF file).
+    moving_image_path : str or Path
+        The path to the moving image to be registered (TIFF file).
+    save_directory : str or Path
+        Directory where the transformation results will be saved.
+    imaging_round : int, optional
+        The round number used to identify transformation files (default is 0).
+    crop : bool, optional
+        Whether to crop the moving image before registration (default is False).
+    enable_logging : bool, optional
+        Whether to enable logging (default is True).
+
+    Returns
+    -------
+    None
+        The function saves the registration results to disk and does not return anything.
+
+    Raises
+    ------
+    FileNotFoundError
+        If any of the provided file paths do not exist.
+    """
 
     # Confirm that the save_directory exists.
     os.makedirs(save_directory, exist_ok=True)
+
+    _log = initialize_logging(
+        log_directory=save_directory, enable_logging=enable_logging
+    )
 
     # Load the fixed image data and convert to AntsImage...
     image_opener = ImageOpener()
     fixed_image, _ = image_opener.open(fixed_image_path, prefer_dask=False)
     fixed_image = ants.from_numpy(fixed_image)
-    print(f"Loaded fixed image {fixed_image_path}. Shape: {fixed_image.shape}.")
+    _log.info(f"Loaded fixed image {fixed_image_path}. Shape: {fixed_image.shape}.")
 
     # Load the moving image data
-    moving_image, _ = image_opener.open(
-        moving_image_path,
-        prefer_dask=False
-    )
-    print(f"Loaded moving image {moving_image_path}. Shape: {moving_image.shape}.")
+    moving_image, _ = image_opener.open(moving_image_path, prefer_dask=False)
+    _log.info(f"Loaded moving image {moving_image_path}. Shape: {moving_image.shape}.")
 
     # Only crop the moving data since the fixed data defines the coordinate space.
     if crop:
         z0, z1, y0, y1, x0, x1 = identify_minimal_bounding_box(
-                image=moving_image,
-                down_sampling=4,
-                robust=True,
-                lower_pct=0.1,
-                upper_pct=99.9
+            image=moving_image,
+            down_sampling=4,
+            robust=True,
+            lower_pct=0.1,
+            upper_pct=99.9,
         )
         moving_image = ants.from_numpy(moving_image)
         moving_image = ants.crop_indices(
-            moving_image,
-            lowerind=(z0, y0, x0),
-            upperind=(z1, y1, x1)
+            moving_image, lowerind=(z0, y0, x0), upperind=(z1, y1, x1)
         )
-        print(f"Moving image cropped to: {moving_image.shape}.")
+        _log.info(f"Moving image cropped to: {moving_image.shape}.")
     else:
         moving_image = ants.from_numpy(moving_image)
 
-    print(f"Performing Linear Registration...")
-    moving_image, transform = clearex.registration.linear.register_image(
+    _log.info("Performing Linear Registration...")
+    result, stdout, stderr = capture_c_level_output(
+        clearex.registration.linear.register_image,
         moving_image=moving_image,
         fixed_image=fixed_image,
         registration_type="TRSAA",
         accuracy="low",
         verbose=True,
     )
-    linear_transformation_path = os.path.join(save_directory, f"linear_transform_{round}.mat")
-    ants.write_transform(transform, linear_transformation_path)
-    print(f"Linear Registration Complete...")
+    moving_image, transform = result
+    if stdout:
+        _log.info(stdout)
+    if stderr:
+        _log.error(stderr)
 
-    print(f"Performing Nonlinear Registration...")
-    nonlinear_transformed, transform_path = clearex.registration.nonlinear.register_image(
+    linear_transformation_path = os.path.join(
+        save_directory, f"linear_transform_{imaging_round}.mat"
+    )
+    ants.write_transform(transform, linear_transformation_path)
+    _log.info(f"Linear Transform written to: {linear_transformation_path}")
+
+    _log.info("Beginning Nonlinear Registration...")
+    result, stdout, stderr = capture_c_level_output(
+        clearex.registration.nonlinear.register_image,
         moving_image=moving_image,
         fixed_image=fixed_image,
         accuracy="high",
-        verbose=True
+        verbose=True,
     )
-    nonlinear_transformation_path = os.path.join(save_directory, f"nonlinear_warp_{round}.nii.gz")
-    shutil.copyfile(transform_path, nonlinear_transformation_path)
-    print("Nonlinear Registration Complete...")
+    nonlinear_transformed, transform_path = result
+    if stdout:
+        _log.info(stdout)
+    if stderr:
+        _log.error(stderr)
 
-def bulk_transform_directory(fixed_image_path, moving_image_paths, save_directory, round):
+    nonlinear_transformation_path = os.path.join(
+        save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
+    )
+    shutil.copyfile(transform_path, nonlinear_transformation_path)
+    _log.info(f"Linear Transform written to: {nonlinear_transformation_path}")
+
+
+def bulk_transform_directory(
+    fixed_image_path: str | Path,
+    moving_image_paths: Sequence[str | Path],
+    save_directory: str | Path,
+    imaging_round: int,
+) -> None:
+    """
+    Apply linear and nonlinear transformations to a list of moving images and save the results.
+
+    Parameters
+    ----------
+    fixed_image_path : str or Path
+        Path to the fixed reference image (TIFF file).
+    moving_image_paths : Sequence[str or Path]
+        List of paths to moving images to be transformed.
+    save_directory : str or Path
+        Directory where the transformed images will be saved.
+    imaging_round : int
+        The imaging_round number used to identify transformation files.
+
+    Returns
+    -------
+    None
+        The function saves the transformed images to disk and does not return anything.
+
+    Raises
+    ------
+    FileNotFoundError
+        If any of the required transformation files do not exist.
+    """
 
     # Paths to transforms on disk
-    linear_transformation_path = os.path.join(save_directory, f"linear_transform_{round}.mat")
-    nonlinear_transformation_path   = os.path.join(save_directory, f"nonlinear_warp_{round}.nii.gz")
+    linear_transformation_path = os.path.join(
+        save_directory, f"linear_transform_{imaging_round}.mat"
+    )
+    nonlinear_transformation_path = os.path.join(
+        save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
+    )
     for p in (linear_transformation_path, nonlinear_transformation_path):
         if not os.path.exists(p):
             raise FileNotFoundError(p)
@@ -505,32 +214,80 @@ def bulk_transform_directory(fixed_image_path, moving_image_paths, save_director
     print("Linear Transformation Path:", linear_transformation_path)
     print("Nonlinear Transformation Path;", nonlinear_transformation_path)
 
-
     for moving_image_path in moving_image_paths:
-        transform_image(fixed_image_path, linear_transformation_path, moving_image_path,
-                        nonlinear_transformation_path, save_directory)
+        transform_image(
+            fixed_image_path,
+            linear_transformation_path,
+            moving_image_path,
+            nonlinear_transformation_path,
+            save_directory,
+        )
 
 
-def transform_image(fixed_image_path, linear_transformation_path, moving_image_path,
-                    nonlinear_transformation_path, save_directory):
+def transform_image(
+    fixed_image_path: str | Path,
+    linear_transformation_path: str | Path,
+    moving_image_path: str | Path,
+    nonlinear_transformation_path: str | Path,
+    save_directory: str | Path,
+) -> None:
+    """
+    Apply linear and nonlinear transformations to a moving image and save the result.
 
-    if isinstance(moving_image_path, str):
-        moving_image_path = Path(moving_image_path)
+    Parameters
+    ----------
+    fixed_image_path : str or Path
+        The path to the fixed reference image (TIFF file).
+    linear_transformation_path : str or Path
+        The path to the linear (affine) transformation file (.mat).
+    moving_image_path : str or Path
+        The path to the moving image to be transformed (TIFF file).
+    nonlinear_transformation_path : str or Path
+        The path to the nonlinear (warp) transformation file (.nii.gz).
+    save_directory : str or Path
+        Directory where the transformed image will be saved.
 
-    if isinstance(fixed_image_path, str):
-        fixed_image_path = Path(fixed_image_path)
+    Returns
+    -------
+    None
+        The function saves the transformed image to disk and does not return anything.
+
+    Raises
+    ------
+    FileNotFoundError
+        If any of the provided file paths do not exist.
+    """
+
+    # Ensure all input parameters are Path objects
+    fixed_image_path = (
+        Path(fixed_image_path)
+        if isinstance(fixed_image_path, str)
+        else fixed_image_path
+    )
+    linear_transformation_path = (
+        Path(linear_transformation_path)
+        if isinstance(linear_transformation_path, str)
+        else linear_transformation_path
+    )
+    moving_image_path = (
+        Path(moving_image_path)
+        if isinstance(moving_image_path, str)
+        else moving_image_path
+    )
+    nonlinear_transformation_path = (
+        Path(nonlinear_transformation_path)
+        if isinstance(nonlinear_transformation_path, str)
+        else nonlinear_transformation_path
+    )
+    save_directory = (
+        Path(save_directory) if isinstance(save_directory, str) else save_directory
+    )
 
     # Load the fixed image data and convert to AntsImage...
     image_opener = ImageOpener()
-    fixed_image, _ = image_opener.open(
-        fixed_image_path,
-        prefer_dask=False
-    )
+    fixed_image, _ = image_opener.open(fixed_image_path, prefer_dask=False)
     fixed_image = ants.from_numpy(fixed_image)
-    moving_image, _ = image_opener.open(
-        moving_image_path,
-        prefer_dask=False
-    )
+    moving_image, _ = image_opener.open(moving_image_path, prefer_dask=False)
     min_value = float(moving_image.min())
     max_value = float(moving_image.max())
     moving_image = ants.from_numpy(moving_image)
@@ -540,25 +297,10 @@ def transform_image(fixed_image_path, linear_transformation_path, moving_image_p
         moving=moving_image,
         transformlist=[linear_transformation_path, nonlinear_transformation_path],
         whichtoinvert=[False, False],  # set True for any transform you want inverted
-        interpolator="linear"  # use "nearestNeighbor" for label images
+        interpolator="linear",  # use "nearestNeighbor" for label images
     )
     print("Transformation Complete. Shape:", nonlinear_transformed.shape)
 
-    transformed_image_path = os.path.join(
-        save_directory, moving_image_path.name
-    )
-    export_tiff(
-        nonlinear_transformed,
-        min_value,
-        max_value,
-        transformed_image_path
-    )
+    transformed_image_path = os.path.join(save_directory, moving_image_path.name)
+    export_tiff(nonlinear_transformed, min_value, max_value, transformed_image_path)
     print("Image saved to:", transformed_image_path)
-
-
-if __name__ == "__main__":
-    print("Running registration locally")
-
-    from clearex import initiate_logger
-    logger = initiate_logger('/home2/kdean/Desktop')
-    Registration()

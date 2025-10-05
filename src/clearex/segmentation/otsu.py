@@ -158,7 +158,7 @@ def gamma_otsu(
         The thresholded image data.
     """
 
-    if type(image_data) == np.ndarray:
+    if isinstance(image_data, np.ndarray):
         image_data = da.from_array(image_data)
 
     # Gamma Correction

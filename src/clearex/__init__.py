@@ -36,20 +36,70 @@ from datetime import datetime
 
 # Local Imports
 
-def initiate_logger(base_path):
 
+def initialize_logging(log_directory: str, enable_logging: bool) -> logging.Logger:
+    """Initialize logging if not already configured.
+
+    This function checks if the root logger has any handlers configured. If not,
+    it initializes logging to write to a log file in the specified directory. If
+    logging is already configured, it simply returns the existing root logger.
+
+    Parameters
+    ----------
+    log_directory : str
+        The directory path where the log file should be created if logging is not
+        already configured.
+    enable_logging : bool
+        Flag indicating whether to initialize logging if it is not already set up.
+    Returns
+    -------
+    logging.Logger
+        The root logger instance.
+    """
+    root_logger = logging.getLogger()
+
+    # Check if logger has handlers (indicates it's been configured)
+    if root_logger.hasHandlers() and root_logger.level != logging.NOTSET:
+        return root_logger
+
+    # If logging is not initialized and we want to initialize it
+    if enable_logging:
+        return initiate_logger(log_directory=log_directory)
+    else:
+        # If logging is not initialized and we do not want to initialize it,
+        # set a NullHandler to avoid "No handler found" warnings.
+        root_logger.addHandler(logging.NullHandler())
+        return root_logger
+
+
+def initiate_logger(log_directory) -> logging.Logger:
+    """Set up logging to a file in the specified directory.
+
+    This function configures the root logger to write log messages to a file
+    located in the specified base path. The log file is named with a timestamp
+    to ensure uniqueness. The logging level is set to INFO, and the log format
+    includes timestamps.
+
+    Parameters
+    ----------
+    log_directory : str
+        The directory where the log file will be created.
+    Returns
+    -------
+    logging.Logger
+        The configured root logger instance.
+    """
     # Format: YYYY-MM-DD-HH-SS.log
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%S")
     log_filename = f"{timestamp}.log"
-    log_path = os.path.join(base_path, log_filename)
+    log_path = os.path.join(log_directory, log_filename)
 
     logging.basicConfig(
-        filename=log_path,
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s'
+        filename=log_path, level=logging.INFO, format="%(asctime)s - %(message)s"
     )
     logging.getLogger().setLevel(logging.INFO)
-    return logging
+    return logging.getLogger()
+
 
 def log_and_echo(self, message: str, level: str = "info"):
     """
@@ -85,13 +135,15 @@ def log_and_echo(self, message: str, level: str = "info"):
     else:
         self.logger.log(logging.INFO, message)  # fallback
 
+
 def capture_c_level_output(func, *args, **kwargs):
     """Capture stdout/stderr including C-level output from function calls."""
 
     # Create temporary files for stdout and stderr
-    with tempfile.TemporaryFile(mode='w+') as stdout_file, \
-         tempfile.TemporaryFile(mode='w+') as stderr_file:
-
+    with (
+        tempfile.TemporaryFile(mode="w+") as stdout_file,
+        tempfile.TemporaryFile(mode="w+") as stderr_file,
+    ):
         # Save original file descriptors
         saved_stdout_fd = os.dup(sys.stdout.fileno())
         saved_stderr_fd = os.dup(sys.stderr.fileno())
@@ -128,6 +180,7 @@ def capture_c_level_output(func, *args, **kwargs):
 
     return result, stdout_content, stderr_content
 
+
 def create_parser():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Command Line Arguments")
@@ -156,20 +209,20 @@ def create_parser():
         "--file",
         help="Path to image (TIFF/OME‑TIFF, .zarr, .npy/.npz)",
         type=str,
-        required=False
+        required=False,
     )
 
     parser.add_argument(
         "--dask",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Return a Dask array when possible (use --dask to enable, --no-dask to disable)"
+        help="Return a Dask array when possible (use --dask to enable, --no-dask to disable)",
     )
     parser.add_argument(
         "--chunks",
         type=str,
         default=None,
-        help="Chunk spec for Dask, e.g. '256,256,64' or single int"
+        help="Chunk spec for Dask, e.g. '256,256,64' or single int",
     )
 
     return parser

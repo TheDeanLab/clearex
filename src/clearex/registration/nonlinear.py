@@ -26,7 +26,6 @@
 
 
 # Standard Library Imports
-import os
 import logging
 
 # Local Imports
@@ -34,9 +33,6 @@ import logging
 # Third Party Imports
 import ants
 import numpy as np
-from tifffile import imwrite, imread
-from scipy.linalg import polar, rq
-from scipy.spatial.transform import Rotation
 
 # Set up logging
 logger = logging.getLogger('registration')

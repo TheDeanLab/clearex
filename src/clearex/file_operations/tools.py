@@ -28,28 +28,49 @@
 import sys
 import pickle
 import os
+from pathlib import Path
+from typing import Any
 
 # Third-party imports
 import ants
 import numpy as np
-from numpy.core.multiarray import RAISE
 
 # Local imports
 from clearex.segmentation.otsu import otsu
 
-def get_moving_image_paths(directory, idx):
+
+def get_moving_image_paths(directory: str | Path, idx: int) -> list[Path]:
+    """
+    Get a list of .tif and .tiff image paths for a given round index in a directory.
+
+    Parameters
+    ----------
+    directory : str or Path
+        The directory to search for image files.
+    idx : int
+        The round index to match in the filenames.
+
+    Returns
+    -------
+    list of Path
+        List of matching image file paths.
+    """
+
     directory = Path(directory)
+
     # Match both .tif and .tiff
     tif_files = list(directory.glob(f"Round{idx}_*.tif"))
+
     tiff_files = list(directory.glob(f"Round{idx}_*.tiff"))
     return tif_files + tiff_files
 
-def get_variable_size(variable: any) -> float:
+
+def get_variable_size(variable: Any) -> float:
     """Get the size of a variable in MB.
 
     Parameters
     ----------
-    variable : any
+    variable : Any
         The variable to get the size of.
 
     Returns
@@ -60,12 +81,12 @@ def get_variable_size(variable: any) -> float:
     return sys.getsizeof(variable) / 1024**2
 
 
-def save_variable_to_disk(variable: any, path: str) -> None:
+def save_variable_to_disk(variable: Any, path: str) -> None:
     """Save a variable to disk.
 
     Parameters
     ----------
-    variable : any
+    variable : Any
         The variable to save.
     path : str
         The path to save the variable to.
@@ -74,7 +95,7 @@ def save_variable_to_disk(variable: any, path: str) -> None:
         pickle.dump(variable, f)
 
 
-def load_variable_from_disk(path: str) -> any:
+def load_variable_from_disk(path: str) -> Any:
     """Load a variable from disk.
 
     Parameters
@@ -84,7 +105,7 @@ def load_variable_from_disk(path: str) -> any:
 
     Returns
     -------
-    any
+    Any
         The loaded variable
 
     Raises
@@ -116,15 +137,20 @@ def delete_filetype(data_path: str, filetype: str) -> None:
     for file in files:
         os.remove(os.path.join(data_path, file))
 
+
 def get_roi_indices(image, roi_size=256):
-    """   Get indices for a centered ROI of size roi_size x roi_size x roi_size
+    """Get indices for a centered ROI of size roi_size x roi_size x roi_size
 
     Parameters
     ----------
     image : np.ndarray
         The input image from which to extract the ROI.
     roi_size : int, optional
+
         The size of the ROI to extract from the center of the image. Default is 256.
+
+
+
 
     Returns
     -------
@@ -136,7 +162,9 @@ def get_roi_indices(image, roi_size=256):
     if roi_size <= 0:
         raise ValueError("ROI size must be a positive integer.")
     if roi_size > min(image.shape):
-        raise ValueError("ROI size must be less than or equal to the smallest dimension of the image.")
+        raise ValueError(
+            "ROI size must be less than or equal to the smallest dimension of the image."
+        )
 
     # Calculate the start and end indices for the ROI
     distance = roi_size // 2
@@ -157,7 +185,10 @@ def get_roi_indices(image, roi_size=256):
     x_end = min(b[2], x_end)
     return z_start, z_end, y_start, y_end, x_start, x_end
 
-def identify_robust_bounding_box(binary, lower_pct=5, upper_pct=95):
+
+def identify_robust_bounding_box(
+    binary: np.ndarray, lower_pct: float = 5, upper_pct: float = 95
+):
     """Compute a robust bounding box from binary 3D mask by ignoring outliers.
 
     Parameters
@@ -198,8 +229,10 @@ def identify_robust_bounding_box(binary, lower_pct=5, upper_pct=95):
 
     return z0, z1, y0, y1, x0, x1
 
+
 def identify_minimal_bounding_box(
-        image, down_sampling=8, robust=False, lower_pct=5, upper_pct=95):
+    image, down_sampling=8, robust=False, lower_pct=5, upper_pct=95
+):
     """Identify the minimal bounding box that encloses foreground signal in a 3D
     image using Otsu thresholding.
 
@@ -268,8 +301,10 @@ def identify_minimal_bounding_box(
     elif isinstance(image, np.ndarray):
         pass
     else:
-        raise TypeError(f"Unsupported file type: {type(image)}. Supported types are: "
-                        f"np.ndarray and ANTsImage")
+        raise TypeError(
+            f"Unsupported file type: {type(image)}. Supported types are: "
+            f"np.ndarray and ANTsImage"
+        )
 
     # Otsu Thresholding
     binary_data = otsu(image_data=image, down_sampling=down_sampling)
@@ -296,6 +331,7 @@ def identify_minimal_bounding_box(
     z_end, y_end, x_end = max_idx
 
     return z_start, z_end, y_start, y_end, x_start, x_end
+
 
 def merge_bounding_boxes(box1, box2):
     """Compute a minimal bounding box that encompasses two input bounding boxes.
@@ -341,7 +377,10 @@ def merge_bounding_boxes(box1, box2):
         slice(x_start, x_end),
     )
 
-def crop_overlapping_datasets(fixed_roi, transformed_image, robust=False, lower_pct=5, upper_pct=95):
+
+def crop_overlapping_datasets(
+    fixed_roi, transformed_image, robust=False, lower_pct=5, upper_pct=95
+):
     """Crop two 3D images to the maximal overlapping bounding box containing
     foreground signal.
 
@@ -395,14 +434,16 @@ def crop_overlapping_datasets(fixed_roi, transformed_image, robust=False, lower_
     """
     # Identify z_start, z_end, y_start, y_end, x_start, x_end, for each image.
     minimum_bounding_box_fixed = identify_minimal_bounding_box(
-        fixed_roi, robust=robust, lower_pct=lower_pct, upper_pct=upper_pct)
+        fixed_roi, robust=robust, lower_pct=lower_pct, upper_pct=upper_pct
+    )
     minimum_bounding_box_moving = identify_minimal_bounding_box(
-        transformed_image, robust=robust, lower_pct=lower_pct, upper_pct=upper_pct)
+        transformed_image, robust=robust, lower_pct=lower_pct, upper_pct=upper_pct
+    )
 
     # Find the maximum overlapping region.
     bounding_box = merge_bounding_boxes(
-        minimum_bounding_box_moving,
-        minimum_bounding_box_fixed)
+        minimum_bounding_box_moving, minimum_bounding_box_fixed
+    )
     print(f"Cropping data to: {bounding_box}")
 
     # Convert to numpy to crop the data.
