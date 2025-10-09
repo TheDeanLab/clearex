@@ -22,7 +22,19 @@ cd to/your/cloned/clearex/directory
 pip install -e .
 ```
 
-### Install with `uv`
+## Installation with `conda-forge`
+
+If you encounter compilation issues during installation, you can install ClearEx entirely from conda-forge:
+
+```bash
+cd to/your/cloned/clearex/directory
+conda env create -f environment.yml
+conda activate clearex
+```
+
+This installs all dependencies from conda-forge and the ClearEx package in editable mode. The environment is named `clearex` by default (specified in `environment.yml`).
+
+## Installation with `uv`
 
 You can also manage dependencies using [uv](https://github.com/astral-sh/uv),
 which provides faster installs and lockfile support. First, install `uv` via the
@@ -39,7 +51,7 @@ uv pip install -e .          # core install
 uv pip install -e '.[dev]'   # development extras
 ```
 
-`uv` is compatible with existing `pip` or conda workflows, so you can continue
+`uv` is compatible with existing `pip` or `conda` workflows, so you can continue
 to use those tools if preferred.
 
 
@@ -50,5 +62,3 @@ Once installed and the environment is active, start the ClearEx command line int
 ```bash
 clearex
 ```
-
-Follow the prompts to perform image registration.

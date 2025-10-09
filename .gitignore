@@ -173,3 +173,5 @@ cython_debug/
 # PyCharm files
 *.idea/
 *.DS_Store
+._pyproject.toml
+._README.md

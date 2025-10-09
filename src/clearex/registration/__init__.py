@@ -108,7 +108,9 @@ def register_round(
 
     # Load the moving image data
     moving_image, _ = image_opener.open(moving_image_path, prefer_dask=False)
-    _log.info(f"Loaded moving image {moving_image_path}. Shape: {moving_image.shape}.")
+    _log.info(
+        f"Loaded moving image {moving_image_path}. Shape:" f" {moving_image.shape}."
+    )
 
     # Only crop the moving data since the fixed data defines the coordinate space.
     if crop:

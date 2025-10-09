@@ -1,0 +1,29 @@
+name: clearex
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.11
+  - pip
+  - cython
+  - dask=2025.1.0
+  - dask-image
+  - dask-jobqueue
+  - distributed=2025.1.0
+  - h5py
+  - jupyterlab
+  - matplotlib
+  - numpy
+  - opencv
+  - pandas
+  - pyarrow
+  - seaborn
+  - scikit-image
+  - scipy
+  - simpleitk
+  - tifffile
+  - zarr<3.0
+  - pip:
+      - antspyx
+      - neuroglancer (>=2.40.1,<3.0.0)
+      - -e .
