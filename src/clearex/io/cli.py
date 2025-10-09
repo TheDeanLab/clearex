@@ -23,10 +23,64 @@
 #  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
+import argparse
 
-# Standard Library Imports
 
-# Third Party Imports
+def create_parser():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Command Line Arguments")
+    input_args = parser.add_argument_group("Input Arguments")
 
-# Local Imports
-from . import *
+    input_args.add_argument(
+        "-r",
+        "--registration",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Registration Workflow",
+    )
+
+    input_args.add_argument(
+        "-v",
+        "--visualization",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Visualization of the data with Neuroglancer",
+    )
+
+    parser.add_argument(
+        "-f",
+        "--file",
+        help="Path to image (TIFF/OME‑TIFF, .zarr, .npy/.npz)",
+        type=str,
+        required=False,
+    )
+
+    parser.add_argument(
+        "--dask",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Return a Dask array when possible (use --dask to enable, --no-dask to disable)",
+    )
+    parser.add_argument(
+        "--chunks",
+        type=str,
+        default=None,
+        help="Chunk spec for Dask, e.g. '256,256,64' or single int",
+    )
+
+    return parser
+
+
+def display_logo():
+    logo = r"""
+           _                          
+          | |                         
+       ___| | ___  __ _ _ __ _____  __
+      / __| |/ _ \/ _` | '__/ _ \ \/ /
+     | (__| |  __/ (_| | | |  __/>  < 
+      \___|_|\___|\__,_|_|  \___/_/\_\
+    
+    """
+    print(logo)

@@ -25,21 +25,23 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 
-
 # Standard Library Imports
 from typing import Optional, Union, Tuple
 import os
+
 os.environ["OMP_NUM_THREADS"] = "1"  # Limit OpenMP threads to 1
 os.environ["MKL_NUM_THREADS"] = "1"  # Limit MKL threads to 1
 os.environ["NUMEXPR_NUM_THREADS"] = "1"  # Limit NumExpr threads to 1
 os.environ["OPENBLAS_NUM_THREADS"] = "1"  # Limit OpenBLAS threads to 1
 
-# Third Party Imports 
+# Third Party Imports
 
 # Local Imports
 from clearex.registration import Registration
 from clearex.io.read import ImageOpener
-from clearex import initiate_logger, display_logo, create_parser
+from clearex.io.cli import create_parser, display_logo
+from clearex.io.log import initiate_logger
+
 
 def main():
     """Run the ClearEx command line interface."""

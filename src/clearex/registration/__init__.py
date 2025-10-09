@@ -42,8 +42,11 @@ import clearex
 import clearex.registration.common
 import clearex.registration.linear as linear
 import clearex.registration.nonlinear as nonlinear
-from clearex import capture_c_level_output, initialize_logging
-from clearex import log_and_echo as log
+from clearex.io.log import (
+    initialize_logging,
+    log_and_echo as log,
+    capture_c_level_output,
+)
 from clearex.file_operations.tools import (
     crop_overlapping_datasets,
     identify_minimal_bounding_box,
@@ -108,9 +111,7 @@ def register_round(
 
     # Load the moving image data
     moving_image, _ = image_opener.open(moving_image_path, prefer_dask=False)
-    _log.info(
-        f"Loaded moving image {moving_image_path}. Shape:" f" {moving_image.shape}."
-    )
+    _log.info(f"Loaded moving image {moving_image_path}. Shape: {moving_image.shape}.")
 
     # Only crop the moving data since the fixed data defines the coordinate space.
     if crop:
