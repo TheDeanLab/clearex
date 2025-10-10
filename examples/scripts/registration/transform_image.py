@@ -32,11 +32,9 @@ import os
 import tifffile
 
 # Local Imports
-from clearex.registration.linear import (
-    inspect_affine_transform, transform_image
-)
-from clearex.registration.common import export_tiff, \
-    import_affine_transform
+from clearex.registration.linear import inspect_affine_transform, transform_image
+from clearex.registration.common import export_tiff, import_affine_transform
+from tests import download_test_registration_data
 
 
 def main(
@@ -45,6 +43,19 @@ def main(
     transform_path: str,
     output_path: str,
 ):
+    """Apply an affine transform to a moving image to align it with a fixed image.
+
+    Parameters
+    ----------
+    fixed_path : str
+        Path to the fixed image (target).
+    moving_path : str
+        Path to the moving image (to be transformed).
+    transform_path : str
+        Path to the affine transform file (in .mat format).
+    output_path : str
+        Path to save the transformed moving image.
+    """
     print(f"Loading fixed image: {fixed_path}")
     fixed_roi = tifffile.imread(fixed_path)
 
@@ -65,13 +76,16 @@ def main(
 
     print("Done.")
 
-if __name__ == "__main__":
-    # Example file paths — consider replacing with argparse or env vars in real use
-    channel = 1
-    fixed_path = f'/archive/bioinformatics/Danuser_lab/Dean/Seweryn/s2/Sytox_ppm1/250320/new_Cell4/1_CH0{channel}_000000.tif'
-    moving_path = f'/archive/bioinformatics/Danuser_lab/Dean/Seweryn/s2/restained/Cell1/1_CH0{channel}_000000.tif'
-    base_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-05-28-registration"
-    transform_path = os.path.join(base_path, "AffineTransform.mat")
-    output_path = os.path.join(base_path, "registered_test.tif")
 
-    main(fixed_path, moving_path, transform_path, output_path)
+if __name__ == "__main__":
+    output_path = download_test_registration_data()
+    fixed_path = os.path.join(output_path, "clearex", "cropped_fixed.tif")
+    moving_path = os.path.join(output_path, "clearex", "cropped_moving.tif")
+    transform_path = os.path.join(output_path, "clearex", "GenericAffine.mat")
+    save_path = os.path.join(output_path, "transformed.tif")
+    main(
+        fixed_path=fixed_path,
+        moving_path=moving_path,
+        transform_path=transform_path,
+        output_path=save_path,
+    )

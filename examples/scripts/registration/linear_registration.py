@@ -31,18 +31,25 @@ import os
 import tifffile
 
 # Local Imports
-from clearex.registration.linear import (
-    register_image,
-    inspect_affine_transform
-)
+from clearex.registration.linear import register_image, inspect_affine_transform
 from clearex.registration.common import export_affine_transform, export_tiff
+from tests import download_test_registration_data
 
 
 def main(
-        path_to_fixed_data,
-        path_to_moving_data,
-        path_to_save_to
-):
+    path_to_fixed_data: str, path_to_moving_data: str, path_to_save_to: str
+) -> None:
+    """Perform linear registration of a moving image to a fixed image.
+
+    Parameters
+    ----------
+    path_to_fixed_data : str
+        Path to the fixed image (target).
+    path_to_moving_data : str
+        Path to the moving image (to be transformed).
+    path_to_save_to : str
+        Directory to save the results (transform and registered image).
+    """
     print(f"Loading fixed image: {path_to_fixed_data}")
     fixed_roi = tifffile.imread(path_to_fixed_data)
 
@@ -54,8 +61,9 @@ def main(
         moving_image=moving_roi,
         fixed_image=fixed_roi,
         registration_type="TRSAA",
-        accuracy="high",
-        verbose=True)
+        accuracy="low",
+        verbose=True,
+    )
 
     print("Inspecting transform:")
     inspect_affine_transform(transform)
@@ -66,13 +74,14 @@ def main(
     print("Exporting the registered data to:", path_to_save_to)
     export_tiff(
         image=transformed_image,
-        data_path=os.path.join(path_to_save_to, "registered.tif"))
+        data_path=os.path.join(path_to_save_to, "registered.tif"),
+    )
 
     print("Done.")
 
+
 if __name__ == "__main__":
-    channel = 1
-    fixed_path = f'/archive/bioinformatics/Danuser_lab/Dean/Seweryn/s2/Sytox_ppm1/250320/new_Cell4/1_CH0{channel}_000000.tif'
-    moving_path = f'/archive/bioinformatics/Danuser_lab/Dean/Seweryn/s2/restained/Cell1/1_CH0{channel}_000000.tif'
-    base_path = "/archive/bioinformatics/Danuser_lab/Dean/dean/2025-05-28-registration"
-    main(fixed_path, moving_path, base_path)
+    output_path = download_test_registration_data()
+    fixed_path = os.path.join(output_path, "clearex", "cropped_fixed.tif")
+    moving_path = os.path.join(output_path, "clearex", "cropped_moving.tif")
+    main(fixed_path, moving_path, output_path)

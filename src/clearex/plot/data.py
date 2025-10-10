@@ -46,10 +46,11 @@ def histograms(*images, bins=256, sample=200_000, labels=None):
         Each input is converted to a 1-D ``float32`` NumPy vector.
         ANTsImages are handled transparently via their ``.numpy()`` method.
     bins : int or sequence or str, optional
-        Controls the binning rule passed to
-        :func:`numpy.histogram_bin_edges`.
-        *int* → that many equal-width bins; *str* (e.g. ``"auto"``,
-        ``"fd"``) → NumPy’s data-driven rules. Default is ``"auto"``.
+        Controls the binning rule passed to `numpy.histogram_bin_edges`.
+
+            - *int* → that many equal-width bins;
+            - *str* (e.g. ``"auto"``,``"fd"``) → NumPy’s data-driven rules.
+            - Default is ``"auto"``.
     sample : int
         Number of samples to use from the data. Randomly retrieved.
     labels : list of str, optional
@@ -58,8 +59,8 @@ def histograms(*images, bins=256, sample=200_000, labels=None):
 
     Notes
     -----
-    *Each histogram uses the same ``common_bins`` array calculated from the
-    concatenation of *all* input vectors to ensure a fair comparison.*
+    * Each histogram uses the same ``common_bins`` array calculated from the
+    concatenation of *all* input vectors to ensure a fair comparison.
 
     * Bars are drawn semi-transparent (``alpha = 0.85``) with white edges.
 

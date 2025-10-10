@@ -39,11 +39,11 @@ from tifffile import imwrite, imread
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
+
 def export_affine_transform(
-        affine_transform: ants.core.ants_transform.ANTsTransform,
-        directory: str
+    affine_transform: ants.core.ants_transform.ANTsTransform, directory: str
 ) -> None:
-    """ Export an ants Affine Transform to disk.
+    """Export an ants Affine Transform to disk.
 
     Parameters
     ----------
@@ -64,30 +64,35 @@ def export_affine_transform(
     if not isinstance(affine_transform, ants.core.ants_transform.ANTsTransform):
         raise ValueError("The affine_transform must be an instance of ANTsTransform.")
 
-    save_path=os.path.join(directory, str(affine_transform.type) + ".mat")
+    save_path = os.path.join(directory, str(affine_transform.type) + ".mat")
     ants.write_transform(affine_transform, save_path)
 
 
 def export_tiff(
-        image: ants.core.ants_image.ANTsImage,
-        min_value: float,
-        max_value: float,
-        data_path: str) -> None:
-    """ Export an ants.ANTsImage to a 16-bit tiff file.
+    image: ants.core.ants_image.ANTsImage,
+    data_path: str,
+    min_value: float = None,
+    max_value: float = None,
+) -> None:
+    """Export an ants.ANTsImage to a 16-bit tiff file.
+
+    Export an ants.ANTsImage to a 16-bit tiff file. If the image min or max values
+    are provided, the image will be scaled to that range. If not provided, the image
+    will be scaled to its own min and max values.
 
     Parameters
     ----------
     image: ants.core.ants_image.ANTsImage
         Image to export
-    min_value: float
-        Minimum value of the reference range to map the image to.
-    max_value: float
-        Maximum value of the reference range to map the image to.
     data_path: str
         The location and name of the file to save the data to.
+    min_value: float or None
+        Minimum value of the reference range to map the image to. Default is None.
+    max_value: float or None
+        Maximum value of the reference range to map the image to. Default is None.
     """
     if isinstance(image, ants.core.ants_image.ANTsImage):
-        image=image.numpy()
+        image = image.numpy()
     elif isinstance(image, np.ndarray):
         pass
     else:
@@ -96,6 +101,13 @@ def export_tiff(
     # Get rid of NaNs and Infs
     image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
     image[image < 0] = 0.0
+
+    # Determine min and max if not provided
+    if min_value is None:
+        min_value = image.min()
+
+    if max_value is None:
+        max_value = image.max()
 
     # Normalize to [0,1] with small offset.
     image = (image - image.min()) / (image.max() - image.min() + 1e-8)
@@ -109,8 +121,8 @@ def export_tiff(
     imwrite(data_path, image)
 
 
-def import_tiff(data_path):
-    """ Import a tiff file and convert to an ANTsImage.
+def import_tiff(data_path: str) -> ants.core.ants_image.ANTsImage:
+    """Import a tiff file and convert to an ANTsImage.
 
     Parameters
     ----------
@@ -120,8 +132,8 @@ def import_tiff(data_path):
     return ants.from_numpy(imread(data_path))
 
 
-def import_affine_transform(data_path: str):
-    """ Import an ants Affine Transform.
+def import_affine_transform(data_path: str) -> ants.core.ants_transform.ANTsTransform:
+    """Import an ants Affine Transform.
 
     Parameters
     ----------
@@ -136,8 +148,8 @@ def import_affine_transform(data_path: str):
     affine_transform = ants.read_transform(data_path)
     return affine_transform
 
-def calculate_metrics(
-        fixed, moving, mask=None, sampling='regular', sampling_pct=1.0):
+
+def calculate_metrics(fixed, moving, mask=None, sampling="regular", sampling_pct=1.0):
     """
     Compute normalized cross-correlation band Mattes Mutual Information etween two
     ANTsImage volumes.
@@ -164,22 +176,22 @@ def calculate_metrics(
     """
 
     if isinstance(fixed, np.ndarray):
-        fixed=ants.from_numpy(fixed)
+        fixed = ants.from_numpy(fixed)
     if isinstance(moving, np.ndarray):
-        moving=ants.from_numpy(moving)
+        moving = ants.from_numpy(moving)
 
     metric_results = {}
-    for metric_type in ['Correlation', 'MattesMutualInformation']:
+    for metric_type in ["Correlation", "MattesMutualInformation"]:
         value = ants.image_similarity(
-            fixed, moving,
+            fixed,
+            moving,
             metric_type=metric_type,
             fixed_mask=mask,
             moving_mask=mask,
             sampling_strategy=sampling,
-            sampling_percentage=sampling_pct
+            sampling_percentage=sampling_pct,
         )
         metric_results[metric_type] = -value
         logger.info(f"Image Metric: {metric_type}, value: {-value}")
 
     return metric_results
-

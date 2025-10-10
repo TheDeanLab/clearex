@@ -23,3 +23,40 @@
 #  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
+
+import requests
+import zipfile
+import os
+
+
+def download_test_registration_data() -> str:
+    """Download test registration data from the cloud server.
+    The data is downloaded as a zip file and extracted to the current directory.
+    The zip file is deleted after extraction.
+
+    Returns
+    -------
+    str
+        Path to the extracted data directory.
+    """
+
+    url = "https://cloud.biohpc.swmed.edu/index.php/s/7y7QHszBiJtqgQE/download"
+    output_path = "downloaded_data.zip"
+
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        with open(output_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+    print(f"Downloaded to {output_path}")
+
+    with zipfile.ZipFile(output_path, "r") as zip_ref:
+        zip_ref.extractall("downloaded_data")
+    print(f"Extracted {output_path} directory.")
+
+    os.remove(output_path)
+
+    output_path = output_path.split(".")[0]
+
+    return output_path
