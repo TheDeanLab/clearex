@@ -27,14 +27,6 @@ jobs:
         run: |
           curl -Ls https://astral.sh/uv/install.sh | sh
 
-      - name: Cache uv
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('**/pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-uv-
-
       - name: Install Dependencies
         run: |
           uv python install 3.12
