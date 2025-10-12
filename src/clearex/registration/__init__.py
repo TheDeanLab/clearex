@@ -27,28 +27,21 @@
 # Standard Library Imports
 import logging
 import os
-import re
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
 # Third Party Imports
-import tifffile
 import ants
-import numpy as np
 
 # Local Imports
 import clearex
 import clearex.registration.common
-import clearex.registration.linear as linear
-import clearex.registration.nonlinear as nonlinear
 from clearex.io.log import (
     initialize_logging,
-    log_and_echo as log,
     capture_c_level_output,
 )
 from clearex.file_operations.tools import (
-    crop_overlapping_datasets,
     identify_minimal_bounding_box,
 )
 from clearex.io.read import ImageOpener

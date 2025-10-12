@@ -17,6 +17,8 @@ dependencies:
   - opencv
   - pandas
   - pyarrow
+  - pytest
+  - pywavelets
   - seaborn
   - scikit-image
   - scipy

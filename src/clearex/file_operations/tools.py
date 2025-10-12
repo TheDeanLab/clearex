@@ -146,11 +146,7 @@ def get_roi_indices(image, roi_size=256):
     image : np.ndarray
         The input image from which to extract the ROI.
     roi_size : int, optional
-
         The size of the ROI to extract from the center of the image. Default is 256.
-
-
-
 
     Returns
     -------
