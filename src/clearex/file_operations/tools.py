@@ -29,11 +29,13 @@ import sys
 import pickle
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+from typing import Union, Tuple
 
 # Third-party imports
 import ants
 import numpy as np
+from numpy import ndarray
 
 # Local imports
 from clearex.segmentation.otsu import otsu
@@ -90,6 +92,10 @@ def save_variable_to_disk(variable: Any, path: str) -> None:
         The variable to save.
     path : str
         The path to save the variable to.
+
+    Returns
+    -------
+    None
     """
     with open(path, "wb") as f:
         pickle.dump(variable, f)
@@ -129,6 +135,10 @@ def delete_filetype(data_path: str, filetype: str) -> None:
         The path to the directory containing the files.
     filetype : str
         The filetype to delete. E.g. 'pdf'
+
+    Returns
+    -------
+    None
     """
     if filetype[0] != ".":
         filetype = "." + filetype
@@ -138,7 +148,9 @@ def delete_filetype(data_path: str, filetype: str) -> None:
         os.remove(os.path.join(data_path, file))
 
 
-def get_roi_indices(image, roi_size=256):
+def get_roi_indices(
+    image: np.ndarray, roi_size: int = 256
+) -> Tuple[int, int, int, int, int, int]:
     """Get indices for a centered ROI of size roi_size x roi_size x roi_size
 
     Parameters
@@ -184,7 +196,7 @@ def get_roi_indices(image, roi_size=256):
 
 def identify_robust_bounding_box(
     binary: np.ndarray, lower_pct: float = 5, upper_pct: float = 95
-):
+) -> Tuple[int, int, int, int, int, int]:
     """Compute a robust bounding box from binary 3D mask by ignoring outliers.
 
     Parameters
@@ -198,7 +210,7 @@ def identify_robust_bounding_box(
 
     Returns
     -------
-    (z0, z1, y0, y1, x0, x1) : tuple of ints
+    (z0, z1, y0, y1, x0, x1) : Tuple of ints
         Bounding box indices in the form: [z_start:z_end, y_start:y_end, x_start:x_end]
     """
 
@@ -223,12 +235,16 @@ def identify_robust_bounding_box(
     y0, y1 = find_bounds(y_dist, lower_pct, upper_pct)
     x0, x1 = find_bounds(x_dist, lower_pct, upper_pct)
 
-    return z0, z1, y0, y1, x0, x1
+    return int(z0), int(z1), int(y0), int(y1), int(x0), int(x1)
 
 
 def identify_minimal_bounding_box(
-    image, down_sampling=8, robust=False, lower_pct=5, upper_pct=95
-):
+    image: Union[np.ndarray, ants.core.ants_image.ANTsImage],
+    down_sampling: int = 8,
+    robust=False,
+    lower_pct: float = 5,
+    upper_pct: float = 95,
+) -> Tuple[int, int, int, int, int, int]:
     """Identify the minimal bounding box that encloses foreground signal in a 3D
     image using Otsu thresholding.
 
@@ -329,7 +345,10 @@ def identify_minimal_bounding_box(
     return z_start, z_end, y_start, y_end, x_start, x_end
 
 
-def merge_bounding_boxes(box1, box2):
+def merge_bounding_boxes(
+    box1: Tuple[int, int, int, int, int, int],
+    box2: Tuple[int, int, int, int, int, int],
+) -> Tuple[slice, slice, slice]:
     """Compute a minimal bounding box that encompasses two input bounding boxes.
 
     This function takes two bounding boxes in the form of 6-element tuples
@@ -355,9 +374,9 @@ def merge_bounding_boxes(box1, box2):
 
     Examples
     --------
-    >>> box1 = (10, 50, 20, 60, 30, 80)
-    >>> box2 = (15, 55, 10, 70, 25, 85)
-    >>> merged_slices = merge_bounding_boxes(box1, box2)
+    >>> bounding_box_1 = (10, 50, 20, 60, 30, 80)
+    >>> bounding_box_2 = (15, 55, 10, 70, 25, 85)
+    >>> merged_slices = merge_bounding_boxes(bounding_box_1, bounding_box_2)
     >>> image[merged_slices]  # Direct indexing into a 3D image
     """
     merged_coords = tuple(
@@ -375,8 +394,16 @@ def merge_bounding_boxes(box1, box2):
 
 
 def crop_overlapping_datasets(
-    fixed_roi, transformed_image, robust=False, lower_pct=5, upper_pct=95
-):
+    fixed_roi: Union[np.ndarray, ants.core.ants_image.ANTsImage],
+    transformed_image: Union[np.ndarray, ants.core.ants_image.ANTsImage],
+    robust: bool = False,
+    lower_pct: float = 5,
+    upper_pct: float = 95,
+) -> tuple[
+    ndarray[tuple[int, ...], Any],
+    ndarray[tuple[int, ...], Any],
+    Iterable | tuple[slice],
+]:
     """Crop two 3D images to the maximal overlapping bounding box containing
     foreground signal.
 
@@ -398,6 +425,14 @@ def crop_overlapping_datasets(
         If True, uses a robust method to detect foreground and exclude outliers when
         computing the bounding boxes. If False, uses strict minimum and maximum
         coordinates. Default is False.
+
+    lower_pct : float, optional
+        Lower percentage for cut-off for robust boundary detection. Values between 0
+        and 100 and valid. Default is 5.
+
+    upper_pct : float, optional
+        Upper percentage for cut-off for robust boundary detection. Values between 0
+        and 100 and valid. Default is 95.
 
     Returns
     -------
@@ -423,10 +458,7 @@ def crop_overlapping_datasets(
 
     Examples
     --------
-    >>> fixed_crop, moving_crop, bounding_box = crop_overlapping_datasets(
-        fixed_img, moving_img, robust=True, lower_pct=2, upper_pct=98)
-    >>> print(fixed_crop.shape)
-        (128, 256, 256)
+    >>> fixed_crop, moving_crop, bounding_box = crop_overlapping_datasets(fixed_img, moving_img, robust=True, lower_pct=2, upper_pct=98)
     """
     # Identify z_start, z_end, y_start, y_end, x_start, x_end, for each image.
     minimum_bounding_box_fixed = identify_minimal_bounding_box(
@@ -440,7 +472,6 @@ def crop_overlapping_datasets(
     bounding_box = merge_bounding_boxes(
         minimum_bounding_box_moving, minimum_bounding_box_fixed
     )
-    print(f"Cropping data to: {bounding_box}")
 
     # Convert to numpy to crop the data.
     if isinstance(fixed_roi, ants.core.ants_image.ANTsImage):

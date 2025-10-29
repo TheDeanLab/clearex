@@ -44,6 +44,10 @@ def report_chunks(data: da.Array) -> None:
     ----------
     data : dask.array.Array
         Dask array containing the data
+
+    Returns
+    -------
+    None
     """
     if isinstance(data, da.Array):
         chunks = data.chunks
@@ -84,6 +88,10 @@ def tiff_to_zarr(
         The position index to save the data to.
     channel : int
         The channel index to save the data to.
+
+    Returns
+    -------
+    None
     """
 
     data = tifffile.imread(data_path)  # Load TIFF into memory
