@@ -37,6 +37,8 @@ import ants
 # Local Imports
 import clearex
 import clearex.registration.common
+from clearex.registration.linear import register_image as linear_registration
+from clearex.registration.nonlinear import register_image as nonlinear_registration
 from clearex.io.log import (
     initialize_logging,
     capture_c_level_output,
@@ -125,7 +127,7 @@ def register_round(
 
     _log.info("Performing Linear Registration...")
     result, stdout, stderr = capture_c_level_output(
-        clearex.registration.linear.register_image,
+        linear_registration,
         moving_image=moving_image,
         fixed_image=fixed_image,
         registration_type="TRSAA",
@@ -146,7 +148,7 @@ def register_round(
 
     _log.info("Beginning Nonlinear Registration...")
     result, stdout, stderr = capture_c_level_output(
-        clearex.registration.nonlinear.register_image,
+        nonlinear_registration,
         moving_image=moving_image,
         fixed_image=fixed_image,
         accuracy="high",
