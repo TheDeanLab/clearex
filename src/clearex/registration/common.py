@@ -73,6 +73,7 @@ def export_tiff(
     data_path: str,
     min_value: float = None,
     max_value: float = None,
+    max_intensity_project: bool = False,
 ) -> None:
     """Export an ants.ANTsImage to a 16-bit tiff file.
 
@@ -90,6 +91,8 @@ def export_tiff(
         Minimum value of the reference range to map the image to. Default is None.
     max_value: float or None
         Maximum value of the reference range to map the image to. Default is None.
+    max_intensity_project: bool
+        If True, perform a max intensity projection along the z-axis before saving.
     """
     if isinstance(image, ants.core.ants_image.ANTsImage):
         image = image.numpy()
@@ -117,6 +120,10 @@ def export_tiff(
 
     # Convert to uint16
     image = image.astype(np.uint16)
+
+    if max_intensity_project:
+        # Max intensity project along z-axis
+        image = np.max(image, axis=0)
 
     imwrite(data_path, image)
 

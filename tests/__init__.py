@@ -40,7 +40,7 @@ def download_test_registration_data() -> str:
         Path to the extracted data directory.
     """
 
-    url = "https://cloud.biohpc.swmed.edu/index.php/s/7y7QHszBiJtqgQE/download"
+    url = "https://zenodo.org/api/records/17591393/files-archive"
     output_path = "downloaded_data.zip"
 
     with requests.get(url, stream=True) as r:

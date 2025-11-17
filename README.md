@@ -30,13 +30,24 @@ uv --version
 Then, in the root directory of the cloned ClearEx repository, run:
 
 ```bash
+# Create a virtual environment in the project root.
+uv venv
+
+# Activate virtual environment
+source .venv/bin/activate
+
+# Install the base dependencies.
 uv sync
+
+# Install the ClearEx package in editable mode.
+uv pip install -e .
 
 # Optional - Install development dependencies
 uv sync --extra dev 
 
 # Optional - Install all additional dependencies.
 uv sync --all-extras
+
 ```
 
 `uv` is compatible with existing `pip` or `conda` workflows, so you can continue
