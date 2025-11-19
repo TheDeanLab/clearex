@@ -35,8 +35,6 @@ from pathlib import Path
 import ants
 
 # Local Imports
-import clearex
-import clearex.registration.common
 from clearex.registration.linear import register_image as linear_registration
 from clearex.registration.nonlinear import register_image as nonlinear_registration
 from clearex.io.log import (

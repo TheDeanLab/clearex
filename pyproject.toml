@@ -29,6 +29,7 @@ dependencies = [
     "pywavelets",
     "scikit-image",
     "scipy",
+    "scipy-stubs==1.16.3.0",
     "seaborn",
     "SimpleITK",
     "tifffile==2025.1.10",

@@ -88,7 +88,9 @@ def initiate_logger(log_directory) -> logging.Logger:
     log_path = os.path.join(log_directory, log_filename)
 
     logging.basicConfig(
-        filename=log_path, level=logging.INFO, format="%(asctime)s - %(message)s"
+        filename=log_path,
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
     )
     logging.getLogger().setLevel(logging.INFO)
     return logging.getLogger()
