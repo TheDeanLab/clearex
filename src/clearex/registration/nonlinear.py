@@ -61,9 +61,9 @@ def register_image(
         The type of registration method to use. Options include Elastic, SyN,
         SyNOnly. Default is SyNOnly.
     accuracy : str
-        Used for the TRSAA registration type. Registration performed in a 4-level
-        multiscale format. By default, it applies shrink factors of 8x4x2x1 and
-        smoothing sigmas 3x2x1x0 (voxel units) over the four levels.
+        Controls the number of registration iterations. Options are "high"
+        (100, 70, 50 iterations), "low" (5, 5, 5 iterations), or "dry run"
+        (1, 1, 1 iterations). Default is "high".
     verbose : bool
         The verbosity of the registration routine, showing iteration index,
         duration, registration error, etc.
@@ -104,22 +104,29 @@ def register_image(
         "type_of_transform": registration_type,
         "flow_sigma": 3.0,
         "total_sigma": 0.5,
-        "shrink_factors": [2, 1], # 4, 2, 1
-        "smoothing_sigmas": [1, 0], #2, 1, 0
-        "metric": "CC", # MeanSquares, CC, Mattes, NormalizedMutualInformation
-        "singleprecision": False,
+        "shrink_factors": [4, 2, 1], # Previously [2, 1]
+        "smoothing_sigmas": [2, 1, 0], #Previously [1,0]
+        "syn_metric": "mattes",  # Previously, thought to be CC, but probably incorrect.
+        # "metric": "CC", # MeanSquares, CC, Mattes, NormalizedMutualInformation
+        # "radius_or_number_of_bins": 4,  # For CC metric (if used)
+
+        "metric_weight": 1.0,
+        "number_of_bins": 32,  # For mattes metric
+
+        # "sampling_strategy": "regular",  # More stable than random. New.
+        # "sampling_percentage": 0.25,  # Reduce memory/computation. New.
+        "singleprecision": False, # True possibly helpful for larger data.
         "aff_random_sampling_rate": 1.0,
         "verbose": verbose,
-        "reg_iterations": (70, 50), #vector of iterations for syn, 100, 70, 50.
         "initial_transform": 'Identity'
         }
 
     if accuracy == "high":
-        kwargs["reg_iterations"] = (100, 70)
+        kwargs["reg_iterations"] = (100, 70, 50) # Previously 100, 70
     elif accuracy == "low":
-        kwargs["reg_iterations"] = (5, 5)
+        kwargs["reg_iterations"] = (5, 5, 5)
     elif accuracy == "dry run":
-        kwargs["reg_iterations"] = (1, 1)
+        kwargs["reg_iterations"] = (1, 1, 1)
 
     # Register the images. This will return a dictionary with the results.
     registered = ants.registration(**kwargs)
