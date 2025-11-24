@@ -27,13 +27,20 @@
 # Standard Library Imports
 import os
 import logging
+from logging import Logger
+from pathlib import Path
+from typing import Any, Sequence
+import json
 
 # Third Party Imports
 import ants
 import numpy as np
+from numpy import ndarray
 from tifffile import imwrite, imread
 
 # Local Imports
+from clearex.file_operations.tools import identify_minimal_bounding_box
+from clearex.io.read import ImageOpener
 
 # Start logging
 logger = logging.getLogger(__name__)
@@ -202,3 +209,195 @@ def calculate_metrics(fixed, moving, mask=None, sampling="regular", sampling_pct
         logger.info(f"Image Metric: {metric_type}, value: {-value}")
 
     return metric_results
+
+
+def crop_data(logger: Logger, crop: bool | None, imaging_round: int | None,
+              moving_image: ndarray, save_directory: str | Path) -> Any:
+    # Only crop the moving data since the fixed data defines the coordinate space.
+    if crop:
+        # Convert to AntsImage for cropping
+        moving_image = ants.from_numpy(moving_image)
+        json_path = os.path.join(save_directory, f"crop_indices_{imaging_round}.json")
+
+        if os.path.exists(json_path):
+            logger.info(f"Loading existing crop indices from: {json_path}")
+            with open(json_path, "r") as f:
+                z0, z1, y0, y1, x0, x1 = json.load(f)
+        else:
+            logger.info("Identifying minimal bounding box for cropping...")
+            z0, z1, y0, y1, x0, x1 = identify_minimal_bounding_box(
+                image=moving_image,
+                down_sampling=4,
+                robust=True,
+                lower_pct=0.1,
+                upper_pct=99.9,
+            )
+
+            # Save the bounding box coordinates for future reference
+            with open(json_path, "w") as f:
+                json.dump([z0, z1, y0, y1, x0, x1], f)
+            logger.info(f"Crop indices saved to: {json_path}")
+
+        moving_image = ants.crop_indices(
+            moving_image, lowerind=(z0, y0, x0), upperind=(z1, y1, x1)
+        )
+        logger.info(f"Moving image cropped to: {moving_image.shape}.")
+
+    else:
+        logger.info("Cropping not enabled; proceeding without cropping.")
+        moving_image = ants.from_numpy(moving_image)
+    return moving_image
+
+
+def bulk_transform_directory(
+    fixed_image_path: str | Path,
+    moving_image_paths: Sequence[str | Path],
+    save_directory: str | Path,
+    imaging_round: int,
+) -> None:
+    """
+    Apply linear and nonlinear transformations to a list of moving images and save the results.
+
+    Parameters
+    ----------
+    fixed_image_path : str or Path
+        Path to the fixed reference image (TIFF file).
+    moving_image_paths : Sequence[str or Path]
+        List of paths to moving images to be transformed.
+    save_directory : str or Path
+        Directory where the transformed images will be saved.
+    imaging_round : int
+        The imaging_round number used to identify transformation files.
+
+    Returns
+    -------
+    None
+        The function saves the transformed images to disk and does not return anything.
+
+    Raises
+    ------
+    FileNotFoundError
+        If any of the required transformation files do not exist.
+    """
+
+    # Paths to transforms on disk
+    linear_transformation_path = os.path.join(
+        save_directory, f"linear_transform_{imaging_round}.mat"
+    )
+    nonlinear_transformation_path = os.path.join(
+        save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
+    )
+    for p in (linear_transformation_path, nonlinear_transformation_path):
+        if not os.path.exists(p):
+            raise FileNotFoundError(p)
+
+    print("Linear Transformation Path:", linear_transformation_path)
+    print("Nonlinear Transformation Path:", nonlinear_transformation_path)
+
+    for moving_image_path in moving_image_paths:
+        transform_image(
+            fixed_image_path,
+            linear_transformation_path,
+            moving_image_path,
+            nonlinear_transformation_path,
+            save_directory,
+        )
+
+
+def transform_image(
+    fixed_image_path: str | Path,
+    linear_transformation_path: str | Path,
+    moving_image_path: str | Path,
+    nonlinear_transformation_path: str | Path,
+    save_directory: str | Path,
+) -> None:
+    """
+    Apply linear and nonlinear transformations to a moving image and save the result.
+
+    Parameters
+    ----------
+    fixed_image_path : str or Path
+        The path to the fixed reference image (TIFF file).
+    linear_transformation_path : str or Path
+        The path to the linear (affine) transformation file (.mat).
+    moving_image_path : str or Path
+        The path to the moving image to be transformed (TIFF file).
+    nonlinear_transformation_path : str or Path
+        The path to the nonlinear (warp) transformation file (.nii.gz).
+    save_directory : str or Path
+        Directory where the transformed image will be saved.
+
+    Returns
+    -------
+    None
+        The function saves the transformed image to disk and does not return anything.
+
+    Raises
+    ------
+    FileNotFoundError
+        If any of the provided file paths do not exist.
+    """
+
+    # Ensure all input parameters are Path objects
+    fixed_image_path = (
+        Path(fixed_image_path)
+        if isinstance(fixed_image_path, str)
+        else fixed_image_path
+    )
+    linear_transformation_path = (
+        Path(linear_transformation_path)
+        if isinstance(linear_transformation_path, str)
+        else linear_transformation_path
+    )
+    moving_image_path = (
+        Path(moving_image_path)
+        if isinstance(moving_image_path, str)
+        else moving_image_path
+    )
+    nonlinear_transformation_path = (
+        Path(nonlinear_transformation_path)
+        if isinstance(nonlinear_transformation_path, str)
+        else nonlinear_transformation_path
+    )
+    save_directory = (
+        Path(save_directory) if isinstance(save_directory, str) else save_directory
+    )
+
+    # Load the fixed image data and convert to AntsImage...
+    image_opener = ImageOpener()
+    fixed_image, _ = image_opener.open(fixed_image_path, prefer_dask=False)
+    fixed_image = ants.from_numpy(fixed_image)
+
+    moving_image, _ = image_opener.open(moving_image_path, prefer_dask=False)
+    min_value = float(moving_image.min())
+    max_value = float(moving_image.max())
+    moving_image = ants.from_numpy(moving_image)
+    print(f"Loaded {moving_image_path}. Shape: {moving_image.shape}.")
+
+    # Transform the data
+    # ``ants.apply_transforms`` applies transforms in reverse order, i.e. the
+    # last entry in the list is executed first.  For transforms generated by
+    # ``ants.registration`` the forward transform order should therefore be
+    # the nonlinear warp followed by the affine matrix to ensure that the
+    # deformation field and affine offsets are composed correctly.
+
+    nonlinear_transformed = ants.apply_transforms(
+        fixed=fixed_image,
+        moving=moving_image,
+        transformlist=[
+            str(nonlinear_transformation_path),
+            str(linear_transformation_path),
+        ],
+        whichtoinvert=[False, False],
+        interpolator="linear",  # use "nearestNeighbor" for label images
+    )
+    print("Transformation Complete. Shape:", nonlinear_transformed.shape)
+
+    transformed_image_path = os.path.join(save_directory, moving_image_path.name)
+    export_tiff(
+        nonlinear_transformed,
+        transformed_image_path,
+        min_value,
+        max_value,
+    )
+    print("Image saved to:", transformed_image_path)

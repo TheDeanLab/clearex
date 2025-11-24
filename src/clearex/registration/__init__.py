@@ -24,12 +24,33 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
-# Standard Library Imports
-import logging
+"""
+Image registration module.
+
+This module provides high-level registration functions that combine
+linear and nonlinear transformations. Implementation details are in
+submodules:
+- linear: Linear/affine registration
+- nonlinear: Deformable registration
+- common: Shared utilities
+"""
+
+# Environment setup
 import os
+
+# Limit internal threading in BLAS/ITK/etc. to avoid oversubscription
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", "1")
+
+# Standard Library Imports
 import shutil
-from collections.abc import Sequence
 from pathlib import Path
+from logging import Logger
+from typing import Any
 
 # Third Party Imports
 import ants
@@ -41,15 +62,8 @@ from clearex.io.log import (
     initialize_logging,
     capture_c_level_output,
 )
-from clearex.file_operations.tools import (
-    identify_minimal_bounding_box,
-)
 from clearex.io.read import ImageOpener
-from clearex.registration.common import export_tiff
-
-
-logger = logging.getLogger(__name__)
-logger.addHandler(logging.NullHandler())
+from clearex.registration.common import export_tiff, crop_data
 
 
 def register_round(
@@ -92,9 +106,11 @@ def register_round(
     # Confirm that the save_directory exists.
     os.makedirs(save_directory, exist_ok=True)
 
+    # Initialize logging
     _log = initialize_logging(
         log_directory=save_directory, enable_logging=enable_logging
     )
+    _log.info(f"Image registration performed with antspyx: {ants.__version__}")
 
     # Load the fixed image data and convert to AntsImage...
     image_opener = ImageOpener()
@@ -106,214 +122,89 @@ def register_round(
     moving_image, _ = image_opener.open(moving_image_path, prefer_dask=False)
     _log.info(f"Loaded moving image {moving_image_path}. Shape: {moving_image.shape}.")
 
-    # Only crop the moving data since the fixed data defines the coordinate space.
-    if crop:
-        z0, z1, y0, y1, x0, x1 = identify_minimal_bounding_box(
-            image=moving_image,
-            down_sampling=4,
-            robust=True,
-            lower_pct=0.1,
-            upper_pct=99.9,
+    # Optionally crop the moving data to reduce computation time
+    moving_image = crop_data(_log, crop, imaging_round, moving_image, save_directory)
+
+    # Perform Linear Registration
+    moving_linear_aligned = _linear_registration(_log, fixed_image, imaging_round,
+                                                 moving_image, save_directory)
+
+    # Perform Nonlinear Registration
+    _nonlinear_registration(_log, fixed_image, imaging_round, moving_linear_aligned,
+                            save_directory)
+
+
+def _nonlinear_registration(_log: Logger, fixed_image, imaging_round: int | None,
+                            moving_linear_aligned, save_directory: str | Path):
+    # Perform Nonlinear Registration
+    nonlinear_transformation_path = os.path.join(
+        save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
+    )
+    if os.path.exists(nonlinear_transformation_path):
+        _log.info(
+            f"Nonlinear transformation already exists at "
+            f"{nonlinear_transformation_path}. Skipping registration."
         )
-        moving_image = ants.from_numpy(moving_image)
-        moving_image = ants.crop_indices(
-            moving_image, lowerind=(z0, y0, x0), upperind=(z1, y1, x1)
-        )
-        _log.info(f"Moving image cropped to: {moving_image.shape}.")
+        nonlinear_transform = ants.read_transform(nonlinear_transformation_path)
+
+        # Resample the registered image to the target image.
+
     else:
-        moving_image = ants.from_numpy(moving_image)
-
-    _log.info("Performing Linear Registration...")
-    result, stdout, stderr = capture_c_level_output(
-        linear_registration,
-        moving_image=moving_image,
-        fixed_image=fixed_image,
-        registration_type="TRSAA",
-        accuracy="low",
-        verbose=True,
-    )
-    moving_linear_aligned, transform = result
-    if stdout:
-        _log.info(stdout)
-    if stderr:
-        _log.error(stderr)
-
-    linear_transformation_path = os.path.join(
-        save_directory, f"linear_transform_{imaging_round}.mat"
-    )
-    ants.write_transform(transform, linear_transformation_path)
-    _log.info(f"Linear Transform written to: {linear_transformation_path}")
-
-    _log.info("Beginning Nonlinear Registration...")
-    result, stdout, stderr = capture_c_level_output(
-        nonlinear_registration,
-        moving_image=moving_linear_aligned,
-        fixed_image=fixed_image,
-        accuracy="high",
-        verbose=True,
-    )
-    nonlinear_transformed, transform_path = result
-    if stdout:
-        _log.info(stdout)
-    if stderr:
-        _log.error(stderr)
-
-    nonlinear_transformation_path = os.path.join(
-        save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
-    )
-    shutil.copyfile(transform_path, nonlinear_transformation_path)
-    _log.info(f"Nonlinear warp written to: {nonlinear_transformation_path}")
-
-
-def bulk_transform_directory(
-    fixed_image_path: str | Path,
-    moving_image_paths: Sequence[str | Path],
-    save_directory: str | Path,
-    imaging_round: int,
-) -> None:
-    """
-    Apply linear and nonlinear transformations to a list of moving images and save the results.
-
-    Parameters
-    ----------
-    fixed_image_path : str or Path
-        Path to the fixed reference image (TIFF file).
-    moving_image_paths : Sequence[str or Path]
-        List of paths to moving images to be transformed.
-    save_directory : str or Path
-        Directory where the transformed images will be saved.
-    imaging_round : int
-        The imaging_round number used to identify transformation files.
-
-    Returns
-    -------
-    None
-        The function saves the transformed images to disk and does not return anything.
-
-    Raises
-    ------
-    FileNotFoundError
-        If any of the required transformation files do not exist.
-    """
-
-    # Paths to transforms on disk
-    linear_transformation_path = os.path.join(
-        save_directory, f"linear_transform_{imaging_round}.mat"
-    )
-    nonlinear_transformation_path = os.path.join(
-        save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
-    )
-    for p in (linear_transformation_path, nonlinear_transformation_path):
-        if not os.path.exists(p):
-            raise FileNotFoundError(p)
-
-    print("Linear Transformation Path:", linear_transformation_path)
-    print("Nonlinear Transformation Path:", nonlinear_transformation_path)
-
-    for moving_image_path in moving_image_paths:
-        transform_image(
-            fixed_image_path,
-            linear_transformation_path,
-            moving_image_path,
-            nonlinear_transformation_path,
-            save_directory,
+        _log.info("Beginning Nonlinear Registration...")
+        result, stdout, stderr = capture_c_level_output(
+            nonlinear_registration,
+            moving_image=moving_linear_aligned,
+            fixed_image=fixed_image,
+            accuracy="high",
+            verbose=True,
         )
+        nonlinear_transformed, transform_path = result
+        if stdout:
+            _log.info(stdout)
+        if stderr:
+            _log.error(stderr)
+
+        shutil.copyfile(transform_path, nonlinear_transformation_path)
+        _log.info(f"Nonlinear warp written to: {nonlinear_transformation_path}")
 
 
-def transform_image(
-    fixed_image_path: str | Path,
-    linear_transformation_path: str | Path,
-    moving_image_path: str | Path,
-    nonlinear_transformation_path: str | Path,
-    save_directory: str | Path,
-) -> None:
-    """
-    Apply linear and nonlinear transformations to a moving image and save the result.
-
-    Parameters
-    ----------
-    fixed_image_path : str or Path
-        The path to the fixed reference image (TIFF file).
-    linear_transformation_path : str or Path
-        The path to the linear (affine) transformation file (.mat).
-    moving_image_path : str or Path
-        The path to the moving image to be transformed (TIFF file).
-    nonlinear_transformation_path : str or Path
-        The path to the nonlinear (warp) transformation file (.nii.gz).
-    save_directory : str or Path
-        Directory where the transformed image will be saved.
-
-    Returns
-    -------
-    None
-        The function saves the transformed image to disk and does not return anything.
-
-    Raises
-    ------
-    FileNotFoundError
-        If any of the provided file paths do not exist.
-    """
-
-    # Ensure all input parameters are Path objects
-    fixed_image_path = (
-        Path(fixed_image_path)
-        if isinstance(fixed_image_path, str)
-        else fixed_image_path
+def _linear_registration(_log: Logger, fixed_image, imaging_round: int | None,
+                         moving_image, save_directory: str | Path) -> Any:
+    linear_transformation_path = os.path.join(
+        save_directory, f"linear_transform_{imaging_round}.mat"
     )
-    linear_transformation_path = (
-        Path(linear_transformation_path)
-        if isinstance(linear_transformation_path, str)
-        else linear_transformation_path
-    )
-    moving_image_path = (
-        Path(moving_image_path)
-        if isinstance(moving_image_path, str)
-        else moving_image_path
-    )
-    nonlinear_transformation_path = (
-        Path(nonlinear_transformation_path)
-        if isinstance(nonlinear_transformation_path, str)
-        else nonlinear_transformation_path
-    )
-    save_directory = (
-        Path(save_directory) if isinstance(save_directory, str) else save_directory
-    )
+    if os.path.exists(linear_transformation_path):
+        _log.info(
+            f"Linear transformation already exists at {linear_transformation_path}. "
+            "Skipping registration."
+        )
+        # Read the transform from disk.
+        transform = ants.read_transform(linear_transformation_path)
 
-    # Load the fixed image data and convert to AntsImage...
-    image_opener = ImageOpener()
-    fixed_image, _ = image_opener.open(fixed_image_path, prefer_dask=False)
-    fixed_image = ants.from_numpy(fixed_image)
+        # Resample the registered image to the target image.
+        moving_linear_aligned = transform.apply_to_image(
+            image=moving_image,
+            reference=fixed_image,
+            interpolation='linear'
+        )
+    else:
+        _log.info("Performing Linear Registration...")
+        result, stdout, stderr = capture_c_level_output(
+            linear_registration,
+            moving_image=moving_image,
+            fixed_image=fixed_image,
+            registration_type="TRSAA",
+            accuracy="low",
+            verbose=True,
+        )
+        moving_linear_aligned, transform = result
+        if stdout:
+            _log.info(stdout)
+        if stderr:
+            _log.error(stderr)
 
-    moving_image, _ = image_opener.open(moving_image_path, prefer_dask=False)
-    min_value = float(moving_image.min())
-    max_value = float(moving_image.max())
-    moving_image = ants.from_numpy(moving_image)
-    print(f"Loaded {moving_image_path}. Shape: {moving_image.shape}.")
+        ants.write_transform(transform, linear_transformation_path)
+        _log.info(f"Linear Transform written to: {linear_transformation_path}")
+    return moving_linear_aligned
 
-    # Transform the data
-    # ``ants.apply_transforms`` applies transforms in reverse order, i.e. the
-    # last entry in the list is executed first.  For transforms generated by
-    # ``ants.registration`` the forward transform order should therefore be
-    # the nonlinear warp followed by the affine matrix to ensure that the
-    # deformation field and affine offsets are composed correctly.
 
-    nonlinear_transformed = ants.apply_transforms(
-        fixed=fixed_image,
-        moving=moving_image,
-        transformlist=[
-            str(nonlinear_transformation_path),
-            str(linear_transformation_path),
-        ],
-        whichtoinvert=[False, False],
-        interpolator="linear",  # use "nearestNeighbor" for label images
-    )
-    print("Transformation Complete. Shape:", nonlinear_transformed.shape)
-
-    transformed_image_path = os.path.join(save_directory, moving_image_path.name)
-    export_tiff(
-        nonlinear_transformed,
-        transformed_image_path,
-        min_value,
-        max_value,
-    )
-    print("Image saved to:", transformed_image_path)

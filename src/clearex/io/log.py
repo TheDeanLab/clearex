@@ -23,12 +23,18 @@
 #  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
+
+# Standard Library Imports
 import logging
 import os
 import sys
 import tempfile
 from datetime import datetime
+import socket
 
+# Local Imports
+
+# Third Party Imports
 
 def initialize_logging(log_directory: str, enable_logging: bool) -> logging.Logger:
     """Initialize logging if not already configured.
@@ -49,6 +55,9 @@ def initialize_logging(log_directory: str, enable_logging: bool) -> logging.Logg
     logging.Logger
         The root logger instance.
     """
+    # Ensure the log directory exists
+    os.makedirs(log_directory, exist_ok=True)
+
     root_logger = logging.getLogger()
 
     # Check if logger has handlers (indicates it's been configured)
@@ -82,53 +91,41 @@ def initiate_logger(log_directory) -> logging.Logger:
     logging.Logger
         The configured root logger instance.
     """
-    # Format: YYYY-MM-DD-HH-SS.log
+    # Prefer Slurm identifiers, fall back to PID
+    slurm_keys = ("SLURM_PROCID", "SLURM_NODEID", "SLURM_ARRAY_TASK_ID", "SLURM_JOB_ID")
+    slurm_id = next((os.environ.get(k) for k in slurm_keys if os.environ.get(k)), None)
+    identifier = slurm_id or str(os.getpid())
+    hostname = socket.gethostname()
+
+    # Format: YYYY-MM-DD-HH-SS-hostname-identifier.log
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%S")
-    log_filename = f"{timestamp}.log"
+    log_filename = f"{timestamp}-{hostname}-{identifier}.log"
     log_path = os.path.join(log_directory, log_filename)
 
-    logging.basicConfig(
-        filename=log_path,
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
-    logging.getLogger().setLevel(logging.INFO)
-    return logging.getLogger()
+    # Set up root logger
+    root_logger = logging.getLogger()
 
+    # Remove existing handlers to avoid duplicate logging across imports/processes
+    for h in list(root_logger.handlers):
+        root_logger.removeHandler(h)
 
-def log_and_echo(self, message: str, level: str = "info"):
-    """
-    Log a message using the specified logging level and print it to the console.
+    # Configure format for log messages
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-    This method logs the provided message to the class logger using the given
-    severity level (e.g., 'info', 'warning', 'error', 'debug'), and then echoes
-    the same message to the console using `typer.echo`.
+    # File handler (per-process)
+    fh = logging.FileHandler(log_path, mode="a")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(formatter)
+    root_logger.addHandler(fh)
 
-    Parameters
-    ----------
-    self : ...
-        The class object which has the logger attribute.
-    message : str
-        The message to log and display.
-    level : str, optional
-        The severity level for logging. Must be one of:
-        {'info', 'warning', 'error', 'debug'}. Defaults to 'info'.
-        If an unrecognized level is provided, it falls back to 'info'.
+    # Console output (optional) -- keep it so interactive runs still show logs
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setLevel(logging.INFO)
+    sh.setFormatter(formatter)
+    root_logger.addHandler(sh)
 
-    Returns
-    -------
-    None
-    """
-    if level == "info":
-        self.logger.info(message)
-    elif level == "warning":
-        self.logger.warning(message)
-    elif level == "error":
-        self.logger.error(message)
-    elif level == "debug":
-        self.logger.debug(message)
-    else:
-        self.logger.log(logging.INFO, message)  # fallback
+    root_logger.setLevel(logging.INFO)
+    return root_logger
 
 
 def capture_c_level_output(func, *args, **kwargs):
