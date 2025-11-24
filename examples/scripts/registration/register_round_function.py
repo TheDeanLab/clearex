@@ -24,64 +24,53 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
+"""
+Example script demonstrating the register_round function.
+
+This script shows how to use the register_round convenience function
+to register a moving image to a fixed reference image using combined
+linear and nonlinear transformations.
+"""
 
 # Standard Library Imports
-from typing import Optional, Union, Tuple
 import os
 
-os.environ["OMP_NUM_THREADS"] = "1"  # Limit OpenMP threads to 1
-os.environ["MKL_NUM_THREADS"] = "1"  # Limit MKL threads to 1
-os.environ["NUMEXPR_NUM_THREADS"] = "1"  # Limit NumExpr threads to 1
-os.environ["OPENBLAS_NUM_THREADS"] = "1"  # Limit OpenBLAS threads to 1
-
-# Third Party Imports
-
 # Local Imports
-from clearex.registration import ImageRegistration
-from clearex.io.read import ImageOpener
-from clearex.io.cli import create_parser, display_logo
-from clearex.io.log import initiate_logger
+from clearex.registration import register_round
+from tests import download_test_registration_data
 
 
-def main():
-    """Run the ClearEx command line interface."""
-    display_logo()
+def main_functional():
+    """Perform registration using the register_round function."""
+    print("=== Functional Registration Example ===\n")
 
-    # Initialize Logging
-    logger = initiate_logger(os.getcwd())
-    logger.info("Starting ClearEx")
+    # Download test data
+    output_path = download_test_registration_data()
+    fixed_path = os.path.join(output_path, "clearex", "cropped_fixed.tif")
+    moving_path = os.path.join(output_path, "clearex", "cropped_moving.tif")
 
-    # Parse command line arguments.
-    parser = create_parser()
-    args = parser.parse_args()
-    logger.info(f"Command line arguments: {args}")
+    print(f"Fixed image: {fixed_path}")
+    print(f"Moving image: {moving_path}")
+    print(f"Output directory: {output_path}\n")
 
-    if args.file:
-        # Specify chunking strategy.
-        chunks_opt: Optional[Union[int, Tuple[int, ...]]] = None
-        if args.chunks:
-            if "," in args.chunks:
-                chunks_opt = tuple(int(x) for x in args.chunks.split(","))
-            else:
-                chunks_opt = int(args.chunks)
+    # Simple one-line registration
+    print("Performing registration...")
 
-        opener = ImageOpener()
-        arr, info = opener.open(args.file, prefer_dask=args.dask, chunks=chunks_opt)
+    # Uncomment to actually run registration:
+    # register_round(
+    #     fixed_image_path=fixed_path,
+    #     moving_image_path=moving_path,
+    #     save_directory=output_path,
+    #     imaging_round=1,
+    #     crop=False,
+    #     enable_logging=True,
+    # )
 
-        logger.info(f"Image shape: {info.shape}")
-        logger.info(f"Image dtype:, {info.dtype}")
-        if info.axes:
-            logger.info(f"Image axes: {info.axes}")
-        if info.metadata:
-            metadata = {k: type(v).__name__ for k, v in (info.metadata or {}).items()}
-            logger.info(f"Image metadata: {metadata}")
-
-    if args.registration:
-        ImageRegistration()
-
-    if args.visualization:
-        print("Launching visualization")
+    print("Registration configured (not executed in this example)\n")
+    print("Done! See examples/scripts/registration/image_registration_class.py")
+    print("for the class-based approach using ImageRegistration.")
 
 
 if __name__ == "__main__":
-    main()
+    main_functional()
+

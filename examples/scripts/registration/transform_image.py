@@ -79,9 +79,9 @@ def main(
 
 if __name__ == "__main__":
     output_path = download_test_registration_data()
-    fixed_path = os.path.join(output_path, "clearex", "cropped_fixed.tif")
-    moving_path = os.path.join(output_path, "clearex", "cropped_moving.tif")
-    transform_path = os.path.join(output_path, "clearex", "GenericAffine.mat")
+    fixed_path = os.path.join(output_path, "cropped_fixed.tif")
+    moving_path = os.path.join(output_path, "cropped_moving.tif")
+    transform_path = os.path.join(output_path, "GenericAffine.mat")
     save_path = os.path.join(output_path, "transformed.tif")
     main(
         fixed_path=fixed_path,

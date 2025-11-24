@@ -105,7 +105,10 @@ def initiate_logger(log_directory) -> logging.Logger:
     # Set up root logger
     root_logger = logging.getLogger()
 
-    # Remove existing handlers to avoid duplicate logging across imports/processes
+    # Remove existing handlers to avoid duplicate logging across imports/processes.
+    # Could interfere wit handlers configured by other parts of the application or
+    # libraries. Consider checking if handlers were added by this module before
+    # removing them.
     for h in list(root_logger.handlers):
         root_logger.removeHandler(h)
 

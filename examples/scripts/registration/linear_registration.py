@@ -82,6 +82,6 @@ def main(
 
 if __name__ == "__main__":
     output_path = download_test_registration_data()
-    fixed_path = os.path.join(output_path, "clearex", "cropped_fixed.tif")
-    moving_path = os.path.join(output_path, "clearex", "cropped_moving.tif")
+    fixed_path = os.path.join(output_path, "cropped_fixed.tif")
+    moving_path = os.path.join(output_path, "cropped_moving.tif")
     main(fixed_path, moving_path, output_path)

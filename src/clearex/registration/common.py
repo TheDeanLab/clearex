@@ -217,7 +217,12 @@ def crop_data(logger: Logger, crop: bool | None, imaging_round: int | None,
     if crop:
         # Convert to AntsImage for cropping
         moving_image = ants.from_numpy(moving_image)
-        json_path = os.path.join(save_directory, f"crop_indices_{imaging_round}.json")
+
+        if imaging_round is None:
+            json_path = os.path.join(save_directory, "crop_indices.json")
+        else:
+            json_path = os.path.join(save_directory,
+                                     f"crop_indices_{imaging_round}.json")
 
         if os.path.exists(json_path):
             logger.info(f"Loading existing crop indices from: {json_path}")
@@ -291,6 +296,7 @@ def bulk_transform_directory(
         if not os.path.exists(p):
             raise FileNotFoundError(p)
 
+    # Convert to logging
     print("Linear Transformation Path:", linear_transformation_path)
     print("Nonlinear Transformation Path:", nonlinear_transformation_path)
 
@@ -372,6 +378,8 @@ def transform_image(
     min_value = float(moving_image.min())
     max_value = float(moving_image.max())
     moving_image = ants.from_numpy(moving_image)
+
+    # TODO: Use proper logging
     print(f"Loaded {moving_image_path}. Shape: {moving_image.shape}.")
 
     # Transform the data
