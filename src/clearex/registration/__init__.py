@@ -418,7 +418,7 @@ class ChunkedImageRegistration(ImageRegistration):
         self._compute_chunk_grid(self.fixed_image_info.shape)
 
         # Create directory for chunk transforms
-        self.chunks_dir = self.save_directory / "chunks"
+        self.chunks_dir = Path(self.save_directory) / "chunks"
         self.chunks_dir.mkdir(exist_ok=True)
 
     def _perform_nonlinear_registration(
@@ -473,20 +473,13 @@ class ChunkedImageRegistration(ImageRegistration):
             ] = updated_chunk
 
             # Place the local warp into the correct location in the full warp field
+            # Note: local_warp is already stripped to core size by register_chunk()
             nonlinear_transform[
                 chunk.z_start:chunk.z_end,
                 chunk.y_start:chunk.y_end,
                 chunk.x_start:chunk.x_end,
                 :
-            ] = local_warp[
-                chunk.z_start - chunk.z_start_ext:
-                chunk.z_end - chunk.z_start_ext,
-                chunk.y_start - chunk.y_start_ext:
-                chunk.y_end - chunk.y_start_ext,
-                chunk.x_start - chunk.x_start_ext:
-                chunk.x_end - chunk.x_start_ext,
-                :
-            ]
+            ] = local_warp
 
         self._log.info("All chunks registered!")
 
