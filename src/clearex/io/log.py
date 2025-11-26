@@ -31,12 +31,17 @@ import sys
 import tempfile
 from datetime import datetime
 import socket
+from pathlib import Path
+
 
 # Local Imports
 
 # Third Party Imports
 
-def initialize_logging(log_directory: str, enable_logging: bool) -> logging.Logger:
+
+def initialize_logging(
+    log_directory: Path | str | None, enable_logging: bool | None = False
+) -> logging.Logger:
     """Initialize logging if not already configured.
 
     This function checks if the root logger has any handlers configured. If not,
@@ -45,10 +50,10 @@ def initialize_logging(log_directory: str, enable_logging: bool) -> logging.Logg
 
     Parameters
     ----------
-    log_directory : str
+    log_directory : Path | str | None
         The directory path where the log file should be created if logging is not
         already configured.
-    enable_logging : bool
+    enable_logging : bool | None, optional
         Flag indicating whether to initialize logging if it is not already set up.
     Returns
     -------

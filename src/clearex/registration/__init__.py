@@ -138,6 +138,8 @@ class ImageRegistration:
         self.crop = crop
         self.force_override = force_override
         self._image_opener = ImageOpener()
+        self.linear_accuracy = "dry run"
+        self.nonlinear_accuracy = "dry run"
 
         # Initialize logging
         self._log = initialize_logging(
@@ -146,7 +148,9 @@ class ImageRegistration:
         self._log.info(f"Image registration performed with antspyx: {ants.__version__}")
 
         # Validate required parameters
-        if not all([self.fixed_image_path, self.moving_image_path, self.save_directory]):
+        if not all(
+            [self.fixed_image_path, self.moving_image_path, self.save_directory]
+        ):
             raise ValueError(
                 "fixed_image_path, moving_image_path, and save_directory must be provided "
                 "either as arguments or instance attributes."
@@ -157,16 +161,21 @@ class ImageRegistration:
 
         # Load the image data as numpy array.
         self.fixed_image, self.fixed_image_info = self._image_opener.open(
-            self.fixed_image_path,prefer_dask=False)
+            self.fixed_image_path, prefer_dask=False
+        )
         self.moving_image, self.moving_image_info = self._image_opener.open(
-            self.moving_image_path, prefer_dask=False)
+            self.moving_image_path, prefer_dask=False
+        )
 
         # Report the loaded image shapes.
-        self._log.info(f"Loaded fixed image {self.fixed_image_path}. "
-                       f"Shape: {self.fixed_image.shape}.")
-        self._log.info(f"Loaded moving image {self.moving_image_path}. "
-                       f"Shape: {self.moving_image.shape}.")
-
+        self._log.info(
+            f"Loaded fixed image {self.fixed_image_path}. "
+            f"Shape: {self.fixed_image.shape}."
+        )
+        self._log.info(
+            f"Loaded moving image {self.moving_image_path}. "
+            f"Shape: {self.moving_image.shape}."
+        )
 
         # Optionally crop the data to reduce computation time.
         self.fixed_image = crop_data(
@@ -175,7 +184,7 @@ class ImageRegistration:
             imaging_round,
             self.fixed_image,
             save_directory,
-            image_type="fixed"
+            image_type="fixed",
         )
 
         # Optionally crop the moving data to reduce computation time
@@ -185,10 +194,8 @@ class ImageRegistration:
             imaging_round,
             self.moving_image,
             save_directory,
-            image_type="moving"
+            image_type="moving",
         )
-
-
 
     def register(self) -> None:
         """
@@ -211,7 +218,7 @@ class ImageRegistration:
             fixed_image=self.fixed_image,
             moving_image=self.moving_image,
             imaging_round=self.imaging_round,
-            save_directory=self.save_directory
+            save_directory=self.save_directory,
         )
 
         # Perform Nonlinear Registration
@@ -219,7 +226,7 @@ class ImageRegistration:
             fixed_image=self.fixed_image,
             moving_linear_aligned=moving_linear_aligned,
             imaging_round=self.imaging_round,
-            save_directory=self.save_directory
+            save_directory=self.save_directory,
         )
 
     def _perform_linear_registration(
@@ -258,20 +265,20 @@ class ImageRegistration:
 
             # Resample the registered image to the target image
             moving_linear_aligned = transform.apply_to_image(
-                image=moving_image,
-                reference=fixed_image,
-                interpolation='linear'
+                image=moving_image, reference=fixed_image, interpolation="linear"
             )
         else:
             if self.force_override and os.path.exists(linear_transformation_path):
-                self._log.info(f"Force override enabled. Re-computing linear registration.")
+                self._log.info(
+                    f"Force override enabled. Re-computing linear registration."
+                )
             self._log.info("Performing Linear Registration...")
             result, stdout, stderr = capture_c_level_output(
                 linear_registration,
                 moving_image=moving_image,
                 fixed_image=fixed_image,
                 registration_type="TRSAA",
-                accuracy="low",
+                accuracy=self.linear_accuracy,
                 verbose=True,
             )
             moving_linear_aligned, transform = result
@@ -286,11 +293,11 @@ class ImageRegistration:
         return moving_linear_aligned
 
     def _perform_nonlinear_registration(
-            self,
-            fixed_image: ants.ANTsImage,
-            moving_linear_aligned: ants.ANTsImage,
-            imaging_round: int,
-            save_directory: str | Path
+        self,
+        fixed_image: ants.ANTsImage,
+        moving_linear_aligned: ants.ANTsImage,
+        imaging_round: int,
+        save_directory: str | Path,
     ) -> None:
         """
         Perform nonlinear (deformable) registration.
@@ -317,13 +324,15 @@ class ImageRegistration:
             )
         else:
             if self.force_override and os.path.exists(nonlinear_transformation_path):
-                self._log.info(f"Force override enabled. Re-computing nonlinear registration.")
+                self._log.info(
+                    f"Force override enabled. Re-computing nonlinear registration."
+                )
             self._log.info("Beginning Nonlinear Registration...")
             result, stdout, stderr = capture_c_level_output(
                 nonlinear_registration,
                 moving_image=moving_linear_aligned,
                 fixed_image=fixed_image,
-                accuracy="high",
+                accuracy=self.nonlinear_accuracy,
                 verbose=True,
             )
             nonlinear_transformed, transform_path = result
@@ -333,7 +342,10 @@ class ImageRegistration:
                 self._log.error(stderr)
 
             shutil.copyfile(transform_path, nonlinear_transformation_path)
-            self._log.info(f"Nonlinear warp written to: {nonlinear_transformation_path}")
+            self._log.info(
+                f"Nonlinear warp written to: {nonlinear_transformation_path}"
+            )
+
 
 @dataclass
 class ChunkInfo:
@@ -360,6 +372,7 @@ class ChunkInfo:
     # Transform paths
     linear_transform_path: Optional[Path] = None
     nonlinear_transform_path: Optional[Path] = None
+
 
 class ChunkedImageRegistration(ImageRegistration):
     """
@@ -425,13 +438,13 @@ class ChunkedImageRegistration(ImageRegistration):
             imaging_round,
             crop,
             enable_logging,
-            force_override
+            force_override,
         )
 
-        #  Chunking parameters    
+        #  Chunking parameters
         self.chunk_size: Tuple[int, int, int] = (256, 256, 256)  # (z, y, x)
         self.overlap_fraction: float = 0.15
-        
+
         # Compute the chunk grid.
         self._compute_chunk_grid(self.fixed_image_info.shape)
 
@@ -440,11 +453,11 @@ class ChunkedImageRegistration(ImageRegistration):
         self.chunks_dir.mkdir(exist_ok=True)
 
     def _perform_nonlinear_registration(
-            self,
-            fixed_image: ants.ANTsImage,
-            moving_linear_aligned: ants.ANTsImage,
-            imaging_round: int,
-            save_directory: str | Path
+        self,
+        fixed_image: ants.ANTsImage,
+        moving_linear_aligned: ants.ANTsImage,
+        imaging_round: int,
+        save_directory: str | Path,
     ) -> None:
         """
         Perform nonlinear (deformable) registration.
@@ -467,8 +480,8 @@ class ChunkedImageRegistration(ImageRegistration):
 
         # Create an empty array to store the warp field
         nonlinear_transform = np.zeros(
-            (*self.fixed_image.shape, 3),
-            dtype=self.fixed_image.numpy().dtype)
+            (*self.fixed_image.shape, 3), dtype=self.fixed_image.numpy().dtype
+        )
 
         # Process each chunk
         for i, chunk in enumerate(self.chunk_info_list):
@@ -478,24 +491,24 @@ class ChunkedImageRegistration(ImageRegistration):
                 fixed_image=self.fixed_image,
                 moving_image=moving_linear_aligned,
                 nonlinear_type="SyNOnly",
-                nonlinear_accuracy="low",
+                nonlinear_accuracy=self.nonlinear_accuracy,
             )
             self.chunk_info_list[i] = updated_chunk
 
             # Place the registered chunk into the correct location in the full image
             registered_image[
-                chunk.z_start:chunk.z_end,
-                chunk.y_start:chunk.y_end,
-                chunk.x_start:chunk.x_end
+                chunk.z_start : chunk.z_end,
+                chunk.y_start : chunk.y_end,
+                chunk.x_start : chunk.x_end,
             ] = updated_chunk
 
             # Place the local warp into the correct location in the full warp field
             # Note: local_warp is already stripped to core size by register_chunk()
             nonlinear_transform[
-                chunk.z_start:chunk.z_end,
-                chunk.y_start:chunk.y_end,
-                chunk.x_start:chunk.x_end,
-                :
+                chunk.z_start : chunk.z_end,
+                chunk.y_start : chunk.y_end,
+                chunk.x_start : chunk.x_end,
+                :,
             ] = local_warp
 
         self._log.info("All chunks registered!")
@@ -522,10 +535,7 @@ class ChunkedImageRegistration(ImageRegistration):
         ants.write_transform(nonlinear_transform, nonlinear_transformation_path)
         self._log.info(f"Nonlinear warp written to: {nonlinear_transformation_path}")
 
-    def _compute_chunk_grid(
-            self,
-            image_shape
-    ) -> List[ChunkInfo]:
+    def _compute_chunk_grid(self, image_shape) -> List[ChunkInfo]:
         """
         Compute the grid of overlapping chunks.
 
@@ -614,7 +624,6 @@ class ChunkedImageRegistration(ImageRegistration):
         self.chunk_info_list = chunks
         return chunks
 
-
     def register_chunk(
         self,
         chunk: ChunkInfo,
@@ -652,10 +661,13 @@ class ChunkedImageRegistration(ImageRegistration):
         local_warp_path = self.chunks_dir / f"chunk_{chunk.chunk_id:04d}_warp.nii.gz"
 
         if local_warp_path.exists() and not self.force_override:
-            self._log.info(f"  Found existing transform for chunk {chunk.chunk_id}. Loading...")
+            self._log.info(
+                f"  Found existing transform for chunk {chunk.chunk_id}. Loading..."
+            )
 
-            fixed_chunk, moving_chunk = self.extract_chunk(chunk, fixed_image,
-                                                           moving_image)
+            fixed_chunk, moving_chunk = self.extract_chunk(
+                chunk, fixed_image, moving_image
+            )
 
             # Load the existing transform
             warp_image = ants.image_read(str(local_warp_path))
@@ -665,12 +677,14 @@ class ChunkedImageRegistration(ImageRegistration):
                 fixed=fixed_chunk,
                 moving=moving_chunk,
                 transformlist=[str(local_warp_path)],
-                interpolator='linear'
+                interpolator="linear",
             )
 
             # Update chunk info with transform path
             chunk.nonlinear_transform_path = local_warp_path
-            self._log.info(f"  Loaded and applied existing transform: {local_warp_path}")
+            self._log.info(
+                f"  Loaded and applied existing transform: {local_warp_path}"
+            )
 
             # Convert to numpy
             nonlinear_transformed = nonlinear_transformed.numpy()
@@ -685,26 +699,22 @@ class ChunkedImageRegistration(ImageRegistration):
             x_end_rel = x_start_rel + (chunk.x_end - chunk.x_start)
 
             nonlinear_transformed = nonlinear_transformed[
-                z_start_rel:z_end_rel,
-                y_start_rel:y_end_rel,
-                x_start_rel:x_end_rel
+                z_start_rel:z_end_rel, y_start_rel:y_end_rel, x_start_rel:x_end_rel
             ]
 
             warp = warp[
-                z_start_rel:z_end_rel,
-                y_start_rel:y_end_rel,
-                x_start_rel:x_end_rel,
-                :
+                z_start_rel:z_end_rel, y_start_rel:y_end_rel, x_start_rel:x_end_rel, :
             ]
 
             return nonlinear_transformed, warp
 
         # If force_override and transform exists, log it
         if self.force_override and local_warp_path.exists():
-            self._log.info(f"  Force override enabled. Re-computing chunk {chunk.chunk_id} registration.")
+            self._log.info(
+                f"  Force override enabled. Re-computing chunk {chunk.chunk_id} registration."
+            )
 
-        fixed_chunk, moving_chunk = self.extract_chunk(chunk, fixed_image,
-                                                       moving_image)
+        fixed_chunk, moving_chunk = self.extract_chunk(chunk, fixed_image, moving_image)
 
         # Pre-registration checks.
         fixed_chunk_np = fixed_chunk.numpy()
@@ -735,18 +745,14 @@ class ChunkedImageRegistration(ImageRegistration):
             x_end_rel = x_start_rel + x_size
 
             core_chunk = moving_chunk_np[
-                z_start_rel:z_end_rel,
-                y_start_rel:y_end_rel,
-                x_start_rel:x_end_rel
+                z_start_rel:z_end_rel, y_start_rel:y_end_rel, x_start_rel:x_end_rel
             ]
             zero_warp = np.zeros((z_size, y_size, x_size, 3), dtype=np.float32)
             return core_chunk, zero_warp
 
         # 2. Check for NaN or inf values
         if np.any(np.isnan(moving_chunk_np)) or np.any(np.isnan(fixed_chunk_np)):
-            message = (
-                "Block contains NaN values. Skipping registration."
-            )
+            message = "Block contains NaN values. Skipping registration."
             self._log.warning(message)
             warnings.warn(message)
 
@@ -759,18 +765,14 @@ class ChunkedImageRegistration(ImageRegistration):
             x_end_rel = x_start_rel + x_size
 
             core_chunk = moving_chunk_np[
-                z_start_rel:z_end_rel,
-                y_start_rel:y_end_rel,
-                x_start_rel:x_end_rel
+                z_start_rel:z_end_rel, y_start_rel:y_end_rel, x_start_rel:x_end_rel
             ]
             zero_warp = np.zeros((z_size, y_size, x_size, 3), dtype=np.float32)
             return core_chunk, zero_warp
 
         # 3. Check for inf values
         if np.any(np.isinf(moving_chunk_np)) or np.any(np.isinf(fixed_chunk_np)):
-            message = (
-                "Block contains inf values. Skipping registration."
-            )
+            message = "Block contains inf values. Skipping registration."
             self._log.warning(message)
             warnings.warn(message)
 
@@ -783,9 +785,7 @@ class ChunkedImageRegistration(ImageRegistration):
             x_end_rel = x_start_rel + x_size
 
             core_chunk = moving_chunk_np[
-                z_start_rel:z_end_rel,
-                y_start_rel:y_end_rel,
-                x_start_rel:x_end_rel
+                z_start_rel:z_end_rel, y_start_rel:y_end_rel, x_start_rel:x_end_rel
             ]
             zero_warp = np.zeros((z_size, y_size, x_size, 3), dtype=np.float32)
             return core_chunk, zero_warp
@@ -826,9 +826,7 @@ class ChunkedImageRegistration(ImageRegistration):
         x_end_rel = x_start_rel + (chunk.x_end - chunk.x_start)
 
         nonlinear_transformed = nonlinear_transformed[
-            z_start_rel:z_end_rel,
-            y_start_rel:y_end_rel,
-            x_start_rel:x_end_rel
+            z_start_rel:z_end_rel, y_start_rel:y_end_rel, x_start_rel:x_end_rel
         ]
 
         # Read the nonlinear transform
@@ -836,28 +834,61 @@ class ChunkedImageRegistration(ImageRegistration):
 
         # Strip the overlap from the warp as well
         warp = warp[
-            z_start_rel:z_end_rel,
-            y_start_rel:y_end_rel,
-            x_start_rel:x_end_rel,
-            :
+            z_start_rel:z_end_rel, y_start_rel:y_end_rel, x_start_rel:x_end_rel, :
         ]
 
         return nonlinear_transformed, warp
 
-    def extract_chunk(self, chunk: ChunkInfo, fixed_image: ants.ANTsImage,
-                      moving_image: ants.ANTsImage) -> tuple[Any, Any]:
+    def extract_chunk(
+        self,
+        chunk: ChunkInfo,
+        fixed_image: ants.ANTsImage,
+        moving_image: ants.ANTsImage,
+    ) -> tuple[Any, Any]:
+        """
+        Extract corresponding chunks from fixed and moving images.
+
+        Extracts regions from both the fixed and moving images based on the
+        extended boundaries defined in the chunk information. The extended
+        boundaries include overlap regions to ensure smooth transitions
+        between adjacent chunks during registration.
+
+        Parameters
+        ----------
+        chunk : ChunkInfo
+            Data class containing chunk boundary information including both
+            core boundaries (z_start, z_end, etc.) and extended boundaries
+            (z_start_ext, z_end_ext, etc.) that include overlap regions.
+        fixed_image : ants.ANTsImage
+            The fixed reference image from which to extract a chunk.
+        moving_image : ants.ANTsImage
+            The moving image from which to extract a chunk.
+
+        Returns
+        -------
+        fixed_chunk : ants.ANTsImage
+            Extracted region from the fixed image using extended boundaries.
+        moving_chunk : ants.ANTsImage
+            Extracted region from the moving image using extended boundaries.
+
+        Notes
+        -----
+        Both chunks are extracted using the extended boundaries to include
+        overlap regions with neighboring chunks. This overlap helps prevent
+        artifacts at chunk boundaries during registration.
+        """
         # Extract moving chunk (using extended boundaries)
         moving_chunk = ants.crop_indices(
             moving_image,
             lowerind=(chunk.z_start_ext, chunk.y_start_ext, chunk.x_start_ext),
-            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext)
+            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext),
         )
 
         # Extract fixed chunk for applying the transform
         fixed_chunk = ants.crop_indices(
             fixed_image,
             lowerind=(chunk.z_start_ext, chunk.y_start_ext, chunk.x_start_ext),
-            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext)
+            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext),
         )
         return fixed_chunk, moving_chunk
 
@@ -929,16 +960,16 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
             imaging_round,
             crop,
             enable_logging,
-            force_override
+            force_override,
         )
         self.num_workers = num_workers
 
     def _perform_nonlinear_registration(
-            self,
-            fixed_image: ants.ANTsImage,
-            moving_linear_aligned: ants.ANTsImage,
-            imaging_round: int,
-            save_directory: str
+        self,
+        fixed_image: ants.ANTsImage,
+        moving_linear_aligned: ants.ANTsImage,
+        imaging_round: int,
+        save_directory: str,
     ):
         """Perform chunked nonlinear registration with parallel processing."""
         self._log.info("Beginning Chunked Nonlinear Registration...")
@@ -960,7 +991,7 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
                 moving_linear_aligned,
                 imaging_round,
                 str(self.chunks_dir),  # Use the existing chunks_dir
-                self.force_override
+                self.force_override,
             )
             for chunk_idx, chunk in enumerate(self.chunk_info_list)
         ]
@@ -969,10 +1000,7 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
         with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
             # Submit all chunks
             future_to_chunk = {
-                executor.submit(
-                    _process_chunk_wrapper,
-                    *args
-                ): chunk_idx
+                executor.submit(_process_chunk_wrapper, *args): chunk_idx
                 for chunk_idx, args in enumerate(chunk_args)
             }
 
@@ -985,19 +1013,21 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
 
                     # Place results into output arrays
                     registered_image[
-                        chunk.z_start:chunk.z_end,
-                        chunk.y_start:chunk.y_end,
-                        chunk.x_start:chunk.x_end
+                        chunk.z_start : chunk.z_end,
+                        chunk.y_start : chunk.y_end,
+                        chunk.x_start : chunk.x_end,
                     ] = updated_chunk
 
                     nonlinear_transform[
-                        chunk.z_start:chunk.z_end,
-                        chunk.y_start:chunk.y_end,
-                        chunk.x_start:chunk.x_end,
-                        :
+                        chunk.z_start : chunk.z_end,
+                        chunk.y_start : chunk.y_end,
+                        chunk.x_start : chunk.x_end,
+                        :,
                     ] = local_warp
 
-                    self._log.info(f"Chunk {chunk_idx + 1}/{len(self.chunk_info_list)} completed")
+                    self._log.info(
+                        f"Chunk {chunk_idx + 1}/{len(self.chunk_info_list)} completed"
+                    )
 
                 except Exception as e:
                     self._log.error(f"Chunk {chunk_idx} failed: {str(e)}")
@@ -1027,22 +1057,24 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
             origin=fixed_image.origin,
             spacing=fixed_image.spacing,
             direction=fixed_image.direction,
-            has_components=True
+            has_components=True,
         )
         ants.image_write(warp_image, nonlinear_transformation_path)
-        self._log.info(f"Nonlinear transform written to: {nonlinear_transformation_path}")
+        self._log.info(
+            f"Nonlinear transform written to: {nonlinear_transformation_path}"
+        )
 
         return registered_image, nonlinear_transformation_path
 
 
 def _process_chunk_wrapper(
-        chunk_idx: int,
-        chunk,
-        fixed_image: ants.ANTsImage,
-        moving_image: ants.ANTsImage,
-        imaging_round: int,
-        chunk_dir: str,
-        force_override: bool
+    chunk_idx: int,
+    chunk,
+    fixed_image: ants.ANTsImage,
+    moving_image: ants.ANTsImage,
+    imaging_round: int,
+    chunk_dir: str,
+    force_override: bool,
 ):
     """
     Wrapper for chunk processing that can be pickled for multiprocessing.
@@ -1054,16 +1086,14 @@ def _process_chunk_wrapper(
     registrar = ChunkedImageRegistration.__new__(ChunkedImageRegistration)
     registrar.force_override = force_override
     registrar.chunks_dir = Path(chunk_dir)
-    registrar._log = initialize_logging(
-        log_directory=chunk_dir,
-        enable_logging=True
-    )
+    registrar._log = initialize_logging(log_directory=chunk_dir, enable_logging=True)
 
     return registrar.register_chunk(
         chunk=chunk,
         fixed_image=fixed_image,
         moving_image=moving_image,
     )
+
 
 def register_round(
     fixed_image_path: str | Path,
@@ -1124,5 +1154,3 @@ def register_round(
         enable_logging=enable_logging,
     )
     registrar.register()
-
-

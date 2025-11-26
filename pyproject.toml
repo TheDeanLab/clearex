@@ -14,6 +14,7 @@ requires-python = ">=3.11"
 
 dependencies = [
     "antspyx",
+    "black>=25.11.0",
     "bokeh>=3.1.0",
     "cython>=3.1.4",
     "dask==2025.1.0",
@@ -28,9 +29,10 @@ dependencies = [
     "pandas",
     "pre-commit",
     "pywavelets",
+    "ruff>=0.14.6",
     "scikit-image",
     "scipy",
-    "scipy-stubs==1.16.3.0",
+    "scipy-stubs~=1.15.3",
     "seaborn",
     "SimpleITK",
     "tifffile==2025.1.10",
