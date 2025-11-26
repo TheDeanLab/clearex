@@ -631,17 +631,59 @@ class ChunkedImageRegistration(ImageRegistration):
         """
         self._log.info(f"Processing chunk {chunk.chunk_id}...")
 
-        # Extract chunk from images (using extended boundaries)
-        fixed_chunk = ants.crop_indices(
-            fixed_image,
-            lowerind=(chunk.z_start_ext, chunk.y_start_ext, chunk.x_start_ext),
-            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext)
-        )
-        moving_chunk = ants.crop_indices(
-            moving_image,
-            lowerind=(chunk.z_start_ext, chunk.y_start_ext, chunk.x_start_ext),
-            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext)
-        )
+        # Check if this chunk has already been registered
+        local_warp_path = self.chunks_dir / f"chunk_{chunk.chunk_id:04d}_warp.nii.gz"
+
+        if local_warp_path.exists():
+            self._log.info(f"  Found existing transform for chunk {chunk.chunk_id}. Loading...")
+
+            fixed_chunk, moving_chunk = self.extract_chunk(chunk, fixed_image,
+                                                           moving_image)
+
+            # Load the existing transform
+            warp_image = ants.image_read(str(local_warp_path))
+
+            # Apply the transform to the moving chunk
+            nonlinear_transformed = ants.apply_transforms(
+                fixed=fixed_chunk,
+                moving=moving_chunk,
+                transformlist=[str(local_warp_path)],
+                interpolator='linear'
+            )
+
+            # Update chunk info with transform path
+            chunk.nonlinear_transform_path = local_warp_path
+            self._log.info(f"  Loaded and applied existing transform: {local_warp_path}")
+
+            # Convert to numpy
+            nonlinear_transformed = nonlinear_transformed.numpy()
+            warp = warp_image.numpy()
+
+            # Strip the overlap to return only the core chunk
+            z_start_rel = chunk.z_start - chunk.z_start_ext
+            z_end_rel = z_start_rel + (chunk.z_end - chunk.z_start)
+            y_start_rel = chunk.y_start - chunk.y_start_ext
+            y_end_rel = y_start_rel + (chunk.y_end - chunk.y_start)
+            x_start_rel = chunk.x_start - chunk.x_start_ext
+            x_end_rel = x_start_rel + (chunk.x_end - chunk.x_start)
+
+            nonlinear_transformed = nonlinear_transformed[
+                z_start_rel:z_end_rel,
+                y_start_rel:y_end_rel,
+                x_start_rel:x_end_rel
+            ]
+
+            warp = warp[
+                z_start_rel:z_end_rel,
+                y_start_rel:y_end_rel,
+                x_start_rel:x_end_rel,
+                :
+            ]
+
+            return nonlinear_transformed, warp
+
+        fixed_chunk, moving_chunk = self.extract_chunk(chunk, fixed_image,
+                                                       moving_image)
 
         # Pre-registration checks.
         fixed_chunk_np = fixed_chunk.numpy()
@@ -730,6 +772,24 @@ class ChunkedImageRegistration(ImageRegistration):
         ]
 
         return nonlinear_transformed, warp
+
+    def extract_chunk(self, chunk: ChunkInfo, fixed_image: ANTsImage,
+                      moving_image: ANTsImage) -> tuple[Any, Any]:
+        # Extract moving chunk (using extended boundaries)
+        moving_chunk = ants.crop_indices(
+            moving_image,
+            lowerind=(chunk.z_start_ext, chunk.y_start_ext, chunk.x_start_ext),
+            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext)
+        )
+
+        # Extract fixed chunk for applying the transform
+        fixed_chunk = ants.crop_indices(
+            fixed_image,
+            lowerind=(chunk.z_start_ext, chunk.y_start_ext, chunk.x_start_ext),
+            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext)
+        )
+        return fixed_chunk, moving_chunk
+
 
 def register_round(
     fixed_image_path: str | Path,
