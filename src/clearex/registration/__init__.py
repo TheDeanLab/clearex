@@ -91,6 +91,8 @@ class ImageRegistration:
         Whether to crop the moving image before registration.
     enable_logging : bool
         Whether to enable logging.
+    force_override : bool
+        Whether to force re-registration even if transforms already exist.
     _log : Logger
         Logger instance for this registration.
     _image_opener : ImageOpener
@@ -105,6 +107,7 @@ class ImageRegistration:
         imaging_round: int = 0,
         crop: bool = False,
         enable_logging: bool = True,
+        force_override: bool = False,
     ):
         """
         Initialize the ImageRegistration instance.
@@ -123,12 +126,15 @@ class ImageRegistration:
             Whether to crop the moving image before registration (default is False).
         enable_logging : bool, optional
             Whether to enable logging (default is True).
+        force_override : bool, optional
+            Whether to force re-registration even if transforms already exist (default is False).
         """
         self.fixed_image_path = fixed_image_path
         self.moving_image_path = moving_image_path
         self.save_directory = save_directory
         self.imaging_round = imaging_round
         self.crop = crop
+        self.force_override = force_override
         self._image_opener = ImageOpener()
 
         # Initialize logging
@@ -240,7 +246,7 @@ class ImageRegistration:
             save_directory, f"linear_transform_{imaging_round}.mat"
         )
 
-        if os.path.exists(linear_transformation_path):
+        if os.path.exists(linear_transformation_path) and not self.force_override:
             self._log.info(
                 f"Linear transformation already exists at {linear_transformation_path}. "
                 "Skipping registration."
@@ -255,6 +261,8 @@ class ImageRegistration:
                 interpolation='linear'
             )
         else:
+            if self.force_override and os.path.exists(linear_transformation_path):
+                self._log.info(f"Force override enabled. Re-computing linear registration.")
             self._log.info("Performing Linear Registration...")
             result, stdout, stderr = capture_c_level_output(
                 linear_registration,
@@ -300,12 +308,14 @@ class ImageRegistration:
             save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
         )
 
-        if os.path.exists(nonlinear_transformation_path):
+        if os.path.exists(nonlinear_transformation_path) and not self.force_override:
             self._log.info(
                 f"Nonlinear transformation already exists at "
                 f"{nonlinear_transformation_path}. Skipping registration."
             )
         else:
+            if self.force_override and os.path.exists(nonlinear_transformation_path):
+                self._log.info(f"Force override enabled. Re-computing nonlinear registration.")
             self._log.info("Beginning Nonlinear Registration...")
             result, stdout, stderr = capture_c_level_output(
                 nonlinear_registration,
@@ -371,6 +381,8 @@ class ChunkedImageRegistration(ImageRegistration):
         Whether to crop the moving image before registration.
     enable_logging : bool
         Whether to enable logging.
+    force_override : bool
+        Whether to force re-registration even if transforms already exist.
     """
 
     def __init__(
@@ -381,6 +393,7 @@ class ChunkedImageRegistration(ImageRegistration):
         imaging_round: int = 0,
         crop: bool = False,
         enable_logging: bool = True,
+        force_override: bool = False,
     ):
         """
         Initialize the ChunkedImageRegistration instance.
@@ -399,6 +412,8 @@ class ChunkedImageRegistration(ImageRegistration):
             Whether to crop the moving image before registration (default is False).
         enable_logging : bool, optional
             Whether to enable logging (default is True).
+        force_override : bool, optional
+            Whether to force re-registration even if transforms already exist (default is False).
         """
         # Initialize the parent class
         super().__init__(
@@ -407,7 +422,8 @@ class ChunkedImageRegistration(ImageRegistration):
             save_directory,
             imaging_round,
             crop,
-            enable_logging
+            enable_logging,
+            force_override
         )
 
         #  Chunking parameters    
@@ -634,7 +650,7 @@ class ChunkedImageRegistration(ImageRegistration):
         # Check if this chunk has already been registered
         local_warp_path = self.chunks_dir / f"chunk_{chunk.chunk_id:04d}_warp.nii.gz"
 
-        if local_warp_path.exists():
+        if local_warp_path.exists() and not self.force_override:
             self._log.info(f"  Found existing transform for chunk {chunk.chunk_id}. Loading...")
 
             fixed_chunk, moving_chunk = self.extract_chunk(chunk, fixed_image,
@@ -681,6 +697,10 @@ class ChunkedImageRegistration(ImageRegistration):
             ]
 
             return nonlinear_transformed, warp
+
+        # If force_override and transform exists, log it
+        if self.force_override and local_warp_path.exists():
+            self._log.info(f"  Force override enabled. Re-computing chunk {chunk.chunk_id} registration.")
 
         fixed_chunk, moving_chunk = self.extract_chunk(chunk, fixed_image,
                                                        moving_image)
@@ -773,8 +793,8 @@ class ChunkedImageRegistration(ImageRegistration):
 
         return nonlinear_transformed, warp
 
-    def extract_chunk(self, chunk: ChunkInfo, fixed_image: ANTsImage,
-                      moving_image: ANTsImage) -> tuple[Any, Any]:
+    def extract_chunk(self, chunk: ChunkInfo, fixed_image: ants.ANTsImage,
+                      moving_image: ants.ANTsImage) -> tuple[Any, Any]:
         # Extract moving chunk (using extended boundaries)
         moving_chunk = ants.crop_indices(
             moving_image,
