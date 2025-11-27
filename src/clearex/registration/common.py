@@ -211,64 +211,61 @@ def calculate_metrics(fixed, moving, mask=None, sampling="regular", sampling_pct
     return metric_results
 
 
-def crop_data(logging_instance: Logger,
-              crop: bool | None,
-              imaging_round: int | None,
-              image: ndarray,
-              save_directory: str | Path,
-              image_type: str = ""
-              ) -> Any:
+def crop_data(
+    logging_instance: Logger,
+    crop: bool | None,
+    imaging_round: int | None,
+    image: ndarray,
+    save_directory: str | Path,
+    image_type: str = "",
+) -> Any:
     """
-     Crop an image to its minimal bounding box or load existing crop indices.
+    Crop an image to its minimal bounding box or load existing crop indices.
 
-     Identifies and applies a minimal bounding box around non-background voxels
-     in the image. Crop indices are saved to disk for reproducibility and reuse.
+    Identifies and applies a minimal bounding box around non-background voxels
+    in the image. Crop indices are saved to disk for reproducibility and reuse.
 
-     Parameters
-     ----------
-     logging_instance : Logger
-         Logger instance for recording crop operations.
-     crop : bool or None
-         Whether to perform cropping. If False or None, returns the image as an
-         ANTsImage without cropping.
-     imaging_round : int or None
-         The round number used to identify the crop indices file. If None, the
-         file is named without a round suffix.
-     image : ndarray
-         The image array to be cropped.
-     save_directory : str or Path
-         Directory where crop indices JSON file will be saved or loaded from.
-     image_type : str, optional
-         Type of image being cropped, either "fixed" or "moving", used for naming
-         the crop indices file. Default is "".
+    Parameters
+    ----------
+    logging_instance : Logger
+        Logger instance for recording crop operations.
+    crop : bool or None
+        Whether to perform cropping. If False or None, returns the image as an
+        ANTsImage without cropping.
+    imaging_round : int or None
+        The round number used to identify the crop indices file. If None, the
+        file is named without a round suffix.
+    image : ndarray
+        The image array to be cropped.
+    save_directory : str or Path
+        Directory where crop indices JSON file will be saved or loaded from.
+    image_type : str, optional
+        Type of image being cropped, either "fixed" or "moving", used for naming
+        the crop indices file. Default is "".
 
-     Returns
-     -------
-     ants.core.ants_image.ANTsImage
-         The cropped image as an ANTsImage (if crop=True), or the original image
-         converted to ANTsImage (if crop=False).
+    Returns
+    -------
+    ants.core.ants_image.ANTsImage
+        The cropped image as an ANTsImage (if crop=True), or the original image
+        converted to ANTsImage (if crop=False).
 
-     Notes
-     -----
-     Crop indices are saved as JSON files in the format:
-     - `{image_type}_crop_indices_{imaging_round}.json` (if imaging_round is provided)
-     - `{image_type}_crop_indices.json` (if imaging_round is None)
-     """
+    Notes
+    -----
+    Crop indices are saved as JSON files in the format:
+    - `{image_type}_crop_indices_{imaging_round}.json` (if imaging_round is provided)
+    - `{image_type}_crop_indices.json` (if imaging_round is None)
+    """
 
     # Only crop the moving data since the fixed data defines the coordinate space.
     if crop:
-        # Convert to AntsImage for cropping
-        image = ants.from_numpy(image)
+        # # Convert to AntsImage for cropping
+        # image = ants.from_numpy(image)
 
         if imaging_round is None:
-            json_path = os.path.join(
-                save_directory,
-                f"{image_type}_crop_indices.json"
-            )
+            json_path = os.path.join(save_directory, f"{image_type}_crop_indices.json")
         else:
             json_path = os.path.join(
-                save_directory,
-                f"{image_type}_crop_indices_{imaging_round}.json"
+                save_directory, f"{image_type}_crop_indices_{imaging_round}.json"
             )
 
         if os.path.exists(json_path):
@@ -290,15 +287,17 @@ def crop_data(logging_instance: Logger,
                 json.dump([z0, z1, y0, y1, x0, x1], f)
             logging_instance.info(f"Crop indices saved to: {json_path}")
 
-        image = ants.crop_indices(
-            image, lowerind=(z0, y0, x0), upperind=(z1, y1, x1)
-        )
+        # image = ants.crop_indices(
+        #     image, lowerind=(z0, y0, x0), upperind=(z1, y1, x1)
+        # )
+
+        image = image[z0:z1, y0:y1, x0:x1]
         logging_instance.info(f"Moving image cropped to: {image.shape}.")
 
     else:
         logging_instance.info("Cropping not enabled; proceeding without cropping.")
-        image = ants.from_numpy(image)
-    return image
+
+    return ants.from_numpy(image)
 
 
 def bulk_transform_directory(

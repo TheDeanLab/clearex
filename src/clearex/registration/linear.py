@@ -148,10 +148,10 @@ def register_image(
         kwargs["reg_iterations"] = (1,)
         kwargs["smoothing_sigmas"] = (0,)
         kwargs["shrink_factors"] = (8,)
-        kwargs["aff_random_sampling_rate"] = (0.1,)
-
+        kwargs["aff_random_sampling_rate"] = 0.1
     logger.info(
-        f"Using {kwargs["type_of_transform"]} registration with {kwargs['reg_iterations']} iterations."
+        f"Using {kwargs['type_of_transform']} registration "
+        f"with {kwargs['reg_iterations']} iterations."
     )
 
     # Register the images. This will return a dictionary with the results.

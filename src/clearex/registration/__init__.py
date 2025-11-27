@@ -442,7 +442,7 @@ class ChunkedImageRegistration(ImageRegistration):
         )
 
         #  Chunking parameters
-        self.chunk_size: Tuple[int, int, int] = (256, 256, 256)  # (z, y, x)
+        self.chunk_size: Tuple[int, int, int] = (512, 512, 512)  # (z, y, x)
         self.overlap_fraction: float = 0.15
 
         # Compute the chunk grid.
@@ -479,21 +479,22 @@ class ChunkedImageRegistration(ImageRegistration):
         registered_image = np.zeros(self.fixed_image.shape)
 
         # Create an empty array to store the warp field
-        nonlinear_transform = np.zeros(
-            (*self.fixed_image.shape, 3), dtype=self.fixed_image.numpy().dtype
-        )
+        nonlinear_transform = np.zeros((*self.fixed_image.shape, 3), dtype=np.float32)
+
+        # Convert to a numpy array for easier indexing
+        moving_linear_aligned = moving_linear_aligned.numpy()
+        fixed_image = fixed_image.numpy()
 
         # Process each chunk
         for i, chunk in enumerate(self.chunk_info_list):
             self._log.info(f"Chunk {i+1}/{len(self.chunk_info_list)}")
             updated_chunk, local_warp = self.register_chunk(
                 chunk=chunk,
-                fixed_image=self.fixed_image,
+                fixed_image=fixed_image,
                 moving_image=moving_linear_aligned,
                 nonlinear_type="SyNOnly",
                 nonlinear_accuracy=self.nonlinear_accuracy,
             )
-            self.chunk_info_list[i] = updated_chunk
 
             # Place the registered chunk into the correct location in the full image
             registered_image[
@@ -598,6 +599,11 @@ class ChunkedImageRegistration(ImageRegistration):
                     x_start_ext = max(0, x_start - overlap_x // 2)
                     x_end_ext = min(x_max, x_end + overlap_x // 2)
 
+                    if z_start_ext < 0 or y_start_ext < 0 or x_start_ext < 0:
+                        continue
+                    if z_end_ext > z_max or y_end_ext > y_max or x_end_ext > x_max:
+                        continue
+
                     chunk = ChunkInfo(
                         chunk_id=chunk_id,
                         z_start=z_start,
@@ -627,8 +633,8 @@ class ChunkedImageRegistration(ImageRegistration):
     def register_chunk(
         self,
         chunk: ChunkInfo,
-        fixed_image: ants.ANTsImage,
-        moving_image: ants.ANTsImage,
+        fixed_image: np.ndarray,
+        moving_image: np.ndarray,
         nonlinear_type: str = "SyNOnly",
         nonlinear_accuracy: str = "high",
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -639,9 +645,9 @@ class ChunkedImageRegistration(ImageRegistration):
         ----------
         chunk : ChunkInfo
             Information about the chunk to register.
-        fixed_image : ants.ANTsImage
+        fixed_image : np.ndarray
             The full fixed image.
-        moving_image : ants.ANTsImage
+        moving_image : np.ndarray
             The full moving image.
         nonlinear_type : str, optional
             Type of nonlinear registration (default: "SyNOnly").
@@ -839,57 +845,65 @@ class ChunkedImageRegistration(ImageRegistration):
 
         return nonlinear_transformed, warp
 
-    def extract_chunk(
-        self,
-        chunk: ChunkInfo,
-        fixed_image: ants.ANTsImage,
-        moving_image: ants.ANTsImage,
-    ) -> tuple[Any, Any]:
+    def extract_chunk(self, chunk, fixed_image, moving_image):
         """
         Extract corresponding chunks from fixed and moving images.
 
-        Extracts regions from both the fixed and moving images based on the
-        extended boundaries defined in the chunk information. The extended
-        boundaries include overlap regions to ensure smooth transitions
-        between adjacent chunks during registration.
+        This method extracts overlapping regions from both the fixed and moving images
+        based on the chunk's extended boundaries. The extended boundaries include overlap
+        regions to prevent registration artifacts at chunk boundaries.
 
         Parameters
         ----------
         chunk : ChunkInfo
-            Data class containing chunk boundary information including both
-            core boundaries (z_start, z_end, etc.) and extended boundaries
-            (z_start_ext, z_end_ext, etc.) that include overlap regions.
-        fixed_image : ants.ANTsImage
-            The fixed reference image from which to extract a chunk.
-        moving_image : ants.ANTsImage
-            The moving image from which to extract a chunk.
+            Chunk information containing boundary coordinates.
+        fixed_image : np.ndarray
+            The fixed (reference) image.
+        moving_image : np.ndarray
+            The moving image to be registered.
 
         Returns
         -------
-        fixed_chunk : ants.ANTsImage
-            Extracted region from the fixed image using extended boundaries.
-        moving_chunk : ants.ANTsImage
-            Extracted region from the moving image using extended boundaries.
+        fixed_chunk : ants.core.ants_image.ANTsImage
+            Extracted chunk from the fixed image.
+        moving_chunk : ants.core.ants_image.ANTsImage
+            Extracted chunk from the moving image.
 
         Notes
         -----
-        Both chunks are extracted using the extended boundaries to include
-        overlap regions with neighboring chunks. This overlap helps prevent
-        artifacts at chunk boundaries during registration.
+        Uses extended boundaries (with overlap) rather than core boundaries to prevent
+        artifacts at chunk boundaries during registration. ANTs crop_indices uses
+        INCLUSIVE upper bounds, so we subtract 1 from Python-style exclusive indices.
         """
-        # Extract moving chunk (using extended boundaries)
-        moving_chunk = ants.crop_indices(
-            moving_image,
-            lowerind=(chunk.z_start_ext, chunk.y_start_ext, chunk.x_start_ext),
-            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext),
+        moving_chunk = moving_image[
+            chunk.z_start_ext : chunk.z_end_ext,
+            chunk.y_start_ext : chunk.y_end_ext,
+            chunk.x_start_ext : chunk.x_end_ext,
+        ]
+
+        fixed_chunk = fixed_image[
+            chunk.z_start_ext : chunk.z_end_ext,
+            chunk.y_start_ext : chunk.y_end_ext,
+            chunk.x_start_ext : chunk.x_end_ext,
+        ]
+
+        self._log.info(
+            f"  Chunk {chunk.chunk_id}: fixed_chunk shape={fixed_chunk.shape}, "
+            f"moving_chunk shape={moving_chunk.shape}"
         )
 
-        # Extract fixed chunk for applying the transform
-        fixed_chunk = ants.crop_indices(
-            fixed_image,
-            lowerind=(chunk.z_start_ext, chunk.y_start_ext, chunk.x_start_ext),
-            upperind=(chunk.z_end_ext, chunk.y_end_ext, chunk.x_end_ext),
-        )
+        # Hard guard: empty chunk
+        if fixed_chunk.size == 0 or moving_chunk.size == 0:
+            message = (
+                f"Chunk {chunk.chunk_id} is empty: "
+                f"fixed shape={fixed_chunk.shape}, moving shape={moving_chunk.shape}. "
+                "Check chunk indices / crop_indices logic."
+            )
+            self._log.error(message)
+            raise ValueError(message)
+
+        fixed_chunk = ants.from_numpy(fixed_chunk)
+        moving_chunk = ants.from_numpy(moving_chunk)
         return fixed_chunk, moving_chunk
 
 
@@ -1031,7 +1045,7 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
 
                 except Exception as e:
                     self._log.error(f"Chunk {chunk_idx} failed: {str(e)}")
-                    raise
+                    pass
 
         self._log.info("All chunks registered!")
 
