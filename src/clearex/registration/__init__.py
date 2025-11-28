@@ -138,8 +138,8 @@ class ImageRegistration:
         self.crop = crop
         self.force_override = force_override
         self._image_opener = ImageOpener()
-        self.linear_accuracy = "dry run"
-        self.nonlinear_accuracy = "dry run"
+        self.linear_accuracy = "low"
+        self.nonlinear_accuracy = "high"
 
         # Initialize logging
         self._log = initialize_logging(
@@ -473,7 +473,9 @@ class ChunkedImageRegistration(ImageRegistration):
         self._compute_chunk_grid(self.fixed_image.shape)
 
         # Create directory for chunk transforms
-        self.chunks_dir = Path(self.save_directory) / "chunks"
+        self.chunks_dir = Path(self.save_directory) / (
+            f"round_{self.imaging_round}_chunks"
+        )
         self.chunks_dir.mkdir(exist_ok=True)
 
         # Create an empty array to store the numpy transformed chunks to
