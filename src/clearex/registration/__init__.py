@@ -290,6 +290,7 @@ class ImageRegistration:
             ants.write_transform(transform, linear_transformation_path)
             self._log.info(f"Linear Transform written to: {linear_transformation_path}")
 
+        self.linear_transform = transform
         return moving_linear_aligned
 
     def _perform_nonlinear_registration(
@@ -445,13 +446,6 @@ class ChunkedImageRegistration(ImageRegistration):
         self.chunk_size: Tuple[int, int, int] = (512, 512, 512)  # (z, y, x)
         self.overlap_fraction: float = 0.15
 
-        # Compute the chunk grid.
-        self._compute_chunk_grid(self.fixed_image_info.shape)
-
-        # Create directory for chunk transforms
-        self.chunks_dir = Path(self.save_directory) / "chunks"
-        self.chunks_dir.mkdir(exist_ok=True)
-
     def _perform_nonlinear_registration(
         self,
         fixed_image: ants.ANTsImage,
@@ -475,11 +469,20 @@ class ChunkedImageRegistration(ImageRegistration):
         """
         self._log.info("Beginning Chunked Nonlinear Registration...")
 
+        # Compute the chunk grid.
+        self._compute_chunk_grid(self.fixed_image.shape)
+
+        # Create directory for chunk transforms
+        self.chunks_dir = Path(self.save_directory) / "chunks"
+        self.chunks_dir.mkdir(exist_ok=True)
+
         # Create an empty array to store the numpy transformed chunks to
         registered_image = np.zeros(self.fixed_image.shape)
 
         # Create an empty array to store the warp field
         nonlinear_transform = np.zeros((*self.fixed_image.shape, 3), dtype=np.float32)
+
+        fixed_image_ants = fixed_image
 
         # Convert to a numpy array for easier indexing
         moving_linear_aligned = moving_linear_aligned.numpy()
@@ -532,8 +535,26 @@ class ChunkedImageRegistration(ImageRegistration):
         self._log.info(f"Nonlinear registered image written to: {nonlinear_image_path}")
 
         # Convert the warp field to an ANTs image and save
-        nonlinear_transform = ants.from_numpy(nonlinear_transform)
-        ants.write_transform(nonlinear_transform, nonlinear_transformation_path)
+        nonlinear_transform = ants.from_numpy(
+            nonlinear_transform,
+            origin=fixed_image_ants.origin,
+            spacing=fixed_image_ants.spacing,
+            direction=fixed_image_ants.direction,
+            has_components=True,  # IMPORTANT: makes it a vector image
+        )
+
+        # Ensure the path has .nii.gz extension
+        nonlinear_transformation_path = Path(nonlinear_transformation_path)
+        if (
+            nonlinear_transformation_path.suffix != ".gz"
+            or nonlinear_transformation_path.stem.split(".")[-1] != "nii"
+        ):
+            # Remove existing extension(s) and add .nii.gz
+            nonlinear_transformation_path = nonlinear_transformation_path.with_suffix(
+                ".nii.gz"
+            )
+
+        ants.image_write(nonlinear_transform, str(nonlinear_transformation_path))
         self._log.info(f"Nonlinear warp written to: {nonlinear_transformation_path}")
 
     def _compute_chunk_grid(self, image_shape) -> List[ChunkInfo]:
@@ -578,10 +599,19 @@ class ChunkedImageRegistration(ImageRegistration):
         step_y: int = int(chunk_y - overlap_y)
         step_x: int = int(chunk_x - overlap_x)
 
-        # Iterate through the volume
-        z_positions = list(range(0, z_max, step_z))  # type: ignore[arg-type]
-        y_positions = list(range(0, y_max, step_y))  # type: ignore[arg-type]
-        x_positions = list(range(0, x_max, step_x))  # type: ignore[arg-type]
+        # Generate positions ensuring we cover the entire volume
+        z_positions = list(range(0, z_max, step_z))
+        # Ensure we capture the end if the last position + chunk_size doesn't reach z_max
+        if z_positions[-1] + chunk_z < z_max:
+            z_positions.append(z_max - chunk_z)
+
+        y_positions = list(range(0, y_max, step_y))
+        if y_positions[-1] + chunk_y < y_max:
+            y_positions.append(y_max - chunk_y)
+
+        x_positions = list(range(0, x_max, step_x))
+        if x_positions[-1] + chunk_x < x_max:
+            x_positions.append(x_max - chunk_x)
 
         for z_start in z_positions:
             for y_start in y_positions:
@@ -599,9 +629,29 @@ class ChunkedImageRegistration(ImageRegistration):
                     x_start_ext = max(0, x_start - overlap_x // 2)
                     x_end_ext = min(x_max, x_end + overlap_x // 2)
 
-                    if z_start_ext < 0 or y_start_ext < 0 or x_start_ext < 0:
+                    # Validate chunk dimensions
+                    if (
+                        (z_end - z_start) <= 0
+                        or (y_end - y_start) <= 0
+                        or (x_end - x_start) <= 0
+                    ):
+                        self._log.warning(
+                            f"Skipping invalid core chunk: "
+                            f"z=[{z_start}:{z_end}], y=[{y_start}:{y_end}], x=[{x_start}:{x_end}]"
+                        )
                         continue
-                    if z_end_ext > z_max or y_end_ext > y_max or x_end_ext > x_max:
+
+                    if (
+                        (z_end_ext - z_start_ext) <= 0
+                        or (y_end_ext - y_start_ext) <= 0
+                        or (x_end_ext - x_start_ext) <= 0
+                    ):
+                        self._log.warning(
+                            f"Skipping invalid extended chunk: "
+                            f"z_ext=[{z_start_ext}:{z_end_ext}], "
+                            f"y_ext=[{y_start_ext}:{y_end_ext}], "
+                            f"x_ext=[{x_start_ext}:{x_end_ext}]"
+                        )
                         continue
 
                     chunk = ChunkInfo(
@@ -845,7 +895,9 @@ class ChunkedImageRegistration(ImageRegistration):
 
         return nonlinear_transformed, warp
 
-    def extract_chunk(self, chunk, fixed_image, moving_image):
+    def extract_chunk(
+        self, chunk: ChunkInfo, fixed_image: np.ndarray, moving_image: np.ndarray
+    ) -> Tuple[ants.ANTsImage, ants.ANTsImage]:
         """
         Extract corresponding chunks from fixed and moving images.
 
@@ -868,13 +920,30 @@ class ChunkedImageRegistration(ImageRegistration):
             Extracted chunk from the fixed image.
         moving_chunk : ants.core.ants_image.ANTsImage
             Extracted chunk from the moving image.
-
-        Notes
-        -----
-        Uses extended boundaries (with overlap) rather than core boundaries to prevent
-        artifacts at chunk boundaries during registration. ANTs crop_indices uses
-        INCLUSIVE upper bounds, so we subtract 1 from Python-style exclusive indices.
         """
+        # Log the extraction parameters
+        self._log.debug(
+            f"  Extracting chunk {chunk.chunk_id}:\n"
+            f"    Image shape: {moving_image.shape}\n"
+            f"    z: [{chunk.z_start_ext}:{chunk.z_end_ext}] (size={chunk.z_end_ext - chunk.z_start_ext})\n"
+            f"    y: [{chunk.y_start_ext}:{chunk.y_end_ext}] (size={chunk.y_end_ext - chunk.y_start_ext})\n"
+            f"    x: [{chunk.x_start_ext}:{chunk.x_end_ext}] (size={chunk.x_end_ext - chunk.x_start_ext})"
+        )
+
+        # Validate indices before slicing
+        if chunk.z_end_ext <= chunk.z_start_ext:
+            raise ValueError(
+                f"Invalid z indices for chunk {chunk.chunk_id}: [{chunk.z_start_ext}:{chunk.z_end_ext}]"
+            )
+        if chunk.y_end_ext <= chunk.y_start_ext:
+            raise ValueError(
+                f"Invalid y indices for chunk {chunk.chunk_id}: [{chunk.y_start_ext}:{chunk.y_end_ext}]"
+            )
+        if chunk.x_end_ext <= chunk.x_start_ext:
+            raise ValueError(
+                f"Invalid x indices for chunk {chunk.chunk_id}: [{chunk.x_start_ext}:{chunk.x_end_ext}]"
+            )
+
         moving_chunk = moving_image[
             chunk.z_start_ext : chunk.z_end_ext,
             chunk.y_start_ext : chunk.y_end_ext,
@@ -892,12 +961,15 @@ class ChunkedImageRegistration(ImageRegistration):
             f"moving_chunk shape={moving_chunk.shape}"
         )
 
-        # Hard guard: empty chunk
+        # Validate extracted chunks
         if fixed_chunk.size == 0 or moving_chunk.size == 0:
             message = (
-                f"Chunk {chunk.chunk_id} is empty: "
-                f"fixed shape={fixed_chunk.shape}, moving shape={moving_chunk.shape}. "
-                "Check chunk indices / crop_indices logic."
+                f"Chunk {chunk.chunk_id} is empty after extraction: "
+                f"fixed shape={fixed_chunk.shape}, moving shape={moving_chunk.shape}.\n"
+                f"Chunk indices: z=[{chunk.z_start_ext}:{chunk.z_end_ext}], "
+                f"y=[{chunk.y_start_ext}:{chunk.y_end_ext}], "
+                f"x=[{chunk.x_start_ext}:{chunk.x_end_ext}]\n"
+                f"Image shapes: fixed={fixed_image.shape}, moving={moving_image.shape}"
             )
             self._log.error(message)
             raise ValueError(message)
