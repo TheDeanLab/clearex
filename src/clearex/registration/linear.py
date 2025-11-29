@@ -37,18 +37,19 @@ from scipy.linalg import polar, rq
 from scipy.spatial.transform import Rotation
 
 # Set up logging
-logger = logging.getLogger('registration')
+logger = logging.getLogger("registration")
 if not logger.handlers:
     logger.addHandler(logging.NullHandler())
 
+
 def register_image(
-        moving_image: ants.core.ants_image.ANTsImage | np.ndarray,
-        fixed_image: ants.core.ants_image.ANTsImage | np.ndarray,
-        registration_type: str="TRSAA",
-        accuracy: str="high",
-        verbose: bool=False
+    moving_image: ants.core.ants_image.ANTsImage | np.ndarray,
+    fixed_image: ants.core.ants_image.ANTsImage | np.ndarray,
+    registration_type: str = "TRSAA",
+    accuracy: str = "high",
+    verbose: bool = False,
 ) -> tuple[ants.core.ants_image.ANTsImage, ants.core.ants_transform.ANTsTransform]:
-    """ Linear Image Registration.
+    """Linear Image Registration.
 
     Perform an image registration between the moving image and the fixed
     image. Registration is by default performed via Translation -> Rigid ->
@@ -90,12 +91,20 @@ def register_image(
     """
 
     if registration_type not in [
-        "Translation", "Rigid", "Similarity", "Affine", "TRSAA"
+        "Translation",
+        "Rigid",
+        "Similarity",
+        "Affine",
+        "TRSAA",
     ]:
-        logger.error(f"Unsupported registration type: {registration_type}. "
-                     "Supported types are: Translation, Rigid, Similarity, Affine, TRSAA.")
-        raise ValueError(f"Unsupported registration type: {registration_type}. "
-                         "Supported types are: Translation, Rigid, Similarity, Affine, TRSAA.")
+        logger.error(
+            f"Unsupported registration type: {registration_type}. "
+            "Supported types are: Translation, Rigid, Similarity, Affine, TRSAA."
+        )
+        raise ValueError(
+            f"Unsupported registration type: {registration_type}. "
+            "Supported types are: Translation, Rigid, Similarity, Affine, TRSAA."
+        )
 
     # Convert images to ANTsImage if they are numpy arrays.
     if isinstance(fixed_image, np.ndarray):
@@ -114,39 +123,52 @@ def register_image(
         "aff_metric": "mattes",
         "aff_sampling": 32,
         "aff_random_sampling_rate": 0.50,  # Was 1.0
-        "smoothing_sigmas": (3,2,1,0), # Previously did not provide
-        "shrink_factors": (8,4,2,1), # Previously did not provide
         "verbose": verbose,
-        }
+    }
 
-    if registration_type=="TRSAA":
-        # Multi-resolution iteration schedule
+    if registration_type == "TRSAA":
+        # Multi-resolution iteration schedule.
+        # TODO: I am concerned that the smoothing sigmas are exceedingly slow.
         accuracy = accuracy.lower()
         if accuracy == "high":
             kwargs["reg_iterations"] = (1000, 500, 250, 100)
+            kwargs["smoothing_sigmas"] = (3, 2, 1, 0)
+            kwargs["shrink_factors"] = (8, 4, 2, 1)
+        elif accuracy == "medium":
+            kwargs["reg_iterations"] = (500, 250, 100, 50)
+            kwargs["smoothing_sigmas"] = (3, 2, 1, 0)
+            kwargs["shrink_factors"] = (8, 4, 2, 1)
         elif accuracy == "low":
-            kwargs["reg_iterations"] = (100, 70, 50, 20)
-        elif accuracy == "dry run":
-            kwargs["reg_iterations"] = (1, 1, 1, 1)
+            kwargs["reg_iterations"] = (100, 50, 25, 10)
+            kwargs["smoothing_sigmas"] = (3, 2, 1, 0)
+            kwargs["shrink_factors"] = (8, 4, 2, 1)
 
-        logger.info(f"Using TRSAA registration with {kwargs['reg_iterations']} iterations.")
+    if accuracy == "dry run":
+        kwargs["type_of_transform"] = "Rigid"
+        kwargs["reg_iterations"] = (1,)
+        kwargs["smoothing_sigmas"] = (0,)
+        kwargs["shrink_factors"] = (8,)
+        kwargs["aff_random_sampling_rate"] = 0.1
+    logger.info(
+        f"Using {kwargs['type_of_transform']} registration "
+        f"with {kwargs['reg_iterations']} iterations."
+    )
 
     # Register the images. This will return a dictionary with the results.
     registered = ants.registration(**kwargs)
 
     # Read the transform from the temporary disk location.
-    transform = ants.read_transform(registered['fwdtransforms'][0])
+    transform = ants.read_transform(registered["fwdtransforms"][0])
 
     # Resample the registered image to the target image.
     transformed_image = transform.apply_to_image(
-        image=moving_image,
-        reference=fixed_image,
-        interpolation='linear'
+        image=moving_image, reference=fixed_image, interpolation="linear"
     )
     return transformed_image, transform
 
+
 def inspect_affine_transform(affine_transform):
-    """ Evaluate the affine transform and report it's decomposed parts.
+    """Evaluate the affine transform and report it's decomposed parts.
 
     affine_transform: ants.core.ants_transform.ANTsTransform
     """
@@ -156,7 +178,9 @@ def inspect_affine_transform(affine_transform):
     # Reshape the matrix and calculate the offset.
     affine_matrix = transform_parameters[:9].reshape(3, 3)
     translation_vector = transform_parameters[9:]
-    offset = translation_vector + center_of_rotation - affine_matrix @ center_of_rotation
+    offset = (
+        translation_vector + center_of_rotation - affine_matrix @ center_of_rotation
+    )
 
     # Assemble a complete affine transform matrix.
     final_matrix = np.eye(4)
@@ -171,8 +195,9 @@ def inspect_affine_transform(affine_transform):
     _extract_shear(final_matrix)
     _extract_scale(final_matrix)
 
+
 def _extract_scale(affine_matrix):
-    """ Extract the scaling factors from an affine matrix.
+    """Extract the scaling factors from an affine matrix.
 
     Parameters
     ----------
@@ -183,13 +208,14 @@ def _extract_scale(affine_matrix):
     # Further decompose the scaling/shear using RQ decomposition to separate scale and shear
     scale, _ = rq(scaling_shear)
     scale_vector = np.diagonal(scale)
-    scale_labels = ['Z', 'Y', 'X']
+    scale_labels = ["Z", "Y", "X"]
     for label, scale in zip(scale_labels, scale_vector):
         logger.info(f"{label} Scale: {scale:.2f}-fold")
-        print(f'{label} Scale: {scale:.2f}-fold')
+        print(f"{label} Scale: {scale:.2f}-fold")
+
 
 def _extract_shear(affine_matrix):
-    """ Extract the shearing factors from an affine matrix.
+    """Extract the shearing factors from an affine matrix.
 
     Parameters
     ----------
@@ -202,19 +228,24 @@ def _extract_shear(affine_matrix):
     # Shear factors from off-diagonal elements
     angles_deg = np.degrees(
         [
-            np.arctan(shear[0, 1]), np.arctan(shear[0, 2]), np.arctan(shear[1, 0]),
-            np.arctan(shear[1, 2]), np.arctan(shear[2, 0]), np.arctan(shear[2, 1])
+            np.arctan(shear[0, 1]),
+            np.arctan(shear[0, 2]),
+            np.arctan(shear[1, 0]),
+            np.arctan(shear[1, 2]),
+            np.arctan(shear[2, 0]),
+            np.arctan(shear[2, 1]),
         ]
     )
 
     # Clearly print the results
-    shear_labels = ['XY', 'XZ', 'YX', 'YZ', 'ZX', 'ZY']
+    shear_labels = ["XY", "XZ", "YX", "YZ", "ZX", "ZY"]
     for label, angle in zip(shear_labels, angles_deg):
-        logger.info(f'Shear Angle {label}: {angle:.2f} degrees')
-        print(f'Shear angle {label}: {angle:.2f} degrees')
+        logger.info(f"Shear Angle {label}: {angle:.2f} degrees")
+        print(f"Shear angle {label}: {angle:.2f} degrees")
+
 
 def _extract_translation(affine_matrix):
-    """ Extract the translation factors from an affine matrix.
+    """Extract the translation factors from an affine matrix.
 
     Parameters
     ----------
@@ -223,13 +254,14 @@ def _extract_translation(affine_matrix):
     """
     # Extract the translation
     translation = affine_matrix[:, 3]
-    translation_labels = ['Z', 'Y', 'X']
+    translation_labels = ["Z", "Y", "X"]
     for label, distance in zip(translation_labels, translation):
-        logger.info(f'Translation {label}: {distance:.2f} voxels')
-        print(f'Translation distance in {label}: {distance:.2f} voxels')
+        logger.info(f"Translation {label}: {distance:.2f} voxels")
+        print(f"Translation distance in {label}: {distance:.2f} voxels")
+
 
 def _extract_rotation(affine_matrix):
-    """ Extract the rotation factors from an affine matrix.
+    """Extract the rotation factors from an affine matrix.
 
     Parameters
     ----------
@@ -242,20 +274,21 @@ def _extract_rotation(affine_matrix):
     r = Rotation.from_matrix(rotation)
 
     # Extract Euler angles (XYZ order) in degrees
-    euler_angles_deg = r.as_euler('xyz', degrees=True)
+    euler_angles_deg = r.as_euler("xyz", degrees=True)
 
     # Print angles clearly
-    axis_labels = ['X (roll)', 'Y (pitch)', 'Z (yaw)']
+    axis_labels = ["X (roll)", "Y (pitch)", "Z (yaw)"]
     for axis, angle in zip(axis_labels, euler_angles_deg):
-        logger.info(f'Rotation {axis}: {angle:.2f} degrees')
-        print(f'Rotation around {axis} axis: {angle:.2f} degrees')
+        logger.info(f"Rotation {axis}: {angle:.2f} degrees")
+        print(f"Rotation around {axis} axis: {angle:.2f} degrees")
 
 
-def transform_image(moving_image: ants.core.ants_image.ANTsImage,
-                    fixed_image: ants.core.ants_image.ANTsImage,
-                    affine_transform: ants.core.ants_transform.ANTsTransform) -> (
-        ants.core.ants_image.ANTsImage):
-    """ Use a pre-existing affine transform to transform on a naive image to the
+def transform_image(
+    moving_image: ants.core.ants_image.ANTsImage,
+    fixed_image: ants.core.ants_image.ANTsImage,
+    affine_transform: ants.core.ants_transform.ANTsTransform,
+) -> ants.core.ants_image.ANTsImage:
+    """Use a pre-existing affine transform to transform on a naive image to the
     coordinate space of the fixed_image. Performs histogram matching to the original.
 
     Parameters
@@ -279,8 +312,6 @@ def transform_image(moving_image: ants.core.ants_image.ANTsImage,
         moving_image = ants.from_numpy(moving_image)
 
     warped_image = affine_transform.apply_to_image(
-        moving_image,
-        reference=fixed_image,
-        interpolation='linear'
+        moving_image, reference=fixed_image, interpolation="linear"
     )
     return ants.histogram_match_image(warped_image, moving_image)

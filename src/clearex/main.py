@@ -29,10 +29,6 @@
 from typing import Optional, Union, Tuple
 import os
 
-os.environ["OMP_NUM_THREADS"] = "1"  # Limit OpenMP threads to 1
-os.environ["MKL_NUM_THREADS"] = "1"  # Limit MKL threads to 1
-os.environ["NUMEXPR_NUM_THREADS"] = "1"  # Limit NumExpr threads to 1
-os.environ["OPENBLAS_NUM_THREADS"] = "1"  # Limit OpenBLAS threads to 1
 
 # Third Party Imports
 
