@@ -83,9 +83,9 @@ class ImageRegistration:
     ----------
     fixed_image_path : str or Path
         Path to the fixed reference image.
-    moving_image_path : str or Path
+    moving_image_path : str or PathLike[str]
         Path to the moving image to be registered.
-    save_directory : str or Path
+    save_directory : str or PathLike[str]
         Directory where transformation results are saved.
     imaging_round : int
         The round number for identifying transformation files.
@@ -103,8 +103,8 @@ class ImageRegistration:
 
     def __init__(
         self,
-        fixed_image_path: str | Path = None,
-        moving_image_path: str | Path = None,
+        fixed_image_path: str | os.PathLike[str] = None,
+        moving_image_path: str | os.PathLike[str] = None,
         save_directory: str | Path = None,
         imaging_round: int = 0,
         crop: bool = False,
@@ -116,9 +116,9 @@ class ImageRegistration:
 
         Parameters
         ----------
-        fixed_image_path : str or Path, optional
+        fixed_image_path : str or os.PathLike, optional
             The path to the fixed reference image (TIFF file).
-        moving_image_path : str or Path, optional
+        moving_image_path : str or os.PathLike, optional
             The path to the moving image to be registered (TIFF file).
         save_directory : str or Path, optional
             Directory where the transformation results will be saved.
@@ -196,6 +196,22 @@ class ImageRegistration:
             save_directory,
             image_type="moving",
         )
+
+        # Save the fixed image to the save directory for reference
+
+        reference_image_path = os.path.join(
+            save_directory, f"nonlinear_registered_1.tif"
+        )
+
+        # Save the full reference image
+        if not os.path.exists(reference_image_path):
+            export_tiff(
+                image=self.fixed_image,
+                data_path=reference_image_path,
+                min_value=self.fixed_image.min(),
+                max_value=self.fixed_image.max(),
+            )
+            self._log.info(f"Reference image written to: {reference_image_path}")
 
     def register(self) -> None:
         """
