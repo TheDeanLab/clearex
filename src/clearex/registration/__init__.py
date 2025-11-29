@@ -91,8 +91,6 @@ class ImageRegistration:
         The round number for identifying transformation files.
     crop : bool
         Whether to crop the moving image before registration.
-    enable_logging : bool
-        Whether to enable logging.
     force_override : bool
         Whether to force re-registration even if transforms already exist.
     _log : Logger
@@ -103,9 +101,9 @@ class ImageRegistration:
 
     def __init__(
         self,
-        fixed_image_path: str | os.PathLike[str] = None,
-        moving_image_path: str | os.PathLike[str] = None,
-        save_directory: str | Path = None,
+        fixed_image_path: str | os.PathLike[str],
+        moving_image_path: str | os.PathLike[str],
+        save_directory: str | os.PathLike[str],
         imaging_round: int = 0,
         crop: bool = False,
         enable_logging: bool = True,
@@ -116,11 +114,11 @@ class ImageRegistration:
 
         Parameters
         ----------
-        fixed_image_path : str or os.PathLike, optional
+        fixed_image_path : str or os.PathLike[str]
             The path to the fixed reference image (TIFF file).
-        moving_image_path : str or os.PathLike, optional
+        moving_image_path : str or os.PathLike[str]
             The path to the moving image to be registered (TIFF file).
-        save_directory : str or Path, optional
+        save_directory : str or os.PathLike[str]
             Directory where the transformation results will be saved.
         imaging_round : int, optional
             The round number used to identify transformation files (default is 0).
@@ -131,18 +129,35 @@ class ImageRegistration:
         force_override : bool, optional
             Whether to force re-registration even if transforms already exist (default is False).
         """
+        #: str or os.PathLike: Path to the fixed reference image.
         self.fixed_image_path = fixed_image_path
+
+        #: str or os.PathLike: Path to the moving image to be registered.
         self.moving_image_path = moving_image_path
+
+        #: str or os.PathLike: Directory where transformation results are saved.
         self.save_directory = save_directory
+
+        #: int: The round number for identifying transformation files.
         self.imaging_round = imaging_round
+
+        #: bool: Whether to crop the moving image before registration.
         self.crop = crop
+
+        #: bool: Whether to force re-registration even if transforms already exist.
         self.force_override = force_override
+
+        #: ImageOpener: Image opener for loading image data.
         self._image_opener = ImageOpener()
+
+        #: str: Linear registration accuracy level.
         self.linear_accuracy = "low"
+
+        #: str: Nonlinear registration accuracy level.
         self.nonlinear_accuracy = "high"
 
         # Initialize logging
-        self._log = initialize_logging(
+        self._log: Logger = initialize_logging(
             log_directory=self.save_directory, enable_logging=enable_logging
         )
         self._log.info(f"Image registration performed with antspyx: {ants.__version__}")
@@ -157,12 +172,13 @@ class ImageRegistration:
             )
 
         # Confirm that the save_directory exists
-        os.makedirs(self.save_directory, exist_ok=True)
+        os.makedirs(name=self.save_directory, exist_ok=True)
 
         # Load the image data as numpy array.
-        self.fixed_image, self.fixed_image_info = self._image_opener.open(
+        self.fixed_image: np.ndarray[Any, Any], self.fixed_image_info: tuple = (
+            self._image_opener.open(
             self.fixed_image_path, prefer_dask=False
-        )
+        ))
         self.moving_image, self.moving_image_info = self._image_opener.open(
             self.moving_image_path, prefer_dask=False
         )
@@ -419,9 +435,9 @@ class ChunkedImageRegistration(ImageRegistration):
 
     def __init__(
         self,
-        fixed_image_path: str | Path = None,
-        moving_image_path: str | Path = None,
-        save_directory: str | Path = None,
+        fixed_image_path: str | os.PathLike[str],
+        moving_image_path: str | os.PathLike[str],
+        save_directory: str | os.PathLike[str],
         imaging_round: int = 0,
         crop: bool = False,
         enable_logging: bool = True,
@@ -432,11 +448,11 @@ class ChunkedImageRegistration(ImageRegistration):
 
         Parameters
         ----------
-        fixed_image_path : str or Path, optional
+        fixed_image_path : str or os.PathLike[str]
             The path to the fixed reference image (TIFF file).
-        moving_image_path : str or Path, optional
+        moving_image_path : str or os.PathLike[str]
             The path to the moving image to be registered (TIFF file).
-        save_directory : str or Path, optional
+        save_directory : str or os.PathLike[str]
             Directory where the transformation results will be saved.
         imaging_round : int, optional
             The round number used to identify transformation files (default is 0).
@@ -1006,18 +1022,16 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
 
     Attributes
     ----------
-    fixed_image_path : str or Path
+    fixed_image_path : str or os.PathLike[str]
         Path to the fixed reference image.
-    moving_image_path : str or Path
+    moving_image_path : str or os.PathLike[str]
         Path to the moving image to be registered.
-    save_directory : str or Path
+    save_directory : str or os.PathLike[str]
         Directory where transformation results are saved.
     imaging_round : int
         The round number for identifying transformation files.
     crop : bool
         Whether to crop the moving image before registration.
-    enable_logging : bool
-        Whether to enable logging.
     force_override : bool
         Whether to force re-registration even if transforms already exist.
     num_workers : int
@@ -1026,9 +1040,9 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
 
     def __init__(
         self,
-        fixed_image_path: str | Path = None,
-        moving_image_path: str | Path = None,
-        save_directory: str | Path = None,
+        fixed_image_path: str | os.PathLike[str],
+        moving_image_path: str | os.PathLike[str],
+        save_directory: str | os.PathLike[str],
         imaging_round: int = 0,
         crop: bool = False,
         enable_logging: bool = True,
@@ -1040,11 +1054,11 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
 
         Parameters
         ----------
-        fixed_image_path : str or Path, optional
+        fixed_image_path : str or os.PathLike[str]
             The path to the fixed reference image (TIFF file).
-        moving_image_path : str or Path, optional
+        moving_image_path : str or os.PathLike[str]
             The path to the moving image to be registered (TIFF file).
-        save_directory : str or Path, optional
+        save_directory : str or os.PathLike[str]
             Directory where the transformation results will be saved.
         imaging_round : int, optional
             The round number used to identify transformation files (default is 0).
@@ -1200,9 +1214,9 @@ def _process_chunk_wrapper(
 
 
 def register_round(
-    fixed_image_path: str | Path,
-    moving_image_path: str | Path,
-    save_directory: str | Path,
+    fixed_image_path: str | os.PathLike[str],
+    moving_image_path: str | os.PathLike[str],
+    save_directory: str | os.PathLike[str],
     imaging_round: int = 0,
     crop: bool = False,
     enable_logging: bool = True,
@@ -1216,11 +1230,11 @@ def register_round(
 
     Parameters
     ----------
-    fixed_image_path : str or Path
+    fixed_image_path : str or os.PathLike[str]
         The path to the fixed reference image (TIFF file).
-    moving_image_path : str or Path
+    moving_image_path : str or os.PathLike[str]
         The path to the moving image to be registered (TIFF file).
-    save_directory : str or Path
+    save_directory : str or os.PathLike[str]
         Directory where the transformation results will be saved.
     imaging_round : int, optional
         The round number used to identify transformation files (default is 0).

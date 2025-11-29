@@ -36,6 +36,7 @@ dependencies = [
     "seaborn",
     "SimpleITK",
     "tifffile==2025.1.10",
+    "ty>=0.0.1a29",
     "typer",
     "zarr<3.0",
 ]

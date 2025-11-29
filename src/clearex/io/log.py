@@ -40,7 +40,7 @@ from pathlib import Path
 
 
 def initialize_logging(
-    log_directory: Path | str | None, enable_logging: bool | None = False
+    log_directory: os.PathLike[str] | str | None, enable_logging: bool | None = False
 ) -> logging.Logger:
     """Initialize logging if not already configured.
 
@@ -50,7 +50,7 @@ def initialize_logging(
 
     Parameters
     ----------
-    log_directory : Path | str | None
+    log_directory : os.PathLike[str] | str | None
         The directory path where the log file should be created if logging is not
         already configured.
     enable_logging : bool | None, optional

@@ -215,8 +215,8 @@ def crop_data(
     logging_instance: Logger,
     crop: bool | None,
     imaging_round: int | None,
-    image: ndarray,
-    save_directory: str | Path,
+    image: ndarray[Any, Any],
+    save_directory: str | os.PathLike[str],
     image_type: str = "",
 ) -> Any:
     """
@@ -237,7 +237,7 @@ def crop_data(
         file is named without a round suffix.
     image : ndarray
         The image array to be cropped.
-    save_directory : str or Path
+    save_directory : str or os.PathLike[str]
         Directory where crop indices JSON file will be saved or loaded from.
     image_type : str, optional
         Type of image being cropped, either "fixed" or "moving", used for naming
