@@ -38,14 +38,16 @@ import dask.array as da
 import tifffile
 import zarr
 import h5py
+from numpy.typing import NDArray
 
 # Local Imports
 
-ArrayLike = Union["np.ndarray", "da.Array"]  # noqa: F821
+ArrayLike = Union[NDArray[Any], da.Array]
 
 # Start logging
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
 
 @dataclass
 class ImageInfo:
@@ -53,7 +55,7 @@ class ImageInfo:
     shape: Tuple[int, ...]
     dtype: Any
     axes: Optional[str] = None
-    metadata: Dict[str, Any] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class Reader(ABC):
@@ -74,12 +76,13 @@ class Reader(ABC):
         prefer_dask: bool = False,
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
-    ) -> Tuple[ArrayLike, ImageInfo]:
-        """Return array (NumPy or Dask) and ImageInfo."""
+    ) -> Tuple[NDArray[Any], ImageInfo]:
+        """Return NumPy array and ImageInfo."""
 
 
 class TiffReader(Reader):
     """Reader for TIFF/OME-TIFF files using tifffile."""
+
     SUFFIXES = (".tif", ".tiff")
 
     def open(
@@ -88,7 +91,7 @@ class TiffReader(Reader):
         prefer_dask: bool = False,
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
-    ) -> Tuple[ArrayLike, ImageInfo]:
+    ) -> Tuple[NDArray[Any], ImageInfo]:
         """Open TIFF/OME-TIFF file.
 
         Parameters
@@ -105,8 +108,8 @@ class TiffReader(Reader):
             Additional keyword arguments passed to tifffile.imread.
         Returns
         -------
-        arr : np.ndarray or dask.array.Array
-            The loaded image data as a NumPy or Dask array.
+        arr : NDArray[Any]
+            The loaded image data as a NumPy array.
         info : ImageInfo
             Metadata about the loaded image.
         Raises
@@ -130,15 +133,28 @@ class TiffReader(Reader):
             # This keeps it lazy and chunked without loading into RAM
             store = tifffile.imread(str(path), aszarr=True)
             darr = da.from_zarr(store, chunks=chunks) if chunks else da.from_zarr(store)
-            info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata={})
+            info = ImageInfo(
+                path=path,
+                shape=tuple(darr.shape),
+                dtype=darr.dtype,
+                axes=axes,
+                metadata={},
+            )
             logger.info(f"Loaded {path.name} as a Dask array.")
             return darr, info
         else:
             # Load to memory as NumPy
             arr = tifffile.imread(str(path))
-            info = ImageInfo(path=path, shape=tuple(arr.shape), dtype=arr.dtype, axes=axes, metadata={})
+            info = ImageInfo(
+                path=path,
+                shape=tuple(arr.shape),
+                dtype=arr.dtype,
+                axes=axes,
+                metadata={},
+            )
             logger.info(f"Loaded {path.name} as NumPy array.")
             return arr, info
+
 
 class ZarrReader(Reader):
     SUFFIXES = (".zarr", ".zarr/", ".n5", ".n5/")
@@ -149,13 +165,13 @@ class ZarrReader(Reader):
         prefer_dask: bool = False,
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
-    ) -> Tuple[ArrayLike, ImageInfo]:
+    ) -> Tuple[NDArray[Any], ImageInfo]:
         """Open Zarr file.
 
         Parameters
         ----------
         path : Path
-            The path to the TIFF file.
+            The path to the Zarr file.
         prefer_dask : bool, optional
             If True, attempt to return a Dask array when possible.
             Defaults to False (return NumPy array).
@@ -166,8 +182,8 @@ class ZarrReader(Reader):
             Additional keyword arguments passed to zarr.open.
         Returns
         -------
-        arr : np.ndarray or dask.array.Array
-            The loaded image data as a NumPy or Dask array.
+        arr : NDArray[Any]
+            The loaded image data as a NumPy array.
         info : ImageInfo
             Metadata about the loaded image.
         Raises
@@ -201,17 +217,31 @@ class ZarrReader(Reader):
         if prefer_dask:
             darr = da.from_zarr(array, chunks=chunks) if chunks else da.from_zarr(array)
             logger.info(f"Loaded {path.name} as a Dask array.")
-            info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata=meta)
+            info = ImageInfo(
+                path=path,
+                shape=tuple(darr.shape),
+                dtype=darr.dtype,
+                axes=axes,
+                metadata=meta,
+            )
             return darr, info
         else:
             # Load to memory as NumPy
             np_arr = np.array(array) if np is not None else array[:]
             logger.info(f"Loaded {path.name} as a NumPy array.")
-            info = ImageInfo(path=path, shape=tuple(np_arr.shape), dtype=np_arr.dtype, axes=axes, metadata=meta)
+            info = ImageInfo(
+                path=path,
+                shape=tuple(np_arr.shape),
+                dtype=np_arr.dtype,
+                axes=axes,
+                metadata=meta,
+            )
             return np_arr, info
+
 
 class HDF5Reader(Reader):
     """Reader for HDF5 files using h5py."""
+
     SUFFIXES = (".h5", ".hdf5", ".hdf")
 
     def open(
@@ -220,7 +250,7 @@ class HDF5Reader(Reader):
         prefer_dask: bool = False,
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
-    ) -> Tuple[ArrayLike, ImageInfo]:
+    ) -> Tuple[NDArray[Any], ImageInfo]:
         """
         Open an HDF5 file and return the dataset with the highest resolution.
 
@@ -244,8 +274,8 @@ class HDF5Reader(Reader):
 
         Returns
         -------
-        arr : np.ndarray or dask.array.Array
-            The loaded image data as a NumPy or Dask array.
+        arr : NDArray[Any]
+            The loaded image data as a NumPy array.
         info : ImageInfo
             Metadata about the loaded image.
 
@@ -282,7 +312,7 @@ class HDF5Reader(Reader):
         meta: Dict[str, Any] = {}
         try:
             attrs = dict(ds.attrs) if hasattr(ds, "attrs") else {}
-            meta = attrs
+            meta = {str(k): v for k, v in attrs.items()}
             axes = (
                 attrs.get("axes")
                 or attrs.get("dimension_order")
@@ -294,7 +324,9 @@ class HDF5Reader(Reader):
 
         if prefer_dask:
             # Use native HDF5 chunking if available; otherwise a conservative fallback
-            native_chunks = getattr(ds, "chunks", None)  # may be None if dataset isn't chunked
+            native_chunks = getattr(
+                ds, "chunks", None
+            )  # may be None if dataset isn't chunked
             eff_chunks = chunks or native_chunks
             if eff_chunks is None:
                 eff_chunks = tuple(min(128, s) for s in ds.shape)
@@ -306,7 +338,13 @@ class HDF5Reader(Reader):
                 name=f"h5::{os.path.basename(path_str)}::{ds.name}",
                 lock=True,  # ensure thread-safe access to HDF5
             )
-            info = ImageInfo(path=Path(path_str), shape=tuple(darr.shape), dtype=darr.dtype, axes=axes, metadata=meta)
+            info = ImageInfo(
+                path=Path(path_str),
+                shape=tuple(darr.shape),
+                dtype=darr.dtype,
+                axes=axes,
+                metadata=meta,
+            )
             logger.info(
                 f"Loaded {Path(path_str).name} (HDF5) as Dask array from dataset '{ds.name}'."
             )
@@ -315,11 +353,18 @@ class HDF5Reader(Reader):
         np_arr = ds[...]
         f.close()
 
-        info = ImageInfo(path=Path(path_str), shape=tuple(np_arr.shape), dtype=np_arr.dtype, axes=axes, metadata=meta)
+        info = ImageInfo(
+            path=Path(path_str),
+            shape=tuple(np_arr.shape),
+            dtype=np_arr.dtype,
+            axes=axes,
+            metadata=meta,
+        )
         logger.info(
             f"Loaded {Path(path_str).name} (HDF5) as NumPy array from dataset '{ds.name}'."
         )
         return np_arr, info
+
 
 class NumpyReader(Reader):
     SUFFIXES = (".npy", ".npz")
@@ -330,18 +375,30 @@ class NumpyReader(Reader):
         prefer_dask: bool = False,
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
-    ) -> Tuple[ArrayLike, ImageInfo]:
+    ) -> Tuple[NDArray[Any], ImageInfo]:
 
         if path.suffix.lower() == ".npy":
             if prefer_dask:
                 # memmap keeps it lazy-ish; wrap with dask
                 mem = np.load(str(path), mmap_mode="r")
                 darr = da.from_array(mem, chunks=chunks or "auto")
-                info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=None, metadata={})
+                info = ImageInfo(
+                    path=path,
+                    shape=tuple(darr.shape),
+                    dtype=darr.dtype,
+                    axes=None,
+                    metadata={},
+                )
                 return darr, info
             else:
                 arr = np.load(str(path))
-                info = ImageInfo(path=path, shape=tuple(arr.shape), dtype=arr.dtype, axes=None, metadata={})
+                info = ImageInfo(
+                    path=path,
+                    shape=tuple(arr.shape),
+                    dtype=arr.dtype,
+                    axes=None,
+                    metadata={},
+                )
                 return arr, info
         else:
             # .npz: load first array by name (or all if you prefer)
@@ -350,20 +407,29 @@ class NumpyReader(Reader):
             arr = npz[first_key]
             if prefer_dask:
                 darr = da.from_array(arr, chunks=chunks or "auto")
-                info = ImageInfo(path=path, shape=tuple(darr.shape), dtype=darr.dtype, axes=None, metadata={"npz_key": first_key})
+                info = ImageInfo(
+                    path=path,
+                    shape=tuple(darr.shape),
+                    dtype=darr.dtype,
+                    axes=None,
+                    metadata={"npz_key": first_key},
+                )
                 return darr, info
             else:
-                info = ImageInfo(path=path, shape=tuple(arr.shape), dtype=arr.dtype, axes=None, metadata={"npz_key": first_key})
+                info = ImageInfo(
+                    path=path,
+                    shape=tuple(arr.shape),
+                    dtype=arr.dtype,
+                    axes=None,
+                    metadata={"npz_key": first_key},
+                )
                 return arr, info
-
 
 
 class ImageOpener:
     """Generic image opener that selects an appropriate reader."""
 
-    def __init__(
-            self,
-            readers: Optional[Iterable[Type[Reader]]] = None) -> None:
+    def __init__(self, readers: Optional[Iterable[Type[Reader]]] = None) -> None:
 
         # Registry order is priority order
         self._readers: Tuple[Type[Reader], ...] = tuple(
@@ -376,7 +442,7 @@ class ImageOpener:
         prefer_dask: bool = False,
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
-    ) -> Tuple[ArrayLike, ImageInfo]:
+    ) -> Tuple[NDArray[Any], ImageInfo]:
         """Open image file with appropriate reader.
 
         Parameters
@@ -393,7 +459,7 @@ class ImageOpener:
             Additional keyword arguments passed to the reader's `open` method.
         Returns
         -------
-        arr : np.ndarray or dask.array.Array
+        arr : NDArray[Any] or dask.array.Array
             The loaded image data as a NumPy or Dask array.
         info : ImageInfo
             Metadata about the loaded image.
@@ -417,7 +483,9 @@ class ImageOpener:
                 if reader_cls.claims(p):
                     reader = reader_cls()
                     logger.info(f"Using reader: {reader_cls.__name__}.")
-                    return reader.open(p, prefer_dask=prefer_dask, chunks=chunks, **kwargs)
+                    return reader.open(
+                        p, prefer_dask=prefer_dask, chunks=chunks, **kwargs
+                    )
             except Exception:
                 pass
 
@@ -432,5 +500,3 @@ class ImageOpener:
 
         logger.error(f"No suitable reader found for {p}")
         raise ValueError("No suitable reader found for:", p)
-
-

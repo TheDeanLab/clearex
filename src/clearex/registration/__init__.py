@@ -50,7 +50,7 @@ os.environ.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", "1")
 import shutil
 from pathlib import Path
 from logging import Logger
-from typing import Any, Optional, Union, Tuple, List
+from typing import Any, Optional, Tuple, List, Union
 import warnings
 from dataclasses import dataclass
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -59,6 +59,7 @@ import multiprocessing as mp
 # Third Party Imports
 import ants
 import numpy as np
+from numpy.typing import NDArray
 
 # Local Imports
 from clearex.registration.linear import register_image as linear_registration
@@ -67,8 +68,11 @@ from clearex.io.log import (
     initialize_logging,
     capture_c_level_output,
 )
-from clearex.io.read import ImageOpener
+from clearex.io.read import ImageOpener, ImageInfo
 from clearex.registration.common import export_tiff, crop_data
+
+# Type Aliases
+ImageType = Union[NDArray[Any], ants.ANTsImage]
 
 
 class ImageRegistration:
@@ -160,7 +164,9 @@ class ImageRegistration:
         self._log: Logger = initialize_logging(
             log_directory=self.save_directory, enable_logging=enable_logging
         )
-        self._log.info(f"Image registration performed with antspyx: {ants.__version__}")
+        self._log.info(
+            msg=f"Image registration performed with antspyx: {ants.__version__}"
+        )
 
         # Validate required parameters
         if not all(
@@ -175,59 +181,58 @@ class ImageRegistration:
         os.makedirs(name=self.save_directory, exist_ok=True)
 
         # Load the image data as numpy array.
-        self.fixed_image: np.ndarray[Any, Any], self.fixed_image_info: tuple = (
-            self._image_opener.open(
+        self.fixed_image_info: ImageInfo
+        fixed_image: NDArray[Any]
+        fixed_image, self.fixed_image_info = self._image_opener.open(
             self.fixed_image_path, prefer_dask=False
-        ))
-        self.moving_image, self.moving_image_info = self._image_opener.open(
+        )
+
+        self.moving_image_info: ImageInfo
+        moving_image: NDArray[Any]
+        moving_image, self.moving_image_info = self._image_opener.open(
             self.moving_image_path, prefer_dask=False
         )
 
         # Report the loaded image shapes.
         self._log.info(
-            f"Loaded fixed image {self.fixed_image_path}. "
-            f"Shape: {self.fixed_image.shape}."
+            msg=f"Loaded fixed image {self.fixed_image_path}. Shape: {self.fixed_image.shape}."
         )
         self._log.info(
-            f"Loaded moving image {self.moving_image_path}. "
-            f"Shape: {self.moving_image.shape}."
+            msg=f"Loaded moving image {self.moving_image_path}. Shape: {self.moving_image.shape}."
         )
 
         # Optionally crop the data to reduce computation time.
-        self.fixed_image = crop_data(
-            self._log,
-            self.crop,
-            imaging_round,
-            self.fixed_image,
-            save_directory,
+        self.fixed_image: ants.ANTsImage = crop_data(
+            logging_instance=self._log,
+            crop=self.crop,
+            imaging_round=imaging_round,
+            image=fixed_image,
+            save_directory=save_directory,
             image_type="fixed",
         )
-
-        # Optionally crop the moving data to reduce computation time
-        self.moving_image = crop_data(
-            self._log,
-            self.crop,
-            imaging_round,
-            self.moving_image,
-            save_directory,
+        self.moving_image: ants.ANTsImage = crop_data(
+            logging_instance=self._log,
+            crop=self.crop,
+            imaging_round=imaging_round,
+            image=moving_image,
+            save_directory=save_directory,
             image_type="moving",
         )
 
         # Save the fixed image to the save directory for reference
-
-        reference_image_path = os.path.join(
-            save_directory, f"nonlinear_registered_1.tif"
+        reference_image_path: str = os.path.join(
+            save_directory, "nonlinear_registered_1.tif"
         )
 
         # Save the full reference image
-        if not os.path.exists(reference_image_path):
+        if not os.path.exists(path=reference_image_path):
             export_tiff(
                 image=self.fixed_image,
                 data_path=reference_image_path,
                 min_value=self.fixed_image.min(),
                 max_value=self.fixed_image.max(),
             )
-            self._log.info(f"Reference image written to: {reference_image_path}")
+            self._log.info(msg=f"Reference image written to: {reference_image_path}")
 
     def register(self) -> None:
         """
@@ -261,8 +266,14 @@ class ImageRegistration:
             save_directory=self.save_directory,
         )
 
+        self._log.info(msg="Image registration complete.")
+
     def _perform_linear_registration(
-        self, fixed_image, moving_image, imaging_round: int, save_directory: str | Path
+        self,
+        fixed_image,
+        moving_image,
+        imaging_round: int | None,
+        save_directory: str | os.PathLike,
     ) -> Any:
         """
         Perform linear (affine) registration.
@@ -273,9 +284,9 @@ class ImageRegistration:
             The fixed reference image.
         moving_image : numpy.ndarray or ants.ANTsImage
             The moving image to be registered.
-        imaging_round : int
+        imaging_round : int or None
             The round number for identifying the transformation file.
-        save_directory : str or Path
+        save_directory : str or os.PathLike
             Directory where the transformation will be saved.
 
         Returns
@@ -283,30 +294,31 @@ class ImageRegistration:
         ants.ANTsImage
             The linearly registered moving image.
         """
-        linear_transformation_path = os.path.join(
+        linear_transformation_path: str = os.path.join(
             save_directory, f"linear_transform_{imaging_round}.mat"
         )
 
-        if os.path.exists(linear_transformation_path) and not self.force_override:
+        if os.path.exists(path=linear_transformation_path) and not self.force_override:
             self._log.info(
-                f"Linear transformation already exists at {linear_transformation_path}. "
-                "Skipping registration."
+                msg=f"Linear transformation already exists at {linear_transformation_path}. Skipping registration."
             )
             # Read the transform from disk
-            transform = ants.read_transform(linear_transformation_path)
+            transform: ants.ANTsTransform = ants.read_transform(
+                filename=linear_transformation_path
+            )
 
             # Resample the registered image to the target image
-            moving_linear_aligned = transform.apply_to_image(
+            moving_linear_aligned: ants.ANTsImage = transform.apply_to_image(
                 image=moving_image, reference=fixed_image, interpolation="linear"
             )
         else:
-            if self.force_override and os.path.exists(linear_transformation_path):
+            if self.force_override and os.path.exists(path=linear_transformation_path):
                 self._log.info(
-                    f"Force override enabled. Re-computing linear registration."
+                    msg="Force override enabled. Re-computing linear registration."
                 )
-            self._log.info("Performing Linear Registration...")
+            self._log.info(msg="Performing Linear Registration...")
             result, stdout, stderr = capture_c_level_output(
-                linear_registration,
+                func=linear_registration,
                 moving_image=moving_image,
                 fixed_image=fixed_image,
                 registration_type="TRSAA",
@@ -315,11 +327,11 @@ class ImageRegistration:
             )
             moving_linear_aligned, transform = result
             if stdout:
-                self._log.info(stdout)
+                self._log.info(msg=stdout)
             if stderr:
-                self._log.error(stderr)
+                self._log.error(msg=stderr)
 
-            ants.write_transform(transform, linear_transformation_path)
+            ants.write_transform(transform, filename=linear_transformation_path)
             self._log.info(f"Linear Transform written to: {linear_transformation_path}")
 
         self.linear_transform = transform
@@ -329,8 +341,8 @@ class ImageRegistration:
         self,
         fixed_image: ants.ANTsImage,
         moving_linear_aligned: ants.ANTsImage,
-        imaging_round: int,
-        save_directory: str | Path,
+        imaging_round: int | None,
+        save_directory: str | os.PathLike,
     ) -> None:
         """
         Perform nonlinear (deformable) registration.
@@ -341,9 +353,9 @@ class ImageRegistration:
             The fixed reference image.
         moving_linear_aligned : ants.ANTsImage
             The linearly registered moving image.
-        imaging_round : int
+        imaging_round : int | None
             The round number for identifying the transformation file.
-        save_directory : str or Path
+        save_directory : str or os.PathLike
             Directory where the transformation will be saved.
         """
         nonlinear_transformation_path = os.path.join(
@@ -358,11 +370,11 @@ class ImageRegistration:
         else:
             if self.force_override and os.path.exists(nonlinear_transformation_path):
                 self._log.info(
-                    f"Force override enabled. Re-computing nonlinear registration."
+                    msg="Force override enabled. Re-computing nonlinear registration."
                 )
-            self._log.info("Beginning Nonlinear Registration...")
+            self._log.info(msg="Beginning Nonlinear Registration...")
             result, stdout, stderr = capture_c_level_output(
-                nonlinear_registration,
+                func=nonlinear_registration,
                 moving_image=moving_linear_aligned,
                 fixed_image=fixed_image,
                 accuracy=self.nonlinear_accuracy,
@@ -370,13 +382,13 @@ class ImageRegistration:
             )
             nonlinear_transformed, transform_path = result
             if stdout:
-                self._log.info(stdout)
+                self._log.info(msg=stdout)
             if stderr:
-                self._log.error(stderr)
+                self._log.error(msg=stderr)
 
             shutil.copyfile(transform_path, nonlinear_transformation_path)
             self._log.info(
-                f"Nonlinear warp written to: {nonlinear_transformation_path}"
+                msg=f"Nonlinear warp written to: {nonlinear_transformation_path}"
             )
 
 
@@ -483,7 +495,7 @@ class ChunkedImageRegistration(ImageRegistration):
         fixed_image: ants.ANTsImage,
         moving_linear_aligned: ants.ANTsImage,
         imaging_round: int,
-        save_directory: str | Path,
+        save_directory: str | os.PathLike[str],
     ) -> None:
         """
         Perform nonlinear (deformable) registration.
@@ -496,7 +508,7 @@ class ChunkedImageRegistration(ImageRegistration):
             The linearly registered moving image.
         imaging_round : int
             The round number for identifying the transformation file.
-        save_directory : str or Path
+        save_directory : str or os.PathLike[str]
             Directory where the transformation will be saved.
         """
         self._log.info("Beginning Chunked Nonlinear Registration...")
@@ -590,6 +602,12 @@ class ChunkedImageRegistration(ImageRegistration):
 
         ants.image_write(nonlinear_transform, str(nonlinear_transformation_path))
         self._log.info(f"Nonlinear warp written to: {nonlinear_transformation_path}")
+
+        # Save the Chunk Info List
+        chunk_info_path: Path = Path(self.save_directory) / (
+            f"round_{self.imaging_round}_chunk_info.npy"
+        )
+        np.save(file=chunk_info_path, arr=self.chunk_info_list)
 
     def _compute_chunk_grid(self, image_shape) -> List[ChunkInfo]:
         """

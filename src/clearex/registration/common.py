@@ -35,7 +35,7 @@ import json
 # Third Party Imports
 import ants
 import numpy as np
-from numpy import ndarray
+from numpy.typing import NDArray
 from tifffile import imwrite, imread
 
 # Local Imports
@@ -43,7 +43,7 @@ from clearex.file_operations.tools import identify_minimal_bounding_box
 from clearex.io.read import ImageOpener
 
 # Start logging
-logger = logging.getLogger(__name__)
+logger: Logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
@@ -215,7 +215,7 @@ def crop_data(
     logging_instance: Logger,
     crop: bool | None,
     imaging_round: int | None,
-    image: ndarray[Any, Any],
+    image: NDArray[Any],
     save_directory: str | os.PathLike[str],
     image_type: str = "",
 ) -> Any:
@@ -235,7 +235,7 @@ def crop_data(
     imaging_round : int or None
         The round number used to identify the crop indices file. If None, the
         file is named without a round suffix.
-    image : ndarray
+    image : NDArray[Any]
         The image array to be cropped.
     save_directory : str or os.PathLike[str]
         Directory where crop indices JSON file will be saved or loaded from.
@@ -245,7 +245,7 @@ def crop_data(
 
     Returns
     -------
-    ants.core.ants_image.ANTsImage
+    ants.AnTsImage
         The cropped image as an ANTsImage (if crop=True), or the original image
         converted to ANTsImage (if crop=False).
 
@@ -258,21 +258,23 @@ def crop_data(
 
     # Only crop the moving data since the fixed data defines the coordinate space.
     if crop:
-        # # Convert to AntsImage for cropping
-        # image = ants.from_numpy(image)
-
+        # Determine the path for the crop indices JSON file
         if imaging_round is None:
-            json_path = os.path.join(save_directory, f"{image_type}_crop_indices.json")
+            json_path: str = os.path.join(
+                save_directory, f"{image_type}_crop_indices.json"
+            )
         else:
             json_path = os.path.join(
                 save_directory, f"{image_type}_crop_indices_{imaging_round}.json"
             )
 
+        # Load existing crop indices if available
         if os.path.exists(json_path):
             logging_instance.info(f"Loading existing crop indices from: {json_path}")
-            with open(json_path, "r") as f:
+            with open(file=json_path, mode="r") as f:
                 z0, z1, y0, y1, x0, x1 = json.load(f)
         else:
+            # Identify minimal bounding box
             logging_instance.info("Identifying minimal bounding box for cropping...")
             z0, z1, y0, y1, x0, x1 = identify_minimal_bounding_box(
                 image=image,
@@ -283,21 +285,18 @@ def crop_data(
             )
 
             # Save the bounding box coordinates for future reference
-            with open(json_path, "w") as f:
+            with open(file=json_path, mode="w") as f:
                 json.dump([z0, z1, y0, y1, x0, x1], f)
             logging_instance.info(f"Crop indices saved to: {json_path}")
 
-        # image = ants.crop_indices(
-        #     image, lowerind=(z0, y0, x0), upperind=(z1, y1, x1)
-        # )
-
-        image = image[z0:z1, y0:y1, x0:x1]
+        # Apply cropping to the image
+        image: NDArray[Any] = image[z0:z1, y0:y1, x0:x1]
         logging_instance.info(f"Moving image cropped to: {image.shape}.")
 
     else:
-        logging_instance.info("Cropping not enabled; proceeding without cropping.")
+        logging_instance.info(msg="Cropping not enabled; proceeding without cropping.")
 
-    return ants.from_numpy(image)
+    return ants.from_numpy(data=image)
 
 
 def bulk_transform_directory(
