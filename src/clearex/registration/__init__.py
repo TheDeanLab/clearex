@@ -181,24 +181,20 @@ class ImageRegistration:
         os.makedirs(name=self.save_directory, exist_ok=True)
 
         # Load the image data as numpy array.
-        self.fixed_image_info: ImageInfo
-        fixed_image: NDArray[Any]
         fixed_image, self.fixed_image_info = self._image_opener.open(
             self.fixed_image_path, prefer_dask=False
         )
 
-        self.moving_image_info: ImageInfo
-        moving_image: NDArray[Any]
         moving_image, self.moving_image_info = self._image_opener.open(
             self.moving_image_path, prefer_dask=False
         )
 
         # Report the loaded image shapes.
         self._log.info(
-            msg=f"Loaded fixed image {self.fixed_image_path}. Shape: {self.fixed_image.shape}."
+            msg=f"Loaded fixed image {self.fixed_image_path}. Shape: {fixed_image.shape}."
         )
         self._log.info(
-            msg=f"Loaded moving image {self.moving_image_path}. Shape: {self.moving_image.shape}."
+            msg=f"Loaded moving image {self.moving_image_path}. Shape: {moving_image.shape}."
         )
 
         # Optionally crop the data to reduce computation time.
