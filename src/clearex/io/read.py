@@ -45,12 +45,50 @@ from numpy.typing import NDArray
 ArrayLike = Union[NDArray[Any], da.Array]
 
 # Start logging
-logger = logging.getLogger(__name__)
-logger.addHandler(logging.NullHandler())
+logger: logging.Logger = logging.getLogger(name=__name__)
+logger.addHandler(hdlr=logging.NullHandler())
 
 
 @dataclass
 class ImageInfo:
+    """Container for image metadata.
+
+    This dataclass stores metadata about an opened image file, including
+    its path, shape, data type, axis labels, and any additional metadata
+    extracted from the file format.
+
+    Attributes
+    ----------
+    path : Path
+        The file path to the image.
+    shape : Tuple[int, ...]
+        The shape of the image array (e.g., (height, width) for 2D,
+        (depth, height, width) for 3D, or arbitrary N-dimensional shapes).
+    dtype : Any
+        The NumPy dtype of the image data (e.g., np.uint8, np.float32).
+    axes : str, optional
+        A string describing the axis order, such as "TCZYX" for
+        time-channel-Z-Y-X. Common in OME-TIFF and other formats.
+        Defaults to None if not available.
+    metadata : Dict[str, Any], optional
+        Additional metadata extracted from the file format, such as
+        attributes from Zarr/HDF5 or custom tags. Defaults to None.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> import numpy as np
+    >>> info = ImageInfo(
+    ...     path=Path("image.tif"),
+    ...     shape=(512, 512),
+    ...     dtype=np.uint16,
+    ...     axes="YX",
+    ...     metadata={"scale": 1.0}
+    ... )
+    >>> print(info.shape)
+    (512, 512)
+    """
+
     path: Path
     shape: Tuple[int, ...]
     dtype: Any
@@ -59,14 +97,69 @@ class ImageInfo:
 
 
 class Reader(ABC):
-    """Abstract strategy for opening image data."""
+    """Abstract base class for image file readers.
+
+    This class defines the interface for reading various image file formats.
+    Subclasses implement the `open` method to handle specific file types
+    (e.g., TIFF, Zarr, HDF5, NumPy). The reader pattern allows extensibility
+    and consistent handling of different formats.
+
+    Attributes
+    ----------
+    SUFFIXES : Tuple[str, ...]
+        File extensions (e.g., ('.tif', '.tiff')) that this reader typically
+        supports. Used by the `claims` method for format detection.
+
+    See Also
+    --------
+    TiffReader : Reader for TIFF/OME-TIFF files.
+    ZarrReader : Reader for Zarr stores.
+    HDF5Reader : Reader for HDF5 files.
+    NumpyReader : Reader for NumPy .npy/.npz files.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> reader = TiffReader()
+    >>> arr, info = reader.open(Path("image.tif"))
+    >>> print(info.shape)
+    (512, 512, 3)
+    """
 
     # file suffixes this reader *typically* supports
     SUFFIXES: Tuple[str, ...] = ()
 
     @classmethod
     def claims(cls, path: Path) -> bool:
-        """Lightweight test: usually just extension check; may be overridden."""
+        """Check if this reader can handle the given file path.
+
+        This is typically a lightweight test based on file extension,
+        but can be overridden for more sophisticated detection.
+
+        Parameters
+        ----------
+        path : Path
+            The file path to check.
+
+        Returns
+        -------
+        bool
+            True if this reader claims to handle the file, False otherwise.
+
+        Notes
+        -----
+        The default implementation checks if the file's suffix (lowercased)
+        is in the `SUFFIXES` tuple. Subclasses may override this method
+        for more complex detection logic.
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> TiffReader.claims(Path("image.tif"))
+        True
+        >>> TiffReader.claims(Path("image.zarr"))
+        False
+        """
         return path.suffix.lower() in cls.SUFFIXES
 
     @abstractmethod
@@ -77,11 +170,99 @@ class Reader(ABC):
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
     ) -> Tuple[NDArray[Any], ImageInfo]:
-        """Return NumPy array and ImageInfo."""
+        """Open an image file and return the data and metadata.
+
+        This is an abstract method that must be implemented by all subclasses.
+
+        Parameters
+        ----------
+        path : Path
+            The path to the image file.
+        prefer_dask : bool, optional
+            If True, return a Dask array when possible for lazy evaluation
+            and out-of-core processing. If False, load the entire image
+            into memory as a NumPy array. Defaults to False.
+        chunks : int or tuple of int, optional
+            Chunk size for Dask arrays. Can be a single integer (applied to
+            all dimensions) or a tuple specifying chunk size per dimension.
+            If None, uses default or native chunking. Ignored if
+            `prefer_dask` is False. Defaults to None.
+        **kwargs : dict
+            Additional keyword arguments specific to the reader implementation.
+
+        Returns
+        -------
+        arr : NDArray[Any] or dask.array.Array
+            The loaded image data. Type depends on `prefer_dask`:
+            - If prefer_dask=False: NumPy ndarray
+            - If prefer_dask=True: Dask array
+        info : ImageInfo
+            Metadata about the loaded image, including path, shape, dtype,
+            axes information, and format-specific metadata.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the specified file does not exist.
+        ValueError
+            If the file cannot be read or is not a valid format.
+
+        Notes
+        -----
+        Implementations should handle both NumPy and Dask array returns
+        based on the `prefer_dask` parameter. Dask arrays are recommended
+        for large files that don't fit in memory.
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> reader = TiffReader()
+        >>> arr, info = reader.open(Path("image.tif"), prefer_dask=False)
+        >>> print(type(arr).__name__)
+        ndarray
+        >>> darr, info = reader.open(Path("large.tif"), prefer_dask=True)
+        >>> print(type(darr).__name__)
+        Array
+        """
 
 
 class TiffReader(Reader):
-    """Reader for TIFF/OME-TIFF files using tifffile."""
+    """Reader for TIFF and OME-TIFF files using the tifffile library.
+
+    This reader handles standard TIFF files as well as OME-TIFF (Open Microscopy
+    Environment) format files. It can extract axis order information from OME
+    metadata when available.
+
+    Attributes
+    ----------
+    SUFFIXES : tuple of str
+        Supported file extensions: ('.tif', '.tiff').
+
+    See Also
+    --------
+    Reader : Abstract base class for all readers.
+    ZarrReader : Reader for Zarr stores.
+    HDF5Reader : Reader for HDF5 files.
+
+    Notes
+    -----
+    When `prefer_dask=True`, this reader uses tifffile's `aszarr=True` option
+    to create a Zarr-backed Dask array, enabling lazy loading and efficient
+    processing of large TIFF files without loading them entirely into memory.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> reader = TiffReader()
+    >>> arr, info = reader.open(Path("image.tif"))
+    >>> print(arr.shape)
+    (512, 512, 3)
+
+    >>> # For large files, use Dask
+    >>> darr, info = reader.open(Path("large.ome.tif"), prefer_dask=True)
+    >>> print(info.axes)
+    TCZYX
+    """
 
     SUFFIXES = (".tif", ".tiff")
 
@@ -92,30 +273,78 @@ class TiffReader(Reader):
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
     ) -> Tuple[NDArray[Any], ImageInfo]:
-        """Open TIFF/OME-TIFF file.
+        """Open a TIFF or OME-TIFF file and return the image data and metadata.
+
+        This method reads TIFF files using the tifffile library. For OME-TIFF
+        files, it attempts to extract axis order information (e.g., "TCZYX")
+        from the OME-XML metadata.
 
         Parameters
         ----------
         path : Path
-            The path to the TIFF file.
+            The path to the TIFF or OME-TIFF file.
         prefer_dask : bool, optional
-            If True, attempt to return a Dask array when possible.
-            Defaults to False (return NumPy array).
+            If True, return a Dask array backed by a Zarr store for lazy
+            evaluation. If False, load the entire image into memory as a
+            NumPy array. Defaults to False.
         chunks : int or tuple of int, optional
-            Chunk size for Dask arrays. If None, use default chunking.
-            Ignored if `prefer_dask` is False. Defaults to None.
+            Chunk size for Dask arrays. Can be a single integer (applied to
+            all dimensions) or a tuple specifying chunk size per dimension.
+            If None, uses tifffile's default chunking. Only relevant when
+            `prefer_dask=True`. Defaults to None.
         **kwargs : dict
-            Additional keyword arguments passed to tifffile.imread.
+            Additional keyword arguments passed to `tifffile.imread`.
+
         Returns
         -------
-        arr : NDArray[Any]
-            The loaded image data as a NumPy array.
+        arr : NDArray[Any] or dask.array.Array
+            The loaded image data. Returns a NumPy ndarray if `prefer_dask=False`,
+            or a Dask array if `prefer_dask=True`.
         info : ImageInfo
-            Metadata about the loaded image.
+            Metadata about the loaded image, including path, shape, dtype,
+            and axis order (extracted from OME-XML if available).
+
         Raises
         ------
         ValueError
-            If the file cannot be read as a TIFF.
+            If the file cannot be read as a valid TIFF file.
+        FileNotFoundError
+            If the specified file does not exist.
+
+        Notes
+        -----
+        When `prefer_dask=True`, the reader uses tifffile's `aszarr=True`
+        option, which creates a Zarr store interface to the TIFF file. This
+        allows Dask to read data lazily without loading the entire file into
+        memory, which is beneficial for large microscopy images.
+
+        For OME-TIFF files, the axis order is extracted from the OME-XML
+        metadata using the DimensionOrder attribute. Common values include
+        "TCZYX" (time, channel, Z, Y, X) or "ZCYX" (Z, channel, Y, X).
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> reader = TiffReader()
+
+        >>> # Load a standard TIFF into memory
+        >>> arr, info = reader.open(Path("sample.tif"))
+        >>> print(f"Shape: {info.shape}, dtype: {info.dtype}")
+        Shape: (1024, 1024), dtype: uint16
+
+        >>> # Load an OME-TIFF as a Dask array
+        >>> darr, info = reader.open(Path("timelapse.ome.tif"), prefer_dask=True)
+        >>> print(f"Axes: {info.axes}, Type: {type(darr).__name__}")
+        Axes: TCZYX, Type: Array
+
+        >>> # Specify custom chunking for Dask
+        >>> darr, info = reader.open(
+        ...     Path("large.tif"),
+        ...     prefer_dask=True,
+        ...     chunks=(1, 512, 512)
+        ... )
+        >>> print(darr.chunksize)
+        (1, 512, 512)
         """
 
         # Try OME-axes and metadata
@@ -157,6 +386,48 @@ class TiffReader(Reader):
 
 
 class ZarrReader(Reader):
+    """Reader for Zarr and N5 storage formats.
+
+    This reader handles Zarr stores and N5 format
+    directories. It automatically selects the largest array (by number of elements)
+    from the store and can extract axis information and metadata from Zarr attributes.
+
+    Attributes
+    ----------
+    SUFFIXES : tuple of str
+        Supported file extensions: ('.zarr', '.zarr/', '.n5', '.n5/').
+
+    See Also
+    --------
+    Reader : Abstract base class for all readers.
+    TiffReader : Reader for TIFF/OME-TIFF files.
+    HDF5Reader : Reader for HDF5 files.
+
+    Notes
+    -----
+    Zarr is a chunked, compressed array storage format designed for efficient
+    parallel and cloud-based computing. This reader is particularly well-suited
+    for `prefer_dask=True` since Zarr's native chunking aligns perfectly with
+    Dask's lazy evaluation model.
+
+    When multiple arrays exist in a Zarr group, the reader selects the array
+    with the largest number of elements (np.prod(shape)), which typically
+    corresponds to the highest resolution image.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> reader = ZarrReader()
+    >>> arr, info = reader.open(Path("data.zarr"))
+    >>> print(arr.shape)
+    (100, 512, 512)
+
+    >>> # For large datasets, use Dask for lazy loading
+    >>> darr, info = reader.open(Path("large.zarr"), prefer_dask=True)
+    >>> print(info.axes)
+    ['z', 'y', 'x']
+    """
+
     SUFFIXES = (".zarr", ".zarr/", ".n5", ".n5/")
 
     def open(
@@ -166,30 +437,87 @@ class ZarrReader(Reader):
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
     ) -> Tuple[NDArray[Any], ImageInfo]:
-        """Open Zarr file.
+        """Open a Zarr or N5 store and return the image data and metadata.
+
+        This method opens a Zarr store, identifies all arrays within the group,
+        and selects the largest one by number of elements. Metadata including
+        axis information and custom attributes are extracted when available.
 
         Parameters
         ----------
         path : Path
-            The path to the Zarr file.
+            The path to the Zarr store directory (e.g., 'data.zarr' or 'data.n5').
         prefer_dask : bool, optional
-            If True, attempt to return a Dask array when possible.
-            Defaults to False (return NumPy array).
+            If True, return a Dask array for lazy evaluation. If False, load
+            the entire array into memory as a NumPy array. Defaults to False.
         chunks : int or tuple of int, optional
-            Chunk size for Dask arrays. If None, use default chunking.
-            Ignored if `prefer_dask` is False. Defaults to None.
+            Chunk size for Dask arrays. Can be a single integer (applied to
+            all dimensions) or a tuple specifying chunk size per dimension.
+            If None, uses the Zarr store's native chunking. Only relevant when
+            `prefer_dask=True`. Defaults to None.
         **kwargs : dict
-            Additional keyword arguments passed to zarr.open.
+            Additional keyword arguments passed to `zarr.open_group`.
+
         Returns
         -------
-        arr : NDArray[Any]
-            The loaded image data as a NumPy array.
+        arr : NDArray[Any] or dask.array.Array
+            The loaded image data. Returns a NumPy ndarray if `prefer_dask=False`,
+            or a Dask array if `prefer_dask=True`.
         info : ImageInfo
-            Metadata about the loaded image.
+            Metadata about the loaded image, including path, shape, dtype,
+            axes information (if available from Zarr attributes), and any
+            additional metadata stored in the array's attributes.
+
         Raises
         ------
         ValueError
-            If the file cannot be read as a zarr store.
+            If the Zarr store contains no arrays.
+        FileNotFoundError
+            If the specified path does not exist.
+
+        Notes
+        -----
+        When `prefer_dask=True`, this reader leverages Zarr's native chunking,
+        which is optimal for Dask's lazy evaluation. The array remains on disk
+        and is read only when computation is triggered.
+
+        The reader attempts to extract axis information from multiple common
+        attribute locations:
+        - `multiscales[0]['axes']` (OME-Zarr format)
+        - `axes` attribute (custom metadata)
+
+        If multiple arrays exist in the Zarr group, the array with the largest
+        number of elements (np.prod(shape)) is selected, typically corresponding
+        to the full-resolution image in multi-resolution pyramids.
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> reader = ZarrReader()
+
+        >>> # Load a Zarr store into memory
+        >>> arr, info = reader.open(Path("image.zarr"))
+        >>> print(f"Shape: {info.shape}, dtype: {info.dtype}")
+        Shape: (50, 1024, 1024), dtype: uint16
+
+        >>> # Load as Dask array for large datasets
+        >>> darr, info = reader.open(Path("large.zarr"), prefer_dask=True)
+        >>> print(f"Type: {type(darr).__name__}, chunks: {darr.chunksize}")
+        Type: Array, chunks: (1, 512, 512)
+
+        >>> # Override native chunking
+        >>> darr, info = reader.open(
+        ...     Path("data.zarr"),
+        ...     prefer_dask=True,
+        ...     chunks=(10, 256, 256)
+        ... )
+        >>> print(darr.chunksize)
+        (10, 256, 256)
+
+        >>> # Access metadata
+        >>> arr, info = reader.open(Path("ome.zarr"))
+        >>> print(info.metadata.keys())
+        dict_keys(['multiscales', 'omero', '_ARRAY_DIMENSIONS'])
         """
         grp = zarr.open_group(str(path), mode="r")
 
@@ -240,7 +568,47 @@ class ZarrReader(Reader):
 
 
 class HDF5Reader(Reader):
-    """Reader for HDF5 files using h5py."""
+    """Reader for HDF5 files using the h5py library.
+
+    This reader handles HDF5 (Hierarchical Data Format version 5) files,
+    a widely used format for storing large scientific datasets. When multiple
+    datasets exist in the file, the reader automatically selects the largest
+    one by number of elements (highest resolution).
+
+    Attributes
+    ----------
+    SUFFIXES : tuple of str
+        Supported file extensions: ('.h5', '.hdf5', '.hdf').
+
+    See Also
+    --------
+    Reader : Abstract base class for all readers.
+    TiffReader : Reader for TIFF/OME-TIFF files.
+    ZarrReader : Reader for Zarr stores.
+
+    Notes
+    -----
+    This reader searches the entire HDF5 file structure recursively and
+    automatically selects the dataset with the largest number of elements.
+    It does not accept subpath specifications (e.g., 'file.h5/group/dataset').
+
+    When `prefer_dask=True`, the reader uses h5py's dataset interface with
+    Dask's `from_array` method, enabling lazy loading with thread-safe access.
+    This is particularly useful for large datasets that don't fit in memory.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> reader = HDF5Reader()
+    >>> arr, info = reader.open(Path("data.h5"))
+    >>> print(arr.shape)
+    (200, 512, 512)
+
+    >>> # For large files, use Dask for lazy loading
+    >>> darr, info = reader.open(Path("large.h5"), prefer_dask=True)
+    >>> print(type(darr).__name__)
+    Array
+    """
 
     SUFFIXES = (".h5", ".hdf5", ".hdf")
 
@@ -251,38 +619,96 @@ class HDF5Reader(Reader):
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
     ) -> Tuple[NDArray[Any], ImageInfo]:
-        """
-        Open an HDF5 file and return the dataset with the highest resolution.
+        """Open an HDF5 file and return the highest resolution dataset.
 
-        Notes
-        -----
-        - This reader does **not** accept dataset subpaths (e.g., 'file.h5/group/dataset').
-          Only the file path is used; the reader searches the file and selects the
-          largest dataset by number of elements.
-        - If multiple datasets exist, the one with the greatest np.prod(shape) is chosen.
+        This method opens an HDF5 file, recursively searches all groups for
+        datasets, and selects the one with the largest number of elements.
+        Metadata and axis information are extracted from the dataset's
+        attributes when available.
 
         Parameters
         ----------
         path : Path
-            Path to the HDF5 file (e.g., '/path/to/data.h5').
+            Path to the HDF5 file (e.g., '/path/to/data.h5'). The reader
+            does not accept subpath specifications; it automatically finds
+            and selects the largest dataset in the file.
         prefer_dask : bool, optional
-            If True, return a Dask array backed by the on-disk dataset.
+            If True, return a Dask array backed by the on-disk dataset for
+            lazy evaluation with thread-safe access. If False, load the
+            entire dataset into memory as a NumPy array. Defaults to False.
         chunks : int or tuple of int, optional
-            Desired Dask chunking. If None, tries the dataset's native chunking.
+            Chunk size for Dask arrays. Can be a single integer (applied to
+            all dimensions) or a tuple specifying chunk size per dimension.
+            If None, uses the dataset's native HDF5 chunking if available,
+            otherwise defaults to 128 per dimension. Only relevant when
+            `prefer_dask=True`. Defaults to None.
         **kwargs : dict
-            Reserved for future compatibility.
+            Reserved for future compatibility with additional reader options.
 
         Returns
         -------
-        arr : NDArray[Any]
-            The loaded image data as a NumPy array.
+        arr : NDArray[Any] or dask.array.Array
+            The loaded image data. Returns a NumPy ndarray if `prefer_dask=False`,
+            or a Dask array if `prefer_dask=True`.
         info : ImageInfo
-            Metadata about the loaded image.
+            Metadata about the loaded image, including path, shape, dtype,
+            axes information (if available from HDF5 attributes), dataset
+            name, and any additional attributes stored with the dataset.
 
         Raises
         ------
         ValueError
             If the file contains no datasets.
+        FileNotFoundError
+            If the specified file does not exist.
+
+        Notes
+        -----
+        When `prefer_dask=True`, the reader creates a Dask array backed by
+        the HDF5 dataset with thread-safe locking enabled. This allows
+        multiple Dask workers to read from the same file safely. The dataset
+        remains on disk and is read only when computation is triggered.
+
+        The reader attempts to extract axis information from common HDF5
+        attribute names:
+        - `axes` : Custom axis labels
+        - `dimension_order` or `DimensionOrder` : Axis ordering
+        - `DIMENSION_LABELS` : Alternative axis label specification
+
+        For datasets without native HDF5 chunking, the reader applies a
+        conservative default chunk size of 128 elements per dimension when
+        `prefer_dask=True` and no explicit chunking is specified.
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> reader = HDF5Reader()
+
+        >>> # Load an HDF5 file into memory
+        >>> arr, info = reader.open(Path("image.h5"))
+        >>> print(f"Shape: {info.shape}, dtype: {info.dtype}")
+        Shape: (100, 1024, 1024), dtype: float32
+
+        >>> # Load as Dask array for large files
+        >>> darr, info = reader.open(Path("large.h5"), prefer_dask=True)
+        >>> print(f"Type: {type(darr).__name__}, chunks: {darr.chunksize}")
+        Type: Array, chunks: (10, 512, 512)
+
+        >>> # Specify custom chunking
+        >>> darr, info = reader.open(
+        ...     Path("data.h5"),
+        ...     prefer_dask=True,
+        ...     chunks=(5, 256, 256)
+        ... )
+        >>> print(darr.chunksize)
+        (5, 256, 256)
+
+        >>> # Access metadata and dataset information
+        >>> arr, info = reader.open(Path("annotated.h5"))
+        >>> print(info.metadata.get('axes'))
+        ZYX
+        >>> print(f"Loaded dataset: {info.metadata.get('dataset_name')}")
+        Loaded dataset: /images/channel_0
         """
         # Be tolerant of a trailing '/' on the filename.
         path_str = str(path).rstrip(os.sep)
@@ -367,6 +793,48 @@ class HDF5Reader(Reader):
 
 
 class NumpyReader(Reader):
+    """Reader for NumPy binary files (.npy and .npz).
+
+    This reader handles NumPy's native binary formats: .npy files (single arrays)
+    and .npz files (archives containing multiple named arrays). For .npz files,
+    the reader selects the first array in the archive.
+
+    Attributes
+    ----------
+    SUFFIXES : tuple of str
+        Supported file extensions: ('.npy', '.npz').
+
+    See Also
+    --------
+    Reader : Abstract base class for all readers.
+    TiffReader : Reader for TIFF/OME-TIFF files.
+    ZarrReader : Reader for Zarr stores.
+    HDF5Reader : Reader for HDF5 files.
+
+    Notes
+    -----
+    For .npy files with `prefer_dask=True`, this reader uses NumPy's memory-mapped
+    mode (`mmap_mode='r'`) which allows lazy loading without reading the entire
+    file into memory. The memory-mapped array is then wrapped in a Dask array.
+
+    For .npz archives, the first array (alphabetically by key name) is loaded.
+    If you need to load a specific array from an .npz file, consider using
+    `np.load()` directly or extending this reader.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> reader = NumpyReader()
+    >>> arr, info = reader.open(Path("data.npy"))
+    >>> print(arr.shape)
+    (512, 512)
+
+    >>> # For large files, use Dask with memory mapping
+    >>> darr, info = reader.open(Path("large.npy"), prefer_dask=True)
+    >>> print(type(darr).__name__)
+    Array
+    """
+
     SUFFIXES = (".npy", ".npz")
 
     def open(
@@ -376,6 +844,94 @@ class NumpyReader(Reader):
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
     ) -> Tuple[NDArray[Any], ImageInfo]:
+        """Open a NumPy .npy or .npz file and return the array data and metadata.
+
+        This method handles both .npy (single array) and .npz (archive) formats.
+        For .npy files with `prefer_dask=True`, memory-mapping is used for
+        efficient lazy loading. For .npz archives, the first array is selected.
+
+        Parameters
+        ----------
+        path : Path
+            Path to the NumPy file (e.g., '/path/to/data.npy' or 'archive.npz').
+        prefer_dask : bool, optional
+            If True, return a Dask array. For .npy files, this uses memory-mapping
+            for lazy loading. For .npz files, the array is wrapped in a Dask array
+            after loading. Defaults to False.
+        chunks : int or tuple of int, optional
+            Chunk size for Dask arrays. Can be a single integer (applied to
+            all dimensions) or a tuple specifying chunk size per dimension.
+            If None, uses 'auto' chunking. Only relevant when `prefer_dask=True`.
+            Defaults to None.
+        **kwargs : dict
+            Reserved for future compatibility with additional reader options.
+
+        Returns
+        -------
+        arr : NDArray[Any] or dask.array.Array
+            The loaded array data. Returns a NumPy ndarray if `prefer_dask=False`,
+            or a Dask array if `prefer_dask=True`.
+        info : ImageInfo
+            Metadata about the loaded array, including path, shape, and dtype.
+            For .npz files, the metadata includes the 'npz_key' indicating which
+            array was loaded from the archive.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the specified file does not exist.
+        ValueError
+            If the .npz archive is empty or cannot be read.
+
+        Notes
+        -----
+        When `prefer_dask=True` for .npy files, the reader uses NumPy's
+        memory-mapped mode, which maps the file directly into virtual memory
+        without loading it into RAM. This is efficient for large arrays that
+        don't fit in memory.
+
+        For .npz archives, all arrays are technically loaded when the archive
+        is opened, but only the first one is returned. The first array is
+        determined by alphabetical ordering of the key names in the archive.
+
+        NumPy binary files do not typically contain axis labels or other
+        metadata, so the `axes` field in ImageInfo is always None, and
+        the metadata dictionary is empty (except for 'npz_key' in .npz files).
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> reader = NumpyReader()
+
+        >>> # Load a .npy file into memory
+        >>> arr, info = reader.open(Path("image.npy"))
+        >>> print(f"Shape: {info.shape}, dtype: {info.dtype}")
+        Shape: (1024, 1024), dtype: float64
+
+        >>> # Load a .npy file as a Dask array with memory mapping
+        >>> darr, info = reader.open(Path("large.npy"), prefer_dask=True)
+        >>> print(f"Type: {type(darr).__name__}")
+        Type: Array
+
+        >>> # Specify custom chunking for Dask
+        >>> darr, info = reader.open(
+        ...     Path("data.npy"),
+        ...     prefer_dask=True,
+        ...     chunks=(512, 512)
+        ... )
+        >>> print(darr.chunksize)
+        (512, 512)
+
+        >>> # Load from a .npz archive
+        >>> arr, info = reader.open(Path("archive.npz"))
+        >>> print(f"Loaded array: {info.metadata['npz_key']}")
+        Loaded array: arr_0
+
+        >>> # Load .npz as Dask array
+        >>> darr, info = reader.open(Path("archive.npz"), prefer_dask=True)
+        >>> print(f"Key: {info.metadata['npz_key']}, Type: {type(darr).__name__}")
+        Key: arr_0, Type: Array
+        """
 
         if path.suffix.lower() == ".npy":
             if prefer_dask:
@@ -427,10 +983,85 @@ class NumpyReader(Reader):
 
 
 class ImageOpener:
-    """Generic image opener that selects an appropriate reader."""
+    """Automatic image file format detection and reading.
+
+    ImageOpener provides a unified interface for opening various image file
+    formats. It automatically selects the appropriate reader based on file
+    extension and falls back to probing if the extension is ambiguous or unknown.
+
+    The opener maintains a registry of reader classes and attempts to use them
+    in priority order. This design allows easy extension with custom readers
+    and provides a single entry point for loading images regardless of format.
+
+    Attributes
+    ----------
+    _readers : Tuple[Type[Reader], ...]
+        Ordered tuple of reader classes. The first reader to successfully
+        claim and open a file is used. Priority is determined by order.
+
+    See Also
+    --------
+    Reader : Abstract base class for all readers.
+    TiffReader : Reader for TIFF/OME-TIFF files.
+    ZarrReader : Reader for Zarr stores.
+    HDF5Reader : Reader for HDF5 files.
+    NumpyReader : Reader for NumPy .npy/.npz files.
+
+    Notes
+    -----
+    The opener uses a two-phase strategy:
+    1. Extension-based: Tries readers whose `claims()` method returns True
+    2. Fallback: If no reader claims the file, probes all readers sequentially
+
+    This approach handles both standard file extensions and edge cases where
+    files may have unconventional naming or multiple valid interpretations.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> opener = ImageOpener()
+    >>> arr, info = opener.open("image.tif")
+    >>> print(info.shape)
+    (512, 512, 3)
+
+    >>> # Works with any supported format
+    >>> arr, info = opener.open("data.zarr", prefer_dask=True)
+    >>> print(type(arr).__name__)
+    Array
+
+    >>> # Custom reader registry
+    >>> opener = ImageOpener(readers=[TiffReader, ZarrReader])
+    >>> arr, info = opener.open("image.tif")
+    """
 
     def __init__(self, readers: Optional[Iterable[Type[Reader]]] = None) -> None:
+        """Initialize the ImageOpener with a reader registry.
 
+        Parameters
+        ----------
+        readers : Iterable of Reader subclasses, optional
+            An ordered sequence of reader classes to use. If None, uses the
+            default registry: (TiffReader, ZarrReader, NumpyReader, HDF5Reader).
+            The order determines priority when multiple readers could handle
+            the same file.
+
+        Notes
+        -----
+        Custom readers can be provided by passing a sequence of Reader subclasses.
+        Readers earlier in the sequence have higher priority and will be tried
+        first when opening files.
+
+        Examples
+        --------
+        >>> # Use default readers
+        >>> opener = ImageOpener()
+
+        >>> # Custom reader priority
+        >>> opener = ImageOpener(readers=[ZarrReader, TiffReader])
+
+        >>> # Single reader only
+        >>> opener = ImageOpener(readers=[TiffReader])
+        """
         # Registry order is priority order
         self._readers: Tuple[Type[Reader], ...] = tuple(
             readers or (TiffReader, ZarrReader, NumpyReader, HDF5Reader)
@@ -443,60 +1074,125 @@ class ImageOpener:
         chunks: Optional[Union[int, Tuple[int, ...]]] = None,
         **kwargs: Any,
     ) -> Tuple[NDArray[Any], ImageInfo]:
-        """Open image file with appropriate reader.
+        """Open an image file using the appropriate reader.
+
+        This method automatically detects the file format and selects the
+        best reader from the registry. It first tries extension-based matching,
+        then falls back to probing each reader if necessary.
 
         Parameters
         ----------
         path : str or os.PathLike
-            Path to the image file or directory.
+            Path to the image file or directory (e.g., 'image.tif', 'data.zarr').
         prefer_dask : bool, optional
-            If True, attempt to return a Dask array when possible.
-            Defaults to False (return NumPy array).
+            If True, attempt to return a Dask array for lazy evaluation when
+            the reader supports it. If False, load the entire image into memory
+            as a NumPy array. Defaults to False.
         chunks : int or tuple of int, optional
-            Chunk size for Dask arrays. If None, use default chunking.
-            Ignored if `prefer_dask` is False. Defaults to None.
+            Chunk size for Dask arrays. Can be a single integer (applied to
+            all dimensions) or a tuple specifying chunk size per dimension.
+            If None, uses the reader's default chunking strategy. Only relevant
+            when `prefer_dask=True`. Defaults to None.
         **kwargs : dict
-            Additional keyword arguments passed to the reader's `open` method.
+            Additional keyword arguments passed to the selected reader's `open`
+            method. These vary by reader implementation.
+
         Returns
         -------
         arr : NDArray[Any] or dask.array.Array
-            The loaded image data as a NumPy or Dask array.
+            The loaded image data. Returns a NumPy ndarray if `prefer_dask=False`,
+            or a Dask array if `prefer_dask=True` and the reader supports it.
         info : ImageInfo
-            Metadata about the loaded image.
+            Metadata about the loaded image, including path, shape, dtype,
+            axes information (if available), and format-specific metadata.
+
         Raises
         ------
         FileNotFoundError
             If the specified path does not exist.
         ValueError
-            If no suitable reader is found for the file.
+            If no suitable reader in the registry can open the file.
+
+        Notes
+        -----
+        The method uses a two-phase approach:
+
+        Phase 1 - Extension-based selection:
+            Iterates through registered readers in priority order and uses
+            the first one whose `claims()` method returns True for the file.
+
+        Phase 2 - Fallback probing:
+            If no reader claims the file, attempts to open it with each
+            reader sequentially until one succeeds.
+
+        This strategy handles both common cases (correct file extension) and
+        edge cases (missing extension, multiple interpretations, etc.).
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> opener = ImageOpener()
+
+        >>> # Open a TIFF file into memory
+        >>> arr, info = opener.open("sample.tif")
+        >>> print(f"Shape: {info.shape}, dtype: {info.dtype}")
+        Shape: (1024, 1024), dtype: uint16
+
+        >>> # Open a Zarr store as Dask array
+        >>> darr, info = opener.open("large.zarr", prefer_dask=True)
+        >>> print(f"Type: {type(darr).__name__}")
+        Type: Array
+
+        >>> # Specify custom chunking
+        >>> darr, info = opener.open(
+        ...     "data.h5",
+        ...     prefer_dask=True,
+        ...     chunks=(10, 256, 256)
+        ... )
+        >>> print(darr.chunksize)
+        (10, 256, 256)
+
+        >>> # Open with Path object
+        >>> arr, info = opener.open(Path("image.npy"))
+        >>> print(info.path)
+        image.npy
+
+        >>> # Works with any format in the registry
+        >>> for filepath in ["data.tif", "data.zarr", "data.h5", "data.npy"]:
+        ...     arr, info = opener.open(filepath)
+        ...     print(f"{filepath}: {info.shape}")
         """
 
         p = Path(path)
         if not p.exists():
-            logger.error(f"File {p} does not exist")
+            logger.error(msg=f"File {p} does not exist")
             raise FileNotFoundError(p)
 
         # 1) Extension-based selection
-        logger.info(f"Opening {p}")
+        logger.info(msg=f"Opening {p}")
         for reader_cls in self._readers:
             try:
                 if reader_cls.claims(p):
                     reader = reader_cls()
-                    logger.info(f"Using reader: {reader_cls.__name__}.")
+                    logger.info(msg=f"Using reader: {reader_cls.__name__}.")
                     return reader.open(
-                        p, prefer_dask=prefer_dask, chunks=chunks, **kwargs
+                        path=p, prefer_dask=prefer_dask, chunks=chunks, **kwargs
                     )
             except Exception:
                 pass
 
         # 2) Fallback: probe readers that didn't claim the file
-        logger.info(f"No suitable reader found for {p}. Attempting fallback readers.")
+        logger.info(
+            msg=f"No suitable reader found for {p}. Attempting fallback readers."
+        )
         for reader_cls in self._readers:
             try:
-                reader = reader_cls()
-                return reader.open(p, prefer_dask=prefer_dask, chunks=chunks, **kwargs)
+                reader: Reader = reader_cls()
+                return reader.open(
+                    path=p, prefer_dask=prefer_dask, chunks=chunks, **kwargs
+                )
             except Exception:
                 continue
 
-        logger.error(f"No suitable reader found for {p}")
+        logger.error(msg=f"No suitable reader found for {p}")
         raise ValueError("No suitable reader found for:", p)
