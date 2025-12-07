@@ -163,23 +163,29 @@ def import_affine_transform(data_path: str) -> ants.core.ants_transform.ANTsTran
     return affine_transform
 
 
-def calculate_metrics(fixed, moving, mask=None, sampling="regular", sampling_pct=1.0):
+def calculate_metrics(
+    fixed: ants.ANTsImage | np.ndarray,
+    moving: ants.ANTsImage | np.ndarray,
+    mask: ants.ANTsImage | None = None,
+    sampling: str = "regular",
+    sampling_pct: float = 1.0,
+) -> dict:
     """
-    Compute normalized cross-correlation band Mattes Mutual Information etween two
+    Compute normalized cross-correlation band Mattes Mutual Information between two
     ANTsImage volumes.
 
     Parameters:
     -----------
-    fixed : ants.ANTsImage
+    fixed : ants.ANTsImage or np.ndarray
         The reference (fixed) image.
-    moving : ants.ANTsImage
+    moving : ants.ANTsImage or np.ndarray
         The image to be compared or aligned.
     mask : ants.ANTsImage or None
         Optional mask applied to both fixed and moving.
     sampling : {'regular', 'random', None}
-        Sampling strategy for computing metric.
+        Sampling strategy for computing metric. Default is 'regular'.
     sampling_pct : float
-        Fraction of voxels to sample (0–1).
+        Fraction of voxels to sample (0–1). Default is 1.0 (all voxels).
 
     Returns:
     --------
@@ -187,6 +193,12 @@ def calculate_metrics(fixed, moving, mask=None, sampling="regular", sampling_pct
         Keys include 'Correlation' and 'MattesMutualInformation'. Values are metric
         results. For Correlation coefficient, range is from -1 to 1, where 1
         indicates perfect alignment.
+
+    Notes:
+    ------
+    Could be expanded to include additional metrics as needed. Potential options
+    include MeanSquares, Correlation, ANTSNeighborhoodCorrelation,
+    MattesMutualInformation, JointHistogramMutualInformation, and Demons
     """
 
     if isinstance(fixed, np.ndarray):

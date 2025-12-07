@@ -69,7 +69,7 @@ from clearex.io.log import (
     capture_c_level_output,
 )
 from clearex.io.read import ImageOpener, ImageInfo
-from clearex.registration.common import export_tiff, crop_data
+from clearex.registration.common import export_tiff, crop_data, calculate_metrics
 
 # Type Aliases
 ImageType = Union[NDArray[Any], ants.ANTsImage]
@@ -229,6 +229,12 @@ class ImageRegistration:
                 max_value=self.fixed_image.max(),
             )
             self._log.info(msg=f"Reference image written to: {reference_image_path}")
+
+        # Measure and log image metrics before registration
+        metrics = calculate_metrics(
+            fixed=self.fixed_image,
+            moving=self.moving_image,
+        )
 
     def register(self) -> None:
         """

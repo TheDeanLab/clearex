@@ -155,45 +155,62 @@ def register_image(
     )
 
     # Register the images. This will return a dictionary with the results.
-    registered = ants.registration(**kwargs)
+    registered: dict = ants.registration(**kwargs)
 
     # Read the transform from the temporary disk location.
-    transform = ants.read_transform(registered["fwdtransforms"][0])
+    transform: ants.ANTsTransform = ants.read_transform(
+        filename=registered["fwdtransforms"][0]
+    )
 
     # Resample the registered image to the target image.
-    transformed_image = transform.apply_to_image(
+    transformed_image: ants.ANTsImage = transform.apply_to_image(
         image=moving_image, reference=fixed_image, interpolation="linear"
     )
     return transformed_image, transform
 
 
-def inspect_affine_transform(affine_transform):
+def inspect_affine_transform(
+    affine_transform: ants.core.ants_transform.ANTsTransform,
+) -> None:
     """Evaluate the affine transform and report it's decomposed parts.
 
+    Parameters
+    ----------
     affine_transform: ants.core.ants_transform.ANTsTransform
     """
-    transform_parameters = affine_transform.parameters
-    center_of_rotation = affine_transform.fixed_parameters
+
+    # For a 3D image, the transform_parameters is a 12-element array.
+    # For a 3D transform, the first 9 values represent the rotation/scale/shear
+    # matrix, and the last 3 represent the translation vector.
+    transform_parameters: np.ndarray = affine_transform.parameters
+
+    # An array of the center of rotation, e.g., the coordinate that the transformation
+    # is centered around. Rotations and scaling are performed relative to this point.
+    center_of_rotation: np.ndarray = affine_transform.fixed_parameters
 
     # Reshape the matrix and calculate the offset.
-    affine_matrix = transform_parameters[:9].reshape(3, 3)
-    translation_vector = transform_parameters[9:]
-    offset = (
+    affine_matrix: np.ndarray = transform_parameters[:9].reshape(3, 3)
+    translation_vector: np.ndarray = transform_parameters[9:]
+
+    # calculates the true translation offset in the image's coordinate system. The
+    # transformation applied by ANTs is effectively y = A * (x - center) +
+    # translation + center.
+    offset: np.ndarray = (
         translation_vector + center_of_rotation - affine_matrix @ center_of_rotation
     )
 
     # Assemble a complete affine transform matrix.
-    final_matrix = np.eye(4)
+    final_matrix: np.ndarray = np.eye(N=4)
     final_matrix[:3, :3] = affine_matrix
     final_matrix[:3, 3] = offset
     logger.info(f"Affine Transform Matrix:\n{final_matrix}")
     print("Complete Affine 4x4 matrix:\n", final_matrix)
 
     # Decompose the Affine Matrix into its Parts
-    _extract_translation(final_matrix)
-    _extract_rotation(final_matrix)
-    _extract_shear(final_matrix)
-    _extract_scale(final_matrix)
+    _extract_translation(affine_matrix=final_matrix)
+    _extract_rotation(affine_matrix=final_matrix)
+    _extract_shear(affine_matrix=final_matrix)
+    _extract_scale(affine_matrix=final_matrix)
 
 
 def _extract_scale(affine_matrix):
@@ -204,11 +221,17 @@ def _extract_scale(affine_matrix):
     affine_matrix: np.ndarray
         4x4 affine transform matrix.
     """
-    rotation, scaling_shear = polar(affine_matrix[:, :3])
+    polar_decomposed: tuple = polar(a=affine_matrix[:3, :3])
+
+    scaling_shear: np.ndarray = polar_decomposed[1]
+
     # Further decompose the scaling/shear using RQ decomposition to separate scale and shear
-    scale, _ = rq(scaling_shear)
-    scale_vector = np.diagonal(scale)
-    scale_labels = ["Z", "Y", "X"]
+    scale_matrix, _ = rq(a=scaling_shear)
+    scale_matrix: np.ndarray
+
+    # Force positive diagonal elements by absorbing signs into shear
+    scale_vector: np.ndarray = np.abs(np.diagonal(a=scale_matrix))
+    scale_labels: list[str] = ["Z", "Y", "X"]
     for label, scale in zip(scale_labels, scale_vector):
         logger.info(f"{label} Scale: {scale:.2f}-fold")
         print(f"{label} Scale: {scale:.2f}-fold")
@@ -222,25 +245,24 @@ def _extract_shear(affine_matrix):
     affine_matrix: np.ndarray
         4x4 affine transform matrix.
     """
-    rotation, scaling_shear = polar(affine_matrix[:3, :3])
-    _, shear = rq(scaling_shear)
+    rotation, scaling_shear = polar(a=affine_matrix[:3, :3])
+    _, shear = rq(a=scaling_shear)
 
-    # Shear factors from off-diagonal elements
-    angles_deg = np.degrees(
-        [
-            np.arctan(shear[0, 1]),
-            np.arctan(shear[0, 2]),
-            np.arctan(shear[1, 0]),
-            np.arctan(shear[1, 2]),
-            np.arctan(shear[2, 0]),
-            np.arctan(shear[2, 1]),
-        ]
-    )
+    # Use shear coefficients:
+    sx, sy, sz = np.diag(v=shear)
+    shear_xy = shear[0, 1] / sy if sy != 0 else 0
+    shear_xz = shear[0, 2] / sz if sz != 0 else 0
+    shear_yz = shear[1, 2] / sz if sz != 0 else 0
 
-    # Clearly print the results
-    shear_labels = ["XY", "XZ", "YX", "YZ", "ZX", "ZY"]
-    for label, angle in zip(shear_labels, angles_deg):
-        logger.info(f"Shear Angle {label}: {angle:.2f} degrees")
+    angles_deg_xy = np.degrees(np.arctan(shear_xy))
+    angles_deg_xz = np.degrees(np.arctan(shear_xz))
+    angles_deg_yz = np.degrees(np.arctan(shear_yz))
+
+    shear_labels = ["XY", "XZ", "YZ"]
+    for label, angle in zip(
+        shear_labels, [angles_deg_xy, angles_deg_xz, angles_deg_yz]
+    ):
+        logger.info(msg=f"Shear Angle {label}: {angle:.2f} degrees")
         print(f"Shear angle {label}: {angle:.2f} degrees")
 
 
@@ -253,8 +275,8 @@ def _extract_translation(affine_matrix):
         4x4 affine transform matrix.
     """
     # Extract the translation
-    translation = affine_matrix[:, 3]
-    translation_labels = ["Z", "Y", "X"]
+    translation: np.ndarray = affine_matrix[:3, 3]
+    translation_labels: list[str] = ["Z", "Y", "X"]
     for label, distance in zip(translation_labels, translation):
         logger.info(f"Translation {label}: {distance:.2f} voxels")
         print(f"Translation distance in {label}: {distance:.2f} voxels")
@@ -268,16 +290,16 @@ def _extract_rotation(affine_matrix):
     affine_matrix: np.ndarray
         4x4 affine transform matrix.
     """
-    rotation, _ = polar(affine_matrix[:3, :3])
+    rotation, _ = polar(a=affine_matrix[:3, :3])
 
     # Create a rotation object
-    r = Rotation.from_matrix(rotation)
+    r = Rotation.from_matrix(matrix=rotation)
 
     # Extract Euler angles (XYZ order) in degrees
-    euler_angles_deg = r.as_euler("xyz", degrees=True)
+    euler_angles_deg = r.as_euler(seq="xyz", degrees=True)
 
     # Print angles clearly
-    axis_labels = ["X (roll)", "Y (pitch)", "Z (yaw)"]
+    axis_labels: list[str] = ["X (roll)", "Y (pitch)", "Z (yaw)"]
     for axis, angle in zip(axis_labels, euler_angles_deg):
         logger.info(f"Rotation {axis}: {angle:.2f} degrees")
         print(f"Rotation around {axis} axis: {angle:.2f} degrees")
@@ -307,11 +329,11 @@ def transform_image(
     """
     # Convert images to ANTsImage if they are numpy arrays.
     if isinstance(fixed_image, np.ndarray):
-        fixed_image = ants.from_numpy(fixed_image)
+        fixed_image: ants.ANTsImage = ants.from_numpy(fixed_image)
     if isinstance(moving_image, np.ndarray):
-        moving_image = ants.from_numpy(moving_image)
+        moving_image: ants.ANTsImage = ants.from_numpy(moving_image)
 
-    warped_image = affine_transform.apply_to_image(
+    warped_image: ants.ANTsImage = affine_transform.apply_to_image(
         moving_image, reference=fixed_image, interpolation="linear"
     )
     return ants.histogram_match_image(warped_image, moving_image)

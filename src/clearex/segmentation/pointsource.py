@@ -25,12 +25,10 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 
-# Standard Library Imports
-from typing import Optional
-
 # Third Party Imports
 import numpy as np
 from skimage.feature import blob_log
+from scipy.ndimage import gaussian_filter
 
 # Local Imports
 from clearex.plot.images import mips
@@ -46,6 +44,10 @@ def remove_close_blobs(
     defined by the blob's sigma values, discarding the blob with the lower absolute
     intensity at its centroid.
 
+    distance=0: No filtering (all blobs kept)
+    distance=1: Blobs must be at least 1× their sigma apart
+    distance=10 (default): Blobs must be at least 10× their sigma apart
+
     Parameters
     ----------
     blobs : np.ndarray
@@ -55,7 +57,7 @@ def remove_close_blobs(
         The 3D image data from which intensities at blob centers will be extracted.
     min_dist : float
         A scaling factor for the sigma values to determine the ellipsoidal search
-        volume.
+        volume. If min_dist is 0 or very small, no filtering is performed.
 
     Returns
     -------
@@ -63,6 +65,10 @@ def remove_close_blobs(
         The filtered array of blobs.
     """
     blobs = np.array(blobs)
+
+    # If min_dist is zero or very small, skip filtering to avoid division by zero
+    if min_dist < 1e-10:
+        return blobs
 
     sorted_blobs = sort_by_point_source_intensity(blobs, image)
 
@@ -86,6 +92,10 @@ def remove_close_blobs(
                 )
             else:
                 raise ValueError(f"Unexpected blob format with length {len(blob)}")
+
+            # Skip if any radius is zero (would cause division by zero)
+            if np.any(accepted_radii == 0):
+                continue
 
             # Calculate the difference vector
             diff = blob_center - accepted_center
@@ -142,8 +152,8 @@ def detect_point_sources(
     input_chunk: np.ndarray,
     axial_pixel_size: float,
     lateral_pixel_size: float,
-    distance: Optional[float] = 10,
-    plot_data: Optional[bool] = False,
+    distance: float = 10.0,
+    plot_data: bool = False,
 ) -> np.ndarray:
     """Detect point sources in a 3D image.
 
@@ -162,46 +172,65 @@ def detect_point_sources(
 
     Returns
     -------
-    np.ndarray
+    masked_data : np.ndarray
         A boolean mask indicating the location of point sources.
+    coordinates : np.ndarray
+        Nx3 array of [z, y, x] coordinates for each point source.
+
+    Notes
+    -----
+    For particles with FWHM ~6 pixels (XY) and ~10 pixels (Z):
+    sigma ≈ FWHM / 2.355
+    After isotropic resizing, all dimensions should have similar sigma
+    XY: 6 / 2.355 ≈ 2.5, Z: 10 / 2.355 ≈ 4.2 (but scaled to ~2.5 after resize)
     """
 
     # Resize to isotropic
-    chunk_iso = resize_data(
-        input_chunk,
+    print("Resizing data to isotropic voxel size...")
+    chunk_iso: np.ndarray = resize_data(
+        data=input_chunk,
         axial_pixel_size=axial_pixel_size,
         lateral_pixel_size=lateral_pixel_size,
     )
 
+    # Detect blobs using Laplacian of Gaussian
+    print("Detecting point sources using Laplacian of Gaussian...")
     particle_location = blob_log(
-        chunk_iso,
-        min_sigma=(10.0, 1.0, 1.0),
-        max_sigma=(10.0, 1.0, 1.0),
-        threshold=100,
-        num_sigma=1,
-        overlap=0.0,
+        image=chunk_iso,
+        min_sigma=1.5,
+        max_sigma=20.0,
+        threshold=0.005,
+        num_sigma=10,
+        overlap=0.5,
     )
+    print(f"Initial blob detection: {len(particle_location)} particles found")
 
-    masked_data = np.zeros_like(input_chunk, dtype=bool)
+    masked_data: np.ndarray = np.zeros_like(input_chunk, dtype=bool)
     if len(particle_location) == 0:
-        return masked_data
+        print("No blobs detected after initial detection.")
+        return masked_data, np.array([]).reshape(0, 3)
 
     # Locally evaluate whether the blob is statistically significant
     # relative to the local background.
+    print("Filtering insignificant point sources...")
     significant_blobs = eliminate_insignificant_point_sources(
         chunk_iso, particle_location
     )
+    print(f"After significance filtering: {len(significant_blobs)} particles remaining")
     if len(significant_blobs) == 0:
-        return masked_data
+        print("No significant blobs remaining after significance filtering.")
+        return masked_data, np.array([]).reshape(0, 3)
 
     # Iteratively remove blobs that are too close to each other
+    print("Removing close point sources...")
     delta_blobs = True
     while delta_blobs:
-        number_blobs = len(significant_blobs)
+        number_blobs: int = len(significant_blobs)
         significant_blobs = remove_close_blobs(
-            blobs=significant_blobs, min_dist=distance, image=chunk_iso
+            blobs=significant_blobs, image=chunk_iso, min_dist=distance
         )
         delta_blobs = number_blobs > len(significant_blobs)
+    print(f"After proximity filtering: {len(significant_blobs)} particles remaining")
 
     # Scale the z coordinate of the blobs
     particle_location = np.array(significant_blobs)
@@ -212,10 +241,14 @@ def detect_point_sources(
     # Convert blobs to type int
     particle_location = particle_location.astype(int)
 
+    # Extract Z, Y, X coordinates
+    coordinates = particle_location[:, :3]  # Shape: (N, 3) with columns [z, y, x]
+
     if plot_data:
+        print("Plotting detected point sources...")
         mips(
             input_chunk,
-            points=[particle_location[:, :3]],
+            points=[coordinates],
             lut="nipy_spectral",
             scale_intensity=0.5,
         )
@@ -224,7 +257,7 @@ def detect_point_sources(
     masked_data[
         particle_location[:, 0], particle_location[:, 1], particle_location[:, 2]
     ] = True
-    return masked_data
+    return masked_data, coordinates
 
 
 def eliminate_insignificant_point_sources(
@@ -242,7 +275,7 @@ def eliminate_insignificant_point_sources(
     chunk_iso : np.ndarray
         The 3D image.
     particle_location : np.ndarray
-        The locations of the blobs.
+        The locations of the blobs. Can be Nx4 (isotropic) or Nx6 (anisotropic).
 
     Returns
     -------
@@ -254,9 +287,57 @@ def eliminate_insignificant_point_sources(
     chunk_std = np.std(chunk_iso)
     significant_blobs = []
     for i, blob in enumerate(particle_location):
-        z, y, x, _, _, _ = blob
+        # Handle both 4-element (isotropic) and 6-element (anisotropic) blobs
+        z, y, x = blob[0], blob[1], blob[2]
         z, y, x = int(z), int(y), int(x)
         if chunk_iso[z, y, x] < chunk_mean + 2 * chunk_std:
             continue
         significant_blobs.append(blob)
-    return significant_blobs
+
+    if not significant_blobs:
+        # Return empty array with correct shape based on input
+        num_cols = particle_location.shape[1] if len(particle_location) > 0 else 4
+        return np.array([]).reshape(0, num_cols)
+
+    return np.array(significant_blobs)
+
+
+def background_correction(image: np.ndarray, sigma: float = 20) -> np.ndarray:
+    """Compute background using Gaussian blur while excluding zero-valued voxels.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        The 3D image.
+    sigma : float
+        The sigma for the Gaussian filter.
+
+    Returns
+    -------
+    np.ndarray
+        The background-corrected image.
+    """
+    # Create mask for non-zero voxels
+    valid_mask = image > 0
+
+    # Replace zeros with NaN
+    image_masked = image.astype(float)
+    image_masked[~valid_mask] = np.nan
+
+    # Blur the valid data and the mask separately
+    blurred_image = gaussian_filter(np.nan_to_num(image_masked), sigma=sigma)
+    blurred_mask = gaussian_filter(valid_mask.astype(float), sigma=sigma)
+
+    # Normalize by the blurred mask to get proper weighted average
+    # This prevents zero regions from pulling down the background estimate
+    background = np.divide(
+        blurred_image,
+        blurred_mask,
+        out=np.zeros_like(blurred_image),
+        where=blurred_mask > 0.01,  # Avoid division by very small numbers
+    )
+
+    background_corrected = image - background
+    background_corrected[image == 0] = 0
+
+    return background_corrected

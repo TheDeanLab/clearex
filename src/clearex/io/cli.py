@@ -24,6 +24,94 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 import argparse
+import os
+from typing import Optional
+
+
+def parse_slurm_args() -> argparse.Namespace:
+    """Parse SLURM-related command-line arguments.
+
+    This convenience helper builds an argparse.ArgumentParser configured to
+    accept common SLURM-related options used by the registration workflow and
+    returns the parsed namespace.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    argparse.Namespace
+        Namespace with the parsed arguments. At minimum contains:
+        - imaging_round: Optional[int]
+            The imaging round integer (if provided).
+        - save_directory: str
+            Path to the directory where outputs will be saved.
+
+    Notes
+    -----
+    The function does not inspect environment variables; it only parses
+    command-line arguments. Use :func:`get_imaging_round` to resolve a final
+    imaging round value that may come from the CLI or environment.
+    """
+    parser = argparse.ArgumentParser(description="Register one imaging round.")
+    parser.add_argument(
+        "-r",
+        "--imaging-round",
+        type=int,
+        default=None,
+        help="Imaging round integer (overrides IMAGING_ROUND / SLURM_ARRAY_TASK_ID).",
+    )
+    parser.add_argument(
+        "--save-directory",
+        default="/archive/bioinformatics/Danuser_lab/Dean/dean/2025-11-28",
+    )
+    return parser.parse_args()
+
+
+def get_imaging_round(cli_value: Optional[int]) -> int:
+    """Resolve the imaging round integer from CLI or environment.
+
+    The function returns the imaging round with the following priority:
+    1. The explicitly provided ``cli_value`` (if not ``None``).
+    2. The ``IMAGING_ROUND`` environment variable (if set and an integer).
+    3. The ``SLURM_ARRAY_TASK_ID`` environment variable (if set and an integer).
+    4. A fallback default of ``3``.
+
+    Parameters
+    ----------
+    cli_value : Optional[int]
+        Value provided on the CLI; if not ``None`` this is returned directly.
+
+    Returns
+    -------
+    int
+        The resolved imaging round integer.
+
+    Raises
+    ------
+    ValueError
+        If an environment variable is present but cannot be parsed as an
+        integer.
+    """
+    if cli_value is not None:
+        return cli_value
+
+    env_val: str | None = os.environ.get("IMAGING_ROUND")
+    if env_val is not None:
+        try:
+            return int(env_val)
+        except ValueError:
+            raise ValueError("IMAGING_ROUND environment variable is not an integer")
+
+    slurm_id: str | None = os.environ.get("SLURM_ARRAY_TASK_ID")
+    if slurm_id is not None:
+        try:
+            return int(slurm_id)
+        except ValueError:
+            raise ValueError("SLURM_ARRAY_TASK_ID is not an integer")
+
+    return 3  # fallback default
 
 
 def create_parser():
