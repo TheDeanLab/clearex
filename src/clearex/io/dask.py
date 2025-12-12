@@ -24,41 +24,12 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
-
-# Standard Library Imports
 import os
-
-# Third Party Imports
-import numpy as np
-import skimage.filters as skfilters
 import dask.array as da
 from dask_jobqueue.slurm import SLURMRunner
 from dask.distributed import Client
 
-# Local Imports
-
-
-def apply_meijering(
-    slice2d: np.ndarray, sigmas: list[float], black_ridges: bool
-) -> np.ndarray:
-    """Apply the Meijering filter to a 2D slice.
-
-    Parameters
-    ----------
-    slice2d : np.ndarray
-        A 2D slice of the data.
-    sigmas : list of float
-        Standard deviations for Gaussian smoothing.
-    black_ridges : bool
-        If True, return black ridges on a white background.
-
-    Returns
-    -------
-    np.ndarray
-        The filtered 2D slice.
-    """
-    return skfilters.meijering(slice2d, sigmas=sigmas, black_ridges=black_ridges)
-
+from clearex.filter.filters import meijering_filter
 
 if __name__ == "__main__":
     base_path = (
@@ -80,7 +51,7 @@ if __name__ == "__main__":
 
             # Apply the filter slice-by-slice in the yx plane.
             filtered = da.map_blocks(
-                apply_meijering,
+                meijering_filter,
                 data,
                 sigmas=[2, 5, 7],
                 black_ridges=False,

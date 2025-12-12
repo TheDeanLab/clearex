@@ -23,3 +23,47 @@
 #  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
+
+
+def get_bounding_box(
+    image_shape: tuple[int, int, int],
+    roi_slice: tuple[slice, slice, slice],
+    buffer: int = 0,
+) -> tuple[slice, slice, slice]:
+    """
+    Expand a regionprops slice tuple (z, y, x) by `buffer` voxels, clamped to image bounds.
+
+    Parameters
+    ----------
+    image_shape: tuple of int
+        Shape of the image (z, y, x).
+    roi_slice: tuple of slice
+        Original regionprops slice (z, y, x).
+    buffer: int
+        Number of voxels to expand the slice in each direction.
+
+    Returns
+    -------
+    tuple of slice
+        (sz, sy, sx) expanded and clamped slices.
+    """
+    z, y, x = image_shape
+    sz, sy, sx = roi_slice
+
+    z0: int = max(0, (sz.start or 0) - buffer)
+    y0: int = max(0, (sy.start or 0) - buffer)
+    x0: int = max(0, (sx.start or 0) - buffer)
+
+    z1: int = min(z, (sz.stop if sz.stop is not None else z) + buffer)
+    y1: int = min(y, (sy.stop if sy.stop is not None else y) + buffer)
+    x1: int = min(x, (sx.stop if sx.stop is not None else x) + buffer)
+
+    # Guarantee at least one voxel
+    if z1 <= z0:
+        z1: int = min(z, z0 + 1)
+    if y1 <= y0:
+        y1: int = min(y, y0 + 1)
+    if x1 <= x0:
+        x1: int = min(x, x0 + 1)
+
+    return slice(z0, z1), slice(y0, y1), slice(x0, x1)

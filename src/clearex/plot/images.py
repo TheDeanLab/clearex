@@ -41,7 +41,8 @@ def mips(
     points=None,
     scale_intensity=False,
     lut="gray",
-):
+    titles=None,
+) -> None:
     """Display Maximum Intensity Projections (MIPs) for multiple channels.
 
     Optionally draws bounding box(es) on the MIPs: one bounding box per channel.
@@ -76,6 +77,13 @@ def mips(
     lut : str, optional
         The lookup table to use for the image. Default is 'gray'. Other options
         include 'nipy_spectral', 'viridis', 'plasma', 'inferno', 'magma', 'cividis'...
+
+    titles : list of str, optional
+        Titles for each channel. If provided, should have the same length as channels.
+
+    Returns
+    -------
+    None
     """
     num_channels = len(channels)
 
@@ -90,6 +98,15 @@ def mips(
     else:
         # Use a list of None so we can uniformly handle below
         bounding_boxes = [None] * num_channels
+
+    if titles is not None:
+        if len(titles) != num_channels:
+            raise ValueError(
+                f"titles has length {len(titles)}, "
+                f"but there are {num_channels} channels."
+            )
+
+    column_titles = ["XY", "XZ", "YZ"]
 
     plt.figure(figsize=(10, 6))
     for i, channel in enumerate(channels):
@@ -106,11 +123,26 @@ def mips(
 
             # Plot MIPs for each channel
             ax = plt.subplot(num_channels, 3, i * 3 + axis + 1)
+
+            # Turn off axis ticks but keep labels visible
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+
+            # Add column titles on the first row only
+            # Add row titles on the first column only
+            if titles is not None and axis == 0:
+                ax.set_ylabel(titles[i])
+
+            # Add column titles on the first row only
+            if i == 0:
+                ax.set_title(column_titles[axis])
+
             if scale_intensity is False:
                 ax.imshow(mip_channel, cmap=lut)
             else:
                 ax.imshow(mip_channel, cmap=lut, vmin=0, vmax=scale_intensity)
-            ax.axis("off")
 
             # If we have a bbox for this channel, draw it
             if bbox is not None:

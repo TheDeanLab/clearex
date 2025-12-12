@@ -230,12 +230,6 @@ class ImageRegistration:
             )
             self._log.info(msg=f"Reference image written to: {reference_image_path}")
 
-        # Measure and log image metrics before registration
-        metrics = calculate_metrics(
-            fixed=self.fixed_image,
-            moving=self.moving_image,
-        )
-
     def register(self) -> None:
         """
         Register a moving image to a fixed image using linear and nonlinear transformations.
@@ -252,6 +246,13 @@ class ImageRegistration:
         ValueError
             If required paths are not provided either as arguments or instance attributes.
         """
+        # Measure and log image metrics before registration
+        self._log.info(msg="Pre-registration image metrics...")
+        _ = calculate_metrics(
+            fixed=self.fixed_image,
+            moving=self.moving_image,
+        )
+
         # Perform Linear Registration
         moving_linear_aligned = self._perform_linear_registration(
             fixed_image=self.fixed_image,
@@ -260,12 +261,24 @@ class ImageRegistration:
             save_directory=self.save_directory,
         )
 
+        self._log.info(msg="Linearly registered image metrics...")
+        _ = calculate_metrics(
+            fixed=self.fixed_image,
+            moving=moving_linear_aligned,
+        )
+
         # Perform Nonlinear Registration
-        self._perform_nonlinear_registration(
+        moving_nonlinear_aligned = self._perform_nonlinear_registration(
             fixed_image=self.fixed_image,
             moving_linear_aligned=moving_linear_aligned,
             imaging_round=self.imaging_round,
             save_directory=self.save_directory,
+        )
+
+        self._log.info(msg="Nonlinearly registered image metrics...")
+        _ = calculate_metrics(
+            fixed=self.fixed_image,
+            moving=moving_nonlinear_aligned,
         )
 
         self._log.info(msg="Image registration complete.")
@@ -345,7 +358,7 @@ class ImageRegistration:
         moving_linear_aligned: ants.ANTsImage,
         imaging_round: int | None,
         save_directory: str | os.PathLike,
-    ) -> None:
+    ) -> ants.ANTsImage:
         """
         Perform nonlinear (deformable) registration.
 
@@ -359,8 +372,13 @@ class ImageRegistration:
             The round number for identifying the transformation file.
         save_directory : str or os.PathLike
             Directory where the transformation will be saved.
+
+        Returns
+        -------
+        ants.ANTsImage
+            The nonlinearly registered moving image.
         """
-        nonlinear_transformation_path = os.path.join(
+        nonlinear_transformation_path: str = os.path.join(
             save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
         )
 
@@ -369,6 +387,17 @@ class ImageRegistration:
                 f"Nonlinear transformation already exists at "
                 f"{nonlinear_transformation_path}. Skipping registration."
             )
+            # Read the transform from disk
+            transform: ants.ANTsTransform = ants.read_transform(
+                filename=nonlinear_transformation_path
+            )
+            # Resample the registered image to the target image
+            nonlinear_transformed: ants.ANTsImage = transform.apply_to_image(
+                image=moving_linear_aligned,
+                reference=fixed_image,
+                interpolation="linear",
+            )
+            return nonlinear_transformed
         else:
             if self.force_override and os.path.exists(nonlinear_transformation_path):
                 self._log.info(
@@ -388,10 +417,11 @@ class ImageRegistration:
             if stderr:
                 self._log.error(msg=stderr)
 
-            shutil.copyfile(transform_path, nonlinear_transformation_path)
+            shutil.copyfile(src=transform_path, dst=nonlinear_transformation_path)
             self._log.info(
                 msg=f"Nonlinear warp written to: {nonlinear_transformation_path}"
             )
+            return nonlinear_transformed
 
 
 @dataclass
@@ -496,9 +526,9 @@ class ChunkedImageRegistration(ImageRegistration):
         self,
         fixed_image: ants.ANTsImage,
         moving_linear_aligned: ants.ANTsImage,
-        imaging_round: int,
-        save_directory: str | os.PathLike[str],
-    ) -> None:
+        imaging_round: int | None,
+        save_directory: str | os.PathLike,
+    ) -> ants.ANTsImage:
         """
         Perform nonlinear (deformable) registration.
 
@@ -512,104 +542,136 @@ class ChunkedImageRegistration(ImageRegistration):
             The round number for identifying the transformation file.
         save_directory : str or os.PathLike[str]
             Directory where the transformation will be saved.
+
+        Returns
+        -------
+        ants.ANTsImage
+            The nonlinearly registered moving image.
         """
         self._log.info("Beginning Chunked Nonlinear Registration...")
-
-        # Compute the chunk grid.
-        self._compute_chunk_grid(self.fixed_image.shape)
-
-        # Create directory for chunk transforms
-        self.chunks_dir = Path(self.save_directory) / (
-            f"round_{self.imaging_round}_chunks"
-        )
-        self.chunks_dir.mkdir(exist_ok=True)
-
-        # Create an empty array to store the numpy transformed chunks to
-        registered_image = np.zeros(self.fixed_image.shape)
-
-        # Create an empty array to store the warp field
-        nonlinear_transform = np.zeros((*self.fixed_image.shape, 3), dtype=np.float32)
-
-        fixed_image_ants = fixed_image
-
-        # Convert to a numpy array for easier indexing
-        moving_linear_aligned = moving_linear_aligned.numpy()
-        fixed_image = fixed_image.numpy()
-
-        # Process each chunk
-        for i, chunk in enumerate(self.chunk_info_list):
-            self._log.info(f"Chunk {i+1}/{len(self.chunk_info_list)}")
-            updated_chunk, local_warp = self.register_chunk(
-                chunk=chunk,
-                fixed_image=fixed_image,
-                moving_image=moving_linear_aligned,
-                nonlinear_type="SyNOnly",
-                nonlinear_accuracy=self.nonlinear_accuracy,
-            )
-
-            # Place the registered chunk into the correct location in the full image
-            registered_image[
-                chunk.z_start : chunk.z_end,
-                chunk.y_start : chunk.y_end,
-                chunk.x_start : chunk.x_end,
-            ] = updated_chunk
-
-            # Place the local warp into the correct location in the full warp field
-            # Note: local_warp is already stripped to core size by register_chunk()
-            nonlinear_transform[
-                chunk.z_start : chunk.z_end,
-                chunk.y_start : chunk.y_end,
-                chunk.x_start : chunk.x_end,
-                :,
-            ] = local_warp
-
-        self._log.info("All chunks registered!")
 
         nonlinear_transformation_path = os.path.join(
             save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
         )
 
-        nonlinear_image_path = os.path.join(
-            save_directory, f"nonlinear_registered_{imaging_round}.tif"
-        )
+        if os.path.exists(nonlinear_transformation_path) and not self.force_override:
+            self._log.info(
+                f"Nonlinear transformation already exists at "
+                f"{nonlinear_transformation_path}. Skipping registration."
+            )
+            # Read the transform from disk
+            transform: ants.ANTsTransform = ants.read_transform(
+                filename=nonlinear_transformation_path
+            )
+            # Resample the registered image to the target image
+            nonlinear_transformed: ants.ANTsImage = transform.apply_to_image(
+                image=moving_linear_aligned,
+                reference=fixed_image,
+                interpolation="linear",
+            )
+            return nonlinear_transformed
+        else:
 
-        # Save the full registered image and warp field
-        export_tiff(
-            image=registered_image,
-            data_path=nonlinear_image_path,
-            min_value=self.moving_image.min(),
-            max_value=self.moving_image.max(),
-        )
-        self._log.info(f"Nonlinear registered image written to: {nonlinear_image_path}")
+            # Compute the chunk grid.
+            self._compute_chunk_grid(self.fixed_image.shape)
 
-        # Convert the warp field to an ANTs image and save
-        nonlinear_transform = ants.from_numpy(
-            nonlinear_transform,
-            origin=fixed_image_ants.origin,
-            spacing=fixed_image_ants.spacing,
-            direction=fixed_image_ants.direction,
-            has_components=True,  # IMPORTANT: makes it a vector image
-        )
+            # Create directory for chunk transforms
+            self.chunks_dir = Path(self.save_directory) / (
+                f"round_{self.imaging_round}_chunks"
+            )
+            self.chunks_dir.mkdir(exist_ok=True)
 
-        # Ensure the path has .nii.gz extension
-        nonlinear_transformation_path = Path(nonlinear_transformation_path)
-        if (
-            nonlinear_transformation_path.suffix != ".gz"
-            or nonlinear_transformation_path.stem.split(".")[-1] != "nii"
-        ):
-            # Remove existing extension(s) and add .nii.gz
-            nonlinear_transformation_path = nonlinear_transformation_path.with_suffix(
-                ".nii.gz"
+            # Create an empty array to store the numpy transformed chunks to
+            registered_image: np.ndarray = np.zeros(self.fixed_image.shape)
+
+            # Create an empty array to store the warp field
+            nonlinear_transform: np.ndarray = np.zeros(
+                (*self.fixed_image.shape, 3), dtype=np.float32
             )
 
-        ants.image_write(nonlinear_transform, str(nonlinear_transformation_path))
-        self._log.info(f"Nonlinear warp written to: {nonlinear_transformation_path}")
+            fixed_image_ants: ants.ANTsImage = fixed_image
 
-        # Save the Chunk Info List
-        chunk_info_path: Path = Path(self.save_directory) / (
-            f"round_{self.imaging_round}_chunk_info.npy"
-        )
-        np.save(file=chunk_info_path, arr=self.chunk_info_list)
+            # Convert to a numpy array for easier indexing
+            moving_linear_aligned: np.ndarray = moving_linear_aligned.numpy()
+            fixed_image: np.ndarray = fixed_image.numpy()
+
+            # Process each chunk
+            for i, chunk in enumerate(self.chunk_info_list):
+                self._log.info(f"Chunk {i+1}/{len(self.chunk_info_list)}")
+                updated_chunk, local_warp = self.register_chunk(
+                    chunk=chunk,
+                    fixed_image=fixed_image,
+                    moving_image=moving_linear_aligned,
+                    nonlinear_type="SyNOnly",
+                    nonlinear_accuracy=self.nonlinear_accuracy,
+                )
+
+                # Place the registered chunk into the correct location in the full image
+                registered_image[
+                    chunk.z_start : chunk.z_end,
+                    chunk.y_start : chunk.y_end,
+                    chunk.x_start : chunk.x_end,
+                ] = updated_chunk
+
+                # Place the local warp into the correct location in the full warp field
+                # Note: local_warp is already stripped to core size by register_chunk()
+                nonlinear_transform[
+                    chunk.z_start : chunk.z_end,
+                    chunk.y_start : chunk.y_end,
+                    chunk.x_start : chunk.x_end,
+                    :,
+                ] = local_warp
+
+            self._log.info("All chunks registered!")
+
+            nonlinear_image_path = os.path.join(
+                save_directory, f"nonlinear_registered_{imaging_round}.tif"
+            )
+
+            # Save the full registered image and warp field
+            export_tiff(
+                image=registered_image,
+                data_path=nonlinear_image_path,
+                min_value=self.moving_image.min(),
+                max_value=self.moving_image.max(),
+            )
+            self._log.info(
+                f"Nonlinear registered image written to: {nonlinear_image_path}"
+            )
+
+            # Convert the warp field to an ANTs image and save
+            nonlinear_transform = ants.from_numpy(
+                nonlinear_transform,
+                origin=fixed_image_ants.origin,
+                spacing=fixed_image_ants.spacing,
+                direction=fixed_image_ants.direction,
+                has_components=True,  # IMPORTANT: makes it a vector image
+            )
+
+            # Ensure the path has .nii.gz extension
+            nonlinear_transformation_path = Path(nonlinear_transformation_path)
+            if (
+                nonlinear_transformation_path.suffix != ".gz"
+                or nonlinear_transformation_path.stem.split(".")[-1] != "nii"
+            ):
+                # Remove existing extension(s) and add .nii.gz
+                nonlinear_transformation_path = (
+                    nonlinear_transformation_path.with_suffix(".nii.gz")
+                )
+
+            # Save the warp field
+            ants.image_write(nonlinear_transform, str(nonlinear_transformation_path))
+            self._log.info(
+                f"Nonlinear warp written to: {nonlinear_transformation_path}"
+            )
+
+            # Save the Chunk Info List
+            chunk_info_path: Path = Path(self.save_directory) / (
+                f"round_{self.imaging_round}_chunk_info.npy"
+            )
+            np.save(file=chunk_info_path, arr=self.chunk_info_list)
+            registered_image: ants.ANTsImage = ants.from_numpy(registered_image)
+            return registered_image
 
     def _compute_chunk_grid(self, image_shape) -> List[ChunkInfo]:
         """

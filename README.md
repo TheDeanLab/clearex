@@ -8,9 +8,7 @@
 
 **ClearEx** is an open source Python package for scalable analytics of cleared and expanded tissue imaging data. It relies heavily on next-generation file formats and cloud-based chunk computing to accelerate image analysis workflows, enabling tissue-scale computer vision and machine learning.
 
-<details>
-
-<summary>Installation with UV</summary>
+## Installation with UV 
 You can also manage dependencies using [uv](https://github.com/astral-sh/uv),
 which provides faster installs and lockfile support. First, install `uv` via the
 official script:
@@ -36,55 +34,21 @@ uv venv
 # Activate virtual environment
 source .venv/bin/activate
 
-# Install the base dependencies.
+# If you want to operate the package in a non-editable mode, run:
 uv sync
 
-# Install the ClearEx package in editable mode.
+# Install the ClearEx package in editable mode with all core dependencies.
 uv pip install -e .
 
 # Optional - Install development dependencies
-uv sync --extra dev 
+uv pip install -e ".[dev]"
 
-# Optional - Install all additional dependencies.
-uv sync --all-extras
+# Optional - Install the documentation's dependencies.
+uv pip install -e ".[docs]"
 
+# Or install everything at once:
+uv pip install -e ".[dev,docs]"
 ```
 
-`uv` is compatible with existing `pip` or `conda` workflows, so you can continue
-to use those tools if preferred.
-
-</details>
-
-<details>
-
-<summary>Installation with pip</summary>
-
-We recommend installing ClearEx in a dedicated Anaconda environment:
-
-```bash
-conda create -n clearex python=3.12
-conda activate clearex
-
-# Install core dependencies to circumvent BioHPC-specific issues.
-conda install -c conda-forge pyarrow "numpy>=1.25" cython 
-cd to/your/cloned/clearex/directory
-pip install -e .
-```
-
-</details>
-
-<details>
-
-<summary>Installation with conda-forge</summary>
-
-If you encounter compilation issues during installation, you can install ClearEx entirely from conda-forge:
-
-```bash
-cd to/your/cloned/clearex/directory
-conda env create -f environment.yml
-conda activate clearex
-```
-
-This installs all dependencies from conda-forge and the ClearEx package in editable mode. The environment is named `clearex` by default (specified in `environment.yml`).
-
-</details>
+## Installation in a High Performance Computing environment.
+There are several considerations for installation in a high performance computing (HPC) environment. While these are not unique to ClearEx, we provide some guidelines here to help you get started. Please see the INSTALLATION_NOTES.md file for more details.

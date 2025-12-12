@@ -30,6 +30,8 @@
 from scipy import ndimage
 import cv2
 import numpy as np
+from skimage import filters as skfilters
+
 
 # Local Imports
 
@@ -94,3 +96,25 @@ def dog_cv2(sigma_high: float, sigma_low: float, vol: np.ndarray) -> np.ndarray:
     print("min/max dog:", np.min(dog_result), np.max(dog_result))
 
     return dog_result
+
+
+def meijering_filter(
+    slice2d: np.ndarray, sigmas: list[float], black_ridges: bool
+) -> np.ndarray:
+    """Apply the Meijering filter to a 2D slice.
+
+    Parameters
+    ----------
+    slice2d : np.ndarray
+        A 2D slice of the data.
+    sigmas : list of float
+        Standard deviations for Gaussian smoothing.
+    black_ridges : bool
+        If True, return black ridges on a white background.
+
+    Returns
+    -------
+    np.ndarray
+        The filtered 2D slice.
+    """
+    return skfilters.meijering(image=slice2d, sigmas=sigmas, black_ridges=black_ridges)

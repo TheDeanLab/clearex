@@ -1196,3 +1196,27 @@ class ImageOpener:
 
         logger.error(msg=f"No suitable reader found for {p}")
         raise ValueError("No suitable reader found for:", p)
+
+
+def rename_tiff_to_tif(base_path: str, recursive: bool = True) -> int:
+    """Rename all .tiff files to .tif in the given directory.
+
+    Args:
+        base_path: Directory to search for .tiff files
+        recursive: If True, search subdirectories as well
+
+    Returns:
+        Number of files renamed
+    """
+    base = Path(base_path)
+    pattern = "**/*.tiff" if recursive else "*.tiff"
+    count = 0
+
+    for tiff_file in base.glob(pattern):
+        new_name = tiff_file.with_suffix(".tif")
+        tiff_file.rename(new_name)
+        print(f"Renamed: {tiff_file} -> {new_name}")
+        count += 1
+
+    print(f"Renamed {count} files.")
+    return count
