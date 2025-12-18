@@ -466,3 +466,46 @@ def transform_image(
         max_value,
     )
     print("Image saved to:", transformed_image_path)
+
+
+def set_origin_and_spacing(
+    image: ants.core.ants_image.ANTsImage,
+    origin: tuple | None = None,
+    spacing: tuple | None = None,
+) -> ants.core.ants_image.ANTsImage:
+    """
+    Set origin and spacing to match original images.
+    ants.from_numpy(...) transposes the array when it converts it to an ANTsImage (
+    data.T.copy(order='C')).
+
+    NumPy is typically z,y,x; ITK/ANTs is x,y,z convention.
+
+    Consequently, when you set the spacing/origin, those values must be supplied in (
+    X, Y, Z) order (not Z,Y,X).
+
+    Parameters
+    ----------
+    image : ants.core.ants_image.ANTsImage
+        The input ANTsImage.
+    origin : tuple | None
+        The desired origin coordinates. If None, the origin is not modified.
+    spacing : tuple | None
+        The desired spacing values. If None, the spacing is not modified.
+
+    Returns
+    -------
+    ants.core.ants_image.ANTsImage
+        The ANTsImage with updated origin and/or spacing.
+
+    Notes
+    -----
+    See also:
+        https://antspy.readthedocs.io/en/stable/_modules/ants/core/ants_image_io.html
+    """
+
+    #     origin_xyz = (x0 * spacing_xyz[0], y0 * spacing_xyz[1], z0 * spacing_xyz[2])
+    if origin is not None:
+        image.set_origin(new_origin=origin)
+    if spacing is not None:
+        image.set_spacing(new_spacing=spacing)
+    return image

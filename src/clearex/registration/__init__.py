@@ -69,7 +69,12 @@ from clearex.io.log import (
     capture_c_level_output,
 )
 from clearex.io.read import ImageOpener, ImageInfo
-from clearex.registration.common import export_tiff, crop_data, calculate_metrics
+from clearex.registration.common import (
+    export_tiff,
+    crop_data,
+    calculate_metrics,
+    set_origin_and_spacing,
+)
 
 # Type Aliases
 ImageType = Union[NDArray[Any], ants.ANTsImage]
@@ -213,6 +218,18 @@ class ImageRegistration:
             image=moving_image,
             save_directory=save_directory,
             image_type="moving",
+        )
+
+        # Set the origin and spacing for both images
+        self.fixed_image = set_origin_and_spacing(
+            image=self.fixed_image,
+            origin=(0.0, 0.0, 0.0),
+            spacing=(0.1625, 0.1625, 0.3),  # X, Y, Z
+        )
+        self.moving_image = set_origin_and_spacing(
+            image=self.moving_image,
+            origin=(0.0, 0.0, 0.0),
+            spacing=(0.1625, 0.1625, 0.3),  # X, Y, Z)
         )
 
         # Save the fixed image to the save directory for reference
