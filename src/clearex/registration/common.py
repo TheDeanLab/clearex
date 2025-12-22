@@ -166,7 +166,8 @@ def import_affine_transform(data_path: str) -> ants.core.ants_transform.ANTsTran
 def calculate_metrics(
     fixed: ants.ANTsImage | np.ndarray,
     moving: ants.ANTsImage | np.ndarray,
-    mask: ants.ANTsImage | None = None,
+    fixed_mask: ants.ANTsImage | None = None,
+    moving_mask: ants.ANTsImage | None = None,
     sampling: str = "regular",
     sampling_pct: float = 1.0,
 ) -> dict:
@@ -180,8 +181,10 @@ def calculate_metrics(
         The reference (fixed) image.
     moving : ants.ANTsImage or np.ndarray
         The image to be compared or aligned.
-    mask : ants.ANTsImage or None
-        Optional mask applied to both fixed and moving.
+    fixed_mask : ants.ANTsImage or None
+        Optional mask applied to fixed image.
+    moving_mask : ants.ANTsImage or None
+        Optional mask applied to moving image.
     sampling : {'regular', 'random', None}
         Sampling strategy for computing metric. Default is 'regular'.
     sampling_pct : float
@@ -208,18 +211,25 @@ def calculate_metrics(
 
     metric_results = {}
     for metric_type in ["Correlation", "MattesMutualInformation"]:
-        value = ants.image_similarity(
-            fixed,
-            moving,
-            metric_type=metric_type,
-            fixed_mask=mask,
-            moving_mask=mask,
-            sampling_strategy=sampling,
-            sampling_percentage=sampling_pct,
-        )
-        metric_results[metric_type] = -value
-        logger.info(f"Image Metric: {metric_type}, value: {-value}")
-
+        try:
+            value = ants.image_similarity(
+                fixed,
+                moving,
+                metric_type=metric_type,
+                fixed_mask=fixed_mask,
+                moving_mask=moving_mask,
+                sampling_strategy=sampling,
+                sampling_percentage=sampling_pct,
+            )
+            metric_results[metric_type] = -value
+            logger.info(f"Image Metric: {metric_type}, value: {-value}")
+        except Exception as e:
+            err_msg = (
+                f"ants.image_similarity failed for metric={metric_type}. "
+                f"Fixed spacing={fixed.spacing}, moving spacing={moving.spacing}, "
+                f"fixed shape={fixed.shape}, moving shape={moving.shape}. Exception: {e}"
+            )
+            logger.exception(err_msg)
     return metric_results
 
 
@@ -508,4 +518,7 @@ def set_origin_and_spacing(
         image.set_origin(new_origin=origin)
     if spacing is not None:
         image.set_spacing(new_spacing=spacing)
+
+    logger.info(f"Image origin set to: {image.origin}")
+    logger.info(f"Image spacing (pixel size in XYZ) set to: {image.spacing}")
     return image

@@ -27,6 +27,8 @@
 
 # Standard Library Imports
 import logging
+import os
+from typing import Any
 
 # Local Imports
 
@@ -45,6 +47,8 @@ if not logger.handlers:
 def register_image(
     moving_image: ants.core.ants_image.ANTsImage | np.ndarray,
     fixed_image: ants.core.ants_image.ANTsImage | np.ndarray,
+    fixed_mask: ants.core.ants_image.ANTsImage | None = None,
+    moving_mask: ants.core.ants_image.ANTsImage | None = None,
     registration_type: str = "TRSAA",
     accuracy: str = "high",
     verbose: bool = False,
@@ -116,20 +120,22 @@ def register_image(
         logger.error("Fixed and moving images must have the same number of dimensions.")
         raise ValueError("Both images must have the same number of dimensions.")
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "fixed": fixed_image,
         "moving": moving_image,
+        "fixed_mask": fixed_mask,
+        "moving_mask": moving_mask,
         "type_of_transform": registration_type,
         "aff_metric": "mattes",
         "aff_sampling": 32,
         "aff_random_sampling_rate": 0.50,  # Was 1.0
         "verbose": verbose,
+        "mask_all_stages": True,
     }
 
     if registration_type == "TRSAA":
         # Multi-resolution iteration schedule.
-        # TODO: I am concerned that the smoothing sigmas are exceedingly slow.
-        accuracy = accuracy.lower()
+        accuracy: str = accuracy.lower()
         if accuracy == "high":
             kwargs["reg_iterations"] = (1000, 500, 250, 100)
             kwargs["smoothing_sigmas"] = (3, 2, 1, 0)
@@ -149,6 +155,7 @@ def register_image(
         kwargs["smoothing_sigmas"] = (0,)
         kwargs["shrink_factors"] = (8,)
         kwargs["aff_random_sampling_rate"] = 0.1
+
     logger.info(
         f"Using {kwargs['type_of_transform']} registration "
         f"with {kwargs['reg_iterations']} iterations."
@@ -166,18 +173,31 @@ def register_image(
     transformed_image: ants.ANTsImage = transform.apply_to_image(
         image=moving_image, reference=fixed_image, interpolation="linear"
     )
-    return transformed_image, transform
+
+    # Transform the masks if provided
+    if moving_mask is not None:
+        transformed_mask: ants.ANTsImage = transform.apply_to_image(
+            image=moving_mask, reference=fixed_image, interpolation="nearestNeighbor"
+        )
+        transformed_mask: ants.ANTsImage = ants.threshold_image(
+            transformed_mask, low_thresh=0.5, high_thresh=1.0, inval=1, outval=0
+        )
+
+    return transformed_image, transformed_mask, transform
 
 
 def inspect_affine_transform(
-    affine_transform: ants.core.ants_transform.ANTsTransform,
+    affine_transform: ants.core.ants_transform.ANTsTransform | str,
 ) -> None:
     """Evaluate the affine transform and report it's decomposed parts.
 
     Parameters
     ----------
-    affine_transform: ants.core.ants_transform.ANTsTransform
+    affine_transform: ants.core.ants_transform.ANTsTransform or str
+        The affine transform to evaluate, or a path to a transform file.
     """
+    if isinstance(affine_transform, (str, os.PathLike)):
+        affine_transform = ants.read_transform(str(affine_transform))
 
     # For a 3D image, the transform_parameters is a 12-element array.
     # For a 3D transform, the first 9 values represent the rotation/scale/shear
@@ -213,7 +233,7 @@ def inspect_affine_transform(
     _extract_scale(affine_matrix=final_matrix)
 
 
-def _extract_scale(affine_matrix):
+def _extract_scale(affine_matrix: np.ndarray):
     """Extract the scaling factors from an affine matrix.
 
     Parameters
@@ -235,7 +255,6 @@ def _extract_scale(affine_matrix):
     for label, scale in zip(scale_labels, scale_vector):
         logger.info(f"{label} Scale: {scale:.2f}-fold")
         print(f"{label} Scale: {scale:.2f}-fold")
-
 
 def _extract_shear(affine_matrix):
     """Extract the shearing factors from an affine matrix.

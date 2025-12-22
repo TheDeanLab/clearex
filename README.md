@@ -46,8 +46,11 @@ uv pip install -e ".[dev]"
 # Optional - Install the documentation's dependencies.
 uv pip install -e ".[docs]"
 
+# Optional - Install the deconvolution dependencies. Requires slower installation.
+uv pip install -e ".[decon]"
+
 # Or install everything at once:
-uv pip install -e ".[dev,docs]"
+uv pip install -e ".[dev,docs,decon]"
 ```
 
 ## Installation in a High Performance Computing environment.

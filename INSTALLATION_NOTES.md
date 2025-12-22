@@ -25,24 +25,27 @@ Once the environment is configured, most users only need to run a few commands t
 
 ---
 
-## 2. Shell configuration (`.bashrc`)
+## 2. Shell configuration (`.bashrc` and `bash_profile`)
 
-The following `.bashrc` snippet sets up the basics:
+The following shell configuration ensures that `uv` behaves correctly on the cluster and that Python interpreters, caches, and environments remain stable across nodes.
 
-- Ensures the system `bashrc` is loaded.
-- Defines a `global_scratch` location.
-- Configures `uv` so its **install location** and **cache** live under `/project`.
-- Adds helper functions for activating uv, Conda, etc.
+### Why this matters
+On HPC systems:
 
-You can copy and adapt this snippet to your own `.bashrc` (paths may need to be changed if your username or project directory differ).
+- `~/.bashrc` is typically sourced only for interactive shells
+- `~/.bash_profile` is sourced for **login shells**, GUI applications, and some scheduler contexts
+- uv installs **Python runtimes separately from its cache**
+- If the Python install directory is not explicitly set, uv may default to a node-local or temporary filesystem (e.g. /tmp), causing virtual environments to break when switching nodes
+
+To avoid these issues, we explicitly configure **three uv locations** and ensure they are available in all shell contexts.
+
+------------
+Configuration snippet
+
+You can copy and adapt the following snippet (paths may need adjustment depending on your username or project directory):
 
 ```bash
 # .bashrc
-
-# Source global definitions
-if [ -f /etc/bashrc ]; then
-    . /etc/bashrc
-fi
 
 # -----------------------------------------------------------------------------
 # uv configuration
@@ -50,21 +53,39 @@ fi
 # Install uv under /project so it does not consume home quota.
 export UV_INSTALL_DIR="/project/path/to/uv"
 
-# uv cache must be on the same filesystem as your Python envs (.venv)
+# uv cache (wheels, sdists, metadata). Must be on the same filesystem
+# as Python environments (e.g. project-local .venv directories).
 export UV_CACHE_DIR="${UV_INSTALL_DIR}/.cache"
 
-# Put uv's bin directory on PATH
-export PATH="$UV_INSTALL_DIR/bin:$PATH"
+# Location where uv installs Python runtimes (CPython, PyPy, etc.).
+# This MUST be on a persistent, shared filesystem on the cluster.
+export UV_PYTHON_INSTALL_DIR="${UV_INSTALL_DIR}/python"
 
-# Helper function: activate uv's own environment (if needed)
-activate_uv() {
-    . "/project/path/to/uv/env"
-}
+# Make uv and uvx available on the command line
+export PATH="$UV_INSTALL_DIR/bin:$PATH"
 
 # Remainder of your .bashrc...
 ```
 
+-------
+
+### Notes and best practices
+
+- `UV_INSTALL_DIR` - Controls where the uv executable and its internal metadata live.
+- `UV_CACHE_DIR` - Controls where uv stores cached build artifacts (wheels, sdists, index metadata). This does not control where Python itself is installed.
+- `UV_PYTHON_INSTALL_DIR` (**required on the cluster**) - Controls where uv installs Python runtimes. If unset, uv may fall back to $TMPDIR or other node-local storage, causing virtual environments to break when moving between nodes.
+- `PATH` - Only needs to be modified once, so the shell can locate the `uv` executable.
+The other variables are read internally by `uv` and do not affect command lookup.
+
+---------
+
+### Applying Changes
 After updating your `.bashrc`, run `source ~/.bashrc` to apply the changes.
+
+(You may also need to restart terminals or relaunch GUI applications such as PyCharm.)
+
+
+----------
 
 ## 3. PyCharm configuration
 If you use PyCharm for development, or Jupyter notebooks in general, you may need to:

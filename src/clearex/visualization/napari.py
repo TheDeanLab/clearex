@@ -26,9 +26,11 @@
 
 # Standard library imports
 from typing import Tuple, List
+import math
 
 # Third party imports
 import napari
+from qtpy.QtWidgets import QApplication
 
 # Local imports
 
@@ -45,6 +47,56 @@ def create_viewer(*, show: bool = True) -> napari.Viewer:
     viewer = napari.Viewer(ndisplay=3, show=show)
     return viewer
 
+
+def set_viewer_size_for_layer(
+        viewer: napari.Viewer,
+        layer_name: str,
+        match_native_pixels: bool = True,
+        scale: int = 1,
+        extra_width: int = 200,
+        extra_height: int = 50) -> Tuple[int, int]:
+    """
+    Resize Napari viewer and canvas so the viewer is wider to match the layer's lateral extent.
+
+    - viewer: napari.Viewer
+    - layer_name: name of an image layer already added to the viewer
+    - match_native_pixels: if True, make canvas at least as many pixels as the image XY dims
+    - scale: integer scale multiplier to enlarge further
+    - extra_width/extra_height: allowance for sidebars/window decoration (pixels)
+    """
+    layer = viewer.layers[layer_name]
+    arr = layer.data
+    if arr.ndim < 2:
+        raise ValueError("Layer has < 2 spatial dims")
+
+    img_h, img_w = arr.shape[-2], arr.shape[-1]
+    try:
+        canvas = viewer.window.qt_viewer.canvas.native  # QWidget
+    except Exception:
+        # fallback to top-level window
+        viewer.window.resize(int(img_w * scale) + extra_width, int(img_h * scale) + extra_height)
+        QApplication.processEvents()
+        return
+
+    # current canvas size
+    cur_w, cur_h = canvas.width(), canvas.height()
+
+    if match_native_pixels:
+        target_w = max(cur_w, int(img_w * scale))
+        target_h = max(cur_h, int(img_h * scale))
+    else:
+        target_w = cur_w * max(1, scale)
+        target_h = cur_h * max(1, scale)
+
+    # clamp to reasonable integers
+    target_w, target_h = max(1, int(target_w)), max(1, int(target_h))
+
+    # resize the canvas and then the window (give extra space for sidebars)
+    canvas.resize(target_w, target_h)
+    # Add extra to window size to account for dock widgets / decorations
+    viewer.window.resize(target_w + extra_width, target_h + extra_height)
+    QApplication.processEvents()
+    return (target_w, target_h)
 
 def update_viewer(
     viewer: napari.Viewer,

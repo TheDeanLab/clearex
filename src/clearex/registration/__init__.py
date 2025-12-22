@@ -114,6 +114,7 @@ class ImageRegistration:
         moving_image_path: str | os.PathLike[str],
         save_directory: str | os.PathLike[str],
         imaging_round: int = 0,
+        pixel_size: tuple = (0.15, 0.15, 0.15),
         crop: bool = False,
         enable_logging: bool = True,
         force_override: bool = False,
@@ -131,6 +132,9 @@ class ImageRegistration:
             Directory where the transformation results will be saved.
         imaging_round : int, optional
             The round number used to identify transformation files (default is 0).
+        pixel_size
+            The pixel size (spacing) of the images in micrometers (default is (0.15,
+            0.15, 0.15)). X, Y, Z order.
         crop : bool, optional
             Whether to crop the moving image before registration (default is False).
         enable_logging : bool, optional
@@ -138,6 +142,9 @@ class ImageRegistration:
         force_override : bool, optional
             Whether to force re-registration even if transforms already exist (default is False).
         """
+        #: tuple: The pixel size (spacing) of the images in micrometers.
+        self.pixel_size = pixel_size
+
         #: str or os.PathLike: Path to the fixed reference image.
         self.fixed_image_path = fixed_image_path
 
@@ -224,13 +231,16 @@ class ImageRegistration:
         self.fixed_image = set_origin_and_spacing(
             image=self.fixed_image,
             origin=(0.0, 0.0, 0.0),
-            spacing=(0.1625, 0.1625, 0.3),  # X, Y, Z
+            spacing=self.pixel_size,  # X, Y, Z
         )
         self.moving_image = set_origin_and_spacing(
             image=self.moving_image,
             origin=(0.0, 0.0, 0.0),
-            spacing=(0.1625, 0.1625, 0.3),  # X, Y, Z)
+            spacing=self.pixel_size,  # X, Y, Z)
         )
+
+        # Create masks for both images to ignore zero-valued background during registration
+        self.mask_zero_valued_data()
 
         # Save the fixed image to the save directory for reference
         reference_image_path: str = os.path.join(
@@ -246,6 +256,30 @@ class ImageRegistration:
                 max_value=self.fixed_image.max(),
             )
             self._log.info(msg=f"Reference image written to: {reference_image_path}")
+
+    def mask_zero_valued_data(self) -> None:
+        """
+        Create binary masks for fixed and moving images by masking zero-valued data.
+
+        Returns
+        -------
+        None
+        """
+        fixed_mask_np = (self.fixed_image.numpy() > 0).astype(np.float32)
+        moving_mask_np = (self.moving_image.numpy() > 0).astype(np.float32)
+
+        self.fixed_mask = ants.from_numpy(
+            fixed_mask_np,
+            origin=self.fixed_image.origin,
+            spacing=self.fixed_image.spacing,
+            direction=self.fixed_image.direction,
+        )
+        self.moving_mask = ants.from_numpy(
+            moving_mask_np,
+            origin=self.moving_image.origin,
+            spacing=self.moving_image.spacing,
+            direction=self.moving_image.direction,
+        )
 
     def register(self) -> None:
         """
@@ -265,37 +299,49 @@ class ImageRegistration:
         """
         # Measure and log image metrics before registration
         self._log.info(msg="Pre-registration image metrics...")
-        _ = calculate_metrics(
-            fixed=self.fixed_image,
-            moving=self.moving_image,
-        )
+        # _ = calculate_metrics(
+        #     fixed=self.fixed_image,
+        #     moving=self.moving_image,
+        #     fixed_mask=self.fixed_mask,
+        #     moving_mask=self.moving_mask,
+        # )
 
         # Perform Linear Registration
-        moving_linear_aligned = self._perform_linear_registration(
+        moving_linear_aligned, self.moving_mask = self._perform_linear_registration(
             fixed_image=self.fixed_image,
             moving_image=self.moving_image,
+            fixed_mask=self.fixed_mask,
+            moving_mask=self.moving_mask,
             imaging_round=self.imaging_round,
             save_directory=self.save_directory,
         )
 
-        self._log.info(msg="Linearly registered image metrics...")
-        _ = calculate_metrics(
-            fixed=self.fixed_image,
-            moving=moving_linear_aligned,
-        )
+        # self._log.info(msg="Linearly registered image metrics...")
+        # _ = calculate_metrics(
+        #     fixed=self.fixed_image,
+        #     moving=moving_linear_aligned,
+        #     fixed_mask=self.fixed_mask,
+        #     moving_mask=self.moving_mask,
+        # )
 
         # Perform Nonlinear Registration
-        moving_nonlinear_aligned = self._perform_nonlinear_registration(
-            fixed_image=self.fixed_image,
-            moving_linear_aligned=moving_linear_aligned,
-            imaging_round=self.imaging_round,
-            save_directory=self.save_directory,
+        moving_nonlinear_aligned, moving_nonlinear_mask = (
+            self._perform_nonlinear_registration(
+                fixed_image=self.fixed_image,
+                moving_linear_aligned=moving_linear_aligned,
+                fixed_mask=self.fixed_mask,
+                moving_mask=self.moving_mask,
+                imaging_round=self.imaging_round,
+                save_directory=self.save_directory,
+            )
         )
 
         self._log.info(msg="Nonlinearly registered image metrics...")
         _ = calculate_metrics(
             fixed=self.fixed_image,
             moving=moving_nonlinear_aligned,
+            fixed_mask=self.fixed_mask,
+            moving_mask=self.moving_mask,
         )
 
         self._log.info(msg="Image registration complete.")
@@ -304,9 +350,11 @@ class ImageRegistration:
         self,
         fixed_image,
         moving_image,
-        imaging_round: int | None,
-        save_directory: str | os.PathLike,
-    ) -> Any:
+        fixed_mask: ants.ANTsImage = None,
+        moving_mask: ants.ANTsImage = None,
+        imaging_round: int | None = None,
+        save_directory: str | os.PathLike = None,
+    ) -> Tuple[ants.ANTsImage, ants.ANTsImage]:
         """
         Perform linear (affine) registration.
 
@@ -316,6 +364,10 @@ class ImageRegistration:
             The fixed reference image.
         moving_image : numpy.ndarray or ants.ANTsImage
             The moving image to be registered.
+        fixed_mask : ants.ANTsImage
+            The mask for the fixed image.
+        moving_mask : ants.ANTsImage
+            The mask for the moving image.
         imaging_round : int or None
             The round number for identifying the transformation file.
         save_directory : str or os.PathLike
@@ -323,8 +375,8 @@ class ImageRegistration:
 
         Returns
         -------
-        ants.ANTsImage
-            The linearly registered moving image.
+        tuple(ants.ANTsImage, ants.ANTsImage)
+            The linearly registered moving image and the registered moving mask.
         """
         linear_transformation_path: str = os.path.join(
             save_directory, f"linear_transform_{imaging_round}.mat"
@@ -343,6 +395,21 @@ class ImageRegistration:
             moving_linear_aligned: ants.ANTsImage = transform.apply_to_image(
                 image=moving_image, reference=fixed_image, interpolation="linear"
             )
+
+            # Apply the transform to the moving mask if provided
+            if moving_mask is not None:
+                moving_linear_mask: ants.ANTsImage = transform.apply_to_image(
+                    image=moving_mask,
+                    reference=fixed_image,
+                    interpolation="nearestNeighbor",
+                )
+                moving_linear_mask = ants.threshold_image(
+                    moving_linear_mask,
+                    low_thresh=0.5,
+                    high_thresh=1.0,
+                    inval=1,
+                    outval=0,
+                )
         else:
             if self.force_override and os.path.exists(path=linear_transformation_path):
                 self._log.info(
@@ -353,11 +420,13 @@ class ImageRegistration:
                 func=linear_registration,
                 moving_image=moving_image,
                 fixed_image=fixed_image,
+                fixed_mask=self.fixed_mask,
+                moving_mask=self.moving_mask,
                 registration_type="TRSAA",
                 accuracy=self.linear_accuracy,
                 verbose=True,
             )
-            moving_linear_aligned, transform = result
+            moving_linear_aligned, moving_linear_mask, transform = result
             if stdout:
                 self._log.info(msg=stdout)
             if stderr:
@@ -367,15 +436,17 @@ class ImageRegistration:
             self._log.info(f"Linear Transform written to: {linear_transformation_path}")
 
         self.linear_transform = transform
-        return moving_linear_aligned
+        return moving_linear_aligned, moving_linear_mask
 
     def _perform_nonlinear_registration(
         self,
         fixed_image: ants.ANTsImage,
         moving_linear_aligned: ants.ANTsImage,
-        imaging_round: int | None,
-        save_directory: str | os.PathLike,
-    ) -> ants.ANTsImage:
+        fixed_mask: ants.ANTsImage = None,
+        moving_mask: ants.ANTsImage = None,
+        imaging_round: int | None = None,
+        save_directory: str | os.PathLike = None,
+    ) -> Tuple[ants.ANTsImage, ants.ANTsImage]:
         """
         Perform nonlinear (deformable) registration.
 
@@ -385,6 +456,10 @@ class ImageRegistration:
             The fixed reference image.
         moving_linear_aligned : ants.ANTsImage
             The linearly registered moving image.
+        fixed_mask : ants.ANTsImage
+            The mask for the fixed image.
+        moving_mask : ants.ANTsImage
+            The mask for the moving image.
         imaging_round : int | None
             The round number for identifying the transformation file.
         save_directory : str or os.PathLike
@@ -392,8 +467,8 @@ class ImageRegistration:
 
         Returns
         -------
-        ants.ANTsImage
-            The nonlinearly registered moving image.
+        tuple(ants.ANTsImage, ants.ANTsImage)
+            The nonlinearly registered moving image and the registered moving mask.
         """
         nonlinear_transformation_path: str = os.path.join(
             save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
@@ -425,10 +500,12 @@ class ImageRegistration:
                 func=nonlinear_registration,
                 moving_image=moving_linear_aligned,
                 fixed_image=fixed_image,
+                fixed_mask=self.fixed_mask,
+                moving_mask=self.moving_mask,
                 accuracy=self.nonlinear_accuracy,
                 verbose=True,
             )
-            nonlinear_transformed, transform_path = result
+            nonlinear_transformed, nonlinear_mask, transform_path = result
             if stdout:
                 self._log.info(msg=stdout)
             if stderr:
@@ -438,7 +515,7 @@ class ImageRegistration:
             self._log.info(
                 msg=f"Nonlinear warp written to: {nonlinear_transformation_path}"
             )
-            return nonlinear_transformed
+            return nonlinear_transformed, nonlinear_mask
 
 
 @dataclass
@@ -500,6 +577,7 @@ class ChunkedImageRegistration(ImageRegistration):
         moving_image_path: str | os.PathLike[str],
         save_directory: str | os.PathLike[str],
         imaging_round: int = 0,
+        pixel_size: tuple = (0.15, 0.15, 0.15),
         crop: bool = False,
         enable_logging: bool = True,
         force_override: bool = False,
@@ -517,6 +595,9 @@ class ChunkedImageRegistration(ImageRegistration):
             Directory where the transformation results will be saved.
         imaging_round : int, optional
             The round number used to identify transformation files (default is 0).
+        pixel_size : tuple
+            The pixel size (spacing) of the images in micrometers (default is (0.15,
+            0.15, 0.15)). X, Y, Z order.
         crop : bool, optional
             Whether to crop the moving image before registration (default is False).
         enable_logging : bool, optional
@@ -530,6 +611,7 @@ class ChunkedImageRegistration(ImageRegistration):
             moving_image_path,
             save_directory,
             imaging_round,
+            pixel_size,
             crop,
             enable_logging,
             force_override,
@@ -543,9 +625,11 @@ class ChunkedImageRegistration(ImageRegistration):
         self,
         fixed_image: ants.ANTsImage,
         moving_linear_aligned: ants.ANTsImage,
-        imaging_round: int | None,
-        save_directory: str | os.PathLike,
-    ) -> ants.ANTsImage:
+        fixed_mask: ants.ANTsImage = None,
+        moving_mask: ants.ANTsImage = None,
+        imaging_round: int | None = None,
+        save_directory: str | os.PathLike = None,
+    ) -> Tuple[ants.ANTsImage, ants.ANTsImage]:
         """
         Perform nonlinear (deformable) registration.
 
@@ -586,7 +670,14 @@ class ChunkedImageRegistration(ImageRegistration):
                 reference=fixed_image,
                 interpolation="linear",
             )
-            return nonlinear_transformed
+
+            if moving_mask is not None:
+                nonlinear_transformed_mask: ants.ANTsImage = transform.apply_to_image(
+                    image=moving_mask,
+                    reference=fixed_image,
+                    interpolation="nearestNeighbor",
+                )
+            return nonlinear_transformed, nonlinear_transformed_mask
         else:
 
             # Compute the chunk grid.
@@ -682,13 +773,23 @@ class ChunkedImageRegistration(ImageRegistration):
                 f"Nonlinear warp written to: {nonlinear_transformation_path}"
             )
 
+            # Warp the mask if provided
+            if moving_mask is not None:
+                nonlinear_transformed_mask: ants.ANTsImage = (
+                    nonlinear_transform.apply_to_image(
+                        image=moving_mask,
+                        reference=fixed_image_ants,
+                        interpolation="nearestNeighbor",
+                    )
+                )
+
             # Save the Chunk Info List
             chunk_info_path: Path = Path(self.save_directory) / (
                 f"round_{self.imaging_round}_chunk_info.npy"
             )
             np.save(file=chunk_info_path, arr=self.chunk_info_list)
             registered_image: ants.ANTsImage = ants.from_numpy(registered_image)
-            return registered_image
+            return registered_image, nonlinear_transformed_mask
 
     def _compute_chunk_grid(self, image_shape) -> List[ChunkInfo]:
         """
@@ -1143,6 +1244,7 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
         moving_image_path: str | os.PathLike[str],
         save_directory: str | os.PathLike[str],
         imaging_round: int = 0,
+        pixel_size: tuple = (0.15, 0.15, 0.15),
         crop: bool = False,
         enable_logging: bool = True,
         force_override: bool = False,
@@ -1161,6 +1263,9 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
             Directory where the transformation results will be saved.
         imaging_round : int, optional
             The round number used to identify transformation files (default is 0).
+        pixel_size : tuple
+            The pixel size (spacing) of the images in micrometers (default is (0
+            .15, 0.15, 0.15)). X, Y, Z order.
         crop : bool, optional
             Whether to crop the moving image before registration (default is False).
         enable_logging : bool, optional
@@ -1175,6 +1280,7 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
             moving_image_path,
             save_directory,
             imaging_round,
+            pixel_size,
             crop,
             enable_logging,
             force_override,

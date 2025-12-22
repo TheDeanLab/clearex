@@ -33,20 +33,24 @@ import logging
 # Third Party Imports
 import ants
 import numpy as np
+import tifffile
 
 # Set up logging
-logger = logging.getLogger('registration')
+logger = logging.getLogger("registration")
 if not logger.handlers:
     logger.addHandler(logging.NullHandler())
 
+
 def register_image(
-        moving_image: ants.core.ants_image.ANTsImage | np.ndarray,
-        fixed_image: ants.core.ants_image.ANTsImage | np.ndarray,
-        registration_type: str="SyNOnly",
-        accuracy: str="high",
-        verbose: bool=False
+    moving_image: ants.core.ants_image.ANTsImage | np.ndarray,
+    fixed_image: ants.core.ants_image.ANTsImage | np.ndarray,
+    moving_mask: ants.core.ants_image.ANTsImage | None = None,
+    fixed_mask: ants.core.ants_image.ANTsImage | None = None,
+    registration_type: str = "SyNOnly",
+    accuracy: str = "high",
+    verbose: bool = False,
 ) -> tuple[ants.core.ants_image.ANTsImage, ants.core.ants_transform.ANTsTransform]:
-    """ Linear Image Registration.
+    """Linear Image Registration.
 
     Perform nonlinear image registration between the moving image and the fixed
     image. Registration is by default performed with Symmetric Normalization.
@@ -57,6 +61,12 @@ def register_image(
         The moving image.
     fixed_image : ants.core.ants_image.ANTsImage | np.ndarray
         The image which the moving_image will be registered to. It remains fixed.
+    moving_mask : ants.core.ants_image.ANTsImage | None
+        An optional mask for the moving image to limit registration to a region
+        of interest.
+    fixed_mask : ants.core.ants_image.ANTsImage | None
+        An optional mask for the fixed image to limit registration to a region
+        of interest.
     registration_type : str
         The type of registration method to use. Options include Elastic, SyN,
         SyNOnly. Default is SyNOnly.
@@ -72,6 +82,8 @@ def register_image(
     -------
     transformed_image : ants.core.ants_image.ANTsImage
         The registered image, moved to the coordinate space of the fixed image.
+    transformed_mask : ants.core.ants_image.ANTsImage | None
+        The registered mask, moved to the coordinate space of the fixed image.
     transform : ants.core.ants_transform.ANTsTransform
         The nonlinear transform used in the transformation of the transformed_image.
 
@@ -86,8 +98,10 @@ def register_image(
     https://antspy.readthedocs.io/en/latest/registration.html
     """
     if registration_type not in ["Elastic", "SyNOnly", "SyN"]:
-        raise ValueError(f"Unsupported registration type: {registration_type}. "
-                         "Supported types are: Elastic, SyNOnly, SyN.")
+        raise ValueError(
+            f"Unsupported registration type: {registration_type}. "
+            "Supported types are: Elastic, SyNOnly, SyN."
+        )
 
     # Convert images to ANTsImage if they are numpy arrays.
     if isinstance(fixed_image, np.ndarray):
@@ -101,28 +115,29 @@ def register_image(
     kwargs = {
         "fixed": fixed_image,
         "moving": moving_image,
+        "fixed_mask": fixed_mask,
+        "moving_mask": moving_mask,
         "type_of_transform": registration_type,
         "flow_sigma": 3.0,
         "total_sigma": 0.5,
-        "shrink_factors": [4, 2, 1], # Previously [2, 1]
-        "smoothing_sigmas": [2, 1, 0], #Previously [1,0]
+        "shrink_factors": [4, 2, 1],  # Previously [2, 1]
+        "smoothing_sigmas": [2, 1, 0],  # Previously [1,0]
         "syn_metric": "mattes",  # Previously, thought to be CC, but probably incorrect.
-        # "metric": "CC", # MeanSquares, CC, Mattes, NormalizedMutualInformation
-        # "radius_or_number_of_bins": 4,  # For CC metric (if used)
-
         "metric_weight": 1.0,
         "number_of_bins": 32,  # For mattes metric
-
-        # "sampling_strategy": "regular",  # More stable than random. New.
-        # "sampling_percentage": 0.25,  # Reduce memory/computation. New.
-        "singleprecision": False, # True possibly helpful for larger data.
+        "singleprecision": False,  # True possibly helpful for larger data.
         "aff_random_sampling_rate": 1.0,
         "verbose": verbose,
-        "initial_transform": 'Identity'
-        }
+        "initial_transform": "Identity",
+        "mask_all_stages": True,
+        # "sampling_strategy": "regular",  # More stable than random. New.
+        # "metric": "CC", # MeanSquares, CC, Mattes, NormalizedMutualInformation
+        # "radius_or_number_of_bins": 4,  # For CC metric (if used)
+        # "sampling_percentage": 0.25,  # Reduce memory/computation. New.
+    }
 
     if accuracy == "high":
-        kwargs["reg_iterations"] = (100, 70, 50) # Previously 100, 70
+        kwargs["reg_iterations"] = (100, 70, 50)  # Previously 100, 70
     elif accuracy == "low":
         kwargs["reg_iterations"] = (5, 5, 5)
     elif accuracy == "dry run":
@@ -132,29 +147,33 @@ def register_image(
     registered = ants.registration(**kwargs)
 
     # Read the transform from the temporary disk location.
-    transform = registered['fwdtransforms'][0]
+    transform = registered["fwdtransforms"][0]
 
-    # Resample the registered image to the target image.
-    transformed_image = ants.resample_image_to_target(
-        image=registered["warpedmovout"],
-        target=fixed_image,
-        interp_type="linear"
-    )
+    # Transform the masks if provided
+    if moving_mask is not None:
+        transformed_mask: ants.ANTsImage = transform.apply_to_image(
+            image=moving_mask, reference=fixed_image, interpolation="nearestNeighbor"
+        )
+        transformed_mask: ants.ANTsImage = ants.threshold_image(
+            transformed_mask, low_thresh=0.5, high_thresh=1.0, inval=1, outval=0
+        )
 
     # Histogram match to original data.
     transformed_image = ants.histogram_match_image(
         source_image=transformed_image,
-        reference_image=moving_image
+        reference_image=moving_image,
         # number_of_match_points=...
         # use_threshold_at_mean_intensity=...
     )
-    return transformed_image, transform
+    return transformed_image, transformed_mask, transform
 
-def transform_image(moving_image: ants.core.ants_image.ANTsImage,
-                    fixed_image: ants.core.ants_image.ANTsImage,
-                    transformed_image: ants.core.ants_image.ANTsImage) -> (
-        ants.core.ants_image.ANTsImage):
-    """ Use a pre-existing warp transform to transform on a naive image to the
+
+def transform_image(
+    moving_image: ants.core.ants_image.ANTsImage,
+    fixed_image: ants.core.ants_image.ANTsImage,
+    transformed_image: ants.core.ants_image.ANTsImage,
+) -> ants.core.ants_image.ANTsImage:
+    """Use a pre-existing warp transform to transform on a naive image to the
     coordinate space of the fixed_image. Performs histogram matching to the original.
 
     Parameters
@@ -181,7 +200,83 @@ def transform_image(moving_image: ants.core.ants_image.ANTsImage,
     warped_image = ants.apply_transforms(
         fixed=fixed_image,
         moving=moving_image,
-        transformlist=transformed_image['fwdtransforms'],
-        interpolator="linear")
+        transformlist=transformed_image["fwdtransforms"],
+        interpolator="linear",
+    )
 
     return ants.histogram_match_image(warped_image, moving_image)
+
+
+def inspect_warp_transform(
+    image_path: str, transform_path: str
+) -> dict[str, float | int]:
+    """Inspect a warp (displacement) transform and summarize displacements inside an image mask.
+
+    Parameters
+    ----------
+    image_path : str
+        Path to the registered image file. The image is read with ``tifffile.imread`` and
+        converted to an ANTs image for mask extraction.
+    transform_path : str
+        Path to the warp/displacement field image. This is read with ``ants.image_read`` and
+        expected to be a vector image with one component per spatial dimension.
+
+    Returns
+    -------
+    stats : dict
+        Dictionary with summary statistics of the displacement magnitude (within the image mask):
+        - ``mean`` (float): mean displacement magnitude
+        - ``min`` (float): minimum displacement magnitude
+        - ``std`` (float): standard deviation of displacement magnitude
+        - ``max`` (float): maximum displacement magnitude
+        - ``n_vox`` (int): number of voxels included in the mask
+
+    Raises
+    ------
+    ValueError
+        If the warp array shape is not compatible with the expected number of dimensions
+        (i.e. components not on the last axis or first axis).
+
+    Notes
+    -----
+    The function uses ANTs for reading the warp (to preserve vector field semantics)
+    and for creating a binary mask from the provided image. The image is expected to be
+    readable by ``tifffile``.
+    """
+    # 1) Read the warp as an image (vector displacement field), not as a Transform object
+    warp: ants.ANTsImage = ants.image_read(filename=transform_path)
+
+    # 2) Read your registered image and create a mask
+    img: ants.ANTsImage = ants.from_numpy(data=tifffile.imread(files=image_path))
+    mask: ants.ANTsImage = ants.get_mask(img)  # 0/1 mask
+
+    # 3) Compute amplitude (magnitude) of the displacement vector at each voxel
+    warp_np: np.ndarray = warp.numpy()
+
+    # Make sure components are on the last axis: (..., dim)
+    dim: tuple[int, int, int] = warp.dimension
+    if warp_np.ndim == dim + 1 and warp_np.shape[-1] == dim:
+        disp = warp_np
+    elif warp_np.ndim == dim + 1 and warp_np.shape[0] == dim:
+        disp = np.moveaxis(warp_np, 0, -1)
+    else:
+        raise ValueError(f"Unexpected warp array shape {warp_np.shape} for dim={dim}")
+
+    # Amplitude in the warp’s native units (usually physical units, e.g. mm)
+    amp = np.linalg.norm(disp, axis=-1)
+
+    # 4) Mask and summarize
+    m = mask.numpy().astype(bool)
+    vals = amp[m]
+    vals = vals[np.isfinite(vals)]  # safety
+
+    stats: dict = {
+        "mean": float(vals.mean()),
+        "min": float(vals.min()),
+        "std": float(vals.std(ddof=0)),  # ddof=1 if you prefer sample std
+        "max": float(vals.max()),
+        "n_vox": int(vals.size),
+    }
+
+    print(stats)
+    return stats
