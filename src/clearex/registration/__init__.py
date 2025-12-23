@@ -90,10 +90,24 @@ class ImageRegistration:
 
     Attributes
     ----------
+    pixel_size : tuple
+        The pixel size (spacing) of the images in micrometers.
     fixed_image_path : str or Path
         Path to the fixed reference image.
+    fixed_image : ants.ANTsImage
+        The fixed reference image.
+    fixed_mask : ants.ANTsImage
+        The mask that eliminates zero-valued background in the fixed image.
     moving_image_path : str or PathLike[str]
         Path to the moving image to be registered.
+    moving_image : ants.ANTsImage
+        The moving image to be registered.
+    moving_mask : ants.ANTsImage
+        The mask that eliminates zero-valued background in the moving image.
+    linear_accuracy : str
+        The accuracy level for linear registration.
+    nonlinear_accuracy : str
+        The accuracy level for nonlinear registration.
     save_directory : str or PathLike[str]
         Directory where transformation results are saved.
     imaging_round : int
@@ -172,6 +186,12 @@ class ImageRegistration:
         #: str: Nonlinear registration accuracy level.
         self.nonlinear_accuracy = "high"
 
+        #: ants.ANTsTransform: Mask that eliminates zero-valued background in the fixed image.
+        self.fixed_mask = None
+
+        #: ants.ANTsTransform: Mask that eliminates zero-valued background in the moving image.
+        self.moving_mask = None
+
         # Initialize logging
         self._log: Logger = initialize_logging(
             log_directory=self.save_directory, enable_logging=enable_logging
@@ -191,6 +211,7 @@ class ImageRegistration:
 
         # Confirm that the save_directory exists
         os.makedirs(name=self.save_directory, exist_ok=True)
+        self._log.info(msg=f"Data will be saved to: {self.save_directory}")
 
         # Load the image data as numpy array.
         fixed_image, self.fixed_image_info = self._image_opener.open(
@@ -257,30 +278,6 @@ class ImageRegistration:
             )
             self._log.info(msg=f"Reference image written to: {reference_image_path}")
 
-    def mask_zero_valued_data(self) -> None:
-        """
-        Create binary masks for fixed and moving images by masking zero-valued data.
-
-        Returns
-        -------
-        None
-        """
-        fixed_mask_np = (self.fixed_image.numpy() > 0).astype(np.float32)
-        moving_mask_np = (self.moving_image.numpy() > 0).astype(np.float32)
-
-        self.fixed_mask = ants.from_numpy(
-            fixed_mask_np,
-            origin=self.fixed_image.origin,
-            spacing=self.fixed_image.spacing,
-            direction=self.fixed_image.direction,
-        )
-        self.moving_mask = ants.from_numpy(
-            moving_mask_np,
-            origin=self.moving_image.origin,
-            spacing=self.moving_image.spacing,
-            direction=self.moving_image.direction,
-        )
-
     def register(self) -> None:
         """
         Register a moving image to a fixed image using linear and nonlinear transformations.
@@ -298,13 +295,7 @@ class ImageRegistration:
             If required paths are not provided either as arguments or instance attributes.
         """
         # Measure and log image metrics before registration
-        self._log.info(msg="Pre-registration image metrics...")
-        # _ = calculate_metrics(
-        #     fixed=self.fixed_image,
-        #     moving=self.moving_image,
-        #     fixed_mask=self.fixed_mask,
-        #     moving_mask=self.moving_mask,
-        # )
+        self.calculate_and_save_metrics(registration_stage="pre-registration")
 
         # Perform Linear Registration
         moving_linear_aligned, self.moving_mask = self._perform_linear_registration(
@@ -316,13 +307,8 @@ class ImageRegistration:
             save_directory=self.save_directory,
         )
 
-        # self._log.info(msg="Linearly registered image metrics...")
-        # _ = calculate_metrics(
-        #     fixed=self.fixed_image,
-        #     moving=moving_linear_aligned,
-        #     fixed_mask=self.fixed_mask,
-        #     moving_mask=self.moving_mask,
-        # )
+        # Measure and log image metrics after linear registration
+        self.calculate_and_save_metrics(registration_stage="linearly-registered")
 
         # Perform Nonlinear Registration
         moving_nonlinear_aligned, moving_nonlinear_mask = (
@@ -336,14 +322,8 @@ class ImageRegistration:
             )
         )
 
-        self._log.info(msg="Nonlinearly registered image metrics...")
-        _ = calculate_metrics(
-            fixed=self.fixed_image,
-            moving=moving_nonlinear_aligned,
-            fixed_mask=self.fixed_mask,
-            moving_mask=self.moving_mask,
-        )
-
+        # Measure and log image metrics after nonlinear registration
+        self.calculate_and_save_metrics(registration_stage="nonlinear-registered")
         self._log.info(msg="Image registration complete.")
 
     def _perform_linear_registration(
@@ -516,6 +496,71 @@ class ImageRegistration:
                 msg=f"Nonlinear warp written to: {nonlinear_transformation_path}"
             )
             return nonlinear_transformed, nonlinear_mask
+
+    def mask_zero_valued_data(self) -> None:
+        """
+        Create binary masks for fixed and moving images by masking zero-valued data.
+
+        Returns
+        -------
+        None
+        """
+        fixed_mask_np = (self.fixed_image.numpy() > 0).astype(np.float32)
+        moving_mask_np = (self.moving_image.numpy() > 0).astype(np.float32)
+
+        self.fixed_mask = ants.from_numpy(
+            fixed_mask_np,
+            origin=self.fixed_image.origin,
+            spacing=self.fixed_image.spacing,
+            direction=self.fixed_image.direction,
+        )
+        self.moving_mask = ants.from_numpy(
+            moving_mask_np,
+            origin=self.moving_image.origin,
+            spacing=self.moving_image.spacing,
+            direction=self.moving_image.direction,
+        )
+
+    def calculate_and_save_metrics(
+        self, registration_stage: str = "pre-registration"
+    ) -> None:
+        """
+        Calculate and save image similarity metrics between fixed and moving images.
+
+        Parameters
+        ----------
+        registration_stage : str
+            The stage of registration for which metrics are being calculated.
+            Options: "pre-registration", "linearly-registered", "nonlinear-registered".
+
+        Returns
+        -------
+        None
+            The function saves the metrics to a text file in the save directory.
+        """
+        metrics_path = os.path.join(
+            self.save_directory, f"image_metrics_{registration_stage}.txt"
+        )
+        if os.path.exists(path=metrics_path) and not self.force_override:
+            self._log.info(
+                msg=f"Image metrics already exist at {metrics_path}. Skipping calculation."
+            )
+            return
+
+        self._log.info(
+            msg=f"Calculating {registration_stage} image similarity metrics..."
+        )
+        metrics = calculate_metrics(
+            fixed=self.fixed_image,
+            moving=self.moving_image,
+            fixed_mask=self.fixed_mask,
+            moving_mask=self.moving_mask,
+        )
+
+        # Save metrics to file
+        with open(metrics_path, "w") as f:
+            for metric_name, value in metrics.items():
+                f.write(f"{metric_name}: {value}\n")
 
 
 @dataclass
@@ -1004,7 +1049,30 @@ class ChunkedImageRegistration(ImageRegistration):
                 f"  Force override enabled. Re-computing chunk {chunk.chunk_id} registration."
             )
 
+        # Extract the chunk data
         fixed_chunk, moving_chunk = self.extract_chunk(chunk, fixed_image, moving_image)
+
+        # Extract corresponding mask chunks
+        fixed_mask_chunk = None
+        moving_mask_chunk = None
+
+        if self.fixed_mask is not None:
+            fixed_mask_np = self.fixed_mask.numpy()
+            fixed_mask_chunk_np = fixed_mask_np[
+                chunk.z_start_ext : chunk.z_end_ext,
+                chunk.y_start_ext : chunk.y_end_ext,
+                chunk.x_start_ext : chunk.x_end_ext,
+            ]
+            fixed_mask_chunk = ants.from_numpy(fixed_mask_chunk_np)
+
+        if self.moving_mask is not None:
+            moving_mask_np = self.moving_mask.numpy()
+            moving_mask_chunk_np = moving_mask_np[
+                chunk.z_start_ext : chunk.z_end_ext,
+                chunk.y_start_ext : chunk.y_end_ext,
+                chunk.x_start_ext : chunk.x_end_ext,
+            ]
+            moving_mask_chunk = ants.from_numpy(moving_mask_chunk_np)
 
         # Pre-registration checks.
         fixed_chunk_np = fixed_chunk.numpy()
@@ -1081,11 +1149,16 @@ class ChunkedImageRegistration(ImageRegistration):
             return core_chunk, zero_warp
 
         # Perform fine nonlinear registration on this chunk
-        self._log.info("  Performing fine nonlinear registration...")
+        self._log.info(
+            f"  Performing nonlinear registration with an accuracy of "
+            f"{nonlinear_accuracy}..."
+        )
         result, stdout, stderr = capture_c_level_output(
             nonlinear_registration,
             moving_image=moving_chunk,
+            moving_mask=moving_mask_chunk,
             fixed_image=fixed_chunk,
+            fixed_mask=fixed_mask_chunk,
             registration_type=nonlinear_type,
             accuracy=nonlinear_accuracy,
             verbose=False,
@@ -1095,6 +1168,7 @@ class ChunkedImageRegistration(ImageRegistration):
             self._log.info(stdout)
         if stderr:
             self._log.error(stderr)
+            raise stderr
 
         # Save the local transform
         local_warp_path = self.chunks_dir / f"chunk_{chunk.chunk_id:04d}_warp.nii.gz"

@@ -138,6 +138,8 @@ def register_image(
 
     if accuracy == "high":
         kwargs["reg_iterations"] = (100, 70, 50)  # Previously 100, 70
+    elif accuracy == "medium":
+        kwargs["reg_iterations"] = (50, 35, 25)
     elif accuracy == "low":
         kwargs["reg_iterations"] = (5, 5, 5)
     elif accuracy == "dry run":
@@ -149,14 +151,22 @@ def register_image(
     # Read the transform from the temporary disk location.
     transform = registered["fwdtransforms"][0]
 
-    # Transform the masks if provided
-    if moving_mask is not None:
-        transformed_mask: ants.ANTsImage = transform.apply_to_image(
-            image=moving_mask, reference=fixed_image, interpolation="nearestNeighbor"
-        )
-        transformed_mask: ants.ANTsImage = ants.threshold_image(
-            transformed_mask, low_thresh=0.5, high_thresh=1.0, inval=1, outval=0
-        )
+    # # Transform the masks if provided
+    # if moving_mask is not None:
+    #     # Read transform from disk.
+    #     mask_transform: ants.ANTsTransform = ants.read_transform(transform)
+    #
+    #     transformed_mask: ants.ANTsImage = mask_transform.apply_to_image(
+    #         image=moving_mask, reference=fixed_image, interpolation="nearestNeighbor"
+    #     )
+    #     transformed_mask: ants.ANTsImage = ants.threshold_image(
+    #         transformed_mask, low_thresh=0.5, high_thresh=1.0, inval=1, outval=0
+    #     )
+
+    # Resample the registered image to the target image.
+    transformed_image = ants.resample_image_to_target(
+        image=registered["warpedmovout"], target=fixed_image, interp_type="linear"
+    )
 
     # Histogram match to original data.
     transformed_image = ants.histogram_match_image(
@@ -165,7 +175,7 @@ def register_image(
         # number_of_match_points=...
         # use_threshold_at_mean_intensity=...
     )
-    return transformed_image, transformed_mask, transform
+    return transformed_image, transform
 
 
 def transform_image(
