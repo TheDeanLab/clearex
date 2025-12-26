@@ -35,6 +35,22 @@ from skimage import filters as skfilters
 
 # Local Imports
 
+def fwhm_to_sigma(fwhm_px: float) -> float:
+    """ Convert from FWHM to sigma.
+
+    FWHM = 2*sqrt(2*ln2)*sigma ≈ 2.35482*sigma
+
+    Parameters
+    ----------
+    fwhm_px : float
+        The full width at half maximum in pixels.
+    Returns
+    -------
+    float
+        The standard deviation sigma.
+    """
+    return float(fwhm_px) / 2.354820045
+
 
 def dog(sigma_high: float, sigma_low: float, vol: np.ndarray[...]) -> np.ndarray[...]:
     """Difference of Gaussian (DoG) filter.

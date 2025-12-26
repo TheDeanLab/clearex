@@ -25,7 +25,7 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 # Standard library imports
-from typing import Tuple, List, Dict, Union, Optional
+from typing import Tuple, List, Dict, Union, Optional, Callable, Any
 import os
 from pathlib import Path
 
@@ -149,16 +149,23 @@ def load_tracks(
     return detection_data, detection_data_2D, tracks_data, tracks_data_2d, properties
 
 
-def create_viewer(*, show: bool = True) -> napari.Viewer:
+def create_viewer(*, dimensions: int = 3, show: bool = True) -> napari.Viewer:
     """
     Create and return a new napari viewer instance.
+
+    Parameters
+    ----------
+    dimensions : int, optional
+        Number of spatial dimensions for the viewer (2 or 3), by default 3.
+    show : bool, optional
+        Whether to display the viewer window immediately, by default True.
 
     Returns
     -------
     napari.Viewer
         A new napari viewer instance.
     """
-    viewer = napari.Viewer(ndisplay=3, show=show)
+    viewer = napari.Viewer(ndisplay=dimensions, show=show)
     return viewer
 
 
@@ -170,14 +177,34 @@ def set_viewer_size_for_layer(
     extra_width: int = 200,
     extra_height: int = 50,
 ) -> Optional[Tuple[int, int]]:
-    """
-    Resize Napari viewer and canvas so the viewer is wider to match the layer's lateral extent.
+    """Resize napari viewer and canvas to match a layer's lateral extent.
 
-    - viewer: napari.Viewer
-    - layer_name: name of an image layer already added to the viewer
-    - match_native_pixels: if True, make canvas at least as many pixels as the image XY dims
-    - scale: integer scale multiplier to enlarge further
-    - extra_width/extra_height: allowance for sidebars/window decoration (pixels)
+    Parameters
+    ----------
+    viewer : napari.Viewer
+        The napari viewer instance to resize.
+    layer_name : str
+        Name of an image layer already added to the viewer.
+    match_native_pixels : bool, optional
+        If True, make canvas at least as many pixels as the image XY dims.
+        Default is True.
+    scale : int, optional
+        Integer scale multiplier to enlarge further. Default is 1.
+    extra_width : int, optional
+        Allowance for sidebars/window decoration in pixels. Default is 200.
+    extra_height : int, optional
+        Allowance for window decoration in pixels. Default is 50.
+
+    Returns
+    -------
+    Optional[Tuple[int, int]]
+        Target canvas dimensions (width, height) if successful, or None if
+        sizing could not be applied to the inner canvas.
+
+    Raises
+    ------
+    ValueError
+        If the layer has fewer than 2 spatial dimensions.
     """
     layer = viewer.layers[layer_name]
     arr = layer.data
@@ -231,13 +258,13 @@ def update_viewer(
     ----------
     viewer : napari.Viewer
         The napari viewer instance to update.
-    angles : Tuple[float, float, float]
+    angles : Tuple[float, float, float] | None
         Camera rotation angles (azimuth, elevation, roll) in degrees.
-    zoom : float
+    zoom : float | None
         Camera zoom level.
-    center : Tuple[float, float, float]
+    center : Tuple[float, float, float] | None
         Camera center point coordinates (z, y, x).
-    time : int
+    time : int | None
         Time step index to set in the viewer dimensions.
 
     Returns
@@ -363,7 +390,7 @@ def representative_text_rgba_for_layer(
     return tuple(out)
 
 
-def _layer(viewer, name: str) -> napari.layers.Layer | None:
+def _layer(viewer: napari.Viewer, name: str) -> Optional[napari.layers.Layer]:
     """Get a layer by name, trying a few tolerant name variants.
 
     Many places in this notebook add layers using `name=key.capitalize()` but
@@ -380,7 +407,7 @@ def _layer(viewer, name: str) -> napari.layers.Layer | None:
 
     Returns
     -------
-    napari.layers.Layer | None
+    Optional[napari.layers.Layer]
         The matched layer, or None if not found.
     """
     if name is None:
@@ -559,7 +586,24 @@ def _screenshot(viewer, out_path: str):
         viewer.screenshot(path=out_path, canvas_only=True, scale=10)
 
 
-def _as_array(data):
+def _as_array(
+    data: Union[np.ndarray, List[np.ndarray], Tuple[np.ndarray, ...]],
+) -> np.ndarray:
+    """Convert layer data to a numpy array.
+
+    Handles both single arrays and multiscale (list/tuple) data by
+    returning the highest resolution level.
+
+    Parameters
+    ----------
+    data : np.ndarray or list of np.ndarray or tuple of np.ndarray
+        Layer data, either a single array or multiscale list/tuple.
+
+    Returns
+    -------
+    np.ndarray
+        The data as a numpy array (highest resolution if multiscale).
+    """
     # layer.data can be ndarray or multiscale list; use highest-res
     if isinstance(data, (list, tuple)):
         return np.asarray(data[0])
@@ -614,10 +658,7 @@ def representative_rgba_from_image_layer(
     return tuple(float(c) for c in rgba[:4])
 
 
-import numpy as np
-
-
-def _ensure_rgba_u8(frame) -> np.ndarray:
+def _ensure_rgba_u8(frame: Union[np.ndarray, Any]) -> np.ndarray:
     arr = np.asarray(frame)
     if arr.dtype != np.uint8:
         # handle float screenshots (0..1) or odd ranges defensively
@@ -768,7 +809,7 @@ def annotate_frame_with_component_legend(
 def save_frame(
     viewer, out_path: str, comp: str, groups: dict, transparent_background=True
 ):
-    frame = viewer.screenshot(canvas_only=True, flash=False)
+    frame = viewer.screenshot(canvas_only=True, flash=False, size=(4000, 4000))
     labels = groups.get(comp, [])
 
     frame2 = annotate_frame_with_component_legend(
