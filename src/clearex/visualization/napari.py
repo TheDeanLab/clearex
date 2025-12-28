@@ -731,6 +731,7 @@ def annotate_frame_with_component_legend(
     draw_lut=True,
     transparent_background=False,
     bg_thresh=2,
+        z_idx=None,
 ):
     frame_rgba_u8 = _ensure_rgba_u8(frame_rgba_u8)
 
@@ -758,11 +759,20 @@ def annotate_frame_with_component_legend(
     lut_w, lut_h = 140, 10
     lut_pad = 10
 
-    # Measure box
-    lines = [title] + labels
+    # Measure box - title, optional z-index, then labels
+    lines = [title]
+    if z_idx is not None:
+        # Label position in microns.
+        # lines.append(f"Z-position: {z_idx * 0.065 / 4.2} µm")
+        lines.append(f"Z-position: {z_idx * 0.15 / 4.2:.2f} µm")
+    lines.extend(labels)
+
     max_w, total_h = 0, 0
     for i, line in enumerate(lines):
-        font = title_font if i == 0 else label_font
+        # Title and z-index use title_font, labels use label_font
+        # Check if we're past the title (and optional z-index line)
+        z_line_count = 2 if z_idx is not None else 1
+        font = title_font if i < z_line_count else label_font
         bbox = draw.textbbox((0, 0), line, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         extra = (lut_w + lut_pad) if (draw_lut and i > 0) else 0
@@ -778,6 +788,14 @@ def annotate_frame_with_component_legend(
     cy = y
     draw.text((x, cy), title, font=title_font, fill=title_rgba)
     cy += (draw.textbbox((0, 0), title, font=title_font)[3]) + line_gap
+
+    # Z-index (if provided)
+    if z_idx is not None:
+        # z_text = (f"Z-position: {z_idx * 0.065 / 4.2} µm")
+        z_text = (f"Z-position: {z_idx * 0.15 / 4.2:.2f} µm")
+
+        draw.text((x, cy), z_text, font=title_font, fill=title_rgba)
+        cy += (draw.textbbox((0, 0), z_text, font=title_font)[3]) + line_gap
 
     # Labels (each colored by its own LUT + gamma)
     for label in labels:
@@ -807,7 +825,8 @@ def annotate_frame_with_component_legend(
 
 
 def save_frame(
-    viewer, out_path: str, comp: str, groups: dict, transparent_background=True
+    viewer, out_path: str, comp: str, groups: dict, transparent_background=True,
+    z_idx=None
 ):
     frame = viewer.screenshot(canvas_only=True, flash=False, size=(4000, 4000))
     labels = groups.get(comp, [])
@@ -820,6 +839,7 @@ def save_frame(
         draw_lut=True,
         transparent_background=transparent_background,
         bg_thresh=2,
+        z_idx=z_idx,
     )
 
     Image.fromarray(frame2, mode="RGBA").save(out_path)
