@@ -28,6 +28,8 @@
 from typing import Tuple, List, Dict, Union, Optional, Callable, Any
 import os
 from pathlib import Path
+import warnings
+from logging import Logger
 
 # Third party imports
 import napari
@@ -36,8 +38,118 @@ import numpy as np
 from qtpy.QtCore import QTimer
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
+import tifffile
+
+from clearex.io.log import initialize_logging
+
 
 # Local imports
+
+
+class MovieMaker:
+    """Class for making movies with napari.
+
+    Each label is defined according to a configuration dictionary that
+    specifies its opacity, colormap, and other visual properties.
+
+    data = {
+        "NUP": {
+            "opacity": 0.75,
+            "min": 36,
+            "max": 1119,
+            "gamma": 0.58,
+            "colormap": "gray",
+            "blending": "additive",
+            "rendering": "attenuated_mip",
+            "name": "DB2_round2_555_NUP.tif",
+            "component": ["nucleus"],
+            "projection_mode": "max",
+        },
+        "WGA": {
+            "opacity": 0.78,
+            "min": 382,
+            "max": 1834,
+            "gamma": 0.65,
+            "colormap": "bop orange",
+            "blending": "additive",
+            "rendering": "attenuated_mip",
+            "name": "DB2_round11_488_WGA.tif",
+            "component": ["trafficking"],
+        },
+    """
+
+    def __init__(
+        self,
+        data_directory: str,
+        output_directory: str,
+        data_dictionary: Dict[str, Dict[str, Any]],
+        movie_sequence: List[Dict[str, Any]],
+        enable_logging: bool = True,
+        viewer_dimensions: int = 2,
+        display_viewer: bool = True,
+    ) -> None:
+
+        self.data_directory: str = data_directory
+        self.output_directory: str = output_directory
+
+        # Initialize logging
+        self._log: Logger = initialize_logging(
+            log_directory=self.output_directory, enable_logging=enable_logging
+        )
+        self._log.info("Starting MovieMaker...")
+        self._log.info(f"Data directory: {self.data_directory}")
+        self._log.info(f"Output directory: {self.output_directory}")
+
+        self.data_dictionary = data_dictionary
+        self.movie_sequence = movie_sequence
+        self.load_images(data_dictionary)
+
+        viewer = create_viewer(dimensions=viewer_dimensions, show=display_viewer)
+
+        for key, value in self.data_dictionary.items():
+            viewer.add_image(
+                data=self.data_dictionary[key]["image_data"],
+                name=key,
+                contrast_limits=[value.get("min", 0), value.get("max", 2**16 - 1)],
+                colormap=value.get("colormap", "gray"),
+                opacity=value.get("opacity", 1.0),
+                gamma=value.get("gamma", 1.0),
+                blending=value.get("blending", "additive"),
+                rendering=value.get("rendering", "attenuated_mip"),
+                projection_mode=value.get("projection_mode", "max"),
+                axis_labels=("Z", "Y", "X"),
+                scale=(0.15, 0.15, 0.15),  # Z,Y,X spacing in microns
+            )
+
+    def load_images(self, data_dictionary: dict[str, dict[str, Any]]):
+        """Load image data from files into the data dictionary.
+
+        Parameters
+        ----------
+        data_dictionary : dict
+            Dictionary where each key is a label and each value is a
+            dictionary containing at least the "name" key with the filename.
+
+        Returns
+        -------
+        None
+        """
+
+        for key, value in self.data_dictionary.items():
+            self._log.info(f"Loading {key}")
+            image_name = value.get("name", None)
+            if image_name is None:
+                # warn user, remove key, and continue
+                self._log.warning(f"No image name for {key}")
+                del self.data_dictionary[key]
+                continue
+
+            # Load the image data and add it to the dictionary.
+            file_path = str(os.path.join(self.data_directory, value["name"]))
+            self.data_dictionary[key]["image_data"] = tifffile.imread(file_path)
+            self._log.info(
+                f"Loaded {key}, shape" f"={data_dictionary[key]['image_data'].shape}"
+            )
 
 
 def load_tracks(
@@ -731,7 +843,7 @@ def annotate_frame_with_component_legend(
     draw_lut=True,
     transparent_background=False,
     bg_thresh=2,
-        z_idx=None,
+    z_idx=None,
 ):
     frame_rgba_u8 = _ensure_rgba_u8(frame_rgba_u8)
 
@@ -792,7 +904,7 @@ def annotate_frame_with_component_legend(
     # Z-index (if provided)
     if z_idx is not None:
         # z_text = (f"Z-position: {z_idx * 0.065 / 4.2} µm")
-        z_text = (f"Z-position: {z_idx * 0.15 / 4.2:.2f} µm")
+        z_text = f"Z-position: {z_idx * 0.15 / 4.2:.2f} µm"
 
         draw.text((x, cy), z_text, font=title_font, fill=title_rgba)
         cy += (draw.textbbox((0, 0), z_text, font=title_font)[3]) + line_gap
@@ -825,8 +937,12 @@ def annotate_frame_with_component_legend(
 
 
 def save_frame(
-    viewer, out_path: str, comp: str, groups: dict, transparent_background=True,
-    z_idx=None
+    viewer,
+    out_path: str,
+    comp: str,
+    groups: dict,
+    transparent_background=True,
+    z_idx=None,
 ):
     frame = viewer.screenshot(canvas_only=True, flash=False, size=(4000, 4000))
     labels = groups.get(comp, [])
