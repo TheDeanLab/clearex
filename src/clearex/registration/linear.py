@@ -264,8 +264,9 @@ def _extract_shear(affine_matrix):
     affine_matrix: np.ndarray
         4x4 affine transform matrix.
     """
-    rotation, scaling_shear = polar(a=affine_matrix[:3, :3])
-    _, shear = rq(a=scaling_shear)
+    # Extract shear directly from the 3x3 matrix using RQ decomposition
+    # This gives us the "raw" shear without removing rotation first
+    shear, _ = rq(a=affine_matrix[:3, :3])
 
     # Use shear coefficients:
     sx, sy, sz = np.diag(v=shear)
@@ -311,11 +312,19 @@ def _extract_rotation(affine_matrix):
     """
     rotation, _ = polar(a=affine_matrix[:3, :3])
 
-    # Create a rotation object
-    r = Rotation.from_matrix(matrix=rotation)
+    # Check for reflection (negative determinant)
+    det = np.linalg.det(rotation)
+    if det < 0:
+        logger.warning("Transform contains reflection (negative determinant). Reporting zero rotation.")
+        print("Warning: Transform contains reflection (negative determinant).")
+        # For reflection transforms, report zero rotation
+        euler_angles_deg = np.array([0.0, 0.0, 0.0])
+    else:
+        # Create a rotation object
+        r = Rotation.from_matrix(matrix=rotation)
 
-    # Extract Euler angles (XYZ order) in degrees
-    euler_angles_deg = r.as_euler(seq="xyz", degrees=True)
+        # Extract Euler angles (XYZ order) in degrees
+        euler_angles_deg = r.as_euler(seq="xyz", degrees=True)
 
     # Print angles clearly
     axis_labels: list[str] = ["X (roll)", "Y (pitch)", "Z (yaw)"]
