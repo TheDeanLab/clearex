@@ -84,6 +84,60 @@ def _ensure_tuple(value: Any) -> Optional[Tuple[float, ...]]:
         return None
 
 
+def _normalize_axes(axes: Any) -> Optional[list]:
+    """Normalize axis information to OME-NGFF compatible list format.
+    
+    Converts various axis representations to a standardized list format
+    compatible with OME-NGFF (up to 5 dimensions: t, c, z, y, x).
+    
+    Parameters
+    ----------
+    axes : Any
+        Axis information in various formats:
+        - String like "TCZYX" or "ZYX"
+        - List of axis names like ["t", "c", "z", "y", "x"]
+        - List of OME-NGFF axis dicts like [{"name": "t", "type": "time"}, ...]
+        - Dict with keys like {'T': 10, 'C': 3, 'Z': 5, 'Y': 512, 'X': 512}
+        
+    Returns
+    -------
+    Optional[list]
+        List of lowercase axis names (e.g., ["t", "c", "z", "y", "x"]) or None
+        
+    Notes
+    -----
+    Following OME-NGFF conventions:
+    - Supports up to 5 dimensions
+    - Common axis names: 't' (time), 'c' (channel), 'z', 'y', 'x' (spatial)
+    - Preserves order from input
+    - Normalizes to lowercase for consistency
+    """
+    if axes is None:
+        return None
+    
+    try:
+        # Handle string format (e.g., "TCZYX")
+        if isinstance(axes, str):
+            return [ax.lower() for ax in axes]
+        
+        # Handle list of dicts (OME-NGFF format)
+        if isinstance(axes, list):
+            if all(isinstance(item, dict) and "name" in item for item in axes):
+                return [item["name"].lower() for item in axes]
+            # Handle simple list of strings
+            elif all(isinstance(item, str) for item in axes):
+                return [ax.lower() for ax in axes]
+        
+        # Handle dict format (e.g., sizes dict from ND2)
+        if isinstance(axes, dict):
+            return [key.lower() for key in axes.keys()]
+            
+    except Exception:
+        pass
+    
+    return None
+
+
 @dataclass
 class ImageInfo:
     """Container for image metadata.
@@ -101,15 +155,23 @@ class ImageInfo:
         (depth, height, width) for 3D, or arbitrary N-dimensional shapes).
     dtype : Any
         The NumPy dtype of the image data (e.g., np.uint8, np.float32).
-    axes : str, optional
-        A string describing the axis order, such as "TCZYX" for
-        time-channel-Z-Y-X. Common in OME-TIFF and other formats.
+    axes : list of str, optional
+        List of axis names describing dimension order, following OME-NGFF
+        conventions. Supports up to 5 dimensions with common names:
+        - 't' or 'time' for time dimension
+        - 'c' or 'channel' for channel dimension
+        - 'z' for Z spatial dimension
+        - 'y' for Y spatial dimension
+        - 'x' for X spatial dimension
+        
+        Examples: ["t", "c", "z", "y", "x"], ["z", "y", "x"], ["y", "x"]
+        Order matches the actual array dimension order.
         Defaults to None if not available.
     pixel_size : Tuple[float, ...], optional
-        Physical pixel/voxel sizes in micrometers, typically ordered as
-        (X, Y, Z) or matching the axes order. For example, (0.65, 0.65, 2.0)
-        for a 3D image with 0.65 µm XY resolution and 2.0 µm Z spacing.
-        Defaults to None if not available.
+        Physical pixel/voxel sizes in micrometers, ordered to match the
+        spatial axes in the axes list. For example, with axes=["z", "y", "x"]
+        and pixel_size=(2.0, 0.65, 0.65), the Z spacing is 2.0 µm and
+        XY resolution is 0.65 µm. Defaults to None if not available.
     metadata : Dict[str, Any], optional
         Additional metadata extracted from the file format, such as
         attributes from Zarr/HDF5 or custom tags. Defaults to None.
@@ -120,22 +182,35 @@ class ImageInfo:
     >>> import numpy as np
     >>> info = ImageInfo(
     ...     path=Path("image.tif"),
-    ...     shape=(512, 512),
+    ...     shape=(10, 512, 512),
     ...     dtype=np.uint16,
-    ...     axes="YX",
-    ...     pixel_size=(0.65, 0.65),
+    ...     axes=["z", "y", "x"],
+    ...     pixel_size=(2.0, 0.65, 0.65),
     ...     metadata={"scale": 1.0}
     ... )
     >>> print(info.shape)
-    (512, 512)
+    (10, 512, 512)
+    >>> print(info.axes)
+    ['z', 'y', 'x']
     >>> print(info.pixel_size)
-    (0.65, 0.65)
+    (2.0, 0.65, 0.65)
+    
+    >>> # 5D example
+    >>> info_5d = ImageInfo(
+    ...     path=Path("timeseries.nd2"),
+    ...     shape=(20, 3, 10, 512, 512),
+    ...     dtype=np.uint16,
+    ...     axes=["t", "c", "z", "y", "x"],
+    ...     pixel_size=(2.0, 0.65, 0.65),  # Z, Y, X only
+    ... )
+    >>> print(info_5d.axes)
+    ['t', 'c', 'z', 'y', 'x']
     """
 
     path: Path
     shape: Tuple[int, ...]
     dtype: Any
-    axes: Optional[str] = None
+    axes: Optional[list] = None
     pixel_size: Optional[Tuple[float, ...]] = None
     metadata: Optional[Dict[str, Any]] = None
 
@@ -379,7 +454,7 @@ class TiffReader(Reader):
         >>> # Load an OME-TIFF as a Dask array
         >>> darr, info = reader.open(Path("timelapse.ome.tif"), prefer_dask=True)
         >>> print(f"Axes: {info.axes}, Type: {type(darr).__name__}")
-        Axes: TCZYX, Type: Array
+        Axes: ['t', 'c', 'z', 'y', 'x'], Type: Array
 
         >>> # Specify custom chunking for Dask
         >>> darr, info = reader.open(
@@ -462,7 +537,7 @@ class TiffReader(Reader):
                 path=path,
                 shape=tuple(darr.shape),
                 dtype=darr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
                 pixel_size=pixel_size,
                 metadata={},
             )
@@ -475,7 +550,7 @@ class TiffReader(Reader):
                 path=path,
                 shape=tuple(arr.shape),
                 dtype=arr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
                 pixel_size=pixel_size,
                 metadata={},
             )
@@ -673,7 +748,7 @@ class ZarrReader(Reader):
                 path=path,
                 shape=tuple(darr.shape),
                 dtype=darr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
                 pixel_size=pixel_size,
                 metadata=meta,
             )
@@ -686,7 +761,7 @@ class ZarrReader(Reader):
                 path=path,
                 shape=tuple(np_arr.shape),
                 dtype=np_arr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
                 pixel_size=pixel_size,
                 metadata=meta,
             )
@@ -907,7 +982,7 @@ class HDF5Reader(Reader):
                 path=Path(path_str),
                 shape=tuple(darr.shape),
                 dtype=darr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
                 pixel_size=pixel_size,
                 metadata=meta,
             )
@@ -923,7 +998,7 @@ class HDF5Reader(Reader):
             path=Path(path_str),
             shape=tuple(np_arr.shape),
             dtype=np_arr.dtype,
-            axes=axes,
+            axes=_normalize_axes(axes),
             pixel_size=pixel_size,
             metadata=meta,
         )
@@ -1262,8 +1337,8 @@ class ND2Reader(Reader):
 
             # Get axes information from sizes dict
             if hasattr(nd2_file, 'sizes') and nd2_file.sizes:
-                # Convert sizes dict to axes string (e.g., {'T': 10, 'C': 3, 'Z': 5, 'Y': 512, 'X': 512} -> "TCZYX")
-                axes = "".join(nd2_file.sizes.keys())
+                # Pass the sizes dict to normalize_axes which will extract keys
+                axes = nd2_file.sizes
 
             # Extract pixel size from metadata
             try:
@@ -1295,7 +1370,7 @@ class ND2Reader(Reader):
                     path=path,
                     shape=tuple(darr.shape),
                     dtype=darr.dtype,
-                    axes=axes,
+                    axes=_normalize_axes(axes),
                     pixel_size=pixel_size,
                     metadata=metadata_dict,
                 )
@@ -1308,7 +1383,7 @@ class ND2Reader(Reader):
                     path=path,
                     shape=tuple(arr.shape),
                     dtype=arr.dtype,
-                    axes=axes,
+                    axes=_normalize_axes(axes),
                     pixel_size=pixel_size,
                     metadata=metadata_dict,
                 )
