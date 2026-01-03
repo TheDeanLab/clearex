@@ -497,12 +497,12 @@ class TiffReader(Reader):
                         size_y = getattr(pixels, 'physical_size_y', None)
                         size_z = getattr(pixels, 'physical_size_z', None)
                         
-                        # Build pixel_size tuple based on available dimensions
+                        # Build pixel_size tuple in ZYX order to match axes convention
                         if size_x is not None and size_y is not None:
                             if size_z is not None:
-                                pixel_size = (size_x, size_y, size_z)
+                                pixel_size = (size_z, size_y, size_x)
                             else:
-                                pixel_size = (size_x, size_y)
+                                pixel_size = (size_y, size_x)
                 except Exception:
                     # If OME parsing fails, pixel_size remains None
                     pass
@@ -526,12 +526,12 @@ class TiffReader(Reader):
                             # pixels per inch -> um per pixel
                             x_um = 25400.0 / x_val  # 1 inch = 25400 um
                             y_um = 25400.0 / y_val
-                            pixel_size = (x_um, y_um)
+                            pixel_size = (y_um, x_um)  # YX order
                         elif res_unit.value == 3:  # centimeter
                             # pixels per cm -> um per pixel
                             x_um = 10000.0 / x_val  # 1 cm = 10000 um
                             y_um = 10000.0 / y_val
-                            pixel_size = (x_um, y_um)
+                            pixel_size = (y_um, x_um)  # YX order
                 except Exception:
                     # If standard TIFF tag parsing fails, pixel_size remains None
                     pass
@@ -1236,7 +1236,8 @@ class ND2Reader(Reader):
     ND2 files without loading them entirely into memory.
 
     Pixel size information is extracted from the Volume metadata and stored
-    in the ImageInfo as (X, Y, Z) calibration values in micrometers.
+    in the ImageInfo as (Z, Y, X) calibration values in micrometers, reordered
+    from the ND2 native (X, Y, Z) format to match our axes convention.
 
     Examples
     --------
@@ -1246,7 +1247,7 @@ class ND2Reader(Reader):
     >>> print(arr.shape)
     (10, 512, 512)
     >>> print(info.pixel_size)
-    (0.65, 0.65, 2.0)
+    (2.0, 0.65, 0.65)  # Z, Y, X in micrometers
 
     >>> # For large files, use Dask
     >>> darr, info = reader.open(Path("large.nd2"), prefer_dask=True)
@@ -1304,8 +1305,9 @@ class ND2Reader(Reader):
         Notes
         -----
         The reader extracts pixel/voxel sizes from the ND2 metadata's Volume
-        section. These are stored as (X, Y, Z) calibration values in micrometers
-        in the `pixel_size` field of ImageInfo.
+        section. The native ND2 format stores calibration as (X, Y, Z), but
+        these are reordered to (Z, Y, X) to match our axes convention and
+        stored in the `pixel_size` field of ImageInfo.
 
         Axes information is extracted from the ND2 file's dimension names and
         converted to a string format (e.g., "TCZYX").
@@ -1320,7 +1322,7 @@ class ND2Reader(Reader):
         >>> print(f"Shape: {info.shape}, dtype: {info.dtype}")
         Shape: (5, 512, 512), dtype: uint16
         >>> print(f"Pixel size: {info.pixel_size}")
-        Pixel size: (0.325, 0.325, 1.0)
+        Pixel size: (1.0, 0.325, 0.325)  # Z, Y, X in micrometers
 
         >>> # Load an ND2 as a Dask array
         >>> darr, info = reader.open(Path("large.nd2"), prefer_dask=True)
@@ -1361,7 +1363,9 @@ class ND2Reader(Reader):
                     channel = nd2_file.metadata.channels[0]
                     if channel.volume and channel.volume.axesCalibration:
                         # axesCalibration is (X, Y, Z) in micrometers
-                        pixel_size = channel.volume.axesCalibration
+                        # Reorder to (Z, Y, X) to match our axes convention
+                        x, y, z = channel.volume.axesCalibration
+                        pixel_size = (z, y, x)
             except (AttributeError, IndexError, TypeError):
                 # If metadata extraction fails, pixel_size remains None
                 pass
