@@ -38,7 +38,6 @@ import dask.array as da
 import tifffile
 import zarr
 import h5py
-import nd2
 from numpy.typing import NDArray
 
 # Try to import ome-types for OME-TIFF metadata parsing
@@ -47,6 +46,13 @@ try:
     HAS_OME_TYPES = True
 except ImportError:
     HAS_OME_TYPES = False
+
+# Try to import nd2 for ND2 file support
+try:
+    import nd2
+    HAS_ND2 = True
+except ImportError:
+    HAS_ND2 = False
 
 # Local Imports
 
@@ -118,10 +124,12 @@ def _normalize_axes(axes: Any) -> Optional[list]:
     try:
         # Handle string format (e.g., "TCZYX")
         if isinstance(axes, str):
-            return [ax.lower() for ax in axes]
+            return [ax.lower() for ax in axes] if axes else None
         
         # Handle list of dicts (OME-NGFF format)
         if isinstance(axes, list):
+            if not axes:  # Empty list
+                return None
             if all(isinstance(item, dict) and "name" in item for item in axes):
                 return [item["name"].lower() for item in axes]
             # Handle simple list of strings
@@ -130,7 +138,7 @@ def _normalize_axes(axes: Any) -> Optional[list]:
         
         # Handle dict format (e.g., sizes dict from ND2)
         if isinstance(axes, dict):
-            return [key.lower() for key in axes.keys()]
+            return [key.lower() for key in axes.keys()] if axes else None
             
     except Exception:
         pass
@@ -1328,6 +1336,12 @@ class ND2Reader(Reader):
         >>> print(darr.chunksize)
         (1, 512, 512)
         """
+        
+        if not HAS_ND2:
+            raise ImportError(
+                "The 'nd2' library is required to read ND2 files. "
+                "Install it with: pip install nd2"
+            )
 
         with nd2.ND2File(str(path), **kwargs) as nd2_file:
             # Extract metadata
