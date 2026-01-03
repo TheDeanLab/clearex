@@ -29,6 +29,7 @@ dependencies = [
     "ome-types",
     "opencv-python",
     "pandas>=2.3.3",
+    "pytest>=8.4.2",
     "pywavelets",
     "scikit-image",
     "scipy",

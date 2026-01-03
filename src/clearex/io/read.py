@@ -476,39 +476,65 @@ class TiffReader(Reader):
 
         # Try OME-axes, pixel size, and metadata
         with tifffile.TiffFile(str(path)) as tf:
-            ome_meta = getattr(tf, "omexml", None)
+            import json
             axes = None
             pixel_size = None
-            
+            size_x = None
+            size_y = None
+            size_z = None
+
+            # Method 1: Try to extract from ImageDescription tag (may contain JSON dict with spacing)
+            try:
+                if tf.pages and "ImageDescription" in tf.pages[0].tags:
+                    desc = tf.pages[0].tags["ImageDescription"].value
+
+                    # If desc is already a dict (tifffile auto-parsed it)
+                    if isinstance(desc, dict):
+                        if 'spacing' in desc:
+                            unit = desc.get('unit', 'um')
+                            if unit in ('um', 'µm'):
+                                size_z = desc['spacing']
+                    # If desc is a string, try to parse as JSON
+                    elif isinstance(desc, (str, bytes)):
+                        if isinstance(desc, bytes):
+                            desc = desc.decode("utf-8", errors="ignore")
+                        # Check if it looks like JSON (not OME-XML)
+                        if desc.strip().startswith('{'):
+                            try:
+                                desc_data = json.loads(desc)
+                                if 'spacing' in desc_data:
+                                    unit = desc_data.get('unit', 'um')
+                                    if unit in ('um', 'µm'):
+                                        size_z = desc_data['spacing']
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+            except Exception:
+                pass
+
+            # Method 2: Try OME metadata for axes and pixel sizes
+            ome_meta = getattr(tf, "ome_metadata", None)
             if ome_meta is not None:
                 try:
                     axes = ome_meta.image().pixels().DimensionOrder  # e.g., "TCZYX"
                 except Exception:
                     axes = None
             
-            # Try to extract pixel size from OME metadata
+            # Try to extract X, Y, Z pixel sizes from OME metadata using ome-types
             if HAS_OME_TYPES and hasattr(tf, 'ome_metadata') and tf.ome_metadata:
                 try:
                     ome = from_xml(tf.ome_metadata)
                     if ome.images and ome.images[0].pixels:
                         pixels = ome.images[0].pixels
-                        # Extract physical sizes (in micrometers by default in OME)
                         size_x = getattr(pixels, 'physical_size_x', None)
                         size_y = getattr(pixels, 'physical_size_y', None)
-                        size_z = getattr(pixels, 'physical_size_z', None)
-                        
-                        # Build pixel_size tuple in ZYX order to match axes convention
-                        if size_x is not None and size_y is not None:
-                            if size_z is not None:
-                                pixel_size = (size_z, size_y, size_x)
-                            else:
-                                pixel_size = (size_y, size_x)
+                        # Only use PhysicalSizeZ if we didn't get it from Description
+                        if size_z is None:
+                            size_z = getattr(pixels, 'physical_size_z', None)
                 except Exception:
-                    # If OME parsing fails, pixel_size remains None
                     pass
-            
-            # Fallback: try to extract from standard TIFF resolution tags
-            if pixel_size is None:
+
+            # Method 3: Fallback to standard TIFF resolution tags for X and Y if not found
+            if size_x is None or size_y is None:
                 try:
                     page = tf.pages[0]
                     x_res = page.tags.get('XResolution')
@@ -523,18 +549,20 @@ class TiffReader(Reader):
                         # Convert to micrometers per pixel based on unit
                         # Resolution unit: 1=none, 2=inch, 3=centimeter
                         if res_unit.value == 2:  # inch
-                            # pixels per inch -> um per pixel
-                            x_um = 25400.0 / x_val  # 1 inch = 25400 um
-                            y_um = 25400.0 / y_val
-                            pixel_size = (y_um, x_um)  # YX order
+                            size_x = 25400.0 / x_val  # 1 inch = 25400 um
+                            size_y = 25400.0 / y_val
                         elif res_unit.value == 3:  # centimeter
-                            # pixels per cm -> um per pixel
-                            x_um = 10000.0 / x_val  # 1 cm = 10000 um
-                            y_um = 10000.0 / y_val
-                            pixel_size = (y_um, x_um)  # YX order
+                            size_x = 10000.0 / x_val  # 1 cm = 10000 um
+                            size_y = 10000.0 / y_val
                 except Exception:
-                    # If standard TIFF tag parsing fails, pixel_size remains None
                     pass
+
+            # Build pixel_size tuple in ZYX order to match axes convention
+            if size_x is not None and size_y is not None:
+                if size_z is not None:
+                    pixel_size = (size_z, size_y, size_x)
+                else:
+                    pixel_size = (size_y, size_x)
 
         if prefer_dask:
             # Option A: use tifffile's OME-as-zarr path if possible
@@ -564,6 +592,28 @@ class TiffReader(Reader):
             )
             logger.info(f"Loaded {path.name} as NumPy array.")
             return arr, info
+
+    @staticmethod
+    def find_ome(path, max_pages=None):
+        with tifffile.TiffFile(str(path)) as tf:
+            n = len(tf.pages)
+            lim = n if max_pages is None else min(n, max_pages)
+
+            for idx in range(lim):
+                p = tf.pages[idx]
+                if "ImageDescription" not in p.tags:
+                    continue
+                desc = p.tags["ImageDescription"].value
+                if isinstance(desc, bytes):
+                    desc = desc.decode("utf-8", errors="ignore")
+
+                print("Desc", desc)
+                if "<OME" in desc:
+                    j = desc.find("<OME")
+                    ome_xml = desc[j:].strip("\x00").strip()
+                    return idx, ome_xml
+
+        return None, None
 
 
 class ZarrReader(Reader):

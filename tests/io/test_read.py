@@ -678,6 +678,59 @@ class TestTiffReader:
         slice_result = darr[0].compute()
         assert np.array_equal(slice_result, arr[0])
 
+    def test_ome_tiff_with_spacing_in_description(self, tiff_reader, tmp_path):
+        """Test that Z spacing stored in Description field as JSON is parsed correctly."""
+        import json
+
+        # Create a 3D array
+        arr = np.random.randint(0, 65535, size=(10, 256, 256), dtype=np.uint16)
+        tiff_path = tmp_path / "test_ome_spacing.tif"
+
+        # Create OME-XML metadata with spacing in Description field
+        # This mimics the format seen in the user's data
+        ome_metadata = f'''<?xml version="1.0" encoding="UTF-8"?>
+<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" 
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+     xsi:schemaLocation="http://www.openmicroscopy.org/Schemas/OME/2016-06 http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd">
+    <Image ID="Image:0" Name="test_ome_spacing.tif">
+        <Description>{json.dumps({"spacing": 0.2, "unit": "um", "axes": "ZYX", "shape": [10, 256, 256]})}</Description>
+        <Pixels BigEndian="false" 
+                DimensionOrder="XYCZT" 
+                ID="Pixels:0" 
+                Interleaved="false" 
+                PhysicalSizeX="0.167" 
+                PhysicalSizeY="0.167" 
+                SignificantBits="16" 
+                SizeC="1" 
+                SizeT="10" 
+                SizeX="256" 
+                SizeY="256" 
+                SizeZ="1" 
+                Type="uint16">
+            <Channel ID="Channel:0:0" SamplesPerPixel="1">
+                <LightPath/>
+            </Channel>
+        </Pixels>
+    </Image>
+</OME>'''
+
+        # Write TIFF with OME metadata
+        tifffile.imwrite(str(tiff_path), arr, metadata={'axes': 'TYX'}, description=ome_metadata)
+
+        # Open and check that pixel_size includes Z spacing from Description
+        arr_out, info = tiff_reader.open(tiff_path)
+
+        assert isinstance(arr_out, np.ndarray)
+        assert arr_out.shape == arr.shape
+        assert info.pixel_size is not None
+
+        # Check that pixel_size tuple contains Z, Y, X values
+        # Z spacing should be 0.2 from Description, Y and X should be 0.167 from PhysicalSize
+        assert len(info.pixel_size) == 3
+        assert abs(info.pixel_size[0] - 0.2) < 1e-6  # Z spacing from Description
+        assert abs(info.pixel_size[1] - 0.167) < 1e-3  # Y spacing from PhysicalSizeY
+        assert abs(info.pixel_size[2] - 0.167) < 1e-3  # X spacing from PhysicalSizeX
+
 
 # =============================================================================
 # Test ZarrReader Class
