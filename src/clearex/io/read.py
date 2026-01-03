@@ -1362,11 +1362,19 @@ class ND2Reader(Reader):
                     # Get the first channel's volume information
                     channel = nd2_file.metadata.channels[0]
                     if channel.volume and channel.volume.axesCalibration:
-                        # axesCalibration is (X, Y, Z) in micrometers
+                        # axesCalibration is typically (X, Y, Z) in micrometers
                         # Reorder to (Z, Y, X) to match our axes convention
-                        x, y, z = channel.volume.axesCalibration
-                        pixel_size = (z, y, x)
-            except (AttributeError, IndexError, TypeError):
+                        calib = channel.volume.axesCalibration
+                        if len(calib) == 3:
+                            x, y, z = calib
+                            pixel_size = (z, y, x)
+                        elif len(calib) == 2:
+                            x, y = calib
+                            pixel_size = (y, x)
+                        else:
+                            # For other cases, use as-is
+                            pixel_size = tuple(calib)
+            except (AttributeError, IndexError, TypeError, ValueError):
                 # If metadata extraction fails, pixel_size remains None
                 pass
 
