@@ -357,15 +357,68 @@ class TiffReader(Reader):
         (1, 512, 512)
         """
 
-        # Try OME-axes and metadata
+        # Try OME-axes, pixel size, and metadata
         with tifffile.TiffFile(str(path)) as tf:
             ome_meta = getattr(tf, "omexml", None)
             axes = None
+            pixel_size = None
+            
             if ome_meta is not None:
                 try:
                     axes = ome_meta.image().pixels().DimensionOrder  # e.g., "TCZYX"
                 except Exception:
                     axes = None
+            
+            # Try to extract pixel size from OME metadata
+            if hasattr(tf, 'ome_metadata') and tf.ome_metadata:
+                try:
+                    from ome_types import from_xml
+                    ome = from_xml(tf.ome_metadata)
+                    if ome.images and ome.images[0].pixels:
+                        pixels = ome.images[0].pixels
+                        # Extract physical sizes (in micrometers by default in OME)
+                        size_x = getattr(pixels, 'physical_size_x', None)
+                        size_y = getattr(pixels, 'physical_size_y', None)
+                        size_z = getattr(pixels, 'physical_size_z', None)
+                        
+                        # Build pixel_size tuple based on available dimensions
+                        if size_x is not None and size_y is not None:
+                            if size_z is not None:
+                                pixel_size = (size_x, size_y, size_z)
+                            else:
+                                pixel_size = (size_x, size_y)
+                except Exception:
+                    # If OME parsing fails, pixel_size remains None
+                    pass
+            
+            # Fallback: try to extract from standard TIFF resolution tags
+            if pixel_size is None:
+                try:
+                    page = tf.pages[0]
+                    x_res = page.tags.get('XResolution')
+                    y_res = page.tags.get('YResolution')
+                    res_unit = page.tags.get('ResolutionUnit')
+                    
+                    if x_res and y_res and res_unit:
+                        # Extract resolution values
+                        x_val = x_res.value[0] / x_res.value[1] if isinstance(x_res.value, tuple) else x_res.value
+                        y_val = y_res.value[0] / y_res.value[1] if isinstance(y_res.value, tuple) else y_res.value
+                        
+                        # Convert to micrometers per pixel based on unit
+                        # Resolution unit: 1=none, 2=inch, 3=centimeter
+                        if res_unit.value == 2:  # inch
+                            # pixels per inch -> um per pixel
+                            x_um = 25400.0 / x_val  # 1 inch = 25400 um
+                            y_um = 25400.0 / y_val
+                            pixel_size = (x_um, y_um)
+                        elif res_unit.value == 3:  # centimeter
+                            # pixels per cm -> um per pixel
+                            x_um = 10000.0 / x_val  # 1 cm = 10000 um
+                            y_um = 10000.0 / y_val
+                            pixel_size = (x_um, y_um)
+                except Exception:
+                    # If standard TIFF tag parsing fails, pixel_size remains None
+                    pass
 
         if prefer_dask:
             # Option A: use tifffile's OME-as-zarr path if possible
@@ -377,6 +430,7 @@ class TiffReader(Reader):
                 shape=tuple(darr.shape),
                 dtype=darr.dtype,
                 axes=axes,
+                pixel_size=pixel_size,
                 metadata={},
             )
             logger.info(f"Loaded {path.name} as a Dask array.")
@@ -389,6 +443,7 @@ class TiffReader(Reader):
                 shape=tuple(arr.shape),
                 dtype=arr.dtype,
                 axes=axes,
+                pixel_size=pixel_size,
                 metadata={},
             )
             logger.info(f"Loaded {path.name} as NumPy array.")
@@ -544,11 +599,37 @@ class ZarrReader(Reader):
         array = max(arrays, key=lambda arr: np.prod(arr.shape))
 
         axes = None
+        pixel_size = None
         meta = {}
         try:
             attrs = getattr(array, "attrs", {})
             axes = attrs.get("multiscales", [{}])[0].get("axes") or attrs.get("axes")
             meta = dict(attrs)
+            
+            # Try to extract pixel size from Zarr attributes
+            # Check for OME-Zarr style multiscales metadata
+            if "multiscales" in attrs and attrs["multiscales"]:
+                multiscale = attrs["multiscales"][0]
+                if "axes" in multiscale and isinstance(multiscale["axes"], list):
+                    # Look for scale/transform information
+                    if "datasets" in multiscale and multiscale["datasets"]:
+                        dataset = multiscale["datasets"][0]
+                        if "coordinateTransformations" in dataset:
+                            for transform in dataset["coordinateTransformations"]:
+                                if transform.get("type") == "scale" and "scale" in transform:
+                                    # Scale values typically correspond to axis order
+                                    pixel_size = tuple(transform["scale"])
+                                    break
+            
+            # Fallback: check for direct pixel_size or scale attributes
+            if pixel_size is None:
+                if "pixel_size" in attrs:
+                    pixel_size = tuple(attrs["pixel_size"]) if isinstance(attrs["pixel_size"], (list, tuple)) else attrs["pixel_size"]
+                elif "scale" in attrs:
+                    pixel_size = tuple(attrs["scale"]) if isinstance(attrs["scale"], (list, tuple)) else attrs["scale"]
+                elif "resolution" in attrs:
+                    pixel_size = tuple(attrs["resolution"]) if isinstance(attrs["resolution"], (list, tuple)) else attrs["resolution"]
+                    
         except Exception:
             pass
 
@@ -560,6 +641,7 @@ class ZarrReader(Reader):
                 shape=tuple(darr.shape),
                 dtype=darr.dtype,
                 axes=axes,
+                pixel_size=pixel_size,
                 metadata=meta,
             )
             return darr, info
@@ -572,6 +654,7 @@ class ZarrReader(Reader):
                 shape=tuple(np_arr.shape),
                 dtype=np_arr.dtype,
                 axes=axes,
+                pixel_size=pixel_size,
                 metadata=meta,
             )
             return np_arr, info
@@ -743,8 +826,9 @@ class HDF5Reader(Reader):
         # Highest resolution ≈ largest number of elements
         ds = max(datasets, key=lambda d: int(np.prod(d.shape)))
 
-        # Extract basic metadata / axes if present
+        # Extract basic metadata / axes / pixel_size if present
         axes = None
+        pixel_size = None
         meta: Dict[str, Any] = {}
         try:
             attrs = dict(ds.attrs) if hasattr(ds, "attrs") else {}
@@ -755,6 +839,18 @@ class HDF5Reader(Reader):
                 or attrs.get("DimensionOrder")
                 or attrs.get("DIMENSION_LABELS")  # sometimes stored by other tools
             )
+            
+            # Try to extract pixel size from HDF5 attributes
+            if "pixel_size" in attrs:
+                pixel_size = tuple(attrs["pixel_size"]) if isinstance(attrs["pixel_size"], (list, tuple, np.ndarray)) else attrs["pixel_size"]
+            elif "scale" in attrs:
+                pixel_size = tuple(attrs["scale"]) if isinstance(attrs["scale"], (list, tuple, np.ndarray)) else attrs["scale"]
+            elif "resolution" in attrs:
+                pixel_size = tuple(attrs["resolution"]) if isinstance(attrs["resolution"], (list, tuple, np.ndarray)) else attrs["resolution"]
+            # Check for individual axis scales
+            elif "element_size_um" in attrs:
+                pixel_size = tuple(attrs["element_size_um"]) if isinstance(attrs["element_size_um"], (list, tuple, np.ndarray)) else attrs["element_size_um"]
+                
         except Exception:
             pass
 
@@ -779,6 +875,7 @@ class HDF5Reader(Reader):
                 shape=tuple(darr.shape),
                 dtype=darr.dtype,
                 axes=axes,
+                pixel_size=pixel_size,
                 metadata=meta,
             )
             logger.info(
@@ -794,6 +891,7 @@ class HDF5Reader(Reader):
             shape=tuple(np_arr.shape),
             dtype=np_arr.dtype,
             axes=axes,
+            pixel_size=pixel_size,
             metadata=meta,
         )
         logger.info(
@@ -953,6 +1051,7 @@ class NumpyReader(Reader):
                     shape=tuple(darr.shape),
                     dtype=darr.dtype,
                     axes=None,
+                    pixel_size=None,
                     metadata={},
                 )
                 return darr, info
@@ -963,6 +1062,7 @@ class NumpyReader(Reader):
                     shape=tuple(arr.shape),
                     dtype=arr.dtype,
                     axes=None,
+                    pixel_size=None,
                     metadata={},
                 )
                 return arr, info
@@ -978,6 +1078,7 @@ class NumpyReader(Reader):
                     shape=tuple(darr.shape),
                     dtype=darr.dtype,
                     axes=None,
+                    pixel_size=None,
                     metadata={"npz_key": first_key},
                 )
                 return darr, info
@@ -987,6 +1088,7 @@ class NumpyReader(Reader):
                     shape=tuple(arr.shape),
                     dtype=arr.dtype,
                     axes=None,
+                    pixel_size=None,
                     metadata={"npz_key": first_key},
                 )
                 return arr, info
