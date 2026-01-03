@@ -47,6 +47,7 @@ from clearex.io.read import (
     ZarrReader,
     HDF5Reader,
     NumpyReader,
+    ND2Reader,
     ImageOpener,
 )
 from tests import download_test_registration_data

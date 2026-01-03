@@ -24,6 +24,7 @@ dependencies = [
     "jupyterlab",
     "matplotlib",
     "napari[all]>0.6.1",
+    "nd2",
     "neuroglancer>=2.40.1,<3.0.0",
     "opencv-python",
     "pandas>=2.3.3",

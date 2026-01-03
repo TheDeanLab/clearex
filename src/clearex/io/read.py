@@ -38,6 +38,7 @@ import dask.array as da
 import tifffile
 import zarr
 import h5py
+import nd2
 from numpy.typing import NDArray
 
 # Local Imports
@@ -54,8 +55,8 @@ class ImageInfo:
     """Container for image metadata.
 
     This dataclass stores metadata about an opened image file, including
-    its path, shape, data type, axis labels, and any additional metadata
-    extracted from the file format.
+    its path, shape, data type, axis labels, pixel size, and any additional
+    metadata extracted from the file format.
 
     Attributes
     ----------
@@ -70,6 +71,11 @@ class ImageInfo:
         A string describing the axis order, such as "TCZYX" for
         time-channel-Z-Y-X. Common in OME-TIFF and other formats.
         Defaults to None if not available.
+    pixel_size : Tuple[float, ...], optional
+        Physical pixel/voxel sizes in micrometers, typically ordered as
+        (X, Y, Z) or matching the axes order. For example, (0.65, 0.65, 2.0)
+        for a 3D image with 0.65 µm XY resolution and 2.0 µm Z spacing.
+        Defaults to None if not available.
     metadata : Dict[str, Any], optional
         Additional metadata extracted from the file format, such as
         attributes from Zarr/HDF5 or custom tags. Defaults to None.
@@ -83,16 +89,20 @@ class ImageInfo:
     ...     shape=(512, 512),
     ...     dtype=np.uint16,
     ...     axes="YX",
+    ...     pixel_size=(0.65, 0.65),
     ...     metadata={"scale": 1.0}
     ... )
     >>> print(info.shape)
     (512, 512)
+    >>> print(info.pixel_size)
+    (0.65, 0.65)
     """
 
     path: Path
     shape: Tuple[int, ...]
     dtype: Any
     axes: Optional[str] = None
+    pixel_size: Optional[Tuple[float, ...]] = None
     metadata: Optional[Dict[str, Any]] = None
 
 
@@ -982,6 +992,195 @@ class NumpyReader(Reader):
                 return arr, info
 
 
+class ND2Reader(Reader):
+    """Reader for Nikon ND2 files using the nd2 library.
+
+    This reader handles Nikon's proprietary ND2 format files commonly used
+    in microscopy. It can extract comprehensive metadata including pixel/voxel
+    sizes, axis information, and experimental parameters.
+
+    Attributes
+    ----------
+    SUFFIXES : tuple of str
+        Supported file extensions: ('.nd2',).
+
+    See Also
+    --------
+    Reader : Abstract base class for all readers.
+    TiffReader : Reader for TIFF/OME-TIFF files.
+    ZarrReader : Reader for Zarr stores.
+
+    Notes
+    -----
+    The nd2 library provides native support for both NumPy arrays and Dask
+    arrays through its `to_dask()` method. When `prefer_dask=True`, this
+    reader uses the native Dask support for efficient lazy loading of large
+    ND2 files without loading them entirely into memory.
+
+    Pixel size information is extracted from the Volume metadata and stored
+    in the ImageInfo as (X, Y, Z) calibration values in micrometers.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> reader = ND2Reader()
+    >>> arr, info = reader.open(Path("image.nd2"))
+    >>> print(arr.shape)
+    (10, 512, 512)
+    >>> print(info.pixel_size)
+    (0.65, 0.65, 2.0)
+
+    >>> # For large files, use Dask
+    >>> darr, info = reader.open(Path("large.nd2"), prefer_dask=True)
+    >>> print(type(darr).__name__)
+    Array
+    """
+
+    SUFFIXES = (".nd2",)
+
+    def open(
+        self,
+        path: Path,
+        prefer_dask: bool = False,
+        chunks: Optional[Union[int, Tuple[int, ...]]] = None,
+        **kwargs: Any,
+    ) -> Tuple[NDArray[Any], ImageInfo]:
+        """Open an ND2 file and return the image data and metadata.
+
+        This method reads Nikon ND2 files using the nd2 library. It extracts
+        comprehensive metadata including pixel sizes, axis order, and other
+        experimental parameters.
+
+        Parameters
+        ----------
+        path : Path
+            The path to the ND2 file.
+        prefer_dask : bool, optional
+            If True, return a Dask array for lazy evaluation. If False, load
+            the entire image into memory as a NumPy array. Defaults to False.
+        chunks : int or tuple of int, optional
+            Chunk size for Dask arrays. Can be a single integer (applied to
+            all dimensions) or a tuple specifying chunk size per dimension.
+            If None, uses nd2's default chunking. Only relevant when
+            `prefer_dask=True`. Defaults to None.
+        **kwargs : dict
+            Additional keyword arguments passed to `nd2.ND2File`.
+
+        Returns
+        -------
+        arr : NDArray[Any] or dask.array.Array
+            The loaded image data. Returns a NumPy ndarray if `prefer_dask=False`,
+            or a Dask array if `prefer_dask=True`.
+        info : ImageInfo
+            Metadata about the loaded image, including path, shape, dtype,
+            axes information, pixel size (in micrometers), and format-specific
+            metadata.
+
+        Raises
+        ------
+        ValueError
+            If the file cannot be read as a valid ND2 file.
+        FileNotFoundError
+            If the specified file does not exist.
+
+        Notes
+        -----
+        The reader extracts pixel/voxel sizes from the ND2 metadata's Volume
+        section. These are stored as (X, Y, Z) calibration values in micrometers
+        in the `pixel_size` field of ImageInfo.
+
+        Axes information is extracted from the ND2 file's dimension names and
+        converted to a string format (e.g., "TCZYX").
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> reader = ND2Reader()
+
+        >>> # Load a standard ND2 file into memory
+        >>> arr, info = reader.open(Path("sample.nd2"))
+        >>> print(f"Shape: {info.shape}, dtype: {info.dtype}")
+        Shape: (5, 512, 512), dtype: uint16
+        >>> print(f"Pixel size: {info.pixel_size}")
+        Pixel size: (0.325, 0.325, 1.0)
+
+        >>> # Load an ND2 as a Dask array
+        >>> darr, info = reader.open(Path("large.nd2"), prefer_dask=True)
+        >>> print(f"Type: {type(darr).__name__}")
+        Type: Array
+
+        >>> # Specify custom chunking for Dask
+        >>> darr, info = reader.open(
+        ...     Path("timelapse.nd2"),
+        ...     prefer_dask=True,
+        ...     chunks=(1, 512, 512)
+        ... )
+        >>> print(darr.chunksize)
+        (1, 512, 512)
+        """
+
+        with nd2.ND2File(str(path), **kwargs) as nd2_file:
+            # Extract metadata
+            metadata_dict = {}
+            axes = None
+            pixel_size = None
+
+            # Get axes information from sizes dict
+            if hasattr(nd2_file, 'sizes') and nd2_file.sizes:
+                # Convert sizes dict to axes string (e.g., {'T': 10, 'C': 3, 'Z': 5, 'Y': 512, 'X': 512} -> "TCZYX")
+                axes = "".join(nd2_file.sizes.keys())
+
+            # Extract pixel size from metadata
+            try:
+                if nd2_file.metadata and nd2_file.metadata.channels:
+                    # Get the first channel's volume information
+                    channel = nd2_file.metadata.channels[0]
+                    if channel.volume and channel.volume.axesCalibration:
+                        # axesCalibration is (X, Y, Z) in micrometers
+                        pixel_size = channel.volume.axesCalibration
+            except (AttributeError, IndexError, TypeError):
+                # If metadata extraction fails, pixel_size remains None
+                pass
+
+            # Store additional metadata
+            if nd2_file.metadata:
+                metadata_dict['metadata'] = nd2_file.metadata
+            if hasattr(nd2_file, 'attributes') and nd2_file.attributes:
+                metadata_dict['attributes'] = nd2_file.attributes
+
+            if prefer_dask:
+                # Use nd2's native Dask support
+                darr = nd2_file.to_dask()
+                
+                # Apply custom chunking if specified
+                if chunks is not None:
+                    darr = darr.rechunk(chunks)
+                
+                info = ImageInfo(
+                    path=path,
+                    shape=tuple(darr.shape),
+                    dtype=darr.dtype,
+                    axes=axes,
+                    pixel_size=pixel_size,
+                    metadata=metadata_dict,
+                )
+                logger.info(f"Loaded {path.name} as a Dask array.")
+                return darr, info
+            else:
+                # Load to memory as NumPy
+                arr = nd2_file.asarray()
+                info = ImageInfo(
+                    path=path,
+                    shape=tuple(arr.shape),
+                    dtype=arr.dtype,
+                    axes=axes,
+                    pixel_size=pixel_size,
+                    metadata=metadata_dict,
+                )
+                logger.info(f"Loaded {path.name} as NumPy array.")
+                return arr, info
+
+
 class ImageOpener:
     """Automatic image file format detection and reading.
 
@@ -1041,9 +1240,9 @@ class ImageOpener:
         ----------
         readers : Iterable of Reader subclasses, optional
             An ordered sequence of reader classes to use. If None, uses the
-            default registry: (TiffReader, ZarrReader, NumpyReader, HDF5Reader).
-            The order determines priority when multiple readers could handle
-            the same file.
+            default registry: (TiffReader, ZarrReader, NumpyReader, HDF5Reader,
+            ND2Reader). The order determines priority when multiple readers
+            could handle the same file.
 
         Notes
         -----
@@ -1064,7 +1263,7 @@ class ImageOpener:
         """
         # Registry order is priority order
         self._readers: Tuple[Type[Reader], ...] = tuple(
-            readers or (TiffReader, ZarrReader, NumpyReader, HDF5Reader)
+            readers or (TiffReader, ZarrReader, NumpyReader, HDF5Reader, ND2Reader)
         )
 
     def open(
