@@ -41,6 +41,13 @@ import h5py
 import nd2
 from numpy.typing import NDArray
 
+# Try to import ome-types for OME-TIFF metadata parsing
+try:
+    from ome_types import from_xml
+    HAS_OME_TYPES = True
+except ImportError:
+    HAS_OME_TYPES = False
+
 # Local Imports
 
 ArrayLike = Union[NDArray[Any], da.Array]
@@ -48,6 +55,33 @@ ArrayLike = Union[NDArray[Any], da.Array]
 # Start logging
 logger: logging.Logger = logging.getLogger(name=__name__)
 logger.addHandler(hdlr=logging.NullHandler())
+
+
+def _ensure_tuple(value: Any) -> Optional[Tuple[float, ...]]:
+    """Convert various types to tuple of floats for pixel_size.
+    
+    Parameters
+    ----------
+    value : Any
+        Value to convert (list, tuple, ndarray, or single value)
+        
+    Returns
+    -------
+    Optional[Tuple[float, ...]]
+        Tuple of floats if conversion successful, None otherwise
+    """
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (list, tuple)):
+            return tuple(float(x) for x in value)
+        elif isinstance(value, np.ndarray):
+            return tuple(float(x) for x in value.flat)
+        else:
+            # Single value
+            return (float(value),)
+    except (ValueError, TypeError):
+        return None
 
 
 @dataclass
@@ -370,9 +404,8 @@ class TiffReader(Reader):
                     axes = None
             
             # Try to extract pixel size from OME metadata
-            if hasattr(tf, 'ome_metadata') and tf.ome_metadata:
+            if HAS_OME_TYPES and hasattr(tf, 'ome_metadata') and tf.ome_metadata:
                 try:
-                    from ome_types import from_xml
                     ome = from_xml(tf.ome_metadata)
                     if ome.images and ome.images[0].pixels:
                         pixels = ome.images[0].pixels
@@ -624,11 +657,11 @@ class ZarrReader(Reader):
             # Fallback: check for direct pixel_size or scale attributes
             if pixel_size is None:
                 if "pixel_size" in attrs:
-                    pixel_size = tuple(attrs["pixel_size"]) if isinstance(attrs["pixel_size"], (list, tuple)) else attrs["pixel_size"]
+                    pixel_size = _ensure_tuple(attrs["pixel_size"])
                 elif "scale" in attrs:
-                    pixel_size = tuple(attrs["scale"]) if isinstance(attrs["scale"], (list, tuple)) else attrs["scale"]
+                    pixel_size = _ensure_tuple(attrs["scale"])
                 elif "resolution" in attrs:
-                    pixel_size = tuple(attrs["resolution"]) if isinstance(attrs["resolution"], (list, tuple)) else attrs["resolution"]
+                    pixel_size = _ensure_tuple(attrs["resolution"])
                     
         except Exception:
             pass
@@ -842,14 +875,14 @@ class HDF5Reader(Reader):
             
             # Try to extract pixel size from HDF5 attributes
             if "pixel_size" in attrs:
-                pixel_size = tuple(attrs["pixel_size"]) if isinstance(attrs["pixel_size"], (list, tuple, np.ndarray)) else attrs["pixel_size"]
+                pixel_size = _ensure_tuple(attrs["pixel_size"])
             elif "scale" in attrs:
-                pixel_size = tuple(attrs["scale"]) if isinstance(attrs["scale"], (list, tuple, np.ndarray)) else attrs["scale"]
+                pixel_size = _ensure_tuple(attrs["scale"])
             elif "resolution" in attrs:
-                pixel_size = tuple(attrs["resolution"]) if isinstance(attrs["resolution"], (list, tuple, np.ndarray)) else attrs["resolution"]
+                pixel_size = _ensure_tuple(attrs["resolution"])
             # Check for individual axis scales
             elif "element_size_um" in attrs:
-                pixel_size = tuple(attrs["element_size_um"]) if isinstance(attrs["element_size_um"], (list, tuple, np.ndarray)) else attrs["element_size_um"]
+                pixel_size = _ensure_tuple(attrs["element_size_um"])
                 
         except Exception:
             pass
