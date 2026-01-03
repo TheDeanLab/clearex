@@ -29,7 +29,7 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple, Type, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 import logging
 
 # Third Party Imports
@@ -90,7 +90,7 @@ def _ensure_tuple(value: Any) -> Optional[Tuple[float, ...]]:
         return None
 
 
-def _normalize_axes(axes: Any) -> Optional[list]:
+def _normalize_axes(axes: Any) -> Optional[List[str]]:
     """Normalize axis information to OME-NGFF compatible list format.
     
     Converts various axis representations to a standardized list format
@@ -218,7 +218,7 @@ class ImageInfo:
     path: Path
     shape: Tuple[int, ...]
     dtype: Any
-    axes: Optional[list] = None
+    axes: Optional[List[str]] = None
     pixel_size: Optional[Tuple[float, ...]] = None
     metadata: Optional[Dict[str, Any]] = None
 
