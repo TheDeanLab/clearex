@@ -39,6 +39,7 @@ import tifffile
 import zarr
 import h5py
 from numpy.typing import NDArray
+from zarr import N5Store
 
 # Try to import ome-types for OME-TIFF metadata parsing
 try:
@@ -616,6 +617,165 @@ class TiffReader(Reader):
         return None, None
 
 
+
+class N5Reader(Reader):
+    """Reader for N5 format files.
+    N5 is a chunked array storage format similar to Zarr but with a different
+    directory structure. This reader handles N5 stores by searching the filesystem
+    for attributes.json files that define arrays.
+    Attributes
+    ----------
+    SUFFIXES : tuple of str
+        Supported file extensions: ('.n5', '.n5/').
+    """
+    SUFFIXES = (".n5", ".n5/")
+    @staticmethod
+    def _find_arrays_in_n5(base_path: Path, depth=0) -> List[Tuple[str, Dict[str, Any]]]:
+        """Recursively find all N5 arrays by looking for attributes.json files.
+        Parameters
+        ----------
+        base_path : Path
+            Base directory to search
+        depth : int
+            Current recursion depth
+        Returns
+        -------
+        List[Tuple[str, Dict]]
+            List of (relative_path, attributes_dict) for each array found
+        """
+        import json
+        arrays = []
+        if not base_path.is_dir():
+            return arrays
+        # Check if this directory has an attributes.json that defines an array
+        attrs_file = base_path / "attributes.json"
+        if attrs_file.exists():
+            try:
+                with open(attrs_file, 'r') as f:
+                    attrs = json.load(f)
+                # N5 arrays have 'dimensions' attribute
+                if 'dimensions' in attrs:
+                    arrays.append(("", attrs))
+                    return arrays  # Don't recurse into array directories
+            except Exception:
+                pass
+        # Recurse into subdirectories
+        try:
+            for item in base_path.iterdir():
+                if item.is_dir():
+                    sub_arrays = N5Reader._find_arrays_in_n5(item, depth + 1)
+                    # Prepend the subdirectory name to the paths
+                    for path, attrs in sub_arrays:
+                        rel_path = item.name if not path else f"{item.name}/{path}"
+                        arrays.append((rel_path, attrs))
+        except Exception:
+            pass
+        return arrays
+    def open(
+        self,
+        path: Path,
+        prefer_dask: bool = False,
+        chunks: Optional[Union[int, Tuple[int, ...]]] = None,
+        **kwargs: Any,
+    ) -> Tuple[NDArray[Any], ImageInfo]:
+        """Open an N5 file and return the image data and metadata.
+        Parameters
+        ----------
+        path : Path
+            The path to the N5 store directory (e.g., 'data.n5').
+        prefer_dask : bool, optional
+            If True, return a Dask array for lazy evaluation. If False, load
+            the entire array into memory as a NumPy array. Defaults to False.
+        chunks : int or tuple of int, optional
+            Chunk size for Dask arrays. If None, uses the N5 store's native
+            chunking. Only relevant when `prefer_dask=True`. Defaults to None.
+        **kwargs : dict
+            Additional keyword arguments (unused for N5).
+        Returns
+        -------
+        arr : NDArray[Any] or dask.array.Array
+            The loaded image data.
+        info : ImageInfo
+            Metadata about the loaded image.
+        Raises
+        ------
+        ValueError
+            If the N5 store contains no arrays.
+        """
+        from zarr.n5 import N5Store
+        # Find all arrays in the N5 store
+        arrays_info = self._find_arrays_in_n5(path)
+        if not arrays_info:
+            logger.error(f"No arrays found in N5 store: {path}")
+            raise ValueError(f"No arrays found in N5 store: {path}")
+        logger.info(f"Found {len(arrays_info)} array(s) in N5 store")
+        # Open the N5 store at the root level
+        store = N5Store(str(path))
+        root = zarr.open(store, mode='r')
+        # Access nested arrays by path
+        arrays = []
+        for rel_path, attrs in arrays_info:
+            try:
+                if rel_path:
+                    # Navigate to nested array
+                    arr = root
+                    for part in rel_path.split('/'):
+                        arr = arr[part]
+                else:
+                    # Root level array
+                    arr = root
+                if isinstance(arr, zarr.Array):
+                    arrays.append(arr)
+                    logger.info(f"  Loaded N5 array at '{rel_path}': shape={arr.shape}, dtype={arr.dtype}")
+            except Exception as e:
+                logger.warning(f"Failed to access N5 array at {rel_path}: {e}")
+                continue
+        
+        if not arrays:
+            logger.error(f"Could not open any arrays in N5 store: {path}")
+            raise ValueError(f"Could not open any arrays in N5 store: {path}")
+        # Pick array with the largest number of elements
+        array = max(arrays, key=lambda arr: np.prod(arr.shape))
+        # Extract metadata
+        axes = None
+        pixel_size = None
+        meta = {}
+        try:
+            attrs = getattr(array, "attrs", {})
+            axes = attrs.get("axes")
+            meta = dict(attrs)
+            if "pixel_size" in attrs:
+                pixel_size = _ensure_tuple(attrs["pixel_size"])
+            elif "scale" in attrs:
+                pixel_size = _ensure_tuple(attrs["scale"])
+            elif "resolution" in attrs:
+                pixel_size = _ensure_tuple(attrs["resolution"])
+        except Exception:
+            pass
+        if prefer_dask:
+            darr = da.from_zarr(array, chunks=chunks) if chunks else da.from_zarr(array)
+            logger.info(f"Loaded {path.name} as a Dask array.")
+            info = ImageInfo(
+                path=path,
+                shape=tuple(darr.shape),
+                dtype=darr.dtype,
+                axes=_normalize_axes(axes),
+                pixel_size=pixel_size,
+                metadata=meta,
+            )
+            return darr, info
+        else:
+            np_arr = np.array(array) if np is not None else array[:]
+            logger.info(f"Loaded {path.name} as a NumPy array.")
+            info = ImageInfo(
+                path=path,
+                shape=tuple(np_arr.shape),
+                dtype=np_arr.dtype,
+                axes=_normalize_axes(axes),
+                pixel_size=pixel_size,
+                metadata=meta,
+            )
+            return np_arr, info
 class ZarrReader(Reader):
     """Reader for Zarr and N5 storage formats.
 
@@ -659,7 +819,7 @@ class ZarrReader(Reader):
     ['z', 'y', 'x']
     """
 
-    SUFFIXES = (".zarr", ".zarr/", ".n5", ".n5/")
+    SUFFIXES = (".zarr", ".zarr/")
 
     def open(
         self,
@@ -752,14 +912,12 @@ class ZarrReader(Reader):
         """
         grp = zarr.open_group(str(path), mode="r")
 
-        # collect all arrays
-        arrays = []
-        if hasattr(grp, "array_keys") and callable(grp.array_keys):
-            arrays = [grp[k] for k in grp.array_keys()]
+        # Collect all arrays
+        arrays = self._collect_arrays(grp)
 
         if not arrays:
-            logger.error(f"No arrays found in Zarr group: {path}")
-            raise ValueError(f"No arrays found in Zarr group: {path}")
+            logger.error(f"No arrays found in Zarr store: {path}")
+            raise ValueError(f"No arrays found in Zarr store: {path}")
 
         # Pick array with the largest number of elements
         array = max(arrays, key=lambda arr: np.prod(arr.shape))
@@ -795,7 +953,7 @@ class ZarrReader(Reader):
                     pixel_size = _ensure_tuple(attrs["scale"])
                 elif "resolution" in attrs:
                     pixel_size = _ensure_tuple(attrs["resolution"])
-                    
+
         except Exception:
             pass
 
@@ -824,6 +982,48 @@ class ZarrReader(Reader):
                 metadata=meta,
             )
             return np_arr, info
+
+    @staticmethod
+    def _collect_arrays(group, depth=0):
+        """Recursively collect all arrays from a Zarr/N5 group.
+
+        Parameters
+        ----------
+        group : zarr.Group
+            The Zarr group to search
+        depth : int
+            Current recursion depth
+
+        Returns
+        -------
+        list
+            List of arrays found in the group and its children
+        """
+        out = []
+
+        # Check if this is actually an Array
+        if isinstance(group, zarr.Array):
+            out.append(group)
+            return out
+
+        # If it's a Group, iterate over children
+        if isinstance(group, zarr.Group):
+            try:
+                for key in group.keys():
+                    try:
+                        item = group[key]
+                        # Check if item is an Array
+                        if isinstance(item, zarr.Array):
+                            out.append(item)
+                        # Check if item is a Group - recurse into it
+                        elif isinstance(item, zarr.Group):
+                            out.extend(ZarrReader._collect_arrays(item, depth + 1))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        return out
 
 
 class HDF5Reader(Reader):
@@ -1005,7 +1205,7 @@ class HDF5Reader(Reader):
                 or attrs.get("DimensionOrder")
                 or attrs.get("DIMENSION_LABELS")  # sometimes stored by other tools
             )
-            
+
             # Try to extract pixel size from HDF5 attributes
             if "pixel_size" in attrs:
                 pixel_size = _ensure_tuple(attrs["pixel_size"])
@@ -1016,7 +1216,7 @@ class HDF5Reader(Reader):
             # Check for individual axis scales
             elif "element_size_um" in attrs:
                 pixel_size = _ensure_tuple(attrs["element_size_um"])
-                
+
         except Exception:
             pass
 
@@ -1549,7 +1749,7 @@ class ImageOpener:
         """
         # Registry order is priority order
         self._readers: Tuple[Type[Reader], ...] = tuple(
-            readers or (TiffReader, ZarrReader, NumpyReader, HDF5Reader, ND2Reader)
+            readers or (TiffReader, N5Reader, ZarrReader, NumpyReader, HDF5Reader, ND2Reader)
         )
 
     def open(
@@ -1653,18 +1853,24 @@ class ImageOpener:
             logger.error(msg=f"File {p} does not exist")
             raise FileNotFoundError(p)
 
+        # Track errors for better diagnostics
+        errors = []
+
         # 1) Extension-based selection
         logger.info(msg=f"Opening {p}")
         for reader_cls in self._readers:
             try:
                 if reader_cls.claims(p):
+                    print(f"Reader {reader_cls.__name__} claims the file.")
                     reader = reader_cls()
                     logger.info(msg=f"Using reader: {reader_cls.__name__}.")
                     return reader.open(
                         path=p, prefer_dask=prefer_dask, chunks=chunks, **kwargs
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Reader {reader_cls.__name__} failed to open the file: {e}")
+                errors.append((reader_cls.__name__, str(e)))
+                logger.debug(msg=f"{reader_cls.__name__} failed: {e}")
 
         # 2) Fallback: probe readers that didn't claim the file
         logger.info(
@@ -1673,14 +1879,22 @@ class ImageOpener:
         for reader_cls in self._readers:
             try:
                 reader: Reader = reader_cls()
+                logger.debug(msg=f"Trying fallback reader: {reader_cls.__name__}")
                 return reader.open(
                     path=p, prefer_dask=prefer_dask, chunks=chunks, **kwargs
                 )
-            except Exception:
+            except Exception as e:
+                errors.append((reader_cls.__name__, str(e)))
+                logger.debug(msg=f"{reader_cls.__name__} fallback failed: {e}")
                 continue
 
-        logger.error(msg=f"No suitable reader found for {p}")
-        raise ValueError("No suitable reader found for:", p)
+        # Report all errors for debugging
+        error_msg = f"No suitable reader found for {p}.\n"
+        error_msg += "Attempted readers and their errors:\n"
+        for reader_name, error in errors:
+            error_msg += f"  - {reader_name}: {error}\n"
+        logger.error(msg=error_msg)
+        raise ValueError(f"No suitable reader found for: {p}")
 
 
 def rename_tiff_to_tif(base_path: str, recursive: bool = True) -> int:
