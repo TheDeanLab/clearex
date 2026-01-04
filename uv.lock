@@ -650,6 +650,7 @@ version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "antspyx" },
+    { name = "black" },
     { name = "cython" },
     { name = "dask" },
     { name = "dask-image" },
@@ -705,6 +706,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "antspyx" },
+    { name = "black", specifier = ">=25.11.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=25.11.0" },
     { name = "cython", specifier = ">=3.1.4" },
     { name = "dask", specifier = "==2025.1.0" },

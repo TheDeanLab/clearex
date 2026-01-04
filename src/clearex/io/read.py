@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 import logging
+import json
 
 # Third Party Imports
 import numpy as np
@@ -39,11 +40,12 @@ import tifffile
 import zarr
 import h5py
 from numpy.typing import NDArray
-from zarr import N5Store
+from zarr.n5 import N5Store
 
 # Try to import ome-types for OME-TIFF metadata parsing
 try:
     from ome_types import from_xml
+
     HAS_OME_TYPES = True
 except ImportError:
     HAS_OME_TYPES = False
@@ -51,12 +53,14 @@ except ImportError:
 # Try to import nd2 for ND2 file support
 try:
     import nd2
+
     HAS_ND2 = True
 except ImportError:
     HAS_ND2 = False
 
 # Local Imports
 
+# Define a custom Typing object
 ArrayLike = Union[NDArray[Any], da.Array]
 
 # Start logging
@@ -66,12 +70,12 @@ logger.addHandler(hdlr=logging.NullHandler())
 
 def _ensure_tuple(value: Any) -> Optional[Tuple[float, ...]]:
     """Convert various types to tuple of floats for pixel_size.
-    
+
     Parameters
     ----------
     value : Any
         Value to convert (list, tuple, ndarray, or single value)
-        
+
     Returns
     -------
     Optional[Tuple[float, ...]]
@@ -93,10 +97,10 @@ def _ensure_tuple(value: Any) -> Optional[Tuple[float, ...]]:
 
 def _normalize_axes(axes: Any) -> Optional[List[str]]:
     """Normalize axis information to OME-NGFF compatible list format.
-    
+
     Converts various axis representations to a standardized list format
     compatible with OME-NGFF (up to 5 dimensions: t, c, z, y, x).
-    
+
     Parameters
     ----------
     axes : Any
@@ -105,12 +109,12 @@ def _normalize_axes(axes: Any) -> Optional[List[str]]:
         - List of axis names like ["t", "c", "z", "y", "x"]
         - List of OME-NGFF axis dicts like [{"name": "t", "type": "time"}, ...]
         - Dict with keys like {'T': 10, 'C': 3, 'Z': 5, 'Y': 512, 'X': 512}
-        
+
     Returns
     -------
     Optional[list]
         List of lowercase axis names (e.g., ["t", "c", "z", "y", "x"]) or None
-        
+
     Notes
     -----
     Following OME-NGFF conventions:
@@ -121,12 +125,12 @@ def _normalize_axes(axes: Any) -> Optional[List[str]]:
     """
     if axes is None:
         return None
-    
+
     try:
         # Handle string format (e.g., "TCZYX")
         if isinstance(axes, str):
             return [ax.lower() for ax in axes] if axes else None
-        
+
         # Handle list of dicts (OME-NGFF format)
         if isinstance(axes, list):
             if not axes:  # Empty list
@@ -136,14 +140,14 @@ def _normalize_axes(axes: Any) -> Optional[List[str]]:
             # Handle simple list of strings
             elif all(isinstance(item, str) for item in axes):
                 return [ax.lower() for ax in axes]
-        
+
         # Handle dict format (e.g., sizes dict from ND2)
         if isinstance(axes, dict):
             return [key.lower() for key in axes.keys()] if axes else None
-            
+
     except Exception:
         pass
-    
+
     return None
 
 
@@ -172,7 +176,7 @@ class ImageInfo:
         - 'z' for Z spatial dimension
         - 'y' for Y spatial dimension
         - 'x' for X spatial dimension
-        
+
         Examples: ["t", "c", "z", "y", "x"], ["z", "y", "x"], ["y", "x"]
         Order matches the actual array dimension order.
         Defaults to None if not available.
@@ -203,7 +207,7 @@ class ImageInfo:
     ['z', 'y', 'x']
     >>> print(info.pixel_size)
     (2.0, 0.65, 0.65)
-    
+
     >>> # 5D example
     >>> info_5d = ImageInfo(
     ...     path=Path("timeseries.nd2"),
@@ -477,7 +481,6 @@ class TiffReader(Reader):
 
         # Try OME-axes, pixel size, and metadata
         with tifffile.TiffFile(str(path)) as tf:
-            import json
             axes = None
             pixel_size = None
             size_x = None
@@ -491,22 +494,22 @@ class TiffReader(Reader):
 
                     # If desc is already a dict (tifffile auto-parsed it)
                     if isinstance(desc, dict):
-                        if 'spacing' in desc:
-                            unit = desc.get('unit', 'um')
-                            if unit in ('um', 'µm'):
-                                size_z = desc['spacing']
+                        if "spacing" in desc:
+                            unit = desc.get("unit", "um")
+                            if unit in ("um", "µm"):
+                                size_z = desc["spacing"]
                     # If desc is a string, try to parse as JSON
                     elif isinstance(desc, (str, bytes)):
                         if isinstance(desc, bytes):
                             desc = desc.decode("utf-8", errors="ignore")
                         # Check if it looks like JSON (not OME-XML)
-                        if desc.strip().startswith('{'):
+                        if desc.strip().startswith("{"):
                             try:
                                 desc_data = json.loads(desc)
-                                if 'spacing' in desc_data:
-                                    unit = desc_data.get('unit', 'um')
-                                    if unit in ('um', 'µm'):
-                                        size_z = desc_data['spacing']
+                                if "spacing" in desc_data:
+                                    unit = desc_data.get("unit", "um")
+                                    if unit in ("um", "µm"):
+                                        size_z = desc_data["spacing"]
                             except (json.JSONDecodeError, ValueError):
                                 pass
             except Exception:
@@ -519,18 +522,18 @@ class TiffReader(Reader):
                     axes = ome_meta.image().pixels().DimensionOrder  # e.g., "TCZYX"
                 except Exception:
                     axes = None
-            
+
             # Try to extract X, Y, Z pixel sizes from OME metadata using ome-types
-            if HAS_OME_TYPES and hasattr(tf, 'ome_metadata') and tf.ome_metadata:
+            if HAS_OME_TYPES and hasattr(tf, "ome_metadata") and tf.ome_metadata:
                 try:
                     ome = from_xml(tf.ome_metadata)
                     if ome.images and ome.images[0].pixels:
                         pixels = ome.images[0].pixels
-                        size_x = getattr(pixels, 'physical_size_x', None)
-                        size_y = getattr(pixels, 'physical_size_y', None)
+                        size_x = getattr(pixels, "physical_size_x", None)
+                        size_y = getattr(pixels, "physical_size_y", None)
                         # Only use PhysicalSizeZ if we didn't get it from Description
                         if size_z is None:
-                            size_z = getattr(pixels, 'physical_size_z', None)
+                            size_z = getattr(pixels, "physical_size_z", None)
                 except Exception:
                     pass
 
@@ -538,15 +541,23 @@ class TiffReader(Reader):
             if size_x is None or size_y is None:
                 try:
                     page = tf.pages[0]
-                    x_res = page.tags.get('XResolution')
-                    y_res = page.tags.get('YResolution')
-                    res_unit = page.tags.get('ResolutionUnit')
-                    
+                    x_res = page.tags.get("XResolution")
+                    y_res = page.tags.get("YResolution")
+                    res_unit = page.tags.get("ResolutionUnit")
+
                     if x_res and y_res and res_unit:
                         # Extract resolution values
-                        x_val = x_res.value[0] / x_res.value[1] if isinstance(x_res.value, tuple) else x_res.value
-                        y_val = y_res.value[0] / y_res.value[1] if isinstance(y_res.value, tuple) else y_res.value
-                        
+                        x_val = (
+                            x_res.value[0] / x_res.value[1]
+                            if isinstance(x_res.value, tuple)
+                            else x_res.value
+                        )
+                        y_val = (
+                            y_res.value[0] / y_res.value[1]
+                            if isinstance(y_res.value, tuple)
+                            else y_res.value
+                        )
+
                         # Convert to micrometers per pixel based on unit
                         # Resolution unit: 1=none, 2=inch, 3=centimeter
                         if res_unit.value == 2:  # inch
@@ -608,14 +619,12 @@ class TiffReader(Reader):
                 if isinstance(desc, bytes):
                     desc = desc.decode("utf-8", errors="ignore")
 
-                print("Desc", desc)
                 if "<OME" in desc:
                     j = desc.find("<OME")
                     ome_xml = desc[j:].strip("\x00").strip()
                     return idx, ome_xml
 
         return None, None
-
 
 
 class N5Reader(Reader):
@@ -628,9 +637,13 @@ class N5Reader(Reader):
     SUFFIXES : tuple of str
         Supported file extensions: ('.n5', '.n5/').
     """
+
     SUFFIXES = (".n5", ".n5/")
+
     @staticmethod
-    def _find_arrays_in_n5(base_path: Path, depth=0) -> List[Tuple[str, Dict[str, Any]]]:
+    def _find_arrays_in_n5(
+        base_path: Path, depth=0
+    ) -> List[Tuple[str, Dict[str, Any]]]:
         """Recursively find all N5 arrays by looking for attributes.json files.
         Parameters
         ----------
@@ -643,7 +656,7 @@ class N5Reader(Reader):
         List[Tuple[str, Dict]]
             List of (relative_path, attributes_dict) for each array found
         """
-        import json
+
         arrays = []
         if not base_path.is_dir():
             return arrays
@@ -651,10 +664,10 @@ class N5Reader(Reader):
         attrs_file = base_path / "attributes.json"
         if attrs_file.exists():
             try:
-                with open(attrs_file, 'r') as f:
+                with open(attrs_file, "r") as f:
                     attrs = json.load(f)
                 # N5 arrays have 'dimensions' attribute
-                if 'dimensions' in attrs:
+                if "dimensions" in attrs:
                     arrays.append(("", attrs))
                     return arrays  # Don't recurse into array directories
             except Exception:
@@ -671,6 +684,7 @@ class N5Reader(Reader):
         except Exception:
             pass
         return arrays
+
     def open(
         self,
         path: Path,
@@ -702,7 +716,6 @@ class N5Reader(Reader):
         ValueError
             If the N5 store contains no arrays.
         """
-        from zarr.n5 import N5Store
         # Find all arrays in the N5 store
         arrays_info = self._find_arrays_in_n5(path)
         if not arrays_info:
@@ -711,7 +724,7 @@ class N5Reader(Reader):
         logger.info(f"Found {len(arrays_info)} array(s) in N5 store")
         # Open the N5 store at the root level
         store = N5Store(str(path))
-        root = zarr.open(store, mode='r')
+        root = zarr.open(store, mode="r")
         # Access nested arrays by path
         arrays = []
         for rel_path, attrs in arrays_info:
@@ -719,18 +732,20 @@ class N5Reader(Reader):
                 if rel_path:
                     # Navigate to nested array
                     arr = root
-                    for part in rel_path.split('/'):
+                    for part in rel_path.split("/"):
                         arr = arr[part]
                 else:
                     # Root level array
                     arr = root
                 if isinstance(arr, zarr.Array):
                     arrays.append(arr)
-                    logger.info(f"  Loaded N5 array at '{rel_path}': shape={arr.shape}, dtype={arr.dtype}")
+                    logger.info(
+                        f"  Loaded N5 array at '{rel_path}': shape={arr.shape}, dtype={arr.dtype}"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to access N5 array at {rel_path}: {e}")
                 continue
-        
+
         if not arrays:
             logger.error(f"Could not open any arrays in N5 store: {path}")
             raise ValueError(f"Could not open any arrays in N5 store: {path}")
@@ -776,6 +791,8 @@ class N5Reader(Reader):
                 metadata=meta,
             )
             return np_arr, info
+
+
 class ZarrReader(Reader):
     """Reader for Zarr and N5 storage formats.
 
@@ -929,7 +946,7 @@ class ZarrReader(Reader):
             attrs = getattr(array, "attrs", {})
             axes = attrs.get("multiscales", [{}])[0].get("axes") or attrs.get("axes")
             meta = dict(attrs)
-            
+
             # Try to extract pixel size from Zarr attributes
             # Check for OME-Zarr style multiscales metadata
             if "multiscales" in attrs and attrs["multiscales"]:
@@ -940,11 +957,14 @@ class ZarrReader(Reader):
                         dataset = multiscale["datasets"][0]
                         if "coordinateTransformations" in dataset:
                             for transform in dataset["coordinateTransformations"]:
-                                if transform.get("type") == "scale" and "scale" in transform:
+                                if (
+                                    transform.get("type") == "scale"
+                                    and "scale" in transform
+                                ):
                                     # Scale values typically correspond to axis order
                                     pixel_size = tuple(transform["scale"])
                                     break
-            
+
             # Fallback: check for direct pixel_size or scale attributes
             if pixel_size is None:
                 if "pixel_size" in attrs:
@@ -1588,7 +1608,7 @@ class ND2Reader(Reader):
         >>> print(darr.chunksize)
         (1, 512, 512)
         """
-        
+
         if not HAS_ND2:
             raise ImportError(
                 "The 'nd2' library is required to read ND2 files. "
@@ -1602,7 +1622,7 @@ class ND2Reader(Reader):
             pixel_size = None
 
             # Get axes information from sizes dict
-            if hasattr(nd2_file, 'sizes') and nd2_file.sizes:
+            if hasattr(nd2_file, "sizes") and nd2_file.sizes:
                 # Pass the sizes dict to normalize_axes which will extract keys
                 axes = nd2_file.sizes
 
@@ -1630,18 +1650,18 @@ class ND2Reader(Reader):
 
             # Store additional metadata
             if nd2_file.metadata:
-                metadata_dict['metadata'] = nd2_file.metadata
-            if hasattr(nd2_file, 'attributes') and nd2_file.attributes:
-                metadata_dict['attributes'] = nd2_file.attributes
+                metadata_dict["metadata"] = nd2_file.metadata
+            if hasattr(nd2_file, "attributes") and nd2_file.attributes:
+                metadata_dict["attributes"] = nd2_file.attributes
 
             if prefer_dask:
                 # Use nd2's native Dask support
                 darr = nd2_file.to_dask()
-                
+
                 # Apply custom chunking if specified
                 if chunks is not None:
                     darr = darr.rechunk(chunks)
-                
+
                 info = ImageInfo(
                     path=path,
                     shape=tuple(darr.shape),
@@ -1749,7 +1769,8 @@ class ImageOpener:
         """
         # Registry order is priority order
         self._readers: Tuple[Type[Reader], ...] = tuple(
-            readers or (TiffReader, N5Reader, ZarrReader, NumpyReader, HDF5Reader, ND2Reader)
+            readers
+            or (TiffReader, N5Reader, ZarrReader, NumpyReader, HDF5Reader, ND2Reader)
         )
 
     def open(
@@ -1861,14 +1882,12 @@ class ImageOpener:
         for reader_cls in self._readers:
             try:
                 if reader_cls.claims(p):
-                    print(f"Reader {reader_cls.__name__} claims the file.")
                     reader = reader_cls()
                     logger.info(msg=f"Using reader: {reader_cls.__name__}.")
                     return reader.open(
                         path=p, prefer_dask=prefer_dask, chunks=chunks, **kwargs
                     )
             except Exception as e:
-                print(f"Reader {reader_cls.__name__} failed to open the file: {e}")
                 errors.append((reader_cls.__name__, str(e)))
                 logger.debug(msg=f"{reader_cls.__name__} failed: {e}")
 
