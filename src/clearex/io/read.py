@@ -29,8 +29,9 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple, Type, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 import logging
+import json
 
 # Third Party Imports
 import numpy as np
@@ -39,9 +40,27 @@ import tifffile
 import zarr
 import h5py
 from numpy.typing import NDArray
+from zarr.n5 import N5Store
+
+# Try to import ome-types for OME-TIFF metadata parsing
+try:
+    from ome_types import from_xml
+
+    HAS_OME_TYPES = True
+except ImportError:
+    HAS_OME_TYPES = False
+
+# Try to import nd2 for ND2 file support
+try:
+    import nd2
+
+    HAS_ND2 = True
+except ImportError:
+    HAS_ND2 = False
 
 # Local Imports
 
+# Define a custom Typing object
 ArrayLike = Union[NDArray[Any], da.Array]
 
 # Start logging
@@ -49,13 +68,96 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 logger.addHandler(hdlr=logging.NullHandler())
 
 
+def _ensure_tuple(value: Any) -> Optional[Tuple[float, ...]]:
+    """Convert various types to tuple of floats for pixel_size.
+
+    Parameters
+    ----------
+    value : Any
+        Value to convert (list, tuple, ndarray, or single value)
+
+    Returns
+    -------
+    Optional[Tuple[float, ...]]
+        Tuple of floats if conversion successful, None otherwise
+    """
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (list, tuple)):
+            return tuple(float(x) for x in value)
+        elif isinstance(value, np.ndarray):
+            return tuple(float(x) for x in value.flat)
+        else:
+            # Single value
+            return (float(value),)
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalize_axes(axes: Any) -> Optional[List[str]]:
+    """Normalize axis information to OME-NGFF compatible list format.
+
+    Converts various axis representations to a standardized list format
+    compatible with OME-NGFF (up to 5 dimensions: t, c, z, y, x).
+
+    Parameters
+    ----------
+    axes : Any
+        Axis information in various formats:
+        - String like "TCZYX" or "ZYX"
+        - List of axis names like ["t", "c", "z", "y", "x"]
+        - List of OME-NGFF axis dicts like [{"name": "t", "type": "time"}, ...]
+        - Dict with keys like {'T': 10, 'C': 3, 'Z': 5, 'Y': 512, 'X': 512}
+
+    Returns
+    -------
+    Optional[list]
+        List of lowercase axis names (e.g., ["t", "c", "z", "y", "x"]) or None
+
+    Notes
+    -----
+    Following OME-NGFF conventions:
+    - Supports up to 5 dimensions
+    - Common axis names: 't' (time), 'c' (channel), 'z', 'y', 'x' (spatial)
+    - Preserves order from input
+    - Normalizes to lowercase for consistency
+    """
+    if axes is None:
+        return None
+
+    try:
+        # Handle string format (e.g., "TCZYX")
+        if isinstance(axes, str):
+            return [ax.lower() for ax in axes] if axes else None
+
+        # Handle list of dicts (OME-NGFF format)
+        if isinstance(axes, list):
+            if not axes:  # Empty list
+                return None
+            if all(isinstance(item, dict) and "name" in item for item in axes):
+                return [item["name"].lower() for item in axes]
+            # Handle simple list of strings
+            elif all(isinstance(item, str) for item in axes):
+                return [ax.lower() for ax in axes]
+
+        # Handle dict format (e.g., sizes dict from ND2)
+        if isinstance(axes, dict):
+            return [key.lower() for key in axes.keys()] if axes else None
+
+    except Exception:
+        pass
+
+    return None
+
+
 @dataclass
 class ImageInfo:
     """Container for image metadata.
 
     This dataclass stores metadata about an opened image file, including
-    its path, shape, data type, axis labels, and any additional metadata
-    extracted from the file format.
+    its path, shape, data type, axis labels, pixel size, and any additional
+    metadata extracted from the file format.
 
     Attributes
     ----------
@@ -66,10 +168,23 @@ class ImageInfo:
         (depth, height, width) for 3D, or arbitrary N-dimensional shapes).
     dtype : Any
         The NumPy dtype of the image data (e.g., np.uint8, np.float32).
-    axes : str, optional
-        A string describing the axis order, such as "TCZYX" for
-        time-channel-Z-Y-X. Common in OME-TIFF and other formats.
+    axes : list of str, optional
+        List of axis names describing dimension order, following OME-NGFF
+        conventions. Supports up to 5 dimensions with common names:
+        - 't' or 'time' for time dimension
+        - 'c' or 'channel' for channel dimension
+        - 'z' for Z spatial dimension
+        - 'y' for Y spatial dimension
+        - 'x' for X spatial dimension
+
+        Examples: ["t", "c", "z", "y", "x"], ["z", "y", "x"], ["y", "x"]
+        Order matches the actual array dimension order.
         Defaults to None if not available.
+    pixel_size : Tuple[float, ...], optional
+        Physical pixel/voxel sizes in micrometers, ordered to match the
+        spatial axes in the axes list. For example, with axes=["z", "y", "x"]
+        and pixel_size=(2.0, 0.65, 0.65), the Z spacing is 2.0 µm and
+        XY resolution is 0.65 µm. Defaults to None if not available.
     metadata : Dict[str, Any], optional
         Additional metadata extracted from the file format, such as
         attributes from Zarr/HDF5 or custom tags. Defaults to None.
@@ -80,19 +195,36 @@ class ImageInfo:
     >>> import numpy as np
     >>> info = ImageInfo(
     ...     path=Path("image.tif"),
-    ...     shape=(512, 512),
+    ...     shape=(10, 512, 512),
     ...     dtype=np.uint16,
-    ...     axes="YX",
+    ...     axes=["z", "y", "x"],
+    ...     pixel_size=(2.0, 0.65, 0.65),
     ...     metadata={"scale": 1.0}
     ... )
     >>> print(info.shape)
-    (512, 512)
+    (10, 512, 512)
+    >>> print(info.axes)
+    ['z', 'y', 'x']
+    >>> print(info.pixel_size)
+    (2.0, 0.65, 0.65)
+
+    >>> # 5D example
+    >>> info_5d = ImageInfo(
+    ...     path=Path("timeseries.nd2"),
+    ...     shape=(20, 3, 10, 512, 512),
+    ...     dtype=np.uint16,
+    ...     axes=["t", "c", "z", "y", "x"],
+    ...     pixel_size=(2.0, 0.65, 0.65),  # Z, Y, X only
+    ... )
+    >>> print(info_5d.axes)
+    ['t', 'c', 'z', 'y', 'x']
     """
 
     path: Path
     shape: Tuple[int, ...]
     dtype: Any
-    axes: Optional[str] = None
+    axes: Optional[List[str]] = None
+    pixel_size: Optional[Tuple[float, ...]] = None
     metadata: Optional[Dict[str, Any]] = None
 
 
@@ -335,7 +467,7 @@ class TiffReader(Reader):
         >>> # Load an OME-TIFF as a Dask array
         >>> darr, info = reader.open(Path("timelapse.ome.tif"), prefer_dask=True)
         >>> print(f"Axes: {info.axes}, Type: {type(darr).__name__}")
-        Axes: TCZYX, Type: Array
+        Axes: ['t', 'c', 'z', 'y', 'x'], Type: Array
 
         >>> # Specify custom chunking for Dask
         >>> darr, info = reader.open(
@@ -347,15 +479,102 @@ class TiffReader(Reader):
         (1, 512, 512)
         """
 
-        # Try OME-axes and metadata
+        # Try OME-axes, pixel size, and metadata
         with tifffile.TiffFile(str(path)) as tf:
-            ome_meta = getattr(tf, "omexml", None)
             axes = None
+            pixel_size = None
+            size_x = None
+            size_y = None
+            size_z = None
+
+            # Method 1: Try to extract from ImageDescription tag (may contain JSON dict with spacing)
+            try:
+                if tf.pages and "ImageDescription" in tf.pages[0].tags:
+                    desc = tf.pages[0].tags["ImageDescription"].value
+
+                    # If desc is already a dict (tifffile auto-parsed it)
+                    if isinstance(desc, dict):
+                        if "spacing" in desc:
+                            unit = desc.get("unit", "um")
+                            if unit in ("um", "µm"):
+                                size_z = desc["spacing"]
+                    # If desc is a string, try to parse as JSON
+                    elif isinstance(desc, (str, bytes)):
+                        if isinstance(desc, bytes):
+                            desc = desc.decode("utf-8", errors="ignore")
+                        # Check if it looks like JSON (not OME-XML)
+                        if desc.strip().startswith("{"):
+                            try:
+                                desc_data = json.loads(desc)
+                                if "spacing" in desc_data:
+                                    unit = desc_data.get("unit", "um")
+                                    if unit in ("um", "µm"):
+                                        size_z = desc_data["spacing"]
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+            except Exception:
+                pass
+
+            # Method 2: Try OME metadata for axes and pixel sizes
+            ome_meta = getattr(tf, "ome_metadata", None)
             if ome_meta is not None:
                 try:
                     axes = ome_meta.image().pixels().DimensionOrder  # e.g., "TCZYX"
                 except Exception:
                     axes = None
+
+            # Try to extract X, Y, Z pixel sizes from OME metadata using ome-types
+            if HAS_OME_TYPES and hasattr(tf, "ome_metadata") and tf.ome_metadata:
+                try:
+                    ome = from_xml(tf.ome_metadata)
+                    if ome.images and ome.images[0].pixels:
+                        pixels = ome.images[0].pixels
+                        size_x = getattr(pixels, "physical_size_x", None)
+                        size_y = getattr(pixels, "physical_size_y", None)
+                        # Only use PhysicalSizeZ if we didn't get it from Description
+                        if size_z is None:
+                            size_z = getattr(pixels, "physical_size_z", None)
+                except Exception:
+                    pass
+
+            # Method 3: Fallback to standard TIFF resolution tags for X and Y if not found
+            if size_x is None or size_y is None:
+                try:
+                    page = tf.pages[0]
+                    x_res = page.tags.get("XResolution")
+                    y_res = page.tags.get("YResolution")
+                    res_unit = page.tags.get("ResolutionUnit")
+
+                    if x_res and y_res and res_unit:
+                        # Extract resolution values
+                        x_val = (
+                            x_res.value[0] / x_res.value[1]
+                            if isinstance(x_res.value, tuple)
+                            else x_res.value
+                        )
+                        y_val = (
+                            y_res.value[0] / y_res.value[1]
+                            if isinstance(y_res.value, tuple)
+                            else y_res.value
+                        )
+
+                        # Convert to micrometers per pixel based on unit
+                        # Resolution unit: 1=none, 2=inch, 3=centimeter
+                        if res_unit.value == 2:  # inch
+                            size_x = 25400.0 / x_val  # 1 inch = 25400 um
+                            size_y = 25400.0 / y_val
+                        elif res_unit.value == 3:  # centimeter
+                            size_x = 10000.0 / x_val  # 1 cm = 10000 um
+                            size_y = 10000.0 / y_val
+                except Exception:
+                    pass
+
+            # Build pixel_size tuple in ZYX order to match axes convention
+            if size_x is not None and size_y is not None:
+                if size_z is not None:
+                    pixel_size = (size_z, size_y, size_x)
+                else:
+                    pixel_size = (size_y, size_x)
 
         if prefer_dask:
             # Option A: use tifffile's OME-as-zarr path if possible
@@ -366,7 +585,8 @@ class TiffReader(Reader):
                 path=path,
                 shape=tuple(darr.shape),
                 dtype=darr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
+                pixel_size=pixel_size,
                 metadata={},
             )
             logger.info(f"Loaded {path.name} as a Dask array.")
@@ -378,11 +598,199 @@ class TiffReader(Reader):
                 path=path,
                 shape=tuple(arr.shape),
                 dtype=arr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
+                pixel_size=pixel_size,
                 metadata={},
             )
             logger.info(f"Loaded {path.name} as NumPy array.")
             return arr, info
+
+    @staticmethod
+    def find_ome(path, max_pages=None):
+        with tifffile.TiffFile(str(path)) as tf:
+            n = len(tf.pages)
+            lim = n if max_pages is None else min(n, max_pages)
+
+            for idx in range(lim):
+                p = tf.pages[idx]
+                if "ImageDescription" not in p.tags:
+                    continue
+                desc = p.tags["ImageDescription"].value
+                if isinstance(desc, bytes):
+                    desc = desc.decode("utf-8", errors="ignore")
+
+                if "<OME" in desc:
+                    j = desc.find("<OME")
+                    ome_xml = desc[j:].strip("\x00").strip()
+                    return idx, ome_xml
+
+        return None, None
+
+
+class N5Reader(Reader):
+    """Reader for N5 format files.
+    N5 is a chunked array storage format similar to Zarr but with a different
+    directory structure. This reader handles N5 stores by searching the filesystem
+    for attributes.json files that define arrays.
+    Attributes
+    ----------
+    SUFFIXES : tuple of str
+        Supported file extensions: ('.n5', '.n5/').
+    """
+
+    SUFFIXES = (".n5", ".n5/")
+
+    @staticmethod
+    def _find_arrays_in_n5(
+        base_path: Path, depth=0
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        """Recursively find all N5 arrays by looking for attributes.json files.
+        Parameters
+        ----------
+        base_path : Path
+            Base directory to search
+        depth : int
+            Current recursion depth
+        Returns
+        -------
+        List[Tuple[str, Dict]]
+            List of (relative_path, attributes_dict) for each array found
+        """
+
+        arrays = []
+        if not base_path.is_dir():
+            return arrays
+        # Check if this directory has an attributes.json that defines an array
+        attrs_file = base_path / "attributes.json"
+        if attrs_file.exists():
+            try:
+                with open(attrs_file, "r") as f:
+                    attrs = json.load(f)
+                # N5 arrays have 'dimensions' attribute
+                if "dimensions" in attrs:
+                    arrays.append(("", attrs))
+                    return arrays  # Don't recurse into array directories
+            except Exception:
+                pass
+        # Recurse into subdirectories
+        try:
+            for item in base_path.iterdir():
+                if item.is_dir():
+                    sub_arrays = N5Reader._find_arrays_in_n5(item, depth + 1)
+                    # Prepend the subdirectory name to the paths
+                    for path, attrs in sub_arrays:
+                        rel_path = item.name if not path else f"{item.name}/{path}"
+                        arrays.append((rel_path, attrs))
+        except Exception:
+            pass
+        return arrays
+
+    def open(
+        self,
+        path: Path,
+        prefer_dask: bool = False,
+        chunks: Optional[Union[int, Tuple[int, ...]]] = None,
+        **kwargs: Any,
+    ) -> Tuple[NDArray[Any], ImageInfo]:
+        """Open an N5 file and return the image data and metadata.
+        Parameters
+        ----------
+        path : Path
+            The path to the N5 store directory (e.g., 'data.n5').
+        prefer_dask : bool, optional
+            If True, return a Dask array for lazy evaluation. If False, load
+            the entire array into memory as a NumPy array. Defaults to False.
+        chunks : int or tuple of int, optional
+            Chunk size for Dask arrays. If None, uses the N5 store's native
+            chunking. Only relevant when `prefer_dask=True`. Defaults to None.
+        **kwargs : dict
+            Additional keyword arguments (unused for N5).
+        Returns
+        -------
+        arr : NDArray[Any] or dask.array.Array
+            The loaded image data.
+        info : ImageInfo
+            Metadata about the loaded image.
+        Raises
+        ------
+        ValueError
+            If the N5 store contains no arrays.
+        """
+        # Find all arrays in the N5 store
+        arrays_info = self._find_arrays_in_n5(path)
+        if not arrays_info:
+            logger.error(f"No arrays found in N5 store: {path}")
+            raise ValueError(f"No arrays found in N5 store: {path}")
+        logger.info(f"Found {len(arrays_info)} array(s) in N5 store")
+        # Open the N5 store at the root level
+        store = N5Store(str(path))
+        root = zarr.open(store, mode="r")
+        # Access nested arrays by path
+        arrays = []
+        for rel_path, attrs in arrays_info:
+            try:
+                if rel_path:
+                    # Navigate to nested array
+                    arr = root
+                    for part in rel_path.split("/"):
+                        arr = arr[part]
+                else:
+                    # Root level array
+                    arr = root
+                if isinstance(arr, zarr.Array):
+                    arrays.append(arr)
+                    logger.info(
+                        f"  Loaded N5 array at '{rel_path}': shape={arr.shape}, dtype={arr.dtype}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to access N5 array at {rel_path}: {e}")
+                continue
+
+        if not arrays:
+            logger.error(f"Could not open any arrays in N5 store: {path}")
+            raise ValueError(f"Could not open any arrays in N5 store: {path}")
+        # Pick array with the largest number of elements
+        array = max(arrays, key=lambda arr: np.prod(arr.shape))
+        # Extract metadata
+        axes = None
+        pixel_size = None
+        meta = {}
+        try:
+            attrs = getattr(array, "attrs", {})
+            axes = attrs.get("axes")
+            meta = dict(attrs)
+            if "pixel_size" in attrs:
+                pixel_size = _ensure_tuple(attrs["pixel_size"])
+            elif "scale" in attrs:
+                pixel_size = _ensure_tuple(attrs["scale"])
+            elif "resolution" in attrs:
+                pixel_size = _ensure_tuple(attrs["resolution"])
+        except Exception:
+            pass
+        if prefer_dask:
+            darr = da.from_zarr(array, chunks=chunks) if chunks else da.from_zarr(array)
+            logger.info(f"Loaded {path.name} as a Dask array.")
+            info = ImageInfo(
+                path=path,
+                shape=tuple(darr.shape),
+                dtype=darr.dtype,
+                axes=_normalize_axes(axes),
+                pixel_size=pixel_size,
+                metadata=meta,
+            )
+            return darr, info
+        else:
+            np_arr = np.array(array) if np is not None else array[:]
+            logger.info(f"Loaded {path.name} as a NumPy array.")
+            info = ImageInfo(
+                path=path,
+                shape=tuple(np_arr.shape),
+                dtype=np_arr.dtype,
+                axes=_normalize_axes(axes),
+                pixel_size=pixel_size,
+                metadata=meta,
+            )
+            return np_arr, info
 
 
 class ZarrReader(Reader):
@@ -428,7 +836,7 @@ class ZarrReader(Reader):
     ['z', 'y', 'x']
     """
 
-    SUFFIXES = (".zarr", ".zarr/", ".n5", ".n5/")
+    SUFFIXES = (".zarr", ".zarr/")
 
     def open(
         self,
@@ -521,24 +929,51 @@ class ZarrReader(Reader):
         """
         grp = zarr.open_group(str(path), mode="r")
 
-        # collect all arrays
-        arrays = []
-        if hasattr(grp, "array_keys") and callable(grp.array_keys):
-            arrays = [grp[k] for k in grp.array_keys()]
+        # Collect all arrays
+        arrays = self._collect_arrays(grp)
 
         if not arrays:
-            logger.error(f"No arrays found in Zarr group: {path}")
-            raise ValueError(f"No arrays found in Zarr group: {path}")
+            logger.error(f"No arrays found in Zarr store: {path}")
+            raise ValueError(f"No arrays found in Zarr store: {path}")
 
         # Pick array with the largest number of elements
         array = max(arrays, key=lambda arr: np.prod(arr.shape))
 
         axes = None
+        pixel_size = None
         meta = {}
         try:
             attrs = getattr(array, "attrs", {})
             axes = attrs.get("multiscales", [{}])[0].get("axes") or attrs.get("axes")
             meta = dict(attrs)
+
+            # Try to extract pixel size from Zarr attributes
+            # Check for OME-Zarr style multiscales metadata
+            if "multiscales" in attrs and attrs["multiscales"]:
+                multiscale = attrs["multiscales"][0]
+                if "axes" in multiscale and isinstance(multiscale["axes"], list):
+                    # Look for scale/transform information
+                    if "datasets" in multiscale and multiscale["datasets"]:
+                        dataset = multiscale["datasets"][0]
+                        if "coordinateTransformations" in dataset:
+                            for transform in dataset["coordinateTransformations"]:
+                                if (
+                                    transform.get("type") == "scale"
+                                    and "scale" in transform
+                                ):
+                                    # Scale values typically correspond to axis order
+                                    pixel_size = tuple(transform["scale"])
+                                    break
+
+            # Fallback: check for direct pixel_size or scale attributes
+            if pixel_size is None:
+                if "pixel_size" in attrs:
+                    pixel_size = _ensure_tuple(attrs["pixel_size"])
+                elif "scale" in attrs:
+                    pixel_size = _ensure_tuple(attrs["scale"])
+                elif "resolution" in attrs:
+                    pixel_size = _ensure_tuple(attrs["resolution"])
+
         except Exception:
             pass
 
@@ -549,7 +984,8 @@ class ZarrReader(Reader):
                 path=path,
                 shape=tuple(darr.shape),
                 dtype=darr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
+                pixel_size=pixel_size,
                 metadata=meta,
             )
             return darr, info
@@ -561,10 +997,53 @@ class ZarrReader(Reader):
                 path=path,
                 shape=tuple(np_arr.shape),
                 dtype=np_arr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
+                pixel_size=pixel_size,
                 metadata=meta,
             )
             return np_arr, info
+
+    @staticmethod
+    def _collect_arrays(group, depth=0):
+        """Recursively collect all arrays from a Zarr/N5 group.
+
+        Parameters
+        ----------
+        group : zarr.Group
+            The Zarr group to search
+        depth : int
+            Current recursion depth
+
+        Returns
+        -------
+        list
+            List of arrays found in the group and its children
+        """
+        out = []
+
+        # Check if this is actually an Array
+        if isinstance(group, zarr.Array):
+            out.append(group)
+            return out
+
+        # If it's a Group, iterate over children
+        if isinstance(group, zarr.Group):
+            try:
+                for key in group.keys():
+                    try:
+                        item = group[key]
+                        # Check if item is an Array
+                        if isinstance(item, zarr.Array):
+                            out.append(item)
+                        # Check if item is a Group - recurse into it
+                        elif isinstance(item, zarr.Group):
+                            out.extend(ZarrReader._collect_arrays(item, depth + 1))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        return out
 
 
 class HDF5Reader(Reader):
@@ -733,8 +1212,9 @@ class HDF5Reader(Reader):
         # Highest resolution ≈ largest number of elements
         ds = max(datasets, key=lambda d: int(np.prod(d.shape)))
 
-        # Extract basic metadata / axes if present
+        # Extract basic metadata / axes / pixel_size if present
         axes = None
+        pixel_size = None
         meta: Dict[str, Any] = {}
         try:
             attrs = dict(ds.attrs) if hasattr(ds, "attrs") else {}
@@ -745,6 +1225,18 @@ class HDF5Reader(Reader):
                 or attrs.get("DimensionOrder")
                 or attrs.get("DIMENSION_LABELS")  # sometimes stored by other tools
             )
+
+            # Try to extract pixel size from HDF5 attributes
+            if "pixel_size" in attrs:
+                pixel_size = _ensure_tuple(attrs["pixel_size"])
+            elif "scale" in attrs:
+                pixel_size = _ensure_tuple(attrs["scale"])
+            elif "resolution" in attrs:
+                pixel_size = _ensure_tuple(attrs["resolution"])
+            # Check for individual axis scales
+            elif "element_size_um" in attrs:
+                pixel_size = _ensure_tuple(attrs["element_size_um"])
+
         except Exception:
             pass
 
@@ -768,7 +1260,8 @@ class HDF5Reader(Reader):
                 path=Path(path_str),
                 shape=tuple(darr.shape),
                 dtype=darr.dtype,
-                axes=axes,
+                axes=_normalize_axes(axes),
+                pixel_size=pixel_size,
                 metadata=meta,
             )
             logger.info(
@@ -783,7 +1276,8 @@ class HDF5Reader(Reader):
             path=Path(path_str),
             shape=tuple(np_arr.shape),
             dtype=np_arr.dtype,
-            axes=axes,
+            axes=_normalize_axes(axes),
+            pixel_size=pixel_size,
             metadata=meta,
         )
         logger.info(
@@ -943,6 +1437,7 @@ class NumpyReader(Reader):
                     shape=tuple(darr.shape),
                     dtype=darr.dtype,
                     axes=None,
+                    pixel_size=None,
                     metadata={},
                 )
                 return darr, info
@@ -953,6 +1448,7 @@ class NumpyReader(Reader):
                     shape=tuple(arr.shape),
                     dtype=arr.dtype,
                     axes=None,
+                    pixel_size=None,
                     metadata={},
                 )
                 return arr, info
@@ -968,6 +1464,7 @@ class NumpyReader(Reader):
                     shape=tuple(darr.shape),
                     dtype=darr.dtype,
                     axes=None,
+                    pixel_size=None,
                     metadata={"npz_key": first_key},
                 )
                 return darr, info
@@ -977,8 +1474,216 @@ class NumpyReader(Reader):
                     shape=tuple(arr.shape),
                     dtype=arr.dtype,
                     axes=None,
+                    pixel_size=None,
                     metadata={"npz_key": first_key},
                 )
+                return arr, info
+
+
+class ND2Reader(Reader):
+    """Reader for Nikon ND2 files using the nd2 library.
+
+    This reader handles Nikon's proprietary ND2 format files commonly used
+    in microscopy. It can extract comprehensive metadata including pixel/voxel
+    sizes, axis information, and experimental parameters.
+
+    Attributes
+    ----------
+    SUFFIXES : tuple of str
+        Supported file extensions: ('.nd2',).
+
+    See Also
+    --------
+    Reader : Abstract base class for all readers.
+    TiffReader : Reader for TIFF/OME-TIFF files.
+    ZarrReader : Reader for Zarr stores.
+
+    Notes
+    -----
+    The nd2 library provides native support for both NumPy arrays and Dask
+    arrays through its `to_dask()` method. When `prefer_dask=True`, this
+    reader uses the native Dask support for efficient lazy loading of large
+    ND2 files without loading them entirely into memory.
+
+    Pixel size information is extracted from the Volume metadata and stored
+    in the ImageInfo as (Z, Y, X) calibration values in micrometers, reordered
+    from the ND2 native (X, Y, Z) format to match our axes convention.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> reader = ND2Reader()
+    >>> arr, info = reader.open(Path("image.nd2"))
+    >>> print(arr.shape)
+    (10, 512, 512)
+    >>> print(info.pixel_size)
+    (2.0, 0.65, 0.65)  # Z, Y, X in micrometers
+
+    >>> # For large files, use Dask
+    >>> darr, info = reader.open(Path("large.nd2"), prefer_dask=True)
+    >>> print(type(darr).__name__)
+    Array
+    """
+
+    SUFFIXES = (".nd2",)
+
+    def open(
+        self,
+        path: Path,
+        prefer_dask: bool = False,
+        chunks: Optional[Union[int, Tuple[int, ...]]] = None,
+        **kwargs: Any,
+    ) -> Tuple[NDArray[Any], ImageInfo]:
+        """Open an ND2 file and return the image data and metadata.
+
+        This method reads Nikon ND2 files using the nd2 library. It extracts
+        comprehensive metadata including pixel sizes, axis order, and other
+        experimental parameters.
+
+        Parameters
+        ----------
+        path : Path
+            The path to the ND2 file.
+        prefer_dask : bool, optional
+            If True, return a Dask array for lazy evaluation. If False, load
+            the entire image into memory as a NumPy array. Defaults to False.
+        chunks : int or tuple of int, optional
+            Chunk size for Dask arrays. Can be a single integer (applied to
+            all dimensions) or a tuple specifying chunk size per dimension.
+            If None, uses nd2's default chunking. Only relevant when
+            `prefer_dask=True`. Defaults to None.
+        **kwargs : dict
+            Additional keyword arguments passed to `nd2.ND2File`.
+
+        Returns
+        -------
+        arr : NDArray[Any] or dask.array.Array
+            The loaded image data. Returns a NumPy ndarray if `prefer_dask=False`,
+            or a Dask array if `prefer_dask=True`.
+        info : ImageInfo
+            Metadata about the loaded image, including path, shape, dtype,
+            axes information, pixel size (in micrometers), and format-specific
+            metadata.
+
+        Raises
+        ------
+        ValueError
+            If the file cannot be read as a valid ND2 file.
+        FileNotFoundError
+            If the specified file does not exist.
+
+        Notes
+        -----
+        The reader extracts pixel/voxel sizes from the ND2 metadata's Volume
+        section. The native ND2 format stores calibration as (X, Y, Z), but
+        these are reordered to (Z, Y, X) to match our axes convention and
+        stored in the `pixel_size` field of ImageInfo.
+
+        Axes information is extracted from the ND2 file's dimension names and
+        converted to a string format (e.g., "TCZYX").
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> reader = ND2Reader()
+
+        >>> # Load a standard ND2 file into memory
+        >>> arr, info = reader.open(Path("sample.nd2"))
+        >>> print(f"Shape: {info.shape}, dtype: {info.dtype}")
+        Shape: (5, 512, 512), dtype: uint16
+        >>> print(f"Pixel size: {info.pixel_size}")
+        Pixel size: (1.0, 0.325, 0.325)  # Z, Y, X in micrometers
+
+        >>> # Load an ND2 as a Dask array
+        >>> darr, info = reader.open(Path("large.nd2"), prefer_dask=True)
+        >>> print(f"Type: {type(darr).__name__}")
+        Type: Array
+
+        >>> # Specify custom chunking for Dask
+        >>> darr, info = reader.open(
+        ...     Path("timelapse.nd2"),
+        ...     prefer_dask=True,
+        ...     chunks=(1, 512, 512)
+        ... )
+        >>> print(darr.chunksize)
+        (1, 512, 512)
+        """
+
+        if not HAS_ND2:
+            raise ImportError(
+                "The 'nd2' library is required to read ND2 files. "
+                "Install it with: pip install nd2"
+            )
+
+        with nd2.ND2File(str(path), **kwargs) as nd2_file:
+            # Extract metadata
+            metadata_dict = {}
+            axes = None
+            pixel_size = None
+
+            # Get axes information from sizes dict
+            if hasattr(nd2_file, "sizes") and nd2_file.sizes:
+                # Pass the sizes dict to normalize_axes which will extract keys
+                axes = nd2_file.sizes
+
+            # Extract pixel size from metadata
+            try:
+                if nd2_file.metadata and nd2_file.metadata.channels:
+                    # Get the first channel's volume information
+                    channel = nd2_file.metadata.channels[0]
+                    if channel.volume and channel.volume.axesCalibration:
+                        # axesCalibration is typically (X, Y, Z) in micrometers
+                        # Reorder to (Z, Y, X) to match our axes convention
+                        calib = channel.volume.axesCalibration
+                        if len(calib) == 3:
+                            x, y, z = calib
+                            pixel_size = (z, y, x)
+                        elif len(calib) == 2:
+                            x, y = calib
+                            pixel_size = (y, x)
+                        else:
+                            # For other cases, use as-is
+                            pixel_size = tuple(calib)
+            except (AttributeError, IndexError, TypeError, ValueError):
+                # If metadata extraction fails, pixel_size remains None
+                pass
+
+            # Store additional metadata
+            if nd2_file.metadata:
+                metadata_dict["metadata"] = nd2_file.metadata
+            if hasattr(nd2_file, "attributes") and nd2_file.attributes:
+                metadata_dict["attributes"] = nd2_file.attributes
+
+            if prefer_dask:
+                # Use nd2's native Dask support
+                darr = nd2_file.to_dask()
+
+                # Apply custom chunking if specified
+                if chunks is not None:
+                    darr = darr.rechunk(chunks)
+
+                info = ImageInfo(
+                    path=path,
+                    shape=tuple(darr.shape),
+                    dtype=darr.dtype,
+                    axes=_normalize_axes(axes),
+                    pixel_size=pixel_size,
+                    metadata=metadata_dict,
+                )
+                logger.info(f"Loaded {path.name} as a Dask array.")
+                return darr, info
+            else:
+                # Load to memory as NumPy
+                arr = nd2_file.asarray()
+                info = ImageInfo(
+                    path=path,
+                    shape=tuple(arr.shape),
+                    dtype=arr.dtype,
+                    axes=_normalize_axes(axes),
+                    pixel_size=pixel_size,
+                    metadata=metadata_dict,
+                )
+                logger.info(f"Loaded {path.name} as NumPy array.")
                 return arr, info
 
 
@@ -1041,9 +1746,9 @@ class ImageOpener:
         ----------
         readers : Iterable of Reader subclasses, optional
             An ordered sequence of reader classes to use. If None, uses the
-            default registry: (TiffReader, ZarrReader, NumpyReader, HDF5Reader).
-            The order determines priority when multiple readers could handle
-            the same file.
+            default registry: (TiffReader, ZarrReader, NumpyReader, HDF5Reader,
+            ND2Reader). The order determines priority when multiple readers
+            could handle the same file.
 
         Notes
         -----
@@ -1064,7 +1769,8 @@ class ImageOpener:
         """
         # Registry order is priority order
         self._readers: Tuple[Type[Reader], ...] = tuple(
-            readers or (TiffReader, ZarrReader, NumpyReader, HDF5Reader)
+            readers
+            or (TiffReader, N5Reader, ZarrReader, NumpyReader, HDF5Reader, ND2Reader)
         )
 
     def open(
@@ -1168,6 +1874,9 @@ class ImageOpener:
             logger.error(msg=f"File {p} does not exist")
             raise FileNotFoundError(p)
 
+        # Track errors for better diagnostics
+        errors = []
+
         # 1) Extension-based selection
         logger.info(msg=f"Opening {p}")
         for reader_cls in self._readers:
@@ -1178,8 +1887,9 @@ class ImageOpener:
                     return reader.open(
                         path=p, prefer_dask=prefer_dask, chunks=chunks, **kwargs
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                errors.append((reader_cls.__name__, str(e)))
+                logger.debug(msg=f"{reader_cls.__name__} failed: {e}")
 
         # 2) Fallback: probe readers that didn't claim the file
         logger.info(
@@ -1188,14 +1898,22 @@ class ImageOpener:
         for reader_cls in self._readers:
             try:
                 reader: Reader = reader_cls()
+                logger.debug(msg=f"Trying fallback reader: {reader_cls.__name__}")
                 return reader.open(
                     path=p, prefer_dask=prefer_dask, chunks=chunks, **kwargs
                 )
-            except Exception:
+            except Exception as e:
+                errors.append((reader_cls.__name__, str(e)))
+                logger.debug(msg=f"{reader_cls.__name__} fallback failed: {e}")
                 continue
 
-        logger.error(msg=f"No suitable reader found for {p}")
-        raise ValueError("No suitable reader found for:", p)
+        # Report all errors for debugging
+        error_msg = f"No suitable reader found for {p}.\n"
+        error_msg += "Attempted readers and their errors:\n"
+        for reader_name, error in errors:
+            error_msg += f"  - {reader_name}: {error}\n"
+        logger.error(msg=error_msg)
+        raise ValueError(f"No suitable reader found for: {p}")
 
 
 def rename_tiff_to_tif(base_path: str, recursive: bool = True) -> int:
