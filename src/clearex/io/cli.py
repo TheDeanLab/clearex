@@ -114,10 +114,38 @@ def get_imaging_round(cli_value: Optional[int]) -> int:
     return 3  # fallback default
 
 
-def create_parser():
+def create_parser() -> argparse.ArgumentParser:
+    """Create the primary ClearEx command-line parser.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Parser configured with data input options, workflow selections, and
+        GUI/headless execution controls.
+    """
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Command Line Arguments")
     input_args = parser.add_argument_group("Input Arguments")
+
+    input_args.add_argument(
+        "--deconvolution",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Run deconvolution workflow",
+    )
+
+    input_args.add_argument(
+        "--particle-detection",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Run particle detection workflow",
+    )
 
     input_args.add_argument(
         "-r",
@@ -158,10 +186,35 @@ def create_parser():
         help="Chunk spec for Dask, e.g. '256,256,64' or single int",
     )
 
+    parser.add_argument(
+        "--gui",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Launch the GUI (default: enabled)",
+    )
+    parser.add_argument(
+        "--headless",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Force non-interactive mode (overrides --gui)",
+    )
+
     return parser
 
 
-def display_logo():
+def display_logo() -> None:
+    """Print the ClearEx ASCII logo to stdout.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+        The function prints output and does not return a value.
+    """
     logo = r"""
            _                          
           | |                         
