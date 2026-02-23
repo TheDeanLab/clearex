@@ -33,6 +33,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 # Local Imports
+from clearex.io.experiment import (
+    NavigateExperiment,
+    default_analysis_store_path,
+    is_navigate_experiment_file,
+    load_navigate_experiment,
+    resolve_experiment_data_path,
+)
 from clearex.io.read import ImageInfo, ImageOpener
 from clearex.workflow import WorkflowConfig, format_chunks, parse_chunks
 
@@ -213,9 +220,44 @@ def summarize_image_info(info: ImageInfo) -> Dict[str, str]:
         "positions": _format_optional_value(positions),
         "image_size": image_size,
         "time_points": _format_optional_value(time_points),
-        "pixel_size": _format_optional_value(info.pixel_size),
+        "pixel_size": _format_optional_value(getattr(info, "pixel_size", None)),
         "metadata_keys": metadata_keys,
     }
+
+
+def _apply_experiment_overrides(
+    summary: Dict[str, str],
+    experiment_path: Path,
+    resolved_data_path: Path,
+    experiment: NavigateExperiment,
+) -> Dict[str, str]:
+    """Overlay Navigate experiment metadata onto GUI summary fields.
+
+    Parameters
+    ----------
+    summary : dict[str, str]
+        Base summary generated from image metadata.
+    experiment_path : pathlib.Path
+        Selected ``experiment.yml`` path.
+    resolved_data_path : pathlib.Path
+        Data path resolved from experiment metadata.
+    experiment : Any
+        Parsed experiment object with channel/time/position attributes.
+
+    Returns
+    -------
+    dict[str, str]
+        Updated summary dictionary.
+    """
+    out = dict(summary)
+    out["path"] = f"{experiment_path} -> {resolved_data_path}"
+    out["channels"] = str(experiment.channel_count)
+    out["positions"] = str(experiment.multiposition_count)
+    out["time_points"] = str(experiment.timepoints)
+    out["metadata_keys"] = (
+        f"{summary.get('metadata_keys', 'n/a')} | file_type={experiment.file_type}"
+    )
+    return out
 
 
 if HAS_PYQT6:
@@ -292,7 +334,8 @@ if HAS_PYQT6:
             path_row = QHBoxLayout()
             self._path_input = QLineEdit()
             self._path_input.setPlaceholderText(
-                "Select a data file or directory (.tif/.tiff/.zarr/.n5/.npy/.npz/.h5/.nd2)"
+                "Select a data file, Navigate experiment.yml, or directory "
+                "(.yml/.yaml/.tif/.tiff/.zarr/.n5/.npy/.npz/.h5/.nd2)"
             )
             self._browse_file_button = QPushButton("Browse File")
             self._browse_directory_button = QPushButton("Browse Folder")
@@ -538,7 +581,7 @@ if HAS_PYQT6:
                 self,
                 "Select Image Data",
                 str(Path.cwd()),
-                "All Files (*);;Image Data (*.tif *.tiff *.zarr *.n5 *.npy *.npz *.h5 *.hdf5 *.hdf *.nd2)",
+                "All Files (*);;Image Data (*.yml *.yaml *.tif *.tiff *.zarr *.n5 *.npy *.npz *.h5 *.hdf5 *.hdf *.nd2)",
             )
             if file_path:
                 self._path_input.setText(file_path)
@@ -593,8 +636,14 @@ if HAS_PYQT6:
 
             try:
                 chunks = parse_chunks(self._chunks_input.text())
+                selected_path = Path(path)
+                source_data_path = selected_path
+                experiment = None
+                if is_navigate_experiment_file(selected_path):
+                    experiment = load_navigate_experiment(selected_path)
+                    source_data_path = resolve_experiment_data_path(experiment)
                 _, info = self._opener.open(
-                    path=path,
+                    path=str(source_data_path),
                     prefer_dask=self._dask_checkbox.isChecked(),
                     chunks=chunks,
                 )
@@ -608,9 +657,24 @@ if HAS_PYQT6:
                 return
 
             summary = summarize_image_info(info)
+            if experiment is not None:
+                summary = _apply_experiment_overrides(
+                    summary=summary,
+                    experiment_path=selected_path,
+                    resolved_data_path=source_data_path,
+                    experiment=experiment,
+                )
+
             for key, value in summary.items():
                 self._metadata_labels[key].setText(value)
-            self._set_status("Metadata loaded.")
+            if experiment is not None:
+                target_store = default_analysis_store_path(experiment)
+                self._set_status(
+                    "Metadata loaded from experiment.yml. "
+                    f"Analysis store target: {target_store}"
+                )
+            else:
+                self._set_status("Metadata loaded.")
 
         def _on_run(self) -> None:
             """Validate form values and finalize workflow selection.

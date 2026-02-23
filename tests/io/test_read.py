@@ -1087,12 +1087,12 @@ class TestZarrReader:
         arr_large = np.random.rand(200, 300, 300).astype(np.float32)
         arr_medium = np.random.rand(100, 100).astype(np.float32)
 
-        # Root level arrays (ZarrReader only looks here)
+        # Root level arrays
         root.create_dataset("small", data=arr_small)
         root.create_dataset("large", data=arr_large)
         root.create_dataset("medium", data=arr_medium)
 
-        # Also add to nested groups (these won't be found by current implementation)
+        # Also add arrays to nested groups.
         grp1.create_dataset("nested_small", data=arr_small)
         grp2.create_dataset("nested_medium", data=arr_medium)
 
@@ -1101,6 +1101,22 @@ class TestZarrReader:
 
         assert arr.shape == arr_large.shape
         assert np.array_equal(arr, arr_large)
+
+    def test_zarr_with_nested_only_arrays(self, zarr_reader, tmp_path):
+        """Test opening a store where arrays exist only in nested groups."""
+
+        zarr_path = tmp_path / "nested_only.zarr"
+        root = zarr.open_group(str(zarr_path), mode="w")
+        nested = root.create_group("setup0").create_group("timepoint0")
+        expected = np.random.randint(0, 255, size=(30, 32, 32), dtype=np.uint8)
+        nested.create_dataset("s0", data=expected, chunks=(2, 16, 16))
+
+        arr, info = zarr_reader.open(zarr_path, prefer_dask=False)
+
+        assert arr.shape == expected.shape
+        assert np.array_equal(arr, expected)
+        assert info.metadata is not None
+        assert info.metadata.get("selected_array_path") == "setup0/timepoint0/s0"
 
     def test_zarr_empty_store_raises_error(self, zarr_reader, tmp_path):
         """Test that opening an empty Zarr store raises ValueError."""

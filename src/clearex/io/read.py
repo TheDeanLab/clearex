@@ -486,9 +486,9 @@ class ZarrReader(Reader):
         - `multiscales[0]['axes']` (OME-Zarr format)
         - `axes` attribute (custom metadata)
 
-        If multiple arrays exist in the Zarr group, the array with the largest
-        number of elements (np.prod(shape)) is selected, typically corresponding
-        to the full-resolution image in multi-resolution pyramids.
+        If multiple arrays exist in the store hierarchy, the array with the
+        largest number of elements (np.prod(shape)) is selected. This includes
+        arrays nested under child groups (for example, common N5 layouts).
 
         Examples
         --------
@@ -521,24 +521,41 @@ class ZarrReader(Reader):
         """
         grp = zarr.open_group(str(path), mode="r")
 
-        # collect all arrays
-        arrays = []
-        if hasattr(grp, "array_keys") and callable(grp.array_keys):
-            arrays = [grp[k] for k in grp.array_keys()]
+        # Collect arrays recursively to support nested Zarr/N5 layouts.
+        arrays: list[tuple[str, Any]] = []
+
+        def _walk_arrays(group: Any, prefix: str = "") -> None:
+            if hasattr(group, "array_keys") and callable(group.array_keys):
+                for key in sorted(group.array_keys()):
+                    arrays.append((f"{prefix}{key}", group[key]))
+            if hasattr(group, "group_keys") and callable(group.group_keys):
+                for key in sorted(group.group_keys()):
+                    _walk_arrays(group[key], f"{prefix}{key}/")
+
+        _walk_arrays(grp)
 
         if not arrays:
             logger.error(f"No arrays found in Zarr group: {path}")
             raise ValueError(f"No arrays found in Zarr group: {path}")
 
-        # Pick array with the largest number of elements
-        array = max(arrays, key=lambda arr: np.prod(arr.shape))
+        # Pick largest array by element count; use path as deterministic tiebreaker.
+        arrays.sort(key=lambda item: (-int(np.prod(item[1].shape)), item[0]))
+        array_path, array = arrays[0]
 
         axes = None
         meta = {}
         try:
+            group_attrs = dict(getattr(grp, "attrs", {}))
             attrs = getattr(array, "attrs", {})
-            axes = attrs.get("multiscales", [{}])[0].get("axes") or attrs.get("axes")
-            meta = dict(attrs)
+            axes = (
+                attrs.get("multiscales", [{}])[0].get("axes")
+                or group_attrs.get("multiscales", [{}])[0].get("axes")
+                or attrs.get("axes")
+                or group_attrs.get("axes")
+            )
+            meta = dict(group_attrs)
+            meta.update(dict(attrs))
+            meta["selected_array_path"] = array_path
         except Exception:
             pass
 

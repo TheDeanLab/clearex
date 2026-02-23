@@ -26,6 +26,8 @@
 
 
 # Standard Library Imports
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Optional
 import argparse
 import logging
@@ -36,9 +38,17 @@ import os
 
 # Local Imports
 from clearex.io.read import ImageInfo, ImageOpener
+from clearex.io.experiment import (
+    default_analysis_store_path,
+    initialize_analysis_store,
+    is_navigate_experiment_file,
+    load_navigate_experiment,
+    resolve_experiment_data_path,
+)
 from clearex.io.cli import create_parser, display_logo
 from clearex.io.log import initiate_logger
-from clearex.workflow import WorkflowConfig, parse_chunks
+from clearex.io.provenance import is_zarr_store_path, persist_run_provenance
+from clearex.workflow import WorkflowConfig, format_chunks, parse_chunks
 
 
 def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
@@ -131,7 +141,7 @@ def _log_loaded_image(info: ImageInfo, logger: logging.Logger) -> None:
     logger.info(f"Positions: {positions if positions is not None else 'n/a'}")
     logger.info(f"Time points: {time_points if time_points is not None else 'n/a'}")
     logger.info(f"Image size (XxYxZ): {image_size}")
-    logger.info(f"Pixel size (um): {info.pixel_size or 'n/a'}")
+    logger.info(f"Pixel size (um): {getattr(info, 'pixel_size', None) or 'n/a'}")
 
     if info.metadata:
         metadata_types = {key: type(value).__name__ for key, value in info.metadata.items()}
@@ -214,34 +224,133 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
         If no reader can open the configured file.
     """
     # TODO: Persist workflow configuration for provenance/replay support.
+    run_started_at = datetime.now(tz=timezone.utc)
+    image_info: Optional[ImageInfo] = None
+    step_records: list[Dict[str, object]] = []
+    input_path = workflow.file
+    provenance_store_path: Optional[str] = None
+
     if workflow.file:
+        if is_navigate_experiment_file(workflow.file):
+            experiment = load_navigate_experiment(workflow.file)
+            resolved_data_path = resolve_experiment_data_path(experiment)
+            input_path = str(resolved_data_path)
+
+            logger.info(
+                f"Loaded experiment metadata from {workflow.file}: "
+                f"file_type={experiment.file_type}, "
+                f"timepoints={experiment.timepoints}, "
+                f"positions={experiment.multiposition_count}, "
+                f"channels={experiment.channel_count}, "
+                f"z_steps={experiment.number_z_steps}."
+            )
+            step_records.append(
+                {
+                    "name": "load_experiment",
+                    "parameters": {
+                        "experiment_path": workflow.file,
+                        "resolved_data_path": str(resolved_data_path),
+                        "file_type": experiment.file_type,
+                        "timepoints": experiment.timepoints,
+                        "positions": experiment.multiposition_count,
+                        "channels": experiment.channel_count,
+                        "z_steps": experiment.number_z_steps,
+                    },
+                }
+            )
+        else:
+            experiment = None
+
         opener = ImageOpener()
         _, info = opener.open(
-            workflow.file,
+            input_path,
             prefer_dask=workflow.prefer_dask,
             chunks=workflow.chunks,
         )
+        image_info = info
         _log_loaded_image(info, logger)
+
+        if experiment is not None:
+            analysis_store = default_analysis_store_path(experiment)
+            initialize_analysis_store(
+                experiment=experiment,
+                zarr_path=analysis_store,
+                image_info=info,
+                overwrite=False,
+                dtype=str(info.dtype),
+            )
+            provenance_store_path = str(analysis_store)
+            logger.info(
+                f"Initialized/validated 6D analysis store at {analysis_store} "
+                "(axes=t,p,c,z,y,x)."
+            )
+        elif input_path and is_zarr_store_path(input_path):
+            provenance_store_path = input_path
+
+        step_records.append(
+            {
+                "name": "load_data",
+                "parameters": {
+                    "source_path": input_path,
+                    "prefer_dask": workflow.prefer_dask,
+                    "chunks": format_chunks(workflow.chunks) or None,
+                },
+            }
+        )
 
     if workflow.deconvolution:
         logger.info(
             "Deconvolution selected. Workflow hook is reserved; implementation pending."
         )
+        step_records.append({"name": "deconvolution", "parameters": {}})
 
     if workflow.particle_detection:
         logger.info(
             "Particle detection selected. Workflow hook is reserved; implementation pending."
         )
+        step_records.append({"name": "particle_detection", "parameters": {}})
 
     if workflow.registration:
         logger.info("Running registration workflow.")
         from clearex.registration import ImageRegistration
 
         ImageRegistration()
+        step_records.append({"name": "registration", "parameters": {}})
 
     if workflow.visualization:
         logger.info("Launching visualization workflow.")
         print("Launching visualization")
+        step_records.append({"name": "visualization", "parameters": {}})
+
+    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+        provenance_workflow = WorkflowConfig(
+            file=input_path,
+            prefer_dask=workflow.prefer_dask,
+            chunks=workflow.chunks,
+            deconvolution=workflow.deconvolution,
+            particle_detection=workflow.particle_detection,
+            registration=workflow.registration,
+            visualization=workflow.visualization,
+        )
+        try:
+            run_id = persist_run_provenance(
+                zarr_path=provenance_store_path,
+                workflow=provenance_workflow,
+                image_info=image_info,
+                steps=step_records or None,
+                started_at_utc=run_started_at,
+                ended_at_utc=datetime.now(tz=timezone.utc),
+                repo_root=Path(__file__).resolve().parents[2],
+            )
+            logger.info(
+                f"Persisted provenance run to store {provenance_store_path} "
+                f"with run_id={run_id}."
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Failed to persist provenance in Zarr store "
+                f"{provenance_store_path}: {exc}"
+            )
 
 
 def main() -> None:

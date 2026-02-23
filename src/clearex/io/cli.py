@@ -168,7 +168,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-f",
         "--file",
-        help="Path to image (TIFF/OME‑TIFF, .zarr, .npy/.npz)",
+        help="Path to image or Navigate experiment.yml (TIFF/OME‑TIFF, .zarr, .n5, .h5, .npy/.npz)",
         type=str,
         required=False,
     )

@@ -1,0 +1,207 @@
+#  Copyright (c) 2021-2025  The University of Texas Southwestern Medical Center.
+#  All rights reserved.
+#  Redistribution and use in source and binary forms, with or without
+#  modification, are permitted for academic and research use only (subject to the
+#  limitations in the disclaimer below) provided that the following conditions are met:
+#       * Redistributions of source code must retain the above copyright notice,
+#       this list of conditions and the following disclaimer.
+#       * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#       * Neither the name of the copyright holders nor the names of its
+#       contributors may be used to endorse or promote products derived from this
+#       software without specific prior written permission.
+#  NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE GRANTED BY
+#  THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+#  CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+#  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+#  PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+#  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+#  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+#  BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+#  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+#  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+#  POSSIBILITY OF SUCH DAMAGE.
+
+# Standard Library Imports
+from pathlib import Path
+import json
+
+# Third Party Imports
+import numpy as np
+import zarr
+
+# Local Imports
+from clearex.io.experiment import (
+    default_analysis_store_path,
+    find_experiment_data_candidates,
+    initialize_analysis_store,
+    is_navigate_experiment_file,
+    load_navigate_experiment,
+    resolve_experiment_data_path,
+    write_zyx_block,
+)
+from clearex.io.read import ImageInfo
+
+
+def _write_minimal_experiment(
+    path: Path,
+    save_directory: Path,
+    file_type: str = "H5",
+    *,
+    is_multiposition: bool = False,
+):
+    payload = {
+        "Saving": {
+            "save_directory": str(save_directory),
+            "file_type": file_type,
+        },
+        "MicroscopeState": {
+            "timepoints": 2,
+            "number_z_steps": 4,
+            "is_multiposition": is_multiposition,
+            "channels": {
+                "channel_1": {"is_selected": True, "laser": "488nm"},
+                "channel_2": {"is_selected": True, "laser": "562nm"},
+                "channel_3": {"is_selected": False, "laser": "642nm"},
+            },
+        },
+        "CameraParameters": {
+            "img_x_pixels": 16,
+            "img_y_pixels": 8,
+        },
+        "MultiPositions": [[0, 0, 0], [1, 1, 1], [2, 2, 2]],
+    }
+    path.write_text(json.dumps(payload, indent=2))
+
+
+def _write_multipositions_sidecar(path: Path, count: int) -> None:
+    header = ["X", "Y", "Z", "THETA", "F", "X_PIXEL", "Y_PIXEL"]
+    rows = [header]
+    for idx in range(count):
+        rows.append([float(idx), float(idx), float(idx), 0.0, 0.0, "NaN", "NaN"])
+    path.write_text(json.dumps(rows, indent=2))
+
+
+def test_is_navigate_experiment_file():
+    assert is_navigate_experiment_file("experiment.yml") is True
+    assert is_navigate_experiment_file("experiment.yaml") is True
+    assert is_navigate_experiment_file("settings.yml") is False
+
+
+def test_load_and_resolve_experiment_data_path(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="H5")
+
+    # Two H5 candidates; CH00 should resolve first via deterministic sorting.
+    (tmp_path / "CH01_000000.h5").write_bytes(b"")
+    (tmp_path / "CH00_000000.h5").write_bytes(b"")
+
+    experiment = load_navigate_experiment(experiment_path)
+    resolved = resolve_experiment_data_path(experiment)
+
+    assert experiment.channel_count == 2
+    assert experiment.timepoints == 2
+    assert experiment.multiposition_count == 3
+    assert resolved.name == "CH00_000000.h5"
+
+
+def test_initialize_analysis_store_creates_6d_layout(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="H5")
+    experiment = load_navigate_experiment(experiment_path)
+    store_path = default_analysis_store_path(experiment)
+
+    image_info = ImageInfo(
+        path=tmp_path / "dummy.h5",
+        shape=(4, 8, 16),
+        dtype=np.uint16,
+        axes="ZYX",
+    )
+
+    output = initialize_analysis_store(
+        experiment=experiment,
+        zarr_path=store_path,
+        image_info=image_info,
+        overwrite=True,
+    )
+    assert output == store_path.resolve()
+
+    root = zarr.open_group(str(store_path), mode="r")
+    assert tuple(root["data"].shape) == (2, 3, 2, 4, 8, 16)
+    assert list(root["data"].attrs["axes"]) == ["t", "p", "c", "z", "y", "x"]
+    assert root.attrs["storage_policy_analysis_outputs"] == "latest_only"
+
+
+def test_write_zyx_block_numpy(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="H5")
+    experiment = load_navigate_experiment(experiment_path)
+    store_path = default_analysis_store_path(experiment)
+    initialize_analysis_store(experiment=experiment, zarr_path=store_path, overwrite=True)
+
+    block = np.ones((4, 8, 16), dtype=np.uint16)
+    write_zyx_block(
+        zarr_path=store_path,
+        block=block,
+        t_index=1,
+        p_index=2,
+        c_index=1,
+    )
+
+    root = zarr.open_group(str(store_path), mode="r")
+    loaded = np.array(root["data"][1, 2, 1, :, :, :])
+    assert np.array_equal(loaded, block)
+
+
+def test_resolve_ome_tiff_prefers_primary_over_mip(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="OME-TIFF"
+    )
+
+    mip_file = tmp_path / "MIP" / "P0000_CH00_000000.tiff"
+    primary_file = tmp_path / "Position0" / "P0000_CH00_000000.tiff"
+    mip_file.parent.mkdir(parents=True, exist_ok=True)
+    primary_file.parent.mkdir(parents=True, exist_ok=True)
+    mip_file.write_bytes(b"")
+    primary_file.write_bytes(b"")
+
+    experiment = load_navigate_experiment(experiment_path)
+    candidates = find_experiment_data_candidates(experiment)
+    resolved = resolve_experiment_data_path(experiment)
+
+    assert len(candidates) == 1
+    assert candidates[0] == primary_file
+    assert resolved == primary_file
+
+
+def test_resolve_ome_zarr_alias(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="OME-ZARR"
+    )
+
+    ome_zarr = tmp_path / "CH00_000000.ome.zarr"
+    ome_zarr.mkdir(parents=True, exist_ok=True)
+
+    experiment = load_navigate_experiment(experiment_path)
+    resolved = resolve_experiment_data_path(experiment)
+
+    assert resolved == ome_zarr
+
+
+def test_load_uses_multi_positions_sidecar_when_multiposition_enabled(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="H5",
+        is_multiposition=True,
+    )
+    _write_multipositions_sidecar(tmp_path / "multi_positions.yml", count=24)
+
+    experiment = load_navigate_experiment(experiment_path)
+
+    assert experiment.multiposition_count == 24
