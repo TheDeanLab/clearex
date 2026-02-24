@@ -26,9 +26,10 @@
 
 
 # Standard Library Imports
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 import argparse
 import logging
 import os
@@ -39,6 +40,7 @@ import os
 # Local Imports
 from clearex.io.read import ImageInfo, ImageOpener
 from clearex.io.experiment import (
+    create_dask_client,
     default_analysis_store_path,
     initialize_analysis_store,
     is_navigate_experiment_file,
@@ -48,7 +50,18 @@ from clearex.io.experiment import (
 from clearex.io.cli import create_parser, display_logo
 from clearex.io.log import initiate_logger
 from clearex.io.provenance import is_zarr_store_path, persist_run_provenance
-from clearex.workflow import WorkflowConfig, format_chunks, parse_chunks
+from clearex.workflow import (
+    DASK_BACKEND_LOCAL_CLUSTER,
+    DASK_BACKEND_SLURM_CLUSTER,
+    DASK_BACKEND_SLURM_RUNNER,
+    WorkflowConfig,
+    dask_backend_to_dict,
+    format_dask_backend_summary,
+    format_chunks,
+    format_zarr_chunks_ptczyx,
+    format_zarr_pyramid_ptczyx,
+    parse_chunks,
+)
 
 
 def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
@@ -201,6 +214,139 @@ def _apply_gui_if_requested(
         return workflow
 
 
+def _configure_dask_backend(
+    workflow: WorkflowConfig,
+    logger: logging.Logger,
+    exit_stack: ExitStack,
+) -> Optional[Any]:
+    """Initialize and register the configured Dask backend.
+
+    Parameters
+    ----------
+    workflow : WorkflowConfig
+        Effective workflow configuration including backend settings.
+    logger : logging.Logger
+        Logger used for status and fallback messages.
+    exit_stack : contextlib.ExitStack
+        Exit stack used to manage backend resource teardown.
+
+    Returns
+    -------
+    Any, optional
+        Active Dask client-like object when configured successfully;
+        otherwise ``None``.
+
+    Notes
+    -----
+    Backend initialization errors are converted into warnings and the workflow
+    continues without a distributed client. This keeps local/headless paths
+    operational even when optional Dask distributed backends are unavailable.
+    """
+    if not workflow.prefer_dask:
+        logger.info("Dask lazy loading disabled; skipping backend startup.")
+        return None
+
+    backend = workflow.dask_backend
+    logger.info(f"Dask backend selection: {format_dask_backend_summary(backend)}")
+
+    try:
+        if backend.mode == DASK_BACKEND_LOCAL_CLUSTER:
+            client = create_dask_client(
+                n_workers=backend.local_cluster.n_workers,
+                threads_per_worker=backend.local_cluster.threads_per_worker,
+                memory_limit=backend.local_cluster.memory_limit,
+                local_directory=backend.local_cluster.local_directory,
+            )
+            exit_stack.callback(client.close)
+            logger.info("Connected to LocalCluster backend.")
+            return client
+
+        if backend.mode == DASK_BACKEND_SLURM_RUNNER:
+            scheduler_file = backend.slurm_runner.scheduler_file
+            if not scheduler_file:
+                raise ValueError(
+                    "SLURMRunner backend requires a scheduler file path."
+                )
+
+            from dask.distributed import Client
+            from dask_jobqueue.slurm import SLURMRunner
+
+            runner = exit_stack.enter_context(SLURMRunner(scheduler_file=scheduler_file))
+            client = exit_stack.enter_context(Client(runner))
+
+            wait_for_workers = backend.slurm_runner.wait_for_workers
+            if wait_for_workers is None:
+                runner_workers = getattr(runner, "n_workers", None)
+                if isinstance(runner_workers, int) and runner_workers > 0:
+                    wait_for_workers = runner_workers
+            if wait_for_workers is not None:
+                client.wait_for_workers(wait_for_workers)
+
+            logger.info(
+                "Connected to SLURMRunner backend "
+                f"(scheduler_file={scheduler_file})."
+            )
+            return client
+
+        if backend.mode == DASK_BACKEND_SLURM_CLUSTER:
+            from dask.distributed import Client
+            from dask_jobqueue import SLURMCluster
+
+            cluster_cfg = backend.slurm_cluster
+            extra_directives = [
+                directive.strip()
+                for directive in cluster_cfg.job_extra_directives
+                if directive.strip()
+            ]
+            if cluster_cfg.mail_user:
+                extra_directives = [
+                    directive
+                    for directive in extra_directives
+                    if not directive.startswith("--mail-user=")
+                ]
+                extra_directives.append(f"--mail-user={cluster_cfg.mail_user}")
+
+            cluster_kwargs = {
+                "cores": cluster_cfg.cores,
+                "processes": cluster_cfg.processes,
+                "memory": cluster_cfg.memory,
+                "local_directory": cluster_cfg.local_directory,
+                "interface": cluster_cfg.interface,
+                "walltime": cluster_cfg.walltime,
+                "job_name": cluster_cfg.job_name,
+                "queue": cluster_cfg.queue,
+                "death_timeout": cluster_cfg.death_timeout,
+                "job_extra_directives": extra_directives,
+                "scheduler_options": {
+                    "dashboard_address": cluster_cfg.dashboard_address,
+                    "interface": cluster_cfg.scheduler_interface,
+                    "idle_timeout": cluster_cfg.idle_timeout,
+                    "allowed_failures": cluster_cfg.allowed_failures,
+                },
+            }
+            cluster = SLURMCluster(**cluster_kwargs)
+            exit_stack.callback(cluster.close)
+            cluster.scale(jobs=cluster_cfg.workers)
+
+            client = Client(cluster)
+            exit_stack.callback(client.close)
+            client.wait_for_workers(cluster_cfg.workers)
+            logger.info(
+                "Connected to SLURMCluster backend "
+                f"(workers={cluster_cfg.workers}, queue={cluster_cfg.queue})."
+            )
+            return client
+
+        raise ValueError(f"Unsupported Dask backend mode: {backend.mode}")
+    except Exception as exc:
+        logger.warning(
+            f"Failed to initialize Dask backend "
+            f"({format_dask_backend_summary(backend)}): {exc}. "
+            "Continuing without distributed client."
+        )
+        return None
+
+
 def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
     """Execute a configured workflow in headless mode.
 
@@ -230,127 +376,149 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
     input_path = workflow.file
     provenance_store_path: Optional[str] = None
 
-    if workflow.file:
-        if is_navigate_experiment_file(workflow.file):
-            experiment = load_navigate_experiment(workflow.file)
-            resolved_data_path = resolve_experiment_data_path(experiment)
-            input_path = str(resolved_data_path)
+    with ExitStack() as exit_stack:
+        _configure_dask_backend(
+            workflow=workflow,
+            logger=logger,
+            exit_stack=exit_stack,
+        )
 
-            logger.info(
-                f"Loaded experiment metadata from {workflow.file}: "
-                f"file_type={experiment.file_type}, "
-                f"timepoints={experiment.timepoints}, "
-                f"positions={experiment.multiposition_count}, "
-                f"channels={experiment.channel_count}, "
-                f"z_steps={experiment.number_z_steps}."
+        if workflow.file:
+            if is_navigate_experiment_file(workflow.file):
+                experiment = load_navigate_experiment(workflow.file)
+                resolved_data_path = resolve_experiment_data_path(experiment)
+                input_path = str(resolved_data_path)
+                zarr_chunks_tpczyx = workflow.zarr_save.chunks_tpczyx()
+                zarr_pyramid_tpczyx = workflow.zarr_save.pyramid_tpczyx()
+
+                logger.info(
+                    f"Loaded experiment metadata from {workflow.file}: "
+                    f"file_type={experiment.file_type}, "
+                    f"timepoints={experiment.timepoints}, "
+                    f"positions={experiment.multiposition_count}, "
+                    f"channels={experiment.channel_count}, "
+                    f"z_steps={experiment.number_z_steps}, "
+                    f"zarr_chunks_ptczyx={format_zarr_chunks_ptczyx(workflow.zarr_save.chunks_ptczyx)}, "
+                    "zarr_pyramid_ptczyx="
+                    f"{format_zarr_pyramid_ptczyx(workflow.zarr_save.pyramid_ptczyx)}."
+                )
+                step_records.append(
+                    {
+                        "name": "load_experiment",
+                        "parameters": {
+                            "experiment_path": workflow.file,
+                            "resolved_data_path": str(resolved_data_path),
+                            "file_type": experiment.file_type,
+                            "timepoints": experiment.timepoints,
+                            "positions": experiment.multiposition_count,
+                            "channels": experiment.channel_count,
+                            "z_steps": experiment.number_z_steps,
+                            "zarr_chunks_ptczyx": list(workflow.zarr_save.chunks_ptczyx),
+                            "zarr_pyramid_ptczyx": [
+                                list(levels) for levels in workflow.zarr_save.pyramid_ptczyx
+                            ],
+                        },
+                    }
+                )
+            else:
+                experiment = None
+
+            opener = ImageOpener()
+            _, info = opener.open(
+                input_path,
+                prefer_dask=workflow.prefer_dask,
+                chunks=workflow.chunks,
             )
+            image_info = info
+            _log_loaded_image(info, logger)
+
+            if experiment is not None:
+                analysis_store = default_analysis_store_path(experiment)
+                initialize_analysis_store(
+                    experiment=experiment,
+                    zarr_path=analysis_store,
+                    image_info=info,
+                    overwrite=False,
+                    dtype=str(info.dtype),
+                    chunks=zarr_chunks_tpczyx,
+                    pyramid_factors=zarr_pyramid_tpczyx,
+                )
+                provenance_store_path = str(analysis_store)
+                logger.info(
+                    f"Initialized/validated 6D analysis store at {analysis_store} "
+                    "(axes=t,p,c,z,y,x) with "
+                    f"zarr_chunks_ptczyx={format_zarr_chunks_ptczyx(workflow.zarr_save.chunks_ptczyx)}."
+                )
+            elif input_path and is_zarr_store_path(input_path):
+                provenance_store_path = input_path
+
             step_records.append(
                 {
-                    "name": "load_experiment",
+                    "name": "load_data",
                     "parameters": {
-                        "experiment_path": workflow.file,
-                        "resolved_data_path": str(resolved_data_path),
-                        "file_type": experiment.file_type,
-                        "timepoints": experiment.timepoints,
-                        "positions": experiment.multiposition_count,
-                        "channels": experiment.channel_count,
-                        "z_steps": experiment.number_z_steps,
+                        "source_path": input_path,
+                        "prefer_dask": workflow.prefer_dask,
+                        "chunks": format_chunks(workflow.chunks) or None,
+                        "dask_backend": dask_backend_to_dict(workflow.dask_backend),
                     },
                 }
             )
-        else:
-            experiment = None
 
-        opener = ImageOpener()
-        _, info = opener.open(
-            input_path,
-            prefer_dask=workflow.prefer_dask,
-            chunks=workflow.chunks,
-        )
-        image_info = info
-        _log_loaded_image(info, logger)
-
-        if experiment is not None:
-            analysis_store = default_analysis_store_path(experiment)
-            initialize_analysis_store(
-                experiment=experiment,
-                zarr_path=analysis_store,
-                image_info=info,
-                overwrite=False,
-                dtype=str(info.dtype),
-            )
-            provenance_store_path = str(analysis_store)
+        if workflow.deconvolution:
             logger.info(
-                f"Initialized/validated 6D analysis store at {analysis_store} "
-                "(axes=t,p,c,z,y,x)."
+                "Deconvolution selected. Workflow hook is reserved; implementation pending."
             )
-        elif input_path and is_zarr_store_path(input_path):
-            provenance_store_path = input_path
+            step_records.append({"name": "deconvolution", "parameters": {}})
 
-        step_records.append(
-            {
-                "name": "load_data",
-                "parameters": {
-                    "source_path": input_path,
-                    "prefer_dask": workflow.prefer_dask,
-                    "chunks": format_chunks(workflow.chunks) or None,
-                },
-            }
-        )
-
-    if workflow.deconvolution:
-        logger.info(
-            "Deconvolution selected. Workflow hook is reserved; implementation pending."
-        )
-        step_records.append({"name": "deconvolution", "parameters": {}})
-
-    if workflow.particle_detection:
-        logger.info(
-            "Particle detection selected. Workflow hook is reserved; implementation pending."
-        )
-        step_records.append({"name": "particle_detection", "parameters": {}})
-
-    if workflow.registration:
-        logger.info("Running registration workflow.")
-        from clearex.registration import ImageRegistration
-
-        ImageRegistration()
-        step_records.append({"name": "registration", "parameters": {}})
-
-    if workflow.visualization:
-        logger.info("Launching visualization workflow.")
-        print("Launching visualization")
-        step_records.append({"name": "visualization", "parameters": {}})
-
-    if provenance_store_path and is_zarr_store_path(provenance_store_path):
-        provenance_workflow = WorkflowConfig(
-            file=input_path,
-            prefer_dask=workflow.prefer_dask,
-            chunks=workflow.chunks,
-            deconvolution=workflow.deconvolution,
-            particle_detection=workflow.particle_detection,
-            registration=workflow.registration,
-            visualization=workflow.visualization,
-        )
-        try:
-            run_id = persist_run_provenance(
-                zarr_path=provenance_store_path,
-                workflow=provenance_workflow,
-                image_info=image_info,
-                steps=step_records or None,
-                started_at_utc=run_started_at,
-                ended_at_utc=datetime.now(tz=timezone.utc),
-                repo_root=Path(__file__).resolve().parents[2],
-            )
+        if workflow.particle_detection:
             logger.info(
-                f"Persisted provenance run to store {provenance_store_path} "
-                f"with run_id={run_id}."
+                "Particle detection selected. Workflow hook is reserved; implementation pending."
             )
-        except Exception as exc:
-            logger.warning(
-                f"Failed to persist provenance in Zarr store "
-                f"{provenance_store_path}: {exc}"
+            step_records.append({"name": "particle_detection", "parameters": {}})
+
+        if workflow.registration:
+            logger.info("Running registration workflow.")
+            from clearex.registration import ImageRegistration
+
+            ImageRegistration()
+            step_records.append({"name": "registration", "parameters": {}})
+
+        if workflow.visualization:
+            logger.info("Launching visualization workflow.")
+            print("Launching visualization")
+            step_records.append({"name": "visualization", "parameters": {}})
+
+        if provenance_store_path and is_zarr_store_path(provenance_store_path):
+            provenance_workflow = WorkflowConfig(
+                file=input_path,
+                prefer_dask=workflow.prefer_dask,
+                dask_backend=workflow.dask_backend,
+                chunks=workflow.chunks,
+                deconvolution=workflow.deconvolution,
+                particle_detection=workflow.particle_detection,
+                registration=workflow.registration,
+                visualization=workflow.visualization,
+                zarr_save=workflow.zarr_save,
             )
+            try:
+                run_id = persist_run_provenance(
+                    zarr_path=provenance_store_path,
+                    workflow=provenance_workflow,
+                    image_info=image_info,
+                    steps=step_records or None,
+                    started_at_utc=run_started_at,
+                    ended_at_utc=datetime.now(tz=timezone.utc),
+                    repo_root=Path(__file__).resolve().parents[2],
+                )
+                logger.info(
+                    f"Persisted provenance run to store {provenance_store_path} "
+                    f"with run_id={run_id}."
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to persist provenance in Zarr store "
+                    f"{provenance_store_path}: {exc}"
+                )
 
 
 def main() -> None:

@@ -48,7 +48,14 @@ import zarr
 
 # Local Imports
 from clearex.io.read import ImageInfo
-from clearex.workflow import WorkflowConfig, format_chunks
+from clearex.workflow import (
+    WorkflowConfig,
+    dask_backend_to_dict,
+    format_dask_backend_summary,
+    format_chunks,
+    format_zarr_chunks_ptczyx,
+    format_zarr_pyramid_ptczyx,
+)
 
 ArrayLike = Union[np.ndarray, da.Array]
 
@@ -341,6 +348,16 @@ def _default_steps(workflow: WorkflowConfig) -> list[Dict[str, Any]]:
                 "parameters": {
                     "prefer_dask": workflow.prefer_dask,
                     "chunks": format_chunks(workflow.chunks) or None,
+                    "dask_backend_summary": format_dask_backend_summary(
+                        workflow.dask_backend
+                    ),
+                    "dask_backend": dask_backend_to_dict(workflow.dask_backend),
+                    "zarr_chunks_ptczyx": format_zarr_chunks_ptczyx(
+                        workflow.zarr_save.chunks_ptczyx
+                    ),
+                    "zarr_pyramid_ptczyx": format_zarr_pyramid_ptczyx(
+                        workflow.zarr_save.pyramid_ptczyx
+                    ),
                 },
             }
         )
@@ -604,7 +621,15 @@ def persist_run_provenance(
     workflow_payload = {
         "file": workflow.file,
         "prefer_dask": workflow.prefer_dask,
+        "dask_backend_summary": format_dask_backend_summary(workflow.dask_backend),
+        "dask_backend": dask_backend_to_dict(workflow.dask_backend),
         "chunks": format_chunks(workflow.chunks) or None,
+        "zarr_chunks_ptczyx": format_zarr_chunks_ptczyx(
+            workflow.zarr_save.chunks_ptczyx
+        ),
+        "zarr_pyramid_ptczyx": format_zarr_pyramid_ptczyx(
+            workflow.zarr_save.pyramid_ptczyx
+        ),
         "deconvolution": workflow.deconvolution,
         "particle_detection": workflow.particle_detection,
         "registration": workflow.registration,

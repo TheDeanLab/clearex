@@ -84,6 +84,10 @@ def test_persist_run_provenance_hash_chain(tmp_path: Path):
 
     assert root["provenance"].attrs["run_count"] == 2
     assert record_2["hash_chain"]["prev_hash"] == record_1["hash_chain"]["self_hash"]
+    assert record_1["workflow"]["dask_backend_summary"].startswith("LocalCluster")
+    assert record_1["workflow"]["dask_backend"]["mode"] == "local_cluster"
+    assert record_1["workflow"]["zarr_chunks_ptczyx"] == "p=1, t=1, c=1, z=256, y=256, x=256"
+    assert "z=1,2,4,8" in record_1["workflow"]["zarr_pyramid_ptczyx"]
 
     valid, issues = verify_provenance_chain(store_path)
     assert valid is True

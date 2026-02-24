@@ -20,6 +20,7 @@ This file summarizes the current engineering strategy for agent-driven changes i
 
 - Default mode is GUI-first.
 - Headless operation must remain first-class and easy to run.
+- GUI-selected Dask backend is the execution engine for ingestion, loading, and all analysis operations.
 - CLI controls:
   - `--gui` / `--no-gui`
   - `--headless` (overrides GUI launch)
@@ -30,12 +31,19 @@ This file summarizes the current engineering strategy for agent-driven changes i
   - user may select `experiment.yml` in GUI/CLI,
   - backend resolves source acquisition data path from experiment metadata,
   - backend initializes/uses canonical 6D analysis Zarr store.
+- First operation for acquisition inputs is canonical Zarr establishment:
+  - ingest/convert acquisition data into canonical Zarr analysis store,
+  - apply GUI-selected chunking + pyramid configuration during ingest,
+  - then run analysis steps against that established store.
+- If source is already Zarr/N5, prefer reusing that existing directory/object store path and augment it with ClearEx analysis/provenance layout (do not force duplicate copies).
 
 ## `workflow.py` Contract
 
 - `WorkflowConfig` is the shared schema used by both GUI and headless paths.
+- `WorkflowConfig` carries both storage config (`ZarrSaveConfig`) and backend config (`DaskBackendConfig`) so GUI and runtime stay aligned.
 - `parse_chunks` is the single source of truth for validating chunk specs.
 - `format_chunks` is the single source of truth for rendering chunk specs back into UI text.
+- Dask backend and Zarr-save helpers (validation, summary, serialization) should stay centralized in `workflow.py`.
 - Keep parsing/formatting logic centralized here to avoid drift between CLI and GUI behavior.
 
 ## GUI Strategy
@@ -46,6 +54,14 @@ This file summarizes the current engineering strategy for agent-driven changes i
   - support direct selection of Navigate `experiment.yml`,
   - metadata loading via `ImageOpener`,
   - metadata display (path, shape, dtype, axes, channels, positions, image size, time points, pixel size, metadata keys),
+  - Dask backend configuration popup:
+    - `LocalCluster`, `SLURMRunner`, `SLURMCluster`,
+    - mode guidance text for operators,
+    - required scheduler file for `SLURMRunner`,
+    - required operator email input for `SLURMCluster` notifications,
+  - Zarr save configuration popup:
+    - chunk sizes in `(p, t, c, z, y, x)`,
+    - pyramid factors per axis,
   - workflow selection toggles.
 - Metadata panel should stay operator-friendly and compact. Current design uses a 2-column key/value layout.
 - Visual direction: clean modern dark theme.
@@ -64,13 +80,21 @@ This file summarizes the current engineering strategy for agent-driven changes i
 - Resolve source data path from experiment metadata and on-disk candidates.
 - For TIFF-family acquisitions, prefer primary stack files and avoid selecting `MIP` preview outputs as source data.
 - Zarr/N5 ingestion should support nested group layouts (not only root-level arrays).
+- Ingestion should target directory/object-store-friendly Zarr layouts (many chunk objects/files) to maximize safe parallel writes without single-file-handle contention.
 - Canonical analysis store path: `analysis_6d.zarr` in experiment save directory.
 - Canonical array layout: `(t, p, c, z, y, x)`.
+- For new conversion, chunking and pyramid factors come from GUI/backend `WorkflowConfig`.
+- After canonical data array ingest/establishment, treat base image data as read-only for downstream analysis stages.
 
 ## Parallelism Strategy
 
-- Default compute mode: local Dask distributed execution.
-- Cluster mode: allow connecting to external Dask scheduler for multi-node scale-out.
+- Supported Dask backend modes:
+  - `LocalCluster` for local distributed execution,
+  - `SLURMRunner` for attaching to scheduler-file-driven cluster sessions,
+  - `SLURMCluster` for direct Slurm jobqueue worker launch from ClearEx.
+- `SLURMCluster` configuration should expose and persist key job/scheduler fields (cores/processes/memory/interface/walltime/queue/job directives/dashboard/idle timeout/allowed failures).
+- Operator-provided email must be used for Slurm notification directives (never hardcode personal addresses).
+- Backend selection should be honored for ingestion, loading, and analysis execution.
 - Zarr writes should be parallelized only for non-overlapping regions/chunks.
 - Large outputs follow latest-only replacement semantics (`results/<analysis>/latest`), while provenance remains append-only.
 
@@ -94,6 +118,8 @@ This file summarizes the current engineering strategy for agent-driven changes i
 - run identifier (`run_id`) and UTC timestamps (start/end)
 - ordered analysis steps and exact parameter values
 - input data locator and input fingerprint/hash
+- effective Dask backend mode + parameters
+- effective Zarr ingest/save chunk + pyramid settings
 - software identity:
   - git commit SHA
   - git branch
@@ -106,6 +132,7 @@ This file summarizes the current engineering strategy for agent-driven changes i
 - Co-locate provenance with dataset when possible (for example in Zarr metadata paths), while keeping records lightweight.
 - Prefer append-only provenance records; do not overwrite prior run records.
 - Keep a `latest` pointer/reference for convenience, but preserve full history.
+- Base ingested source image data in canonical store is immutable after ingest; analysis products evolve independently.
 - Large analysis arrays are not append-only by default; they are overwritten at canonical latest paths to control storage growth.
 
 ### Integrity policy

@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 # Local Imports
 from clearex.io.experiment import (
@@ -41,7 +41,29 @@ from clearex.io.experiment import (
     resolve_experiment_data_path,
 )
 from clearex.io.read import ImageInfo, ImageOpener
-from clearex.workflow import WorkflowConfig, format_chunks, parse_chunks
+from clearex.workflow import (
+    DASK_BACKEND_LOCAL_CLUSTER,
+    DASK_BACKEND_MODE_LABELS,
+    DASK_BACKEND_SLURM_CLUSTER,
+    DASK_BACKEND_SLURM_RUNNER,
+    DEFAULT_ZARR_CHUNKS_PTCZYX,
+    DEFAULT_ZARR_PYRAMID_PTCZYX,
+    DEFAULT_SLURM_CLUSTER_JOB_EXTRA_DIRECTIVES,
+    DaskBackendConfig,
+    LocalClusterConfig,
+    PTCZYX_AXES,
+    SlurmClusterConfig,
+    SlurmRunnerConfig,
+    WorkflowConfig,
+    ZarrSaveConfig,
+    format_dask_backend_summary,
+    format_chunks,
+    format_pyramid_levels,
+    format_zarr_chunks_ptczyx,
+    format_zarr_pyramid_ptczyx,
+    parse_chunks,
+    parse_pyramid_levels,
+)
 
 # Third Party Imports
 try:
@@ -49,8 +71,10 @@ try:
     from PyQt6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QComboBox,
         QDialog,
         QFileDialog,
+        QFormLayout,
         QFrame,
         QGridLayout,
         QGroupBox,
@@ -58,8 +82,12 @@ try:
         QLabel,
         QLineEdit,
         QMessageBox,
+        QPlainTextEdit,
         QPushButton,
+        QSpinBox,
+        QStackedWidget,
         QVBoxLayout,
+        QWidget,
     )
 
     HAS_PYQT6 = True
@@ -260,7 +288,827 @@ def _apply_experiment_overrides(
     return out
 
 
+def _format_zarr_save_summary(config: ZarrSaveConfig) -> str:
+    """Build a compact GUI summary string for Zarr save settings.
+
+    Parameters
+    ----------
+    config : ZarrSaveConfig
+        Zarr save configuration selected in the dialog.
+
+    Returns
+    -------
+    str
+        Single-line summary including chunk sizes and pyramid factors.
+    """
+    chunks_text = format_zarr_chunks_ptczyx(config.chunks_ptczyx)
+    pyramid_text = format_zarr_pyramid_ptczyx(config.pyramid_ptczyx)
+    return f"Chunks: {chunks_text} | Pyramid: {pyramid_text}"
+
+
+def _dask_mode_help_text(mode: str) -> str:
+    """Return operator-focused guidance text for a Dask backend mode.
+
+    Parameters
+    ----------
+    mode : str
+        Dask backend mode key.
+
+    Returns
+    -------
+    str
+        Short descriptive help text.
+    """
+    if mode == DASK_BACKEND_LOCAL_CLUSTER:
+        return (
+            "LocalCluster runs scheduler/workers on this machine. "
+            "Best for laptop/workstation development and single-node runs."
+        )
+    if mode == DASK_BACKEND_SLURM_RUNNER:
+        return (
+            "SLURMRunner attaches to an existing scheduler file. "
+            "Use when your cluster launcher already created a scheduler endpoint."
+        )
+    return (
+        "SLURMCluster submits worker jobs to Slurm directly from ClearEx. "
+        "Best for scalable multi-node execution from one configuration dialog."
+    )
+
+
 if HAS_PYQT6:
+
+    class ZarrSaveConfigDialog(QDialog):
+        """Dialog for configuring analysis-store Zarr chunking and pyramid factors.
+
+        Parameters
+        ----------
+        initial : ZarrSaveConfig
+            Initial Zarr save configuration used to populate controls.
+        parent : QDialog, optional
+            Parent dialog widget.
+
+        Attributes
+        ----------
+        result_config : ZarrSaveConfig, optional
+            Selected configuration when dialog is accepted.
+        """
+
+        def __init__(
+            self,
+            initial: ZarrSaveConfig,
+            parent: Optional[QDialog] = None,
+        ) -> None:
+            """Initialize dialog widgets with the provided configuration.
+
+            Parameters
+            ----------
+            initial : ZarrSaveConfig
+                Initial Zarr save configuration.
+            parent : QDialog, optional
+                Parent dialog widget.
+
+            Returns
+            -------
+            None
+                Dialog is initialized in-place.
+            """
+            super().__init__(parent)
+            self.setWindowTitle("Zarr Save Settings")
+            self.setMinimumWidth(760)
+            self.result_config: Optional[ZarrSaveConfig] = None
+            self._chunk_inputs: Dict[str, QSpinBox] = {}
+            self._pyramid_inputs: Dict[str, QLineEdit] = {}
+
+            self._build_ui()
+            self._hydrate(initial)
+
+        def _build_ui(self) -> None:
+            """Construct dialog controls and wire signals.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widgets are created and connected in-place.
+            """
+            root = QVBoxLayout(self)
+            root.setSpacing(12)
+
+            description = QLabel(
+                "Configure Zarr save chunk sizes and downsampling pyramid in "
+                "(p, t, c, z, y, x) axis order."
+            )
+            description.setWordWrap(True)
+            root.addWidget(description)
+
+            chunk_group = QGroupBox("Chunk Size")
+            chunk_layout = QGridLayout(chunk_group)
+            chunk_layout.setHorizontalSpacing(16)
+            chunk_layout.setVerticalSpacing(8)
+
+            for row, axis_name in enumerate(PTCZYX_AXES):
+                axis_label = QLabel(axis_name.upper())
+                spinbox = QSpinBox()
+                spinbox.setRange(1, 65536)
+                spinbox.setSingleStep(1)
+                chunk_layout.addWidget(axis_label, row, 0)
+                chunk_layout.addWidget(spinbox, row, 1)
+                self._chunk_inputs[axis_name] = spinbox
+
+            root.addWidget(chunk_group)
+
+            pyramid_group = QGroupBox("Resolution Pyramid Factors")
+            pyramid_layout = QGridLayout(pyramid_group)
+            pyramid_layout.setHorizontalSpacing(16)
+            pyramid_layout.setVerticalSpacing(8)
+
+            for row, axis_name in enumerate(PTCZYX_AXES):
+                axis_label = QLabel(axis_name.upper())
+                levels_input = QLineEdit()
+                levels_input.setPlaceholderText("1,2,4,8")
+                levels_input.setToolTip(
+                    "Comma-separated positive factors. Each axis must start with 1."
+                )
+                pyramid_layout.addWidget(axis_label, row, 0)
+                pyramid_layout.addWidget(levels_input, row, 1)
+                self._pyramid_inputs[axis_name] = levels_input
+
+            root.addWidget(pyramid_group)
+
+            footer = QHBoxLayout()
+            self._defaults_button = QPushButton("Reset Defaults")
+            self._cancel_button = QPushButton("Cancel")
+            self._apply_button = QPushButton("Apply")
+            self._apply_button.setObjectName("runButton")
+            footer.addWidget(self._defaults_button)
+            footer.addStretch(1)
+            footer.addWidget(self._cancel_button)
+            footer.addWidget(self._apply_button)
+            root.addLayout(footer)
+
+            self._defaults_button.clicked.connect(self._on_reset_defaults)
+            self._cancel_button.clicked.connect(self.reject)
+            self._apply_button.clicked.connect(self._on_apply)
+
+        def _hydrate(self, initial: ZarrSaveConfig) -> None:
+            """Populate form controls from an initial Zarr save configuration.
+
+            Parameters
+            ----------
+            initial : ZarrSaveConfig
+                Initial values for chunk sizes and pyramid factors.
+
+            Returns
+            -------
+            None
+                Widget values are updated in-place.
+            """
+            for axis_name, chunk_size in zip(
+                PTCZYX_AXES, initial.chunks_ptczyx, strict=False
+            ):
+                self._chunk_inputs[axis_name].setValue(int(chunk_size))
+
+            for axis_name, factors in zip(
+                PTCZYX_AXES, initial.pyramid_ptczyx, strict=False
+            ):
+                self._pyramid_inputs[axis_name].setText(format_pyramid_levels(factors))
+
+        def _on_reset_defaults(self) -> None:
+            """Restore default chunking and pyramid settings.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Form controls are reset in-place.
+            """
+            self._hydrate(
+                ZarrSaveConfig(
+                    chunks_ptczyx=DEFAULT_ZARR_CHUNKS_PTCZYX,
+                    pyramid_ptczyx=DEFAULT_ZARR_PYRAMID_PTCZYX,
+                )
+            )
+
+        def _on_apply(self) -> None:
+            """Validate user input and return selected Zarr configuration.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Stores the selected :class:`ZarrSaveConfig` and accepts the
+                dialog when validation succeeds.
+
+            Raises
+            ------
+            None
+                Validation issues are handled via GUI warnings.
+            """
+            chunks_ptczyx = tuple(
+                self._chunk_inputs[axis_name].value() for axis_name in PTCZYX_AXES
+            )
+
+            pyramid_levels: list[Tuple[int, ...]] = []
+            for axis_name in PTCZYX_AXES:
+                text = self._pyramid_inputs[axis_name].text()
+                try:
+                    parsed = parse_pyramid_levels(text, axis_name=axis_name)
+                except ValueError as exc:
+                    QMessageBox.warning(self, "Invalid Pyramid Factors", str(exc))
+                    return
+                pyramid_levels.append(parsed)
+
+            try:
+                self.result_config = ZarrSaveConfig(
+                    chunks_ptczyx=(
+                        chunks_ptczyx[0],
+                        chunks_ptczyx[1],
+                        chunks_ptczyx[2],
+                        chunks_ptczyx[3],
+                        chunks_ptczyx[4],
+                        chunks_ptczyx[5],
+                    ),
+                    pyramid_ptczyx=(
+                        pyramid_levels[0],
+                        pyramid_levels[1],
+                        pyramid_levels[2],
+                        pyramid_levels[3],
+                        pyramid_levels[4],
+                        pyramid_levels[5],
+                    ),
+                )
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid Zarr Settings", str(exc))
+                return
+
+            self.accept()
+
+    class DaskBackendConfigDialog(QDialog):
+        """Dialog for configuring Dask backend execution mode and parameters.
+
+        Parameters
+        ----------
+        initial : DaskBackendConfig
+            Initial backend configuration used to populate controls.
+        parent : QDialog, optional
+            Parent dialog widget.
+
+        Attributes
+        ----------
+        result_config : DaskBackendConfig, optional
+            Selected configuration when dialog is accepted.
+        """
+
+        def __init__(
+            self,
+            initial: DaskBackendConfig,
+            parent: Optional[QDialog] = None,
+        ) -> None:
+            """Initialize dialog controls and hydrate from initial config.
+
+            Parameters
+            ----------
+            initial : DaskBackendConfig
+                Initial backend settings.
+            parent : QDialog, optional
+                Parent dialog widget.
+
+            Returns
+            -------
+            None
+                Dialog is initialized in-place.
+            """
+            super().__init__(parent)
+            self.setWindowTitle("Dask Backend Settings")
+            self.setMinimumWidth(820)
+            self.setMinimumHeight(760)
+            self.result_config: Optional[DaskBackendConfig] = None
+            self._mode_index: Dict[str, int] = {}
+
+            self._build_ui()
+            self._hydrate(initial)
+
+        def _build_ui(self) -> None:
+            """Build all backend configuration widgets and wire signals.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widgets are created and connected in-place.
+            """
+            root = QVBoxLayout(self)
+            root.setSpacing(12)
+
+            overview = QLabel(
+                "Choose how ClearEx orchestrates Dask workers for loading and analysis. "
+                "Mode guidance is shown below."
+            )
+            overview.setWordWrap(True)
+            root.addWidget(overview)
+
+            mode_row = QHBoxLayout()
+            mode_label = QLabel("Backend mode:")
+            self._mode_combo = QComboBox()
+            mode_specs = (
+                (DASK_BACKEND_LOCAL_CLUSTER, DASK_BACKEND_MODE_LABELS[DASK_BACKEND_LOCAL_CLUSTER]),
+                (DASK_BACKEND_SLURM_RUNNER, DASK_BACKEND_MODE_LABELS[DASK_BACKEND_SLURM_RUNNER]),
+                (DASK_BACKEND_SLURM_CLUSTER, DASK_BACKEND_MODE_LABELS[DASK_BACKEND_SLURM_CLUSTER]),
+            )
+            for idx, (mode_key, mode_text) in enumerate(mode_specs):
+                self._mode_combo.addItem(mode_text, mode_key)
+                self._mode_index[mode_key] = idx
+            mode_row.addWidget(mode_label)
+            mode_row.addWidget(self._mode_combo, 1)
+            root.addLayout(mode_row)
+
+            self._mode_help_label = QLabel("")
+            self._mode_help_label.setWordWrap(True)
+            self._mode_help_label.setObjectName("metadataFieldValue")
+            root.addWidget(self._mode_help_label)
+
+            self._mode_stack = QStackedWidget()
+            self._mode_stack.addWidget(self._build_local_cluster_page())
+            self._mode_stack.addWidget(self._build_slurm_runner_page())
+            self._mode_stack.addWidget(self._build_slurm_cluster_page())
+            root.addWidget(self._mode_stack, 1)
+
+            footer = QHBoxLayout()
+            self._defaults_button = QPushButton("Reset Defaults")
+            self._cancel_button = QPushButton("Cancel")
+            self._apply_button = QPushButton("Apply")
+            self._apply_button.setObjectName("runButton")
+            footer.addWidget(self._defaults_button)
+            footer.addStretch(1)
+            footer.addWidget(self._cancel_button)
+            footer.addWidget(self._apply_button)
+            root.addLayout(footer)
+
+            self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+            self._defaults_button.clicked.connect(self._on_reset_defaults)
+            self._cancel_button.clicked.connect(self.reject)
+            self._apply_button.clicked.connect(self._on_apply)
+
+        def _build_local_cluster_page(self) -> QWidget:
+            """Build page for LocalCluster options.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            QWidget
+                Constructed LocalCluster page widget.
+            """
+            page = QWidget()
+            form = QFormLayout(page)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+            self._local_workers_input = QLineEdit()
+            self._local_workers_input.setPlaceholderText("blank = auto")
+            form.addRow("Workers", self._local_workers_input)
+
+            self._local_threads_spin = QSpinBox()
+            self._local_threads_spin.setRange(1, 1024)
+            form.addRow("Threads per worker", self._local_threads_spin)
+
+            self._local_memory_input = QLineEdit()
+            self._local_memory_input.setPlaceholderText("auto")
+            form.addRow("Memory limit", self._local_memory_input)
+
+            self._local_directory_input = QLineEdit()
+            self._local_directory_browse = QPushButton("Browse")
+            self._local_directory_browse.clicked.connect(
+                lambda: self._browse_directory(self._local_directory_input)
+            )
+            local_dir_row = QHBoxLayout()
+            local_dir_row.addWidget(self._local_directory_input, 1)
+            local_dir_row.addWidget(self._local_directory_browse)
+            local_dir_widget = QWidget()
+            local_dir_widget.setLayout(local_dir_row)
+            form.addRow("Local directory", local_dir_widget)
+            return page
+
+        def _build_slurm_runner_page(self) -> QWidget:
+            """Build page for SLURMRunner options.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            QWidget
+                Constructed SLURMRunner page widget.
+            """
+            page = QWidget()
+            form = QFormLayout(page)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+            self._runner_scheduler_file_input = QLineEdit()
+            self._runner_scheduler_file_input.setPlaceholderText("Path to scheduler file")
+            self._runner_scheduler_file_browse = QPushButton("Browse")
+            self._runner_scheduler_file_browse.clicked.connect(
+                self._on_browse_scheduler_file
+            )
+            scheduler_row = QHBoxLayout()
+            scheduler_row.addWidget(self._runner_scheduler_file_input, 1)
+            scheduler_row.addWidget(self._runner_scheduler_file_browse)
+            scheduler_widget = QWidget()
+            scheduler_widget.setLayout(scheduler_row)
+            form.addRow("Scheduler file", scheduler_widget)
+
+            self._runner_wait_workers_spin = QSpinBox()
+            self._runner_wait_workers_spin.setRange(0, 100000)
+            self._runner_wait_workers_spin.setSpecialValueText("auto")
+            form.addRow("Wait for workers", self._runner_wait_workers_spin)
+            return page
+
+        def _build_slurm_cluster_page(self) -> QWidget:
+            """Build page for SLURMCluster options.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            QWidget
+                Constructed SLURMCluster page widget.
+            """
+            page = QWidget()
+            root = QVBoxLayout(page)
+            root.setSpacing(10)
+
+            worker_group = QGroupBox("Worker Job Settings")
+            worker_form = QFormLayout(worker_group)
+            worker_form.setFieldGrowthPolicy(
+                QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+            )
+
+            self._cluster_workers_spin = QSpinBox()
+            self._cluster_workers_spin.setRange(1, 100000)
+            worker_form.addRow("Workers (jobs)", self._cluster_workers_spin)
+
+            self._cluster_cores_spin = QSpinBox()
+            self._cluster_cores_spin.setRange(1, 1024)
+            worker_form.addRow("Cores", self._cluster_cores_spin)
+
+            self._cluster_processes_spin = QSpinBox()
+            self._cluster_processes_spin.setRange(1, 256)
+            worker_form.addRow("Processes", self._cluster_processes_spin)
+
+            self._cluster_memory_input = QLineEdit()
+            worker_form.addRow("Memory", self._cluster_memory_input)
+
+            self._cluster_local_directory_input = QLineEdit()
+            self._cluster_local_directory_browse = QPushButton("Browse")
+            self._cluster_local_directory_browse.clicked.connect(
+                lambda: self._browse_directory(self._cluster_local_directory_input)
+            )
+            cluster_local_dir_row = QHBoxLayout()
+            cluster_local_dir_row.addWidget(self._cluster_local_directory_input, 1)
+            cluster_local_dir_row.addWidget(self._cluster_local_directory_browse)
+            cluster_local_dir_widget = QWidget()
+            cluster_local_dir_widget.setLayout(cluster_local_dir_row)
+            worker_form.addRow("Local directory", cluster_local_dir_widget)
+
+            self._cluster_interface_input = QLineEdit()
+            worker_form.addRow("Interface", self._cluster_interface_input)
+
+            self._cluster_walltime_input = QLineEdit()
+            worker_form.addRow("Walltime", self._cluster_walltime_input)
+
+            self._cluster_job_name_input = QLineEdit()
+            worker_form.addRow("Job name", self._cluster_job_name_input)
+
+            self._cluster_queue_input = QLineEdit()
+            worker_form.addRow("Queue / partition", self._cluster_queue_input)
+
+            self._cluster_death_timeout_input = QLineEdit()
+            worker_form.addRow("Death timeout", self._cluster_death_timeout_input)
+
+            self._cluster_mail_user_input = QLineEdit()
+            self._cluster_mail_user_input.setPlaceholderText("name@institution.edu")
+            worker_form.addRow("Mail user", self._cluster_mail_user_input)
+
+            self._cluster_directives_input = QPlainTextEdit()
+            self._cluster_directives_input.setPlaceholderText(
+                "One Slurm directive per line"
+            )
+            self._cluster_directives_input.setMinimumHeight(110)
+            worker_form.addRow("Extra directives", self._cluster_directives_input)
+
+            scheduler_group = QGroupBox("Scheduler Options")
+            scheduler_form = QFormLayout(scheduler_group)
+            scheduler_form.setFieldGrowthPolicy(
+                QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+            )
+
+            self._cluster_dashboard_input = QLineEdit()
+            scheduler_form.addRow("Dashboard address", self._cluster_dashboard_input)
+
+            self._cluster_scheduler_interface_input = QLineEdit()
+            scheduler_form.addRow("Interface", self._cluster_scheduler_interface_input)
+
+            self._cluster_idle_timeout_input = QLineEdit()
+            scheduler_form.addRow("Idle timeout", self._cluster_idle_timeout_input)
+
+            self._cluster_allowed_failures_spin = QSpinBox()
+            self._cluster_allowed_failures_spin.setRange(1, 100000)
+            scheduler_form.addRow(
+                "Allowed failures", self._cluster_allowed_failures_spin
+            )
+
+            root.addWidget(worker_group)
+            root.addWidget(scheduler_group)
+            return page
+
+        def _browse_directory(self, target_input: QLineEdit) -> None:
+            """Prompt for a directory path and set the target field.
+
+            Parameters
+            ----------
+            target_input : QLineEdit
+                Line edit that receives the selected path.
+
+            Returns
+            -------
+            None
+                Target input is updated in-place.
+            """
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Select Directory",
+                str(Path.cwd()),
+            )
+            if directory:
+                target_input.setText(directory)
+
+        def _on_browse_scheduler_file(self) -> None:
+            """Prompt for a scheduler file path for SLURMRunner mode.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Scheduler file field is updated in-place.
+            """
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Dask Scheduler File",
+                str(Path.cwd()),
+                "All Files (*)",
+            )
+            if file_path:
+                self._runner_scheduler_file_input.setText(file_path)
+
+        def _on_mode_changed(self, _: int) -> None:
+            """Update mode-specific page and help text after mode selection.
+
+            Parameters
+            ----------
+            _ : int
+                Unused combo-box index provided by Qt.
+
+            Returns
+            -------
+            None
+                Stack page and help text are updated in-place.
+            """
+            mode = str(self._mode_combo.currentData())
+            mode_index = self._mode_index.get(mode, 0)
+            self._mode_stack.setCurrentIndex(mode_index)
+            self._mode_help_label.setText(_dask_mode_help_text(mode))
+
+        def _hydrate(self, initial: DaskBackendConfig) -> None:
+            """Populate all controls from an initial backend configuration.
+
+            Parameters
+            ----------
+            initial : DaskBackendConfig
+                Initial backend values.
+
+            Returns
+            -------
+            None
+                Widget values are updated in-place.
+            """
+            mode_index = self._mode_index.get(initial.mode, 0)
+            self._mode_combo.setCurrentIndex(mode_index)
+
+            local_cfg = initial.local_cluster
+            self._local_workers_input.setText(
+                "" if local_cfg.n_workers is None else str(local_cfg.n_workers)
+            )
+            self._local_threads_spin.setValue(local_cfg.threads_per_worker)
+            self._local_memory_input.setText(local_cfg.memory_limit)
+            self._local_directory_input.setText(local_cfg.local_directory or "")
+
+            runner_cfg = initial.slurm_runner
+            self._runner_scheduler_file_input.setText(runner_cfg.scheduler_file or "")
+            self._runner_wait_workers_spin.setValue(runner_cfg.wait_for_workers or 0)
+
+            cluster_cfg = initial.slurm_cluster
+            self._cluster_workers_spin.setValue(cluster_cfg.workers)
+            self._cluster_cores_spin.setValue(cluster_cfg.cores)
+            self._cluster_processes_spin.setValue(cluster_cfg.processes)
+            self._cluster_memory_input.setText(cluster_cfg.memory)
+            self._cluster_local_directory_input.setText(cluster_cfg.local_directory or "")
+            self._cluster_interface_input.setText(cluster_cfg.interface)
+            self._cluster_walltime_input.setText(cluster_cfg.walltime)
+            self._cluster_job_name_input.setText(cluster_cfg.job_name)
+            self._cluster_queue_input.setText(cluster_cfg.queue)
+            self._cluster_death_timeout_input.setText(cluster_cfg.death_timeout)
+            self._cluster_mail_user_input.setText(cluster_cfg.mail_user or "")
+            self._cluster_directives_input.setPlainText(
+                "\n".join(cluster_cfg.job_extra_directives)
+            )
+            self._cluster_dashboard_input.setText(cluster_cfg.dashboard_address)
+            self._cluster_scheduler_interface_input.setText(
+                cluster_cfg.scheduler_interface
+            )
+            self._cluster_idle_timeout_input.setText(cluster_cfg.idle_timeout)
+            self._cluster_allowed_failures_spin.setValue(cluster_cfg.allowed_failures)
+            self._on_mode_changed(mode_index)
+
+        def _on_reset_defaults(self) -> None:
+            """Reset all controls to default backend settings.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Form controls are reset in-place.
+            """
+            self._hydrate(DaskBackendConfig())
+
+        def _parse_optional_positive_int(
+            self,
+            text: str,
+            *,
+            field_name: str,
+        ) -> Optional[int]:
+            """Parse optional positive integers from line-edit text.
+
+            Parameters
+            ----------
+            text : str
+                Input text.
+            field_name : str
+                Field name used in validation messages.
+
+            Returns
+            -------
+            int, optional
+                Parsed integer or ``None`` if empty.
+
+            Raises
+            ------
+            ValueError
+                If text is not a positive integer.
+            """
+            stripped = text.strip()
+            if not stripped:
+                return None
+            try:
+                value = int(stripped)
+            except ValueError as exc:
+                raise ValueError(f"{field_name} must be an integer.") from exc
+            if value <= 0:
+                raise ValueError(f"{field_name} must be greater than zero.")
+            return value
+
+        def _on_apply(self) -> None:
+            """Validate user input and return selected backend configuration.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Stores :class:`DaskBackendConfig` and accepts dialog on success.
+
+            Raises
+            ------
+            None
+                Validation errors are handled via GUI warnings.
+            """
+            try:
+                local_cfg = LocalClusterConfig(
+                    n_workers=self._parse_optional_positive_int(
+                        self._local_workers_input.text(),
+                        field_name="Local workers",
+                    ),
+                    threads_per_worker=self._local_threads_spin.value(),
+                    memory_limit=self._local_memory_input.text().strip() or "auto",
+                    local_directory=self._local_directory_input.text().strip() or None,
+                )
+
+                runner_cfg = SlurmRunnerConfig(
+                    scheduler_file=(
+                        self._runner_scheduler_file_input.text().strip() or None
+                    ),
+                    wait_for_workers=(
+                        None
+                        if self._runner_wait_workers_spin.value() == 0
+                        else self._runner_wait_workers_spin.value()
+                    ),
+                )
+
+                raw_directives = [
+                    line.strip()
+                    for line in self._cluster_directives_input.toPlainText().splitlines()
+                    if line.strip()
+                ]
+                directives = (
+                    tuple(raw_directives)
+                    if raw_directives
+                    else DEFAULT_SLURM_CLUSTER_JOB_EXTRA_DIRECTIVES
+                )
+
+                mail_user = self._cluster_mail_user_input.text().strip()
+                cluster_cfg = SlurmClusterConfig(
+                    workers=self._cluster_workers_spin.value(),
+                    cores=self._cluster_cores_spin.value(),
+                    processes=self._cluster_processes_spin.value(),
+                    memory=self._cluster_memory_input.text().strip(),
+                    local_directory=(
+                        self._cluster_local_directory_input.text().strip() or None
+                    ),
+                    interface=self._cluster_interface_input.text().strip(),
+                    walltime=self._cluster_walltime_input.text().strip(),
+                    job_name=self._cluster_job_name_input.text().strip(),
+                    queue=self._cluster_queue_input.text().strip(),
+                    death_timeout=self._cluster_death_timeout_input.text().strip(),
+                    mail_user=mail_user or None,
+                    job_extra_directives=directives,
+                    dashboard_address=self._cluster_dashboard_input.text().strip(),
+                    scheduler_interface=self._cluster_scheduler_interface_input.text().strip(),
+                    idle_timeout=self._cluster_idle_timeout_input.text().strip(),
+                    allowed_failures=self._cluster_allowed_failures_spin.value(),
+                )
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid Dask Backend Settings", str(exc))
+                return
+
+            mode = str(self._mode_combo.currentData())
+            if mode == DASK_BACKEND_SLURM_RUNNER and runner_cfg.scheduler_file is None:
+                QMessageBox.warning(
+                    self,
+                    "Missing Scheduler File",
+                    "SLURMRunner mode requires a scheduler file path.",
+                )
+                return
+            if mode == DASK_BACKEND_SLURM_CLUSTER:
+                if cluster_cfg.mail_user is None:
+                    QMessageBox.warning(
+                        self,
+                        "Missing Email",
+                        "SLURMCluster mode requires a mail user email address.",
+                    )
+                    return
+                if "@" not in cluster_cfg.mail_user:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Email",
+                        "Mail user must look like a valid email address.",
+                    )
+                    return
+
+            try:
+                self.result_config = DaskBackendConfig(
+                    mode=mode,
+                    local_cluster=local_cfg,
+                    slurm_runner=runner_cfg,
+                    slurm_cluster=cluster_cfg,
+                )
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid Dask Backend Settings", str(exc))
+                return
+
+            self.accept()
 
     class ClearExDialog(QDialog):
         """GUI dialog for workflow selection and metadata preview.
@@ -297,6 +1145,8 @@ if HAS_PYQT6:
             self._opener = ImageOpener()
             self.result_config: Optional[WorkflowConfig] = None
             self._metadata_labels: Dict[str, QLabel] = {}
+            self._dask_backend_config: DaskBackendConfig = DaskBackendConfig()
+            self._zarr_save_config: ZarrSaveConfig = ZarrSaveConfig()
 
             self._build_ui()
             self._apply_theme()
@@ -355,6 +1205,36 @@ if HAS_PYQT6:
             options_row.addWidget(self._dask_checkbox)
             options_row.addWidget(self._chunks_input, 1)
             data_layout.addLayout(options_row)
+
+            dask_backend_row = QHBoxLayout()
+            dask_backend_label = QLabel("Dask backend:")
+            dask_backend_label.setObjectName("metadataFieldLabel")
+            self._dask_backend_summary = QLabel("n/a")
+            self._dask_backend_summary.setObjectName("metadataFieldValue")
+            self._dask_backend_summary.setWordWrap(True)
+            self._dask_backend_summary.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self._dask_backend_button = QPushButton("Edit Dask Backend")
+            dask_backend_row.addWidget(dask_backend_label)
+            dask_backend_row.addWidget(self._dask_backend_summary, 1)
+            dask_backend_row.addWidget(self._dask_backend_button)
+            data_layout.addLayout(dask_backend_row)
+
+            zarr_row = QHBoxLayout()
+            zarr_label = QLabel("Zarr save config:")
+            zarr_label.setObjectName("metadataFieldLabel")
+            self._zarr_config_summary = QLabel("n/a")
+            self._zarr_config_summary.setObjectName("zarrConfigSummary")
+            self._zarr_config_summary.setWordWrap(True)
+            self._zarr_config_summary.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self._zarr_config_button = QPushButton("Edit Zarr Settings")
+            zarr_row.addWidget(zarr_label)
+            zarr_row.addWidget(self._zarr_config_summary, 1)
+            zarr_row.addWidget(self._zarr_config_button)
+            data_layout.addLayout(zarr_row)
 
             root.addWidget(data_group)
 
@@ -427,6 +1307,8 @@ if HAS_PYQT6:
             self._browse_file_button.clicked.connect(self._on_browse_file)
             self._browse_directory_button.clicked.connect(self._on_browse_directory)
             self._load_button.clicked.connect(self._on_load_metadata)
+            self._dask_backend_button.clicked.connect(self._on_edit_dask_backend)
+            self._zarr_config_button.clicked.connect(self._on_edit_zarr_settings)
             self._cancel_button.clicked.connect(self.reject)
             self._run_button.clicked.connect(self._on_run)
 
@@ -445,11 +1327,90 @@ if HAS_PYQT6:
             """
             self._path_input.setText(initial.file or "")
             self._dask_checkbox.setChecked(initial.prefer_dask)
+            self._dask_backend_config = initial.dask_backend
             self._chunks_input.setText(format_chunks(initial.chunks))
             self._deconvolution_checkbox.setChecked(initial.deconvolution)
             self._particle_checkbox.setChecked(initial.particle_detection)
             self._registration_checkbox.setChecked(initial.registration)
             self._visualization_checkbox.setChecked(initial.visualization)
+            self._refresh_dask_backend_summary()
+            self._zarr_save_config = initial.zarr_save
+            self._refresh_zarr_save_summary()
+
+        def _refresh_dask_backend_summary(self) -> None:
+            """Refresh the main dialog summary for Dask backend settings.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Summary label is updated in-place.
+            """
+            summary = format_dask_backend_summary(self._dask_backend_config)
+            self._dask_backend_summary.setText(summary)
+            self._dask_backend_summary.setToolTip(summary)
+
+        def _on_edit_dask_backend(self) -> None:
+            """Launch the Dask backend settings popup and apply its result.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Updates stored backend config when dialog is accepted.
+            """
+            dialog = DaskBackendConfigDialog(
+                initial=self._dask_backend_config,
+                parent=self,
+            )
+            result = dialog.exec()
+            if result != QDialog.DialogCode.Accepted or dialog.result_config is None:
+                return
+            self._dask_backend_config = dialog.result_config
+            self._refresh_dask_backend_summary()
+            self._set_status("Updated Dask backend settings.")
+
+        def _refresh_zarr_save_summary(self) -> None:
+            """Refresh the main dialog summary for Zarr save settings.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Summary label is updated in-place.
+            """
+            summary = _format_zarr_save_summary(self._zarr_save_config)
+            self._zarr_config_summary.setText(summary)
+            self._zarr_config_summary.setToolTip(summary)
+
+        def _on_edit_zarr_settings(self) -> None:
+            """Launch the Zarr save settings popup and apply its result.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Updates stored Zarr save config when dialog is accepted.
+            """
+            dialog = ZarrSaveConfigDialog(initial=self._zarr_save_config, parent=self)
+            result = dialog.exec()
+            if result != QDialog.DialogCode.Accepted or dialog.result_config is None:
+                return
+            self._zarr_save_config = dialog.result_config
+            self._refresh_zarr_save_summary()
+            self._set_status("Updated Zarr save settings.")
 
         def _apply_theme(self) -> None:
             """Apply stylesheet-based dark theme for the dialog.
@@ -508,6 +1469,9 @@ if HAS_PYQT6:
                     font-weight: 600;
                 }
                 QLabel#metadataFieldValue {
+                    color: #d9e2f1;
+                }
+                QLabel#zarrConfigSummary {
                     color: #d9e2f1;
                 }
                 QLineEdit {
@@ -716,11 +1680,13 @@ if HAS_PYQT6:
             self.result_config = WorkflowConfig(
                 file=path,
                 prefer_dask=self._dask_checkbox.isChecked(),
+                dask_backend=self._dask_backend_config,
                 chunks=chunks,
                 deconvolution=self._deconvolution_checkbox.isChecked(),
                 particle_detection=self._particle_checkbox.isChecked(),
                 registration=self._registration_checkbox.isChecked(),
                 visualization=self._visualization_checkbox.isChecked(),
+                zarr_save=self._zarr_save_config,
             )
             self.accept()
 

@@ -677,7 +677,15 @@ def initialize_analysis_store(
     *,
     image_info: Optional[ImageInfo] = None,
     overwrite: bool = False,
-    chunks: tuple[int, int, int, int, int, int] = (1, 1, 1, 8, 256, 256),
+    chunks: tuple[int, int, int, int, int, int] = (1, 1, 1, 256, 256, 256),
+    pyramid_factors: tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+    ] = ((1,), (1,), (1,), (1, 2, 4, 8), (1, 2, 4, 8), (1, 2, 4, 8)),
     dtype: Optional[str] = None,
 ) -> Path:
     """Initialize canonical 6D analysis Zarr store for an experiment.
@@ -692,8 +700,11 @@ def initialize_analysis_store(
         Source image metadata used for dtype/shape inference.
     overwrite : bool, default=False
         Whether to overwrite existing ``data`` array when present.
-    chunks : tuple[int, int, int, int, int, int], default=(1,1,1,8,256,256)
+    chunks : tuple[int, int, int, int, int, int], default=(1,1,1,256,256,256)
         Target 6D chunking in ``(t, p, c, z, y, x)`` order.
+    pyramid_factors : tuple[tuple[int, ...], ...], optional
+        Downsampling factors in ``(t, p, c, z, y, x)`` order. Each axis must
+        provide at least one positive factor and start with ``1``.
     dtype : str, optional
         Explicit output dtype. Defaults to source dtype or ``uint16``.
 
@@ -701,7 +712,40 @@ def initialize_analysis_store(
     -------
     pathlib.Path
         Resolved Zarr store path.
+
+    Raises
+    ------
+    ValueError
+        If ``chunks`` or ``pyramid_factors`` are not valid for six axes.
     """
+    axis_names = ("t", "p", "c", "z", "y", "x")
+    if len(chunks) != len(axis_names):
+        raise ValueError(
+            "chunks must define six values in (t, p, c, z, y, x) order."
+        )
+    requested_chunks = tuple(int(chunk) for chunk in chunks)
+    if any(chunk <= 0 for chunk in requested_chunks):
+        raise ValueError("chunks values must be greater than zero.")
+
+    if len(pyramid_factors) != len(axis_names):
+        raise ValueError(
+            "pyramid_factors must define six axis entries in (t, p, c, z, y, x) order."
+        )
+    normalized_pyramid: list[tuple[int, ...]] = []
+    for axis_name, levels in zip(axis_names, pyramid_factors, strict=False):
+        parsed_levels = tuple(int(level) for level in levels)
+        if not parsed_levels:
+            raise ValueError(f"pyramid_factors for axis '{axis_name}' cannot be empty.")
+        if any(level <= 0 for level in parsed_levels):
+            raise ValueError(
+                f"pyramid_factors for axis '{axis_name}' must be greater than zero."
+            )
+        if parsed_levels[0] != 1:
+            raise ValueError(
+                f"pyramid_factors for axis '{axis_name}' must start with 1."
+            )
+        normalized_pyramid.append(parsed_levels)
+
     output_path = Path(zarr_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -724,19 +768,46 @@ def initialize_analysis_store(
         dtype = np.dtype(dtype).name
 
     normalized_chunks = tuple(
-        min(int(chunk), int(dim)) for chunk, dim in zip(chunks, shape, strict=False)
+        min(int(chunk), int(dim))
+        for chunk, dim in zip(requested_chunks, shape, strict=False)
     )
+    pyramid_payload = [list(levels) for levels in normalized_pyramid]
 
     root = zarr.open_group(str(output_path), mode="a")
+    root.require_group("results")
+    root.require_group("provenance")
     if "data" in root:
         if overwrite:
             del root["data"]
         else:
             existing = root["data"]
+            existing_chunks = (
+                [int(chunk) for chunk in existing.chunks]
+                if existing.chunks is not None
+                else None
+            )
             existing.attrs.update(
                 {
                     "axes": ["t", "p", "c", "z", "y", "x"],
                     "storage_policy": "latest_only",
+                    "chunk_shape_tpczyx": existing_chunks,
+                    "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
+                    "resolution_pyramid_factors_tpczyx": pyramid_payload,
+                }
+            )
+            root.attrs.update(
+                {
+                    "schema": "clearex.analysis_store.v1",
+                    "axes": ["t", "p", "c", "z", "y", "x"],
+                    "source_experiment": str(experiment.path),
+                    "navigate_experiment": experiment.to_metadata_dict(),
+                    "storage_policy_analysis_outputs": "latest_only",
+                    "storage_policy_provenance": "append_only",
+                    "chunk_shape_tpczyx": existing_chunks,
+                    "configured_chunks_tpczyx": [
+                        int(chunk) for chunk in requested_chunks
+                    ],
+                    "resolution_pyramid_factors_tpczyx": pyramid_payload,
                 }
             )
             return output_path
@@ -752,10 +823,11 @@ def initialize_analysis_store(
         {
             "axes": ["t", "p", "c", "z", "y", "x"],
             "storage_policy": "latest_only",
+            "chunk_shape_tpczyx": [int(chunk) for chunk in normalized_chunks],
+            "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
+            "resolution_pyramid_factors_tpczyx": pyramid_payload,
         }
     )
-    root.require_group("results")
-    root.require_group("provenance")
     root.attrs.update(
         {
             "schema": "clearex.analysis_store.v1",
@@ -764,6 +836,9 @@ def initialize_analysis_store(
             "navigate_experiment": experiment.to_metadata_dict(),
             "storage_policy_analysis_outputs": "latest_only",
             "storage_policy_provenance": "append_only",
+            "chunk_shape_tpczyx": [int(chunk) for chunk in normalized_chunks],
+            "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
+            "resolution_pyramid_factors_tpczyx": pyramid_payload,
         }
     )
     return output_path

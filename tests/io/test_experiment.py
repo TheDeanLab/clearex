@@ -132,6 +132,44 @@ def test_initialize_analysis_store_creates_6d_layout(tmp_path: Path):
     assert tuple(root["data"].shape) == (2, 3, 2, 4, 8, 16)
     assert list(root["data"].attrs["axes"]) == ["t", "p", "c", "z", "y", "x"]
     assert root.attrs["storage_policy_analysis_outputs"] == "latest_only"
+    assert list(root["data"].attrs["chunk_shape_tpczyx"]) == [1, 1, 1, 4, 8, 16]
+    assert list(root.attrs["configured_chunks_tpczyx"]) == [1, 1, 1, 256, 256, 256]
+
+
+def test_initialize_analysis_store_applies_custom_chunks_and_pyramid(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="H5")
+    experiment = load_navigate_experiment(experiment_path)
+    store_path = default_analysis_store_path(experiment)
+
+    image_info = ImageInfo(
+        path=tmp_path / "dummy.h5",
+        shape=(16, 64, 64),
+        dtype=np.uint16,
+        axes="ZYX",
+    )
+
+    initialize_analysis_store(
+        experiment=experiment,
+        zarr_path=store_path,
+        image_info=image_info,
+        overwrite=True,
+        chunks=(1, 1, 1, 8, 32, 32),
+        pyramid_factors=((1,), (1,), (1,), (1, 2, 4), (1, 2), (1, 2, 4)),
+    )
+
+    root = zarr.open_group(str(store_path), mode="r")
+    assert tuple(root["data"].chunks) == (1, 1, 1, 8, 32, 32)
+    assert list(root["data"].attrs["chunk_shape_tpczyx"]) == [1, 1, 1, 8, 32, 32]
+    assert list(root.attrs["configured_chunks_tpczyx"]) == [1, 1, 1, 8, 32, 32]
+    assert root.attrs["resolution_pyramid_factors_tpczyx"] == [
+        [1],
+        [1],
+        [1],
+        [1, 2, 4],
+        [1, 2],
+        [1, 2, 4],
+    ]
 
 
 def test_write_zyx_block_numpy(tmp_path: Path):
