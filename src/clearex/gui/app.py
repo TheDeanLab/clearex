@@ -337,6 +337,103 @@ def _dask_mode_help_text(mode: str) -> str:
     )
 
 
+def _popup_dialog_stylesheet() -> str:
+    """Return shared stylesheet for configuration popup dialogs.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        Qt stylesheet string for dark-themed popup dialogs.
+    """
+    return """
+        QDialog {
+            background-color: #0c1118;
+            color: #e6edf3;
+            font-family: "Segoe UI", "Avenir Next", sans-serif;
+            font-size: 13px;
+        }
+        QLabel {
+            color: #d9e2f1;
+        }
+        QGroupBox {
+            border: 1px solid #2a3442;
+            border-radius: 10px;
+            margin-top: 14px;
+            padding: 12px;
+            background-color: #111925;
+            font-weight: 600;
+            color: #9cc6ff;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 6px;
+            color: #9cc6ff;
+        }
+        QLineEdit, QSpinBox, QComboBox, QPlainTextEdit {
+            background-color: #0b1320;
+            border: 1px solid #2b3f58;
+            border-radius: 8px;
+            padding: 6px 8px;
+            color: #e6edf3;
+            selection-background-color: #2f81f7;
+        }
+        QComboBox {
+            padding-right: 24px;
+        }
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 22px;
+            border-left: 1px solid #2b3f58;
+            background-color: #162538;
+            border-top-right-radius: 8px;
+            border-bottom-right-radius: 8px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #0b1320;
+            color: #e6edf3;
+            border: 1px solid #2b3f58;
+            selection-background-color: #2f81f7;
+            selection-color: #f8fbff;
+            outline: 0;
+        }
+        QComboBox QAbstractItemView::item:selected {
+            background-color: #2f81f7;
+            color: #f8fbff;
+        }
+        QLineEdit::placeholder, QPlainTextEdit {
+            color: #a6b7d0;
+        }
+        QPushButton {
+            background-color: #1a2635;
+            border: 1px solid #2f4460;
+            border-radius: 8px;
+            padding: 8px 12px;
+            color: #dbe9ff;
+        }
+        QPushButton:hover {
+            background-color: #22354c;
+        }
+        QPushButton:pressed {
+            background-color: #182639;
+        }
+        QPushButton#runButton {
+            background-color: #2f81f7;
+            border-color: #2f81f7;
+            color: #f8fbff;
+            font-weight: 700;
+        }
+        QPushButton#runButton:hover {
+            background-color: #1f6cd8;
+        }
+    """
+
+
 def _configure_dask_backend_client(
     backend: DaskBackendConfig,
     *,
@@ -488,6 +585,7 @@ if HAS_PYQT6:
 
             self._build_ui()
             self._hydrate(initial)
+            self.setStyleSheet(_popup_dialog_stylesheet())
 
         def _build_ui(self) -> None:
             """Construct dialog controls and wire signals.
@@ -703,6 +801,7 @@ if HAS_PYQT6:
 
             self._build_ui()
             self._hydrate(initial)
+            self.setStyleSheet(_popup_dialog_stylesheet())
 
         def _build_ui(self) -> None:
             """Build all backend configuration widgets and wire signals.
