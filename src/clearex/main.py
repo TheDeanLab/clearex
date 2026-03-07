@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import argparse
 import logging
-import os
 
 
 # Third Party Imports
@@ -44,6 +43,7 @@ from clearex.io.experiment import (
     is_navigate_experiment_file,
     load_navigate_experiment,
     materialize_experiment_data_store,
+    resolve_data_store_path,
     resolve_experiment_data_path,
 )
 from clearex.io.cli import create_parser, display_logo
@@ -61,6 +61,82 @@ from clearex.workflow import (
     format_zarr_pyramid_ptczyx,
     parse_chunks,
 )
+
+
+def _is_zarr_like_path(path: Path) -> bool:
+    """Return whether a path represents a Zarr/N5 directory-style store name.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Path to evaluate.
+
+    Returns
+    -------
+    bool
+        ``True`` when suffix is ``.zarr`` or ``.n5``.
+    """
+    return path.suffix.lower() in {".zarr", ".n5"}
+
+
+def _resolve_log_directory_for_workflow(workflow: WorkflowConfig) -> Path:
+    """Resolve directory path for runtime log file placement.
+
+    Parameters
+    ----------
+    workflow : WorkflowConfig
+        Effective workflow selected from CLI/GUI.
+
+    Returns
+    -------
+    pathlib.Path
+        Directory where runtime logs should be initialized.
+
+    Raises
+    ------
+    Exception
+        Propagates path-resolution errors from experiment metadata parsing.
+
+    Notes
+    -----
+    For Navigate ``experiment.yml`` inputs, logs are colocated with the
+    canonical data store path resolved by ingestion policy.
+    """
+    if not workflow.file:
+        return Path.cwd().resolve()
+
+    selected = Path(workflow.file).expanduser().resolve()
+    if is_navigate_experiment_file(selected):
+        experiment = load_navigate_experiment(selected)
+        source_data_path = resolve_experiment_data_path(experiment)
+        store_path = resolve_data_store_path(experiment, source_data_path)
+        return store_path if _is_zarr_like_path(store_path) else store_path.parent
+
+    if _is_zarr_like_path(selected):
+        return selected
+    return selected.parent if selected.parent != Path("") else Path.cwd().resolve()
+
+
+def _create_bootstrap_logger() -> logging.Logger:
+    """Create a minimal stdout-only logger used before workflow is known.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    logging.Logger
+        Logger configured with a single stream handler.
+    """
+    logger = logging.getLogger("clearex.bootstrap")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        logger.addHandler(handler)
+    return logger
 
 
 def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
@@ -561,14 +637,10 @@ def main() -> None:
     """
     display_logo()
 
-    # Initialize Logging
-    logger = initiate_logger(os.getcwd())
-    logger.info("Starting ClearEx")
-
     # Parse command line arguments.
     parser = create_parser()
     args = parser.parse_args()
-    logger.info(f"Command line arguments: {args}")
+    bootstrap_logger = _create_bootstrap_logger()
 
     try:
         workflow = _build_workflow_config(args)
@@ -576,10 +648,28 @@ def main() -> None:
         parser.error(str(exc))
         return
 
-    workflow = _apply_gui_if_requested(workflow=workflow, args=args, logger=logger)
+    workflow = _apply_gui_if_requested(
+        workflow=workflow,
+        args=args,
+        logger=bootstrap_logger,
+    )
     if workflow is None:
-        logger.info("No workflow selected. Exiting.")
+        bootstrap_logger.info("No workflow selected. Exiting.")
         return
+
+    try:
+        log_directory = _resolve_log_directory_for_workflow(workflow)
+    except Exception as exc:
+        log_directory = Path.cwd().resolve()
+        bootstrap_logger.warning(
+            "Failed to resolve workflow log directory "
+            f"({type(exc).__name__}: {exc}); using {log_directory}."
+        )
+
+    logger = initiate_logger(log_directory)
+    logger.info("Starting ClearEx")
+    logger.info(f"Command line arguments: {args}")
+    logger.info(f"Log directory: {log_directory}")
 
     _run_workflow(workflow=workflow, logger=logger)
 
