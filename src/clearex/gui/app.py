@@ -72,7 +72,8 @@ from clearex.workflow import (
 import zarr
 
 try:
-    from PyQt6.QtCore import QEvent, QObject, QThread, Qt, pyqtSignal
+    from PyQt6.QtCore import QEvent, QMimeData, QObject, QThread, Qt, pyqtSignal
+    from PyQt6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
     from PyQt6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -1736,6 +1737,7 @@ if HAS_PYQT6:
             self.setWindowTitle("ClearEx")
             self.setMinimumWidth(960)
             self.setMinimumHeight(700)
+            self.setAcceptDrops(True)
 
             self._opener = ImageOpener()
             self.result_config: Optional[WorkflowConfig] = None
@@ -1786,6 +1788,11 @@ if HAS_PYQT6:
             self._path_input.setPlaceholderText(
                 "Select Navigate experiment.yml or experiment.yaml"
             )
+            self._path_input.setToolTip(
+                "Drop Navigate experiment.yml/experiment.yaml here."
+            )
+            self._path_input.setAcceptDrops(True)
+            self._path_input.installEventFilter(self)
             self._browse_file_button = QPushButton("Browse Experiment")
             self._load_button = QPushButton("Load Metadata")
             path_row.addWidget(self._path_input, 1)
@@ -2091,6 +2098,175 @@ if HAS_PYQT6:
                 Label text is updated in-place.
             """
             self._status_label.setText(text)
+
+        def _resolve_dropped_experiment_path(
+            self,
+            mime_data: QMimeData,
+        ) -> Optional[Path]:
+            """Resolve a dropped Navigate experiment descriptor path.
+
+            Parameters
+            ----------
+            mime_data : QMimeData
+                Drag/drop payload to inspect.
+
+            Returns
+            -------
+            pathlib.Path, optional
+                Resolved local path to ``experiment.yml`` or
+                ``experiment.yaml`` when available, otherwise ``None``.
+            """
+            if not mime_data.hasUrls():
+                return None
+
+            for url in mime_data.urls():
+                if not url.isLocalFile():
+                    continue
+
+                candidate_path = Path(url.toLocalFile()).expanduser()
+                if candidate_path.is_dir():
+                    for name in ("experiment.yml", "experiment.yaml"):
+                        experiment_path = candidate_path / name
+                        if experiment_path.exists():
+                            return experiment_path.resolve()
+                    continue
+
+                if candidate_path.exists() and is_navigate_experiment_file(candidate_path):
+                    return candidate_path.resolve()
+            return None
+
+        def _can_accept_experiment_drop(self, mime_data: QMimeData) -> bool:
+            """Determine whether dropped payload contains an experiment path.
+
+            Parameters
+            ----------
+            mime_data : QMimeData
+                Drag/drop payload to inspect.
+
+            Returns
+            -------
+            bool
+                ``True`` when a supported local Navigate experiment path is
+                present, otherwise ``False``.
+            """
+            return self._resolve_dropped_experiment_path(mime_data) is not None
+
+        def _apply_experiment_drop(self, mime_data: QMimeData) -> bool:
+            """Apply dropped Navigate experiment path to the setup input field.
+
+            Parameters
+            ----------
+            mime_data : QMimeData
+                Drag/drop payload to inspect.
+
+            Returns
+            -------
+            bool
+                ``True`` when a supported path was applied, otherwise ``False``.
+            """
+            experiment_path = self._resolve_dropped_experiment_path(mime_data)
+            if experiment_path is None:
+                return False
+
+            self._path_input.setText(str(experiment_path))
+            self._loaded_experiment = None
+            self._loaded_experiment_path = None
+            self._loaded_source_data_path = None
+            self._set_status(
+                "Experiment path set from drag-and-drop. Click Load Metadata or Next."
+            )
+            return True
+
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+            """Handle drag/drop events routed through the path input widget.
+
+            Parameters
+            ----------
+            watched : QObject
+                Widget emitting the event.
+            event : QEvent
+                Qt event object to evaluate.
+
+            Returns
+            -------
+            bool
+                ``True`` when the event was handled, otherwise base class
+                event filter result.
+            """
+            if watched is self._path_input:
+                if isinstance(event, QDragEnterEvent):
+                    if self._can_accept_experiment_drop(event.mimeData()):
+                        event.acceptProposedAction()
+                        return True
+                    event.ignore()
+                    return True
+                if isinstance(event, QDragMoveEvent):
+                    if self._can_accept_experiment_drop(event.mimeData()):
+                        event.acceptProposedAction()
+                        return True
+                    event.ignore()
+                    return True
+                if isinstance(event, QDropEvent):
+                    if self._apply_experiment_drop(event.mimeData()):
+                        event.acceptProposedAction()
+                        return True
+                    event.ignore()
+                    return True
+            return super().eventFilter(watched, event)
+
+        def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+            """Accept dialog-level drags containing Navigate experiment files.
+
+            Parameters
+            ----------
+            event : QDragEnterEvent
+                Incoming drag-enter event.
+
+            Returns
+            -------
+            None
+                Event acceptance is updated in-place.
+            """
+            if self._can_accept_experiment_drop(event.mimeData()):
+                event.acceptProposedAction()
+                return
+            event.ignore()
+
+        def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+            """Accept dialog-level drag-move events for valid experiment files.
+
+            Parameters
+            ----------
+            event : QDragMoveEvent
+                Incoming drag-move event.
+
+            Returns
+            -------
+            None
+                Event acceptance is updated in-place.
+            """
+            if self._can_accept_experiment_drop(event.mimeData()):
+                event.acceptProposedAction()
+                return
+            event.ignore()
+
+        def dropEvent(self, event: QDropEvent) -> None:
+            """Handle dialog-level file drops for experiment path selection.
+
+            Parameters
+            ----------
+            event : QDropEvent
+                Incoming drop event.
+
+            Returns
+            -------
+            None
+                Path input and event acceptance are updated in-place.
+            """
+            if self._apply_experiment_drop(event.mimeData()):
+                event.acceptProposedAction()
+                return
+            event.ignore()
 
         def _on_browse_file(self) -> None:
             """Open file picker for Navigate experiment descriptor.
