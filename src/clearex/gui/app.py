@@ -31,7 +31,7 @@ from contextlib import ExitStack
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 # Local Imports
 from clearex.io.experiment import (
@@ -1514,6 +1514,192 @@ if HAS_PYQT6:
 
         def update_progress(self, percent: int, message: str) -> None:
             """Update progress bar and stage text.
+
+            Parameters
+            ----------
+            percent : int
+                Progress percentage value.
+            message : str
+                Human-readable stage text.
+
+            Returns
+            -------
+            None
+                Widget state is updated in-place.
+            """
+            self._progress.setValue(max(0, min(100, int(percent))))
+            self._message_label.setText(str(message))
+
+    class AnalysisExecutionWorker(QThread):
+        """Background worker that executes selected analysis workflows.
+
+        Parameters
+        ----------
+        workflow : WorkflowConfig
+            Workflow configuration selected in GUI.
+        run_callback : callable
+            Callback with signature ``(workflow, progress_callback)`` that
+            executes the workflow.
+
+        Attributes
+        ----------
+        progress_changed : pyqtSignal
+            Signal with ``(percent, message)`` progress payload.
+        succeeded : pyqtSignal
+            Signal emitted when execution completes successfully.
+        failed : pyqtSignal
+            Signal carrying an error message when execution fails.
+        """
+
+        progress_changed = pyqtSignal(int, str)
+        succeeded = pyqtSignal()
+        failed = pyqtSignal(str)
+
+        def __init__(
+            self,
+            *,
+            workflow: WorkflowConfig,
+            run_callback: Callable[
+                [WorkflowConfig, Callable[[int, str], None]],
+                None,
+            ],
+        ) -> None:
+            """Initialize worker state.
+
+            Parameters
+            ----------
+            workflow : WorkflowConfig
+                Workflow configuration selected in GUI.
+            run_callback : callable
+                Workflow execution callback.
+
+            Returns
+            -------
+            None
+                Worker is initialized in-place.
+            """
+            super().__init__()
+            self._workflow = workflow
+            self._run_callback = run_callback
+
+        def _emit_progress(self, percent: int, message: str) -> None:
+            """Emit progress updates from worker thread.
+
+            Parameters
+            ----------
+            percent : int
+                Progress percentage.
+            message : str
+                Human-readable status text.
+
+            Returns
+            -------
+            None
+                Signal side effects only.
+            """
+            self.progress_changed.emit(int(percent), str(message))
+
+        def run(self) -> None:
+            """Execute the configured workflow in the background.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Emits success/failure signals.
+            """
+            try:
+                self._emit_progress(1, "Starting analysis workflow...")
+                self._run_callback(self._workflow, self._emit_progress)
+                self._emit_progress(100, "Analysis workflow completed.")
+                self.succeeded.emit()
+            except Exception as exc:
+                self.failed.emit(str(exc))
+
+    class AnalysisExecutionProgressDialog(QDialog):
+        """Modal progress dialog for analysis execution.
+
+        Parameters
+        ----------
+        parent : QDialog, optional
+            Parent window.
+        """
+
+        def __init__(self, parent: Optional[QDialog] = None) -> None:
+            """Initialize analysis progress dialog widgets.
+
+            Parameters
+            ----------
+            parent : QDialog, optional
+                Parent window.
+
+            Returns
+            -------
+            None
+                Dialog is initialized in-place.
+            """
+            super().__init__(parent)
+            self.setWindowTitle("Running Analysis")
+            self.setMinimumWidth(640)
+            self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+
+            root = QVBoxLayout(self)
+            root.setSpacing(14)
+
+            title = QLabel("Executing selected analysis routines")
+            title.setObjectName("progressTitle")
+            root.addWidget(title)
+
+            self._message_label = QLabel("Preparing analysis...")
+            self._message_label.setObjectName("progressMessage")
+            self._message_label.setWordWrap(True)
+            root.addWidget(self._message_label)
+
+            self._progress = QProgressBar()
+            self._progress.setRange(0, 100)
+            self._progress.setValue(0)
+            self._progress.setTextVisible(True)
+            self._progress.setFormat("%p%")
+            root.addWidget(self._progress)
+
+            self.setStyleSheet(
+                """
+                QDialog {
+                    background-color: #0c1118;
+                    color: #e6edf3;
+                    font-family: "Segoe UI", "Avenir Next", sans-serif;
+                }
+                QLabel#progressTitle {
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: #f0f5ff;
+                }
+                QLabel#progressMessage {
+                    color: #a6b7d0;
+                }
+                QProgressBar {
+                    border: 1px solid #2a3442;
+                    border-radius: 8px;
+                    background-color: #111925;
+                    text-align: center;
+                    height: 22px;
+                    color: #e6edf3;
+                }
+                QProgressBar::chunk {
+                    border-radius: 7px;
+                    background: qlineargradient(
+                        x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #2f81f7, stop:1 #33c3a5
+                    );
+                }
+                """
+            )
+
+        def update_progress(self, percent: int, message: str) -> None:
+            """Update progress bar and stage message.
 
             Parameters
             ----------
@@ -3323,19 +3509,29 @@ if HAS_PYQT6:
             self.accept()
 
 
-def launch_gui(initial: Optional[WorkflowConfig] = None) -> Optional[WorkflowConfig]:
-    """Launch the PyQt dialog and return selected workflow configuration.
+def launch_gui(
+    initial: Optional[WorkflowConfig] = None,
+    run_callback: Optional[
+        Callable[[WorkflowConfig, Callable[[int, str], None]], None]
+    ] = None,
+) -> Optional[WorkflowConfig]:
+    """Launch the PyQt GUI for workflow selection/execution.
 
     Parameters
     ----------
     initial : WorkflowConfig, optional
-        Initial workflow values to pre-populate the GUI controls.
+        Initial workflow values to pre-populate GUI controls.
+    run_callback : callable, optional
+        Optional execution callback. When provided, the GUI runs in iterative
+        mode: after each analysis run, the analysis-selection dialog is shown
+        again so the user can select the next task. Signature must be
+        ``(workflow, progress_callback)``.
 
     Returns
     -------
     WorkflowConfig, optional
-        User-selected workflow configuration. Returns ``None`` when the dialog
-        is cancelled.
+        In single-run mode (no ``run_callback``), returns the selected workflow.
+        In iterative mode, returns ``None`` when the user explicitly exits.
 
     Raises
     ------
@@ -3361,14 +3557,106 @@ def launch_gui(initial: Optional[WorkflowConfig] = None) -> Optional[WorkflowCon
     if setup_result != QDialog.DialogCode.Accepted or setup_dialog.result_config is None:
         selected = None
     else:
-        analysis_dialog = AnalysisSelectionDialog(initial=setup_dialog.result_config)
-        analysis_result = analysis_dialog.exec()
-        selected = (
-            analysis_dialog.result_config
-            if analysis_result == QDialog.DialogCode.Accepted
-            else None
-        )
+        if run_callback is None:
+            analysis_dialog = AnalysisSelectionDialog(initial=setup_dialog.result_config)
+            analysis_result = analysis_dialog.exec()
+            selected = (
+                analysis_dialog.result_config
+                if analysis_result == QDialog.DialogCode.Accepted
+                else None
+            )
+        else:
+            current = setup_dialog.result_config
+            selected = None
+            while True:
+                analysis_dialog = AnalysisSelectionDialog(initial=current)
+                analysis_result = analysis_dialog.exec()
+                if (
+                    analysis_result != QDialog.DialogCode.Accepted
+                    or analysis_dialog.result_config is None
+                ):
+                    selected = None
+                    break
+                current = analysis_dialog.result_config
+                completed = run_workflow_with_progress(
+                    workflow=current,
+                    run_callback=run_callback,
+                )
+                if not completed:
+                    continue
 
     if owns_app:
         app.quit()
     return selected
+
+
+def run_workflow_with_progress(
+    *,
+    workflow: WorkflowConfig,
+    run_callback: Callable[[WorkflowConfig, Callable[[int, str], None]], None],
+) -> bool:
+    """Execute a workflow while showing a modal GUI progress dialog.
+
+    Parameters
+    ----------
+    workflow : WorkflowConfig
+        Workflow configuration to execute.
+    run_callback : callable
+        Callback that performs workflow execution. Signature must be
+        ``(workflow, progress_callback)``.
+
+    Returns
+    -------
+    bool
+        ``True`` when execution succeeds, ``False`` when it fails.
+
+    Raises
+    ------
+    GuiUnavailableError
+        If PyQt6 or a display server is unavailable.
+    """
+    if not HAS_PYQT6:
+        raise GuiUnavailableError(
+            "PyQt6 is not installed. Install it with `pip install PyQt6` or use `--headless`."
+        )
+    if not _display_is_available():
+        raise GuiUnavailableError(
+            "No display detected. Use `--headless` or run with a graphical display."
+        )
+
+    app = QApplication.instance()
+    owns_app = app is None
+    if app is None:
+        app = QApplication(sys.argv)
+
+    progress_dialog = AnalysisExecutionProgressDialog(parent=None)
+    failure_messages: list[str] = []
+    completed = {"ok": False}
+
+    worker = AnalysisExecutionWorker(
+        workflow=workflow,
+        run_callback=run_callback,
+    )
+    worker.progress_changed.connect(progress_dialog.update_progress)
+    worker.succeeded.connect(lambda: completed.__setitem__("ok", True))
+    worker.succeeded.connect(progress_dialog.accept)
+    worker.failed.connect(lambda text: failure_messages.append(str(text)))
+    worker.failed.connect(progress_dialog.reject)
+
+    worker.start()
+    progress_dialog.exec()
+    worker.wait()
+
+    if failure_messages:
+        QMessageBox.critical(
+            progress_dialog,
+            "Analysis Failed",
+            f"Analysis execution failed.\n\n{failure_messages[0]}",
+        )
+        if owns_app:
+            app.quit()
+        return False
+
+    if owns_app:
+        app.quit()
+    return bool(completed["ok"])

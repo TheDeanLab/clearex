@@ -24,6 +24,16 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
-from .app import GuiUnavailableError, launch_gui, summarize_image_info
+from .app import (
+    GuiUnavailableError,
+    launch_gui,
+    run_workflow_with_progress,
+    summarize_image_info,
+)
 
-__all__ = ["GuiUnavailableError", "launch_gui", "summarize_image_info"]
+__all__ = [
+    "GuiUnavailableError",
+    "launch_gui",
+    "run_workflow_with_progress",
+    "summarize_image_info",
+]

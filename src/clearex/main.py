@@ -29,7 +29,7 @@
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 import argparse
 import logging
 
@@ -502,7 +502,12 @@ def _configure_dask_backend(
         return None
 
 
-def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
+def _run_workflow(
+    workflow: WorkflowConfig,
+    logger: logging.Logger,
+    *,
+    analysis_progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> None:
     """Execute a configured workflow in headless mode.
 
     Parameters
@@ -511,6 +516,9 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
         Workflow parameters including file path and selected analyses.
     logger : logging.Logger
         Logger used for progress and status messages.
+    analysis_progress_callback : callable, optional
+        Optional callback used to report analysis progress as
+        ``callback(percent, message)``.
 
     Returns
     -------
@@ -524,6 +532,28 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
     ValueError
         If no reader can open the configured file.
     """
+    def _emit_analysis_progress(percent: int, message: str) -> None:
+        """Emit analysis progress callback updates when configured.
+
+        Parameters
+        ----------
+        percent : int
+            Progress percentage.
+        message : str
+            Human-readable stage text.
+
+        Returns
+        -------
+        None
+            Callback side effects only.
+        """
+        if analysis_progress_callback is None:
+            return
+        clamped = max(0, min(100, int(percent)))
+        analysis_progress_callback(clamped, str(message))
+
+    _emit_analysis_progress(1, "Preparing workflow execution.")
+
     # TODO: Persist workflow configuration for provenance/replay support.
     run_started_at = datetime.now(tz=timezone.utc)
     image_info: Optional[ImageInfo] = None
@@ -636,6 +666,7 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                 },
             }
         )
+        _emit_analysis_progress(5, "Loaded source data and metadata.")
 
     with ExitStack() as analysis_stack:
         analysis_client = (
@@ -665,9 +696,19 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                 "Analysis execution sequence: %s",
                 " -> ".join(execution_sequence),
             )
+            _emit_analysis_progress(
+                10,
+                "Analysis sequence: " + " -> ".join(execution_sequence),
+            )
+        else:
+            _emit_analysis_progress(100, "No analysis operations selected.")
 
         produced_components: Dict[str, str] = {"data": "data"}
-        for operation_name in execution_sequence:
+        total_operations = max(1, len(execution_sequence))
+        for operation_index, operation_name in enumerate(execution_sequence):
+            operation_start = 10 + int((operation_index / total_operations) * 85)
+            operation_end = 10 + int(((operation_index + 1) / total_operations) * 85)
+
             operation_parameters = dict(
                 runtime_analysis_parameters.get(operation_name, {})
             )
@@ -682,6 +723,10 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
             runtime_analysis_parameters[operation_name] = operation_parameters
 
             if operation_name == "deconvolution":
+                _emit_analysis_progress(
+                    operation_start,
+                    "Deconvolution selected; implementation pending.",
+                )
                 logger.info(
                     "Deconvolution selected (input=%s). Workflow hook is reserved; "
                     "implementation pending.",
@@ -695,6 +740,10 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                             "status": "pending_implementation",
                         },
                     }
+                )
+                _emit_analysis_progress(
+                    operation_end,
+                    "Deconvolution step skipped (pending implementation).",
                 )
                 continue
 
@@ -738,6 +787,14 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                             logger.info(
                                 f"[particle_detection] {int(percent)}% - {message}"
                             )
+                        mapped = operation_start + int(
+                            (max(0, min(100, int(percent))) / 100)
+                            * max(1, operation_end - operation_start)
+                        )
+                        _emit_analysis_progress(
+                            mapped,
+                            f"particle_detection: {message}",
+                        )
 
                     summary = run_particle_detection_analysis(
                         zarr_path=provenance_store_path,
@@ -770,6 +827,10 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                             },
                         }
                     )
+                    _emit_analysis_progress(
+                        operation_end,
+                        "Particle detection complete.",
+                    )
                 else:
                     logger.warning(
                         "Particle detection requires a canonical Zarr/N5 data store."
@@ -784,9 +845,17 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                             },
                         }
                     )
+                    _emit_analysis_progress(
+                        operation_end,
+                        "Particle detection skipped (no Zarr/N5 store).",
+                    )
                 continue
 
             if operation_name == "registration":
+                _emit_analysis_progress(
+                    operation_start,
+                    "Running registration workflow.",
+                )
                 logger.info(
                     "Running registration workflow (input=%s).",
                     resolved_source,
@@ -800,9 +869,17 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                         "parameters": operation_parameters,
                     }
                 )
+                _emit_analysis_progress(
+                    operation_end,
+                    "Registration workflow complete.",
+                )
                 continue
 
             if operation_name == "visualization":
+                _emit_analysis_progress(
+                    operation_start,
+                    "Launching visualization workflow.",
+                )
                 logger.info(
                     "Launching visualization workflow (input=%s).",
                     resolved_source,
@@ -813,6 +890,10 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                         "name": "visualization",
                         "parameters": operation_parameters,
                     }
+                )
+                _emit_analysis_progress(
+                    operation_end,
+                    "Visualization workflow complete.",
                 )
                 continue
 
@@ -865,6 +946,8 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                 f"{provenance_store_path}: {exc}"
             )
 
+    _emit_analysis_progress(100, "Workflow execution complete.")
+
 
 def main() -> None:
     """Run the ClearEx entrypoint.
@@ -898,6 +981,72 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
         return
+
+    if args.gui and not args.headless:
+        try:
+            from clearex.gui import GuiUnavailableError, launch_gui
+
+            def _run_from_gui(
+                selected_workflow: WorkflowConfig,
+                progress_callback: Callable[[int, str], None],
+            ) -> None:
+                """Execute one GUI-selected workflow with per-run logger setup.
+
+                Parameters
+                ----------
+                selected_workflow : WorkflowConfig
+                    Workflow selected in GUI.
+                progress_callback : callable
+                    Progress callback used by GUI progress dialog.
+
+                Returns
+                -------
+                None
+                    Side-effect execution only.
+                """
+                try:
+                    run_log_directory = _resolve_log_directory_for_workflow(
+                        selected_workflow
+                    )
+                except Exception as exc:
+                    run_log_directory = Path.cwd().resolve()
+                    bootstrap_logger.warning(
+                        "Failed to resolve workflow log directory "
+                        f"({type(exc).__name__}: {exc}); using {run_log_directory}."
+                    )
+
+                run_logger = initiate_logger(run_log_directory)
+                run_logger.info("Starting ClearEx")
+                run_logger.info(f"Command line arguments: {args}")
+                run_logger.info(f"Log directory: {run_log_directory}")
+                _run_workflow(
+                    workflow=selected_workflow,
+                    logger=run_logger,
+                    analysis_progress_callback=progress_callback,
+                )
+
+            _ = launch_gui(initial=workflow, run_callback=_run_from_gui)
+            bootstrap_logger.info("GUI session closed by user.")
+            return
+        except Exception as exc:
+            try:
+                from clearex.gui import GuiUnavailableError
+
+                if isinstance(exc, GuiUnavailableError):
+                    bootstrap_logger.warning(
+                        f"GUI unavailable: {exc}. Falling back to headless mode."
+                    )
+                else:
+                    bootstrap_logger.warning(
+                        f"GUI launch failed ({type(exc).__name__}: {exc}). "
+                        "Falling back to headless mode."
+                    )
+            except Exception:
+                bootstrap_logger.warning(
+                    f"GUI launch failed ({type(exc).__name__}: {exc}). "
+                    "Falling back to headless mode."
+                )
+            args.gui = False
 
     workflow = _apply_gui_if_requested(
         workflow=workflow,
