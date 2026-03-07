@@ -42,11 +42,8 @@ def parse_slurm_args() -> argparse.Namespace:
     Returns
     -------
     argparse.Namespace
-        Namespace with the parsed arguments. At minimum contains:
-        - imaging_round: Optional[int]
-            The imaging round integer (if provided).
-        - save_directory: str
-            Path to the directory where outputs will be saved.
+        Namespace with parsed values for ``imaging_round`` and
+        ``save_directory``.
 
     Notes
     -----

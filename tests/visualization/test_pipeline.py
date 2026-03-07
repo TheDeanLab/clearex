@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Standard Library Imports
+import json
 from pathlib import Path
 
 # Third Party Imports
@@ -37,11 +38,14 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     root.attrs.update(
         {
             "data_pyramid_levels": ["data", "data_pyramid/level_1"],
+            "source_data_path": "/tmp/input.ome.tif",
+            "source_data_component": "data",
         }
     )
     root["data"].attrs.update(
         {
             "pyramid_levels": ["data", "data_pyramid/level_1"],
+            "scale_tpczyx": [2.0, 1.0, 1.0, 3.0, 4.0, 5.0],
         }
     )
 
@@ -73,11 +77,19 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
         position_index,
         points,
         point_properties,
+        axis_labels,
+        scale_tczyx,
+        image_metadata,
+        points_metadata,
     ) -> None:
         del zarr_path, source_component, point_properties
         captured["source_components"] = tuple(source_components)
         captured["position_index"] = int(position_index)
         captured["points"] = np.asarray(points, dtype=np.float32)
+        captured["axis_labels"] = tuple(axis_labels)
+        captured["scale_tczyx"] = tuple(float(value) for value in scale_tczyx)
+        captured["image_metadata"] = dict(image_metadata)
+        captured["points_metadata"] = dict(points_metadata)
 
     monkeypatch.setattr(
         visualization_pipeline,
@@ -108,6 +120,16 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     points = np.asarray(captured["points"], dtype=np.float32)
     assert points.shape == (1, 5)
     assert np.allclose(points[0], np.asarray([1, 0, 2, 1, 0], dtype=np.float32))
+    assert captured["axis_labels"] == ("t", "c", "z", "y", "x")
+    assert captured["scale_tczyx"] == (2.0, 1.0, 3.0, 4.0, 5.0)
+    image_metadata = dict(captured["image_metadata"])
+    assert image_metadata["source_component"] == "data"
+    assert image_metadata["position_index"] == 1
+    assert image_metadata["source_data_path"] == "/tmp/input.ome.tif"
+    assert image_metadata["multiscale_levels"][0]["component"] == "data"
+    points_metadata = dict(captured["points_metadata"])
+    assert points_metadata["overlay_points_count"] == 1
+    assert points_metadata["coordinate_axes_tczyx"] == ["t", "c", "z", "y", "x"]
 
     output_root = zarr.open_group(str(store_path), mode="r")
     latest_attrs = dict(output_root["results"]["visualization"]["latest"].attrs)
@@ -190,3 +212,93 @@ def test_run_visualization_analysis_rejects_invalid_position(tmp_path: Path) -> 
         assert "out of bounds" in str(exc)
         return
     raise AssertionError("Expected ValueError for invalid position index")
+
+
+def test_run_visualization_analysis_uses_experiment_spacing_when_available(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    experiment_path = tmp_path / "experiment.yml"
+    experiment_payload = {
+        "Saving": {
+            "save_directory": str(tmp_path),
+            "file_type": "TIFF",
+        },
+        "CameraParameters": {
+            "img_x_pixels": 8,
+            "img_y_pixels": 8,
+            "Mesoscale": {
+                "pixel_size": 0.75,
+            },
+        },
+        "MicroscopeState": {
+            "microscope_name": "Mesoscale",
+            "timepoints": 2,
+            "number_z_steps": 2,
+            "timepoint_interval": 2.0,
+            "step_size": 1.5,
+            "channels": {
+                "channel_1": {
+                    "is_selected": True,
+                }
+            },
+        },
+    }
+    experiment_path.write_text(json.dumps(experiment_payload))
+
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(2, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.attrs.update({"source_experiment": str(experiment_path)})
+
+    captured: dict[str, object] = {}
+
+    def _fake_launch_napari_viewer(
+        *,
+        zarr_path,
+        source_components,
+        source_component,
+        position_index,
+        points,
+        point_properties,
+        axis_labels,
+        scale_tczyx,
+        image_metadata,
+        points_metadata,
+    ) -> None:
+        del zarr_path
+        del source_components
+        del source_component
+        del position_index
+        del points
+        del point_properties
+        del axis_labels
+        del points_metadata
+        captured["scale_tczyx"] = tuple(float(value) for value in scale_tczyx)
+        captured["image_metadata"] = dict(image_metadata)
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_launch_napari_viewer",
+        _fake_launch_napari_viewer,
+    )
+
+    summary = run_visualization_analysis(
+        zarr_path=store_path,
+        parameters={
+            "launch_mode": "in_process",
+            "overlay_particle_detections": False,
+        },
+    )
+
+    assert summary.launch_mode == "in_process"
+    assert captured["scale_tczyx"] == (2.0, 1.0, 1.5, 0.75, 0.75)
+    image_metadata = dict(captured["image_metadata"])
+    source_experiment_metadata = image_metadata.get("source_experiment_metadata")
+    assert isinstance(source_experiment_metadata, dict)
+    assert source_experiment_metadata["MicroscopeState"]["step_size"] == 1.5

@@ -44,10 +44,13 @@ import numpy as np
 import zarr
 
 # Local Imports
+from clearex.io.experiment import load_navigate_experiment
 from clearex.io.provenance import register_latest_output_reference
 
 
 ProgressCallback = Callable[[int, str], None]
+_AXIS_LABELS_TCZYX = ("t", "c", "z", "y", "x")
+_TPCZYX_TO_TCZYX = (0, 2, 3, 4, 5)
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,500 @@ class VisualizationSummary:
     overlay_points_count: int
     launch_mode: str
     viewer_pid: Optional[int]
+
+
+@dataclass(frozen=True)
+class NapariLayerPayload:
+    """Payload describing napari layer metadata and calibration.
+
+    Attributes
+    ----------
+    axis_labels_tczyx : tuple[str, str, str, str, str]
+        Display axis labels for rendered arrays in ``(t, c, z, y, x)`` order.
+    scale_tczyx : tuple[float, float, float, float, float]
+        Physical/index scaling factors for rendered arrays in
+        ``(t, c, z, y, x)`` order.
+    image_metadata : dict[str, Any]
+        Metadata payload attached to the napari image layer.
+    points_metadata : dict[str, Any]
+        Metadata payload attached to the napari points layer.
+    """
+
+    axis_labels_tczyx: tuple[str, str, str, str, str]
+    scale_tczyx: tuple[float, float, float, float, float]
+    image_metadata: Dict[str, Any]
+    points_metadata: Dict[str, Any]
+
+
+def _sanitize_metadata_value(value: Any) -> Any:
+    """Convert metadata values into napari-safe Python primitives.
+
+    Parameters
+    ----------
+    value : Any
+        Metadata value candidate.
+
+    Returns
+    -------
+    Any
+        Metadata value converted to primitive Python containers/scalars.
+
+    Raises
+    ------
+    None
+        Conversion is best-effort and never raises custom exceptions.
+    """
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return _sanitize_metadata_value(value.item())
+    if isinstance(value, np.ndarray):
+        return _sanitize_metadata_value(value.tolist())
+    if isinstance(value, Mapping):
+        return {
+            str(key): _sanitize_metadata_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_metadata_value(item) for item in value]
+    return str(value)
+
+
+def _coerce_numeric_sequence(value: Any) -> Optional[tuple[float, ...]]:
+    """Coerce a metadata value into a finite numeric sequence.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate sequence value.
+
+    Returns
+    -------
+    tuple[float, ...], optional
+        Parsed sequence when conversion succeeds; otherwise ``None``.
+
+    Raises
+    ------
+    None
+        Invalid values are handled internally and return ``None``.
+    """
+    normalized = _sanitize_metadata_value(value)
+    if not isinstance(normalized, list):
+        return None
+
+    parsed: list[float] = []
+    for item in normalized:
+        if isinstance(item, list):
+            return None
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(number):
+            return None
+        parsed.append(float(number))
+    return tuple(parsed)
+
+
+def _normalize_scale_tczyx(
+    values: Sequence[float],
+) -> tuple[float, float, float, float, float]:
+    """Normalize scale values into positive finite ``(t, c, z, y, x)`` factors.
+
+    Parameters
+    ----------
+    values : sequence of float
+        Candidate scale values in ``(t, c, z, y, x)`` order.
+
+    Returns
+    -------
+    tuple[float, float, float, float, float]
+        Scale tuple where invalid values are replaced with ``1.0``.
+
+    Raises
+    ------
+    ValueError
+        If ``values`` does not define exactly five entries.
+    """
+    if len(values) != 5:
+        raise ValueError("Scale values must define exactly five entries.")
+    normalized: list[float] = []
+    for item in values:
+        value = float(item)
+        if not np.isfinite(value) or value <= 0:
+            normalized.append(1.0)
+        else:
+            normalized.append(value)
+    return (
+        float(normalized[0]),
+        float(normalized[1]),
+        float(normalized[2]),
+        float(normalized[3]),
+        float(normalized[4]),
+    )
+
+
+def _first_positive_float(candidates: Sequence[Any]) -> Optional[float]:
+    """Return first positive finite float from candidate values.
+
+    Parameters
+    ----------
+    candidates : sequence of Any
+        Candidate values to parse.
+
+    Returns
+    -------
+    float, optional
+        First parsed positive finite value, or ``None`` if unavailable.
+
+    Raises
+    ------
+    None
+        Invalid candidates are skipped and do not raise custom exceptions.
+    """
+    for candidate in candidates:
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value) and value > 0:
+            return float(value)
+    return None
+
+
+def _extract_scale_tczyx_from_attrs(
+    *,
+    root_attrs: Mapping[str, Any],
+    source_attrs: Mapping[str, Any],
+) -> Optional[tuple[float, float, float, float, float]]:
+    """Extract image scale from known store/array attribute keys.
+
+    Parameters
+    ----------
+    root_attrs : mapping[str, Any]
+        Root Zarr attributes.
+    source_attrs : mapping[str, Any]
+        Source-array attributes.
+
+    Returns
+    -------
+    tuple[float, float, float, float, float], optional
+        Scale in ``(t, c, z, y, x)`` order when available.
+
+    Raises
+    ------
+    None
+        Missing/invalid keys are ignored.
+    """
+    candidate_keys = (
+        "scale_tczyx",
+        "scale_tpczyx",
+        "physical_scale_tpczyx",
+        "voxel_size_tpczyx",
+        "pixel_size_tpczyx",
+        "physical_pixel_size_tpczyx",
+        "voxel_size_zyx",
+        "pixel_size_zyx",
+        "physical_pixel_size_zyx",
+        "scale",
+    )
+
+    for attrs in (source_attrs, root_attrs):
+        for key in candidate_keys:
+            if key not in attrs:
+                continue
+            parsed = _coerce_numeric_sequence(attrs.get(key))
+            if parsed is None:
+                continue
+            if len(parsed) == 6:
+                mapped = tuple(float(parsed[idx]) for idx in _TPCZYX_TO_TCZYX)
+                return _normalize_scale_tczyx(mapped)
+            if len(parsed) == 5:
+                return _normalize_scale_tczyx(parsed)
+            if len(parsed) == 3:
+                return _normalize_scale_tczyx(
+                    (
+                        1.0,
+                        1.0,
+                        float(parsed[0]),
+                        float(parsed[1]),
+                        float(parsed[2]),
+                    )
+                )
+    return None
+
+
+def _load_source_experiment_raw(
+    root_attrs: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Load source Navigate experiment raw metadata when available.
+
+    Parameters
+    ----------
+    root_attrs : mapping[str, Any]
+        Root Zarr attributes.
+
+    Returns
+    -------
+    dict[str, Any], optional
+        Parsed ``experiment.yml`` payload from ``source_experiment``.
+
+    Raises
+    ------
+    None
+        Failures are handled internally and return ``None``.
+    """
+    source_experiment = root_attrs.get("source_experiment")
+    if not isinstance(source_experiment, str):
+        return None
+    text = source_experiment.strip()
+    if not text:
+        return None
+
+    experiment_path = Path(text).expanduser()
+    if not experiment_path.exists():
+        return None
+
+    try:
+        experiment = load_navigate_experiment(experiment_path)
+    except Exception:
+        return None
+
+    if not isinstance(experiment.raw, dict):
+        return None
+    return dict(experiment.raw)
+
+
+def _extract_scale_tczyx_from_navigate_raw(
+    navigate_raw: Optional[Mapping[str, Any]],
+) -> Optional[tuple[float, float, float, float, float]]:
+    """Extract ``(t, c, z, y, x)`` scale from Navigate experiment metadata.
+
+    Parameters
+    ----------
+    navigate_raw : mapping[str, Any], optional
+        Raw parsed experiment metadata.
+
+    Returns
+    -------
+    tuple[float, float, float, float, float], optional
+        Scale tuple when at least one physical spacing field is available.
+
+    Raises
+    ------
+    None
+        Invalid structures are handled internally and return ``None``.
+    """
+    if not isinstance(navigate_raw, Mapping):
+        return None
+
+    state = navigate_raw.get("MicroscopeState")
+    state_mapping = state if isinstance(state, Mapping) else {}
+    camera = navigate_raw.get("CameraParameters")
+    camera_mapping = camera if isinstance(camera, Mapping) else {}
+
+    microscope_name_raw = state_mapping.get("microscope_name")
+    microscope_name = str(microscope_name_raw).strip() if microscope_name_raw else ""
+    microscope_camera = camera_mapping.get(microscope_name)
+    microscope_camera_mapping = (
+        microscope_camera if isinstance(microscope_camera, Mapping) else {}
+    )
+
+    lateral_size = _first_positive_float(
+        (
+            microscope_camera_mapping.get("pixel_size"),
+            camera_mapping.get("pixel_size"),
+        )
+    )
+    axial_size = _first_positive_float((state_mapping.get("step_size"),))
+    temporal_size = _first_positive_float(
+        (
+            state_mapping.get("timepoint_interval"),
+            state_mapping.get("stack_pause"),
+        )
+    )
+
+    if lateral_size is None and axial_size is None and temporal_size is None:
+        return None
+
+    return _normalize_scale_tczyx(
+        (
+            float(temporal_size) if temporal_size is not None else 1.0,
+            1.0,
+            float(axial_size) if axial_size is not None else 1.0,
+            float(lateral_size) if lateral_size is not None else 1.0,
+            float(lateral_size) if lateral_size is not None else 1.0,
+        )
+    )
+
+
+def _collect_multiscale_level_metadata(
+    *,
+    root: zarr.hierarchy.Group,
+    source_components: Sequence[str],
+) -> list[Dict[str, Any]]:
+    """Collect shape/chunk metadata for each rendered multiscale level.
+
+    Parameters
+    ----------
+    root : zarr.hierarchy.Group
+        Opened Zarr root group.
+    source_components : sequence of str
+        Ordered source component paths.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Per-level metadata dictionaries.
+
+    Raises
+    ------
+    KeyError
+        If a referenced component is missing.
+    """
+    levels: list[Dict[str, Any]] = []
+    for component in source_components:
+        array = root[str(component)]
+        chunks = (
+            [int(chunk) for chunk in array.chunks]
+            if getattr(array, "chunks", None) is not None
+            else None
+        )
+        levels.append(
+            {
+                "component": str(component),
+                "shape_tpczyx": [int(size) for size in tuple(array.shape)],
+                "chunks_tpczyx": chunks,
+                "dtype": str(array.dtype),
+            }
+        )
+    return levels
+
+
+def _build_napari_layer_payload(
+    *,
+    zarr_path: Union[str, Path],
+    root: zarr.hierarchy.Group,
+    source_component: str,
+    source_components: Sequence[str],
+    position_index: int,
+    parameters: Mapping[str, Any],
+    overlay_points_count: int,
+    point_property_names: Sequence[str],
+) -> NapariLayerPayload:
+    """Build image/points metadata payloads for napari layers.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Zarr analysis-store path.
+    root : zarr.hierarchy.Group
+        Opened Zarr root group.
+    source_component : str
+        Base source component path.
+    source_components : sequence of str
+        Ordered multiscale source components.
+    position_index : int
+        Selected position index.
+    parameters : mapping[str, Any]
+        Effective visualization parameters.
+    overlay_points_count : int
+        Number of overlay points.
+    point_property_names : sequence of str
+        Overlay point property names.
+
+    Returns
+    -------
+    NapariLayerPayload
+        Prepared payload for napari rendering.
+
+    Raises
+    ------
+    KeyError
+        If referenced source components are missing.
+    """
+    root_attrs = dict(root.attrs)
+    source_array = root[str(source_component)]
+    source_attrs = dict(source_array.attrs)
+    source_experiment_raw = _load_source_experiment_raw(root_attrs)
+    scale_tczyx = (
+        _extract_scale_tczyx_from_attrs(
+            root_attrs=root_attrs,
+            source_attrs=source_attrs,
+        )
+        or _extract_scale_tczyx_from_navigate_raw(source_experiment_raw)
+        or (1.0, 1.0, 1.0, 1.0, 1.0)
+    )
+    multiscale_levels = _collect_multiscale_level_metadata(
+        root=root,
+        source_components=source_components,
+    )
+
+    image_metadata_raw: Dict[str, Any] = {
+        "schema": root_attrs.get("schema"),
+        "store_path": str(Path(zarr_path).expanduser().resolve()),
+        "axis_labels_tczyx": list(_AXIS_LABELS_TCZYX),
+        "scale_tczyx": [float(value) for value in scale_tczyx],
+        "source_component": str(source_component),
+        "source_components": [str(item) for item in source_components],
+        "position_index": int(position_index),
+        "source_data_path": root_attrs.get("source_data_path"),
+        "source_data_component": root_attrs.get("source_data_component"),
+        "source_data_axes": root_attrs.get("source_data_axes"),
+        "source_experiment": root_attrs.get("source_experiment"),
+        "navigate_experiment": root_attrs.get("navigate_experiment"),
+        "source_experiment_metadata": source_experiment_raw,
+        "configured_chunks_tpczyx": root_attrs.get("configured_chunks_tpczyx"),
+        "chunk_shape_tpczyx": (
+            source_attrs.get("chunk_shape_tpczyx")
+            or root_attrs.get("chunk_shape_tpczyx")
+        ),
+        "resolution_pyramid_factors_tpczyx": (
+            source_attrs.get("resolution_pyramid_factors_tpczyx")
+            or root_attrs.get("resolution_pyramid_factors_tpczyx")
+        ),
+        "data_pyramid_levels": root_attrs.get("data_pyramid_levels"),
+        "data_pyramid_factors_tpczyx": root_attrs.get("data_pyramid_factors_tpczyx"),
+        "multiscale_levels": multiscale_levels,
+        "source_array_attrs": source_attrs,
+        "root_attrs": root_attrs,
+        "visualization_parameters": dict(parameters),
+    }
+    points_metadata_raw: Dict[str, Any] = {
+        "coordinate_axes_tczyx": list(_AXIS_LABELS_TCZYX),
+        "scale_tczyx": [float(value) for value in scale_tczyx],
+        "source_component": str(source_component),
+        "position_index": int(position_index),
+        "overlay_points_count": int(overlay_points_count),
+        "point_properties": [str(name) for name in point_property_names],
+        "detection_component": str(
+            parameters.get(
+                "particle_detection_component",
+                "results/particle_detection/latest/detections",
+            )
+        ),
+        "source_data_path": root_attrs.get("source_data_path"),
+    }
+
+    image_metadata = _sanitize_metadata_value(image_metadata_raw)
+    points_metadata = _sanitize_metadata_value(points_metadata_raw)
+    if not isinstance(image_metadata, dict):
+        image_metadata = {"metadata": image_metadata}
+    if not isinstance(points_metadata, dict):
+        points_metadata = {"metadata": points_metadata}
+
+    return NapariLayerPayload(
+        axis_labels_tczyx=_AXIS_LABELS_TCZYX,
+        scale_tczyx=scale_tczyx,
+        image_metadata={str(key): value for key, value in image_metadata.items()},
+        points_metadata={str(key): value for key, value in points_metadata.items()},
+    )
 
 
 def _normalize_visualization_parameters(
@@ -322,6 +819,10 @@ def _launch_napari_viewer(
     position_index: int,
     points: np.ndarray,
     point_properties: Mapping[str, np.ndarray],
+    axis_labels: Sequence[str],
+    scale_tczyx: Sequence[float],
+    image_metadata: Mapping[str, Any],
+    points_metadata: Mapping[str, Any],
 ) -> None:
     """Open a napari viewer and render image + optional particle overlays.
 
@@ -339,6 +840,14 @@ def _launch_napari_viewer(
         Overlay points in ``(t, c, z, y, x)`` order.
     point_properties : mapping[str, numpy.ndarray]
         Optional per-point property arrays.
+    axis_labels : sequence of str
+        Axis labels in ``(t, c, z, y, x)`` order.
+    scale_tczyx : sequence of float
+        Layer scale values in ``(t, c, z, y, x)`` order.
+    image_metadata : mapping[str, Any]
+        Metadata payload attached to the image layer.
+    points_metadata : mapping[str, Any]
+        Metadata payload attached to the points layer.
 
     Returns
     -------
@@ -363,21 +872,31 @@ def _launch_napari_viewer(
     else:
         image_data = level_arrays[0]
 
+    scale = tuple(float(value) for value in scale_tczyx)
     viewer = napari.Viewer(ndisplay=3, show=True)
+    try:
+        viewer.dims.axis_labels = tuple(str(label) for label in axis_labels)
+    except Exception:
+        pass
+
     viewer.add_image(
         image_data,
         multiscale=is_multiscale,
         name=f"{source_component} (p={position_index})",
+        scale=scale,
+        metadata={str(key): value for key, value in image_metadata.items()},
     )
     if points.shape[0] > 0:
         viewer.add_points(
             points.astype(np.float32, copy=False),
             name="Particle Detections",
             properties={str(k): np.asarray(v) for k, v in point_properties.items()},
+            scale=scale,
+            metadata={str(key): value for key, value in points_metadata.items()},
             size=7.0,
             face_color="transparent",
-            edge_color="yellow",
-            edge_width=0.25,
+            border_color="yellow",
+            border_width=0.2,
         )
     napari.run()
 
@@ -517,6 +1036,17 @@ def run_visualization_analysis(
             position_index=position_index,
         )
 
+    napari_payload = _build_napari_layer_payload(
+        zarr_path=zarr_path,
+        root=root,
+        source_component=source_component,
+        source_components=source_components,
+        position_index=position_index,
+        parameters=normalized,
+        overlay_points_count=int(overlay_points.shape[0]),
+        point_property_names=tuple(str(name) for name in overlay_properties.keys()),
+    )
+
     _emit(20, "Preparing napari visualization layers")
     effective_launch_mode = _resolve_effective_launch_mode(
         str(normalized.get("launch_mode", "auto"))
@@ -540,6 +1070,10 @@ def run_visualization_analysis(
             position_index=position_index,
             points=overlay_points,
             point_properties=overlay_properties,
+            axis_labels=napari_payload.axis_labels_tczyx,
+            scale_tczyx=napari_payload.scale_tczyx,
+            image_metadata=napari_payload.image_metadata,
+            points_metadata=napari_payload.points_metadata,
         )
 
     _emit(90, "Writing visualization metadata")

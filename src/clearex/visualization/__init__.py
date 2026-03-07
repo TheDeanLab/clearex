@@ -26,9 +26,34 @@
 
 """Visualization helpers and napari workflow entrypoints."""
 
-from .pipeline import VisualizationSummary, run_visualization_analysis
+from typing import Any
 
 __all__ = [
     "VisualizationSummary",
     "run_visualization_analysis",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily resolve visualization exports.
+
+    Parameters
+    ----------
+    name : str
+        Requested attribute name.
+
+    Returns
+    -------
+    Any
+        Exported symbol from :mod:`clearex.visualization.pipeline`.
+
+    Raises
+    ------
+    AttributeError
+        If the attribute is not a supported visualization export.
+    """
+    if name in {"VisualizationSummary", "run_visualization_analysis"}:
+        from . import pipeline
+
+        return getattr(pipeline, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

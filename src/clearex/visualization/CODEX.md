@@ -21,6 +21,18 @@ This folder owns napari-facing visualization workflows.
 - Overlay points are emitted in napari coordinate order `(t, c, z, y, x)`.
 - Position filtering is applied when detection tables include `(t, p, c, z, y, x, ...)`.
 
+## Napari Metadata Contract
+
+- `run_visualization_analysis` builds a layer payload in `pipeline.py::_build_napari_layer_payload`.
+- Image and points layers both receive:
+  - axis labels `(t, c, z, y, x)`,
+  - matched `scale` values for aligned physical/index coordinates,
+  - metadata dictionaries with source/store/pyramid details.
+- Scale resolution precedence is:
+  1. explicit Zarr attrs (for example `scale_tpczyx`, `scale_tczyx`, `voxel_size_*`),
+  2. `source_experiment` metadata (`timepoint_interval`, `step_size`, camera `pixel_size`),
+  3. fallback to `(1, 1, 1, 1, 1)`.
+
 ## GUI/Threading Contract
 
 - GUI analysis execution runs in a worker thread.

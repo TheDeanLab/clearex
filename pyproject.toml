@@ -53,16 +53,17 @@ dev = [
 ]
 
 docs = [
-  "numpydoc",
+  "myst-parser>=3.0.1",
   "nbconvert",
-  "sphinx",
-  "sphinx_rtd_theme",
-  "sphinx-copybutton",
-  "sphinx-issues",
-  "sphinx-design",
+  "numpydoc>=1.8.0",
+  "pydata-sphinx-theme>=0.16.1",
   "pyyaml",
-  "pydata_sphinx_theme",
-  "sphinx-toolbox"
+  "sphinx>=8.1.3",
+  "sphinx-autodoc-typehints>=2.5.0",
+  "sphinx-copybutton>=0.5.2",
+  "sphinx-design>=0.6.1",
+  "sphinx-issues>=5.0.1",
+  "sphinx-toolbox>=3.9.0",
 ]
 
 [project.urls]
