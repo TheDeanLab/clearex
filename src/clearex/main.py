@@ -41,10 +41,9 @@ import os
 from clearex.io.read import ImageInfo, ImageOpener
 from clearex.io.experiment import (
     create_dask_client,
-    default_analysis_store_path,
-    initialize_analysis_store,
     is_navigate_experiment_file,
     load_navigate_experiment,
+    materialize_experiment_data_store,
     resolve_experiment_data_path,
 )
 from clearex.io.cli import create_parser, display_logo
@@ -254,6 +253,7 @@ def _configure_dask_backend(
             client = create_dask_client(
                 n_workers=backend.local_cluster.n_workers,
                 threads_per_worker=backend.local_cluster.threads_per_worker,
+                processes=False,
                 memory_limit=backend.local_cluster.memory_limit,
                 local_directory=backend.local_cluster.local_directory,
             )
@@ -377,7 +377,7 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
     provenance_store_path: Optional[str] = None
 
     with ExitStack() as exit_stack:
-        _configure_dask_backend(
+        dask_client = _configure_dask_backend(
             workflow=workflow,
             logger=logger,
             exit_stack=exit_stack,
@@ -420,37 +420,55 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                         },
                     }
                 )
+
+                materialized = materialize_experiment_data_store(
+                    experiment=experiment,
+                    source_path=resolved_data_path,
+                    chunks=zarr_chunks_tpczyx,
+                    pyramid_factors=zarr_pyramid_tpczyx,
+                    client=dask_client,
+                )
+                image_info = materialized.source_image_info
+                provenance_store_path = str(materialized.store_path)
+                _log_loaded_image(image_info, logger)
+                logger.info(
+                    "Materialized source data to Zarr store "
+                    f"{materialized.store_path} (component=data, "
+                    f"chunks_tpczyx={materialized.chunks_tpczyx})."
+                )
+                step_records.append(
+                    {
+                        "name": "materialize_data_store",
+                        "parameters": {
+                            "source_path": str(materialized.source_path),
+                            "source_component": materialized.source_component,
+                            "store_path": str(materialized.store_path),
+                            "target_component": "data",
+                            "canonical_shape_tpczyx": list(
+                                materialized.data_image_info.shape
+                            ),
+                            "chunks_tpczyx": list(materialized.chunks_tpczyx),
+                            "zarr_chunks_ptczyx": list(workflow.zarr_save.chunks_ptczyx),
+                            "zarr_pyramid_ptczyx": [
+                                list(levels) for levels in workflow.zarr_save.pyramid_ptczyx
+                            ],
+                        },
+                    }
+                )
             else:
                 experiment = None
 
-            opener = ImageOpener()
-            _, info = opener.open(
-                input_path,
-                prefer_dask=workflow.prefer_dask,
-                chunks=workflow.chunks,
-            )
-            image_info = info
-            _log_loaded_image(info, logger)
+                opener = ImageOpener()
+                _, info = opener.open(
+                    input_path,
+                    prefer_dask=workflow.prefer_dask,
+                    chunks=workflow.chunks,
+                )
+                image_info = info
+                _log_loaded_image(info, logger)
 
-            if experiment is not None:
-                analysis_store = default_analysis_store_path(experiment)
-                initialize_analysis_store(
-                    experiment=experiment,
-                    zarr_path=analysis_store,
-                    image_info=info,
-                    overwrite=False,
-                    dtype=str(info.dtype),
-                    chunks=zarr_chunks_tpczyx,
-                    pyramid_factors=zarr_pyramid_tpczyx,
-                )
-                provenance_store_path = str(analysis_store)
-                logger.info(
-                    f"Initialized/validated 6D analysis store at {analysis_store} "
-                    "(axes=t,p,c,z,y,x) with "
-                    f"zarr_chunks_ptczyx={format_zarr_chunks_ptczyx(workflow.zarr_save.chunks_ptczyx)}."
-                )
-            elif input_path and is_zarr_store_path(input_path):
-                provenance_store_path = input_path
+                if input_path and is_zarr_store_path(input_path):
+                    provenance_store_path = input_path
 
             step_records.append(
                 {

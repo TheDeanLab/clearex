@@ -29,15 +29,20 @@
 from __future__ import annotations
 
 # Standard Library Imports
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 import json
 import re
+import warnings
 
 # Third Party Imports
+import dask
 import dask.array as da
+import h5py
 import numpy as np
+import tifffile
 import zarr
 
 # Local Imports
@@ -57,6 +62,757 @@ except Exception:
 
 
 ArrayLike = Union[np.ndarray, da.Array]
+AxesSpec = Optional[tuple[str, ...]]
+CanonicalShapeTpczyx = tuple[int, int, int, int, int, int]
+
+
+def _is_zarr_like_path(path: Path) -> bool:
+    """Return whether a path is a Zarr or N5 directory store.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Path to evaluate.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``path`` is a directory with ``.zarr`` or ``.n5`` suffix.
+    """
+    return path.is_dir() and path.suffix.lower() in {".zarr", ".n5"}
+
+
+def _normalize_axis_token(token: Any) -> Optional[str]:
+    """Normalize a single axis descriptor into canonical one-letter form.
+
+    Parameters
+    ----------
+    token : Any
+        Axis token candidate.
+
+    Returns
+    -------
+    str, optional
+        Canonical axis token in ``{"t", "p", "c", "z", "y", "x"}``, or
+        ``None`` when the token cannot be mapped.
+    """
+    if token is None:
+        return None
+    if isinstance(token, bytes):
+        text = token.decode("utf-8", errors="ignore")
+    else:
+        text = str(token)
+    normalized = text.strip().lower()
+    if not normalized:
+        return None
+
+    aliases = {
+        "t": "t",
+        "time": "t",
+        "c": "c",
+        "ch": "c",
+        "channel": "c",
+        "z": "z",
+        "y": "y",
+        "x": "x",
+        "p": "p",
+        "s": "p",
+        "series": "p",
+        "position": "p",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    if normalized[0] in aliases:
+        return aliases[normalized[0]]
+    return None
+
+
+def _normalize_axes_descriptor(axes: Any, *, ndim: int) -> AxesSpec:
+    """Normalize axis metadata into ordered canonical axis tokens.
+
+    Parameters
+    ----------
+    axes : Any
+        Axis descriptor from source metadata. Supported forms include strings,
+        lists of strings, and OME-Zarr axis dictionaries with ``name`` keys.
+    ndim : int
+        Expected number of dimensions in the source array.
+
+    Returns
+    -------
+    tuple of str, optional
+        Normalized axis tokens matching ``ndim``, or ``None`` when metadata is
+        missing or incompatible.
+    """
+    tokens: list[Any]
+    if axes is None:
+        return None
+    if isinstance(axes, str):
+        tokens = list(axes)
+    elif isinstance(axes, (tuple, list)):
+        tokens = []
+        for axis in axes:
+            if isinstance(axis, dict):
+                tokens.append(axis.get("name"))
+            else:
+                tokens.append(axis)
+    else:
+        return None
+
+    if len(tokens) != ndim:
+        return None
+
+    normalized = tuple(_normalize_axis_token(token) for token in tokens)
+    if any(token is None for token in normalized):
+        return None
+    return tuple(str(token) for token in normalized)
+
+
+def _extract_zarr_axes(array: Any, group_attrs: dict[str, Any]) -> AxesSpec:
+    """Extract and normalize axis metadata from a Zarr array/group.
+
+    Parameters
+    ----------
+    array : Any
+        Zarr array-like object.
+    group_attrs : dict[str, Any]
+        Parent group attributes.
+
+    Returns
+    -------
+    tuple of str, optional
+        Normalized source axes, when present.
+    """
+    attrs = dict(getattr(array, "attrs", {}))
+    raw_axes = (
+        attrs.get("multiscales", [{}])[0].get("axes")
+        or group_attrs.get("multiscales", [{}])[0].get("axes")
+        or attrs.get("_ARRAY_DIMENSIONS")
+        or group_attrs.get("_ARRAY_DIMENSIONS")
+        or attrs.get("axes")
+        or group_attrs.get("axes")
+    )
+    return _normalize_axes_descriptor(raw_axes, ndim=len(tuple(array.shape)))
+
+
+def _infer_source_axes(
+    shape: tuple[int, ...], experiment: NavigateExperiment
+) -> tuple[str, ...]:
+    """Infer source axis ordering when metadata is unavailable.
+
+    Parameters
+    ----------
+    shape : tuple[int, ...]
+        Source array shape.
+    experiment : NavigateExperiment
+        Parsed experiment metadata used for weak disambiguation.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Inferred axis tokens corresponding to ``shape``.
+
+    Raises
+    ------
+    ValueError
+        If the source dimensionality is unsupported.
+    """
+    ndim = len(shape)
+    if ndim == 2:
+        return ("y", "x")
+    if ndim == 3:
+        return ("z", "y", "x")
+    if ndim == 4:
+        if shape[0] == experiment.timepoints and shape[1] == experiment.number_z_steps:
+            return ("t", "z", "y", "x")
+        if shape[0] == experiment.number_z_steps and shape[1] == experiment.channel_count:
+            return ("z", "c", "y", "x")
+        return ("c", "z", "y", "x")
+    if ndim == 5:
+        if shape[0] == experiment.multiposition_count and shape[1] == experiment.channel_count:
+            return ("p", "c", "z", "y", "x")
+        return ("t", "c", "z", "y", "x")
+    if ndim == 6:
+        return ("t", "p", "c", "z", "y", "x")
+    raise ValueError(
+        "Unsupported source dimensionality "
+        f"{ndim}; expected 2D-6D arrays for ingestion."
+    )
+
+
+def _coerce_to_tpczyx(
+    source: da.Array,
+    *,
+    experiment: NavigateExperiment,
+    source_axes: AxesSpec = None,
+) -> da.Array:
+    """Convert source data into canonical ``(t, p, c, z, y, x)`` ordering.
+
+    Parameters
+    ----------
+    source : dask.array.Array
+        Source image data.
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    source_axes : tuple[str, ...], optional
+        Source axis tokens. If omitted, axis order is inferred from shape.
+
+    Returns
+    -------
+    dask.array.Array
+        View of ``source`` reordered/expanded to ``(t, p, c, z, y, x)``.
+
+    Raises
+    ------
+    ValueError
+        If source axis metadata is inconsistent or missing required spatial
+        dimensions.
+    """
+    canonical_axes = ["t", "p", "c", "z", "y", "x"]
+    axes = tuple(source_axes or _infer_source_axes(tuple(source.shape), experiment))
+    if len(axes) != source.ndim:
+        raise ValueError(
+            f"Source axes length ({len(axes)}) does not match ndim ({source.ndim})."
+        )
+    if not {"y", "x"}.issubset(set(axes)):
+        raise ValueError(f"Source axes must include y/x dimensions, got {axes}.")
+
+    if len(set(axes)) != len(axes):
+        raise ValueError(f"Source axes contain duplicates: {axes}.")
+
+    present_axes = [axis for axis in canonical_axes if axis in axes]
+    perm = [axes.index(axis) for axis in present_axes]
+    reordered = source.transpose(tuple(perm))
+
+    current_axes = list(present_axes)
+    for idx, axis in enumerate(canonical_axes):
+        if axis in current_axes:
+            continue
+        reordered = da.expand_dims(reordered, axis=idx)
+        current_axes.insert(idx, axis)
+
+    return reordered
+
+
+def _collect_largest_zarr_array(store_path: Path) -> tuple[Any, str, AxesSpec]:
+    """Open a Zarr/N5 store and select the largest contained array.
+
+    Parameters
+    ----------
+    store_path : pathlib.Path
+        Source Zarr or N5 store path.
+
+    Returns
+    -------
+    tuple
+        ``(array, component, axes)`` where ``component`` is the selected array
+        path relative to the store root.
+
+    Raises
+    ------
+    ValueError
+        If no arrays are found in the store.
+    """
+    root_object = zarr.open(str(store_path), mode="r")
+    if hasattr(root_object, "shape") and not hasattr(root_object, "array_keys"):
+        axes = _extract_zarr_axes(root_object, {})
+        return root_object, "", axes
+
+    group = zarr.open_group(str(store_path), mode="r")
+    group_attrs = dict(getattr(group, "attrs", {}))
+    arrays: list[tuple[str, Any]] = []
+
+    def _walk(group_node: Any, prefix: str = "") -> None:
+        if hasattr(group_node, "array_keys") and callable(group_node.array_keys):
+            for key in sorted(group_node.array_keys()):
+                arrays.append((f"{prefix}{key}", group_node[key]))
+        if hasattr(group_node, "group_keys") and callable(group_node.group_keys):
+            for key in sorted(group_node.group_keys()):
+                _walk(group_node[key], f"{prefix}{key}/")
+
+    _walk(group)
+    if not arrays:
+        raise ValueError(f"No arrays found in Zarr/N5 store: {store_path}")
+
+    arrays.sort(key=lambda item: (-int(np.prod(item[1].shape)), item[0]))
+    component, array = arrays[0]
+    axes = _extract_zarr_axes(array, group_attrs)
+    return array, component, axes
+
+
+def _open_source_as_dask(
+    source_path: Path, *, exit_stack: ExitStack
+) -> tuple[da.Array, AxesSpec, dict[str, Any]]:
+    """Open source image data as a Dask array using format-specific fast paths.
+
+    Parameters
+    ----------
+    source_path : pathlib.Path
+        Source image path.
+    exit_stack : contextlib.ExitStack
+        Exit stack used to manage open file handles for formats that require
+        persistent references (for example HDF5).
+
+    Returns
+    -------
+    tuple
+        ``(source_array, source_axes, metadata)``.
+
+    Raises
+    ------
+    ValueError
+        If the source format is unsupported.
+    """
+    suffix = source_path.suffix.lower()
+    meta: dict[str, Any] = {"source_path": str(source_path)}
+
+    if _is_zarr_like_path(source_path):
+        array, component, axes = _collect_largest_zarr_array(source_path)
+        source_array = (
+            da.from_zarr(str(source_path))
+            if not component
+            else da.from_zarr(str(source_path), component=component)
+        )
+        meta["source_component"] = component or "."
+        return source_array, axes, meta
+
+    if suffix in {".tif", ".tiff"}:
+        with tifffile.TiffFile(str(source_path)) as tf:
+            series = tf.series[0]
+            axes = _normalize_axes_descriptor(
+                getattr(series, "axes", None), ndim=len(tuple(series.shape))
+            )
+        tiff_store = tifffile.imread(str(source_path), aszarr=True)
+        source_array = da.from_zarr(tiff_store)
+        return source_array, axes, meta
+
+    if suffix in {".h5", ".hdf5", ".hdf"}:
+        h5_file = exit_stack.enter_context(h5py.File(str(source_path), mode="r"))
+        datasets: list[h5py.Dataset] = []
+
+        def _collect_datasets(group: h5py.Group) -> None:
+            for _, obj in group.items():
+                if isinstance(obj, h5py.Dataset):
+                    datasets.append(obj)
+                elif isinstance(obj, h5py.Group):
+                    _collect_datasets(obj)
+
+        _collect_datasets(h5_file)
+        if not datasets:
+            raise ValueError(f"No datasets found in HDF5 file: {source_path}")
+
+        dataset = max(datasets, key=lambda item: int(np.prod(item.shape)))
+        raw_axes = (
+            dataset.attrs.get("axes")
+            or dataset.attrs.get("dimension_order")
+            or dataset.attrs.get("DimensionOrder")
+            or dataset.attrs.get("DIMENSION_LABELS")
+        )
+        axes = _normalize_axes_descriptor(raw_axes, ndim=len(tuple(dataset.shape)))
+        chunks = dataset.chunks or tuple(min(128, int(size)) for size in dataset.shape)
+        source_array = da.from_array(dataset, chunks=chunks, lock=True)
+        meta["source_component"] = dataset.name
+        return source_array, axes, meta
+
+    if suffix == ".npy":
+        mmap = np.load(str(source_path), mmap_mode="r")
+        source_array = da.from_array(mmap, chunks="auto")
+        return source_array, None, meta
+
+    if suffix == ".npz":
+        npz_file = exit_stack.enter_context(np.load(str(source_path)))
+        keys = sorted(npz_file.keys())
+        if not keys:
+            raise ValueError(f"No arrays found in NPZ file: {source_path}")
+        key = keys[0]
+        source_array = da.from_array(npz_file[key], chunks="auto")
+        meta["source_component"] = key
+        return source_array, None, meta
+
+    raise ValueError(f"Unsupported source format for ingestion: {source_path}")
+
+
+def _format_axes_for_image_info(axes: AxesSpec) -> Optional[str]:
+    """Format normalized axis tokens as an uppercase axis string.
+
+    Parameters
+    ----------
+    axes : tuple[str, ...], optional
+        Normalized lowercase axis tokens.
+
+    Returns
+    -------
+    str, optional
+        Uppercase axis string suitable for :class:`clearex.io.read.ImageInfo`,
+        or ``None`` when ``axes`` is not available.
+
+    Raises
+    ------
+    None
+        This helper does not raise custom exceptions.
+    """
+    if axes is None:
+        return None
+    return "".join(token.upper() for token in axes)
+
+
+def _normalize_tpczyx_shape(shape: tuple[int, ...]) -> CanonicalShapeTpczyx:
+    """Validate and normalize canonical ``(t, p, c, z, y, x)`` shape.
+
+    Parameters
+    ----------
+    shape : tuple[int, ...]
+        Candidate shape tuple.
+
+    Returns
+    -------
+    tuple[int, int, int, int, int, int]
+        Normalized canonical shape.
+
+    Raises
+    ------
+    ValueError
+        If the shape does not define exactly six positive dimensions.
+    """
+    if len(shape) != 6:
+        raise ValueError(
+            "Canonical data shape must define exactly six dimensions "
+            "(t, p, c, z, y, x)."
+        )
+    normalized = tuple(int(size) for size in shape)
+    if any(size <= 0 for size in normalized):
+        raise ValueError(
+            "Canonical data shape values must be greater than zero; "
+            f"got {normalized}."
+        )
+    return (
+        normalized[0],
+        normalized[1],
+        normalized[2],
+        normalized[3],
+        normalized[4],
+        normalized[5],
+    )
+
+
+def _normalize_write_chunks(
+    shape_tpczyx: CanonicalShapeTpczyx,
+    chunks: tuple[int, int, int, int, int, int],
+) -> CanonicalShapeTpczyx:
+    """Normalize requested chunk sizes against target canonical shape.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Target canonical shape.
+    chunks : tuple[int, int, int, int, int, int]
+        Requested chunk sizes.
+
+    Returns
+    -------
+    tuple[int, int, int, int, int, int]
+        Effective chunk sizes with per-axis values clipped to array bounds.
+
+    Raises
+    ------
+    ValueError
+        If chunk specification is not six positive integers.
+    """
+    if len(chunks) != 6:
+        raise ValueError("chunks must define six values in (t, p, c, z, y, x) order.")
+    requested = tuple(int(chunk) for chunk in chunks)
+    if any(chunk <= 0 for chunk in requested):
+        raise ValueError("chunks values must be greater than zero.")
+    normalized = tuple(
+        min(int(chunk), int(dim))
+        for chunk, dim in zip(requested, shape_tpczyx, strict=False)
+    )
+    return (
+        normalized[0],
+        normalized[1],
+        normalized[2],
+        normalized[3],
+        normalized[4],
+        normalized[5],
+    )
+
+
+def _compute_dask_graph(graph: Any, *, client: Optional["Client"] = None) -> None:
+    """Execute a Dask graph via a configured client or local scheduler.
+
+    Parameters
+    ----------
+    graph : Any
+        Dask delayed graph, future-like object, or nested collection of graphs.
+    client : dask.distributed.Client, optional
+        Active distributed client. When omitted, local Dask scheduler is used.
+
+    Returns
+    -------
+    None
+        Execution side effects only.
+
+    Raises
+    ------
+    Exception
+        Propagates scheduler or task execution errors from Dask when
+        local fallback is not applicable.
+
+    Notes
+    -----
+    Some file-backed graphs (for example TIFF/HDF stores with thread locks)
+    cannot be serialized for distributed workers. In those cases, execution
+    automatically falls back to local Dask compute.
+    """
+    def _compute_with_threads() -> None:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=(
+                    "Running on a single-machine scheduler when a distributed client "
+                    "is active might lead to unexpected results."
+                ),
+            )
+            dask.compute(graph, scheduler="threads")
+
+    if client is None:
+        _compute_with_threads()
+        return
+    try:
+        futures = client.compute(graph)
+        client.gather(futures)
+    except Exception as exc:
+        message = str(exc)
+        if "Could not serialize object" not in message and "cannot pickle" not in message:
+            raise
+        _compute_with_threads()
+
+
+@dataclass(frozen=True)
+class MaterializedDataStore:
+    """Metadata for a source-to-Zarr materialization run.
+
+    Attributes
+    ----------
+    source_path : pathlib.Path
+        Resolved acquisition source path used for reading.
+    store_path : pathlib.Path
+        Resolved target Zarr store path containing canonical ``data`` array.
+    source_component : str, optional
+        Component path selected within the source store, when applicable.
+    source_image_info : ImageInfo
+        Source image metadata used for logging/provenance.
+    data_image_info : ImageInfo
+        Canonical materialized ``data`` array metadata.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Effective write chunks in canonical axis order.
+    """
+
+    source_path: Path
+    store_path: Path
+    source_component: Optional[str]
+    source_image_info: ImageInfo
+    data_image_info: ImageInfo
+    chunks_tpczyx: CanonicalShapeTpczyx
+
+
+def resolve_data_store_path(
+    experiment: "NavigateExperiment",
+    source_path: Union[str, Path],
+) -> Path:
+    """Resolve destination Zarr store path for materialized source data.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    source_path : str or pathlib.Path
+        Resolved or candidate source path.
+
+    Returns
+    -------
+    pathlib.Path
+        Destination Zarr store path. Existing Zarr/N5 sources are reused
+        in-place; non-Zarr sources are materialized as ``data_store.zarr``
+        next to ``experiment.yml``.
+
+    Raises
+    ------
+    None
+        This helper does not raise custom exceptions.
+    """
+    source = Path(source_path).expanduser().resolve()
+    if _is_zarr_like_path(source):
+        return source
+    return (experiment.path.parent / "data_store.zarr").resolve()
+
+
+def materialize_experiment_data_store(
+    *,
+    experiment: "NavigateExperiment",
+    source_path: Union[str, Path],
+    chunks: tuple[int, int, int, int, int, int] = (1, 1, 1, 256, 256, 256),
+    pyramid_factors: tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+    ] = ((1,), (1,), (1,), (1, 2, 4, 8), (1, 2, 4, 8), (1, 2, 4, 8)),
+    client: Optional["Client"] = None,
+) -> MaterializedDataStore:
+    """Materialize experiment source data into canonical Zarr ``data`` array.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    source_path : str or pathlib.Path
+        Acquisition source path resolved from experiment metadata.
+    chunks : tuple[int, int, int, int, int, int], default=(1,1,1,256,256,256)
+        Target chunking in ``(t, p, c, z, y, x)`` order.
+    pyramid_factors : tuple[tuple[int, ...], ...], optional
+        Resolution pyramid factors in ``(t, p, c, z, y, x)`` order.
+    client : dask.distributed.Client, optional
+        Active Dask distributed client used to execute graph writes.
+
+    Returns
+    -------
+    MaterializedDataStore
+        Materialization summary including source/store metadata.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``source_path`` does not exist.
+    ValueError
+        If source format or dimensionality cannot be normalized.
+
+    Notes
+    -----
+    When ``source_path`` is already a Zarr/N5 store, conversion is performed
+    in the same store path rather than creating a duplicate store.
+    """
+    source_resolved = Path(source_path).expanduser().resolve()
+    if not source_resolved.exists():
+        raise FileNotFoundError(source_resolved)
+
+    store_path = resolve_data_store_path(experiment=experiment, source_path=source_resolved)
+    write_client = client if _is_zarr_like_path(source_resolved) else None
+
+    with ExitStack() as exit_stack:
+        source_array, source_axes, source_meta = _open_source_as_dask(
+            source_resolved,
+            exit_stack=exit_stack,
+        )
+        source_shape = tuple(int(size) for size in source_array.shape)
+        source_dtype = np.dtype(source_array.dtype)
+        source_component_value = str(source_meta.get("source_component", "")).strip()
+        source_component = source_component_value or None
+
+        canonical = _coerce_to_tpczyx(
+            source_array,
+            experiment=experiment,
+            source_axes=source_axes,
+        )
+        canonical_shape = _normalize_tpczyx_shape(
+            tuple(int(size) for size in canonical.shape)
+        )
+        normalized_chunks = _normalize_write_chunks(
+            shape_tpczyx=canonical_shape,
+            chunks=chunks,
+        )
+        with dask.config.set({"array.rechunk.method": "tasks"}):
+            canonical = canonical.rechunk(normalized_chunks)
+
+        should_stage_same_component = (
+            store_path == source_resolved and source_component == "data"
+        )
+        if should_stage_same_component:
+            temp_component = "__clearex_tmp_data"
+            root = zarr.open_group(str(store_path), mode="a")
+            if temp_component in root:
+                del root[temp_component]
+            write_graph = da.to_zarr(
+                canonical,
+                url=str(store_path),
+                component=temp_component,
+                overwrite=True,
+                compute=False,
+            )
+            _compute_dask_graph(write_graph, client=write_client)
+            if "data" in root:
+                del root["data"]
+            root.move(temp_component, "data")
+            initialize_analysis_store(
+                experiment=experiment,
+                zarr_path=store_path,
+                overwrite=False,
+                chunks=chunks,
+                pyramid_factors=pyramid_factors,
+                dtype=source_dtype.name,
+                shape_tpczyx=canonical_shape,
+            )
+        else:
+            initialize_analysis_store(
+                experiment=experiment,
+                zarr_path=store_path,
+                overwrite=True,
+                chunks=chunks,
+                pyramid_factors=pyramid_factors,
+                dtype=source_dtype.name,
+                shape_tpczyx=canonical_shape,
+            )
+            root = zarr.open_group(str(store_path), mode="a")
+            write_graph = da.store(
+                canonical,
+                root["data"],
+                lock=False,
+                compute=False,
+            )
+            _compute_dask_graph(write_graph, client=write_client)
+
+    root = zarr.open_group(str(store_path), mode="a")
+    source_axes_attr = list(source_axes) if source_axes is not None else None
+    root["data"].attrs.update(
+        {
+            "source_path": str(source_resolved),
+            "source_axes": source_axes_attr,
+        }
+    )
+    if source_component is not None:
+        root["data"].attrs["source_component"] = source_component
+    root.attrs.update(
+        {
+            "source_data_path": str(source_resolved),
+            "source_data_axes": source_axes_attr,
+            "source_data_component": source_component,
+        }
+    )
+
+    source_image_info = ImageInfo(
+        path=source_resolved,
+        shape=source_shape,
+        dtype=source_dtype,
+        axes=_format_axes_for_image_info(source_axes),
+        metadata=dict(source_meta),
+    )
+    data_image_info = ImageInfo(
+        path=store_path,
+        shape=canonical_shape,
+        dtype=source_dtype,
+        axes="TPCZYX",
+        metadata={"component": "data"},
+    )
+    return MaterializedDataStore(
+        source_path=source_resolved,
+        store_path=store_path,
+        source_component=source_component,
+        source_image_info=source_image_info,
+        data_image_info=data_image_info,
+        chunks_tpczyx=normalized_chunks,
+    )
 
 
 @dataclass
@@ -678,6 +1434,7 @@ def initialize_analysis_store(
     zarr_path: Union[str, Path],
     *,
     image_info: Optional[ImageInfo] = None,
+    shape_tpczyx: Optional[CanonicalShapeTpczyx] = None,
     overwrite: bool = False,
     chunks: tuple[int, int, int, int, int, int] = (1, 1, 1, 256, 256, 256),
     pyramid_factors: tuple[
@@ -700,6 +1457,8 @@ def initialize_analysis_store(
         Output Zarr store path.
     image_info : ImageInfo, optional
         Source image metadata used for dtype/shape inference.
+    shape_tpczyx : tuple[int, int, int, int, int, int], optional
+        Explicit canonical shape override in ``(t, p, c, z, y, x)`` order.
     overwrite : bool, default=False
         Whether to overwrite existing ``data`` array when present.
     chunks : tuple[int, int, int, int, int, int], default=(1,1,1,256,256,256)
@@ -749,17 +1508,27 @@ def initialize_analysis_store(
     output_path = Path(zarr_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    z_size, y_size, x_size = infer_zyx_shape(
-        experiment=experiment, image_info=image_info
-    )
-    shape = (
-        int(experiment.timepoints),
-        int(experiment.multiposition_count),
-        int(experiment.channel_count),
-        int(z_size),
-        int(y_size),
-        int(x_size),
-    )
+    if shape_tpczyx is None:
+        z_size, y_size, x_size = infer_zyx_shape(
+            experiment=experiment, image_info=image_info
+        )
+        shape = (
+            int(experiment.timepoints),
+            int(experiment.multiposition_count),
+            int(experiment.channel_count),
+            int(z_size),
+            int(y_size),
+            int(x_size),
+        )
+    else:
+        if len(shape_tpczyx) != len(axis_names):
+            raise ValueError(
+                "shape_tpczyx must define six values in "
+                "(t, p, c, z, y, x) order."
+            )
+        shape = tuple(int(size) for size in shape_tpczyx)
+        if any(size <= 0 for size in shape):
+            raise ValueError("shape_tpczyx values must be greater than zero.")
 
     if dtype is None:
         if image_info is not None:
@@ -853,6 +1622,7 @@ def create_dask_client(
     scheduler_address: Optional[str] = None,
     n_workers: Optional[int] = None,
     threads_per_worker: int = 1,
+    processes: bool = False,
     memory_limit: Union[str, float] = "auto",
     local_directory: Optional[Union[str, Path]] = None,
 ) -> "Client":
@@ -866,6 +1636,9 @@ def create_dask_client(
         Number of local workers when using local mode.
     threads_per_worker : int, default=1
         Threads per worker for local mode.
+    processes : bool, default=False
+        Whether local workers should be process-based. I/O-dominant workloads
+        typically perform better with thread-based workers.
     memory_limit : str or float, default="auto"
         Memory limit per worker for local mode.
     local_directory : str or pathlib.Path, optional
@@ -889,7 +1662,7 @@ def create_dask_client(
     cluster = LocalCluster(
         n_workers=n_workers,
         threads_per_worker=threads_per_worker,
-        processes=True,
+        processes=processes,
         memory_limit=memory_limit,
         local_directory=str(local_directory) if local_directory is not None else None,
     )

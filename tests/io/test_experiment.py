@@ -39,6 +39,8 @@ from clearex.io.experiment import (
     initialize_analysis_store,
     is_navigate_experiment_file,
     load_navigate_experiment,
+    materialize_experiment_data_store,
+    resolve_data_store_path,
     resolve_experiment_data_path,
     write_zyx_block,
 )
@@ -243,3 +245,97 @@ def test_load_uses_multi_positions_sidecar_when_multiposition_enabled(tmp_path: 
     experiment = load_navigate_experiment(experiment_path)
 
     assert experiment.multiposition_count == 24
+
+
+def test_resolve_data_store_path_uses_experiment_directory_for_non_zarr(tmp_path: Path):
+    experiment_dir = tmp_path / "metadata"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    save_directory = tmp_path / "acquisition"
+    save_directory.mkdir(parents=True, exist_ok=True)
+
+    experiment_path = experiment_dir / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=save_directory, file_type="H5")
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = save_directory / "source.npy"
+    np.save(source_path, np.zeros((2, 3, 4), dtype=np.uint16))
+
+    resolved = resolve_data_store_path(experiment, source_path)
+
+    assert resolved == (experiment_dir / "data_store.zarr").resolve()
+
+
+def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_path = tmp_path / "source.npy"
+    np.save(source_path, source_data)
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+    )
+
+    expected_store = (experiment_path.parent / "data_store.zarr").resolve()
+    assert materialized.store_path == expected_store
+    root = zarr.open_group(str(expected_store), mode="r")
+    assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
+    assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
+    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+
+
+def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="OME-ZARR"
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_store = tmp_path / "source.ome.zarr"
+    source_root = zarr.open_group(str(source_store), mode="w")
+    source_root.create_dataset("raw", data=source_data, chunks=(1, 3, 4), overwrite=True)
+    source_root["raw"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_store,
+        chunks=(1, 1, 1, 2, 2, 2),
+    )
+
+    assert materialized.store_path == source_store.resolve()
+    root = zarr.open_group(str(source_store), mode="r")
+    assert "data" in root
+    assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
+    assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
+    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert not (experiment_path.parent / "data_store.zarr").exists()
+
+
+def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="OME-ZARR"
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_store = tmp_path / "source_data.zarr"
+    source_root = zarr.open_group(str(source_store), mode="w")
+    source_root.create_dataset("data", data=source_data, chunks=(1, 3, 4), overwrite=True)
+    source_root["data"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
+
+    materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_store,
+        chunks=(1, 1, 1, 2, 2, 2),
+    )
+
+    root = zarr.open_group(str(source_store), mode="r")
+    assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
+    assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
+    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
