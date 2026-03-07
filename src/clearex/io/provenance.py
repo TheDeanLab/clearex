@@ -635,6 +635,7 @@ def persist_run_provenance(
         "registration": workflow.registration,
         "visualization": workflow.visualization,
         "selected_analyses": _selected_analyses(workflow),
+        "analysis_parameters": _to_jsonable(workflow.analysis_parameters),
         "analysis_output_policy": "latest_only",
     }
 

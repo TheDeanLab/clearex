@@ -24,6 +24,7 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Optional, Sequence, Tuple, Union
 
@@ -42,6 +43,12 @@ ZarrPyramidAxisSpec = Tuple[
 PTCZYX_AXES = ("p", "t", "c", "z", "y", "x")
 TPCZYX_AXES = ("t", "p", "c", "z", "y", "x")
 _PTCZYX_TO_TPCZYX_INDICES = (1, 0, 2, 3, 4, 5)
+ANALYSIS_OPERATION_ORDER = (
+    "deconvolution",
+    "particle_detection",
+    "registration",
+    "visualization",
+)
 
 DEFAULT_ZARR_CHUNKS_PTCZYX: ZarrAxisSpec = (1, 1, 1, 256, 256, 256)
 DEFAULT_ZARR_PYRAMID_PTCZYX: ZarrPyramidAxisSpec = (
@@ -52,6 +59,308 @@ DEFAULT_ZARR_PYRAMID_PTCZYX: ZarrPyramidAxisSpec = (
     (1, 2, 4, 8),
     (1, 2, 4, 8),
 )
+
+DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
+    "deconvolution": {
+        "execution_order": 1,
+        "input_source": "data",
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": True,
+        "overlap_zyx": [4, 16, 16],
+        "memory_overhead_factor": 2.0,
+    },
+    "particle_detection": {
+        "execution_order": 2,
+        "input_source": "data",
+        "channel_index": 0,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": True,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 1.5,
+        "bg_sigma": 20.0,
+        "fwhm_px": 3.0,
+        "sigma_min_factor": 1.0,
+        "sigma_max_factor": 3.0,
+        "threshold": 0.1,
+        "overlap": 0.5,
+        "exclude_border": 5,
+        "eliminate_insignificant_particles": False,
+        "remove_close_particles": False,
+        "min_distance_sigma": 10.0,
+    },
+    "registration": {
+        "execution_order": 3,
+        "input_source": "data",
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": True,
+        "overlap_zyx": [8, 32, 32],
+        "memory_overhead_factor": 2.5,
+    },
+    "visualization": {
+        "execution_order": 4,
+        "input_source": "data",
+        "chunk_basis": "2d",
+        "detect_2d_per_slice": True,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 1.0,
+    },
+}
+
+
+def default_analysis_operation_parameters() -> Dict[str, Dict[str, Any]]:
+    """Return independent default analysis operation parameters.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    dict[str, dict[str, Any]]
+        Deep-copied default analysis parameter mapping keyed by analysis name.
+    """
+    return deepcopy(DEFAULT_ANALYSIS_OPERATION_PARAMETERS)
+
+
+def _normalize_common_operation_parameters(
+    operation_name: str,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize common analysis-operation runtime parameters.
+
+    Parameters
+    ----------
+    operation_name : str
+        Analysis operation name used for validation error context.
+    params : dict[str, Any]
+        Candidate operation parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized operation parameter mapping.
+
+    Raises
+    ------
+    ValueError
+        If common operation fields are malformed.
+    """
+    normalized = dict(params)
+    normalized["chunk_basis"] = str(normalized.get("chunk_basis", "3d")).strip() or "3d"
+    normalized["detect_2d_per_slice"] = bool(
+        normalized.get("detect_2d_per_slice", False)
+    )
+    normalized["use_map_overlap"] = bool(normalized.get("use_map_overlap", False))
+
+    overlap_value = normalized.get("overlap_zyx", [0, 0, 0])
+    if not isinstance(overlap_value, (tuple, list)) or len(overlap_value) != 3:
+        raise ValueError(
+            f"{operation_name} overlap_zyx must define three integers in (z, y, x) order."
+        )
+    normalized["overlap_zyx"] = [max(0, int(v)) for v in overlap_value]
+
+    memory_overhead = float(normalized.get("memory_overhead_factor", 1.0))
+    if memory_overhead <= 0:
+        raise ValueError(
+            f"{operation_name} memory_overhead_factor must be greater than zero."
+        )
+    normalized["memory_overhead_factor"] = memory_overhead
+
+    execution_order = int(normalized.get("execution_order", 1))
+    if execution_order < 1:
+        raise ValueError(f"{operation_name} execution_order must be at least one.")
+    normalized["execution_order"] = execution_order
+
+    input_source = str(normalized.get("input_source", "data")).strip() or "data"
+    normalized["input_source"] = input_source
+    return normalized
+
+
+def _normalize_particle_detection_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize particle-detection runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate particle-detection parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized particle-detection parameters.
+
+    Raises
+    ------
+    ValueError
+        If required values are invalid.
+    """
+    normalized = _normalize_common_operation_parameters(
+        "particle_detection", params
+    )
+
+    normalized["channel_index"] = max(0, int(normalized.get("channel_index", 0)))
+    normalized["detect_2d_per_slice"] = bool(
+        normalized.get("detect_2d_per_slice", True)
+    )
+
+    normalized["bg_sigma"] = float(normalized.get("bg_sigma", 20.0))
+    normalized["fwhm_px"] = float(normalized.get("fwhm_px", 3.0))
+    normalized["sigma_min_factor"] = float(normalized.get("sigma_min_factor", 1.0))
+    normalized["sigma_max_factor"] = float(normalized.get("sigma_max_factor", 3.0))
+    normalized["threshold"] = float(normalized.get("threshold", 0.1))
+    normalized["overlap"] = float(normalized.get("overlap", 0.5))
+    normalized["exclude_border"] = max(0, int(normalized.get("exclude_border", 5)))
+    normalized["eliminate_insignificant_particles"] = bool(
+        normalized.get("eliminate_insignificant_particles", False)
+    )
+    normalized["remove_close_particles"] = bool(
+        normalized.get("remove_close_particles", False)
+    )
+    normalized["min_distance_sigma"] = float(
+        normalized.get("min_distance_sigma", 10.0)
+    )
+    if normalized["min_distance_sigma"] < 0:
+        raise ValueError("particle_detection min_distance_sigma cannot be negative.")
+
+    return normalized
+
+
+def normalize_analysis_operation_parameters(
+    parameters: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
+    """Normalize analysis operation parameter mappings.
+
+    Parameters
+    ----------
+    parameters : dict[str, dict[str, Any]], optional
+        Candidate parameter mapping keyed by analysis operation name.
+
+    Returns
+    -------
+    dict[str, dict[str, Any]]
+        Normalized mapping merged with defaults.
+
+    Raises
+    ------
+    ValueError
+        If known operation parameters are malformed.
+    """
+    merged = default_analysis_operation_parameters()
+    if parameters is None:
+        return merged
+
+    for key, value in parameters.items():
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"Analysis operation parameters for '{key}' must be a dictionary."
+            )
+        merged[str(key)] = {**merged.get(str(key), {}), **value}
+
+    for operation_name in ANALYSIS_OPERATION_ORDER:
+        if operation_name not in merged:
+            continue
+        if operation_name == "particle_detection":
+            merged[operation_name] = _normalize_particle_detection_parameters(
+                merged[operation_name]
+            )
+        else:
+            merged[operation_name] = _normalize_common_operation_parameters(
+                operation_name,
+                merged[operation_name],
+            )
+    return merged
+
+
+def selected_analysis_operations(
+    *,
+    deconvolution: bool,
+    particle_detection: bool,
+    registration: bool,
+    visualization: bool,
+) -> Tuple[str, ...]:
+    """Collect enabled analysis operation names.
+
+    Parameters
+    ----------
+    deconvolution : bool
+        Whether deconvolution is enabled.
+    particle_detection : bool
+        Whether particle detection is enabled.
+    registration : bool
+        Whether registration is enabled.
+    visualization : bool
+        Whether visualization is enabled.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Selected operations in canonical declaration order.
+    """
+    selected: list[str] = []
+    if deconvolution:
+        selected.append("deconvolution")
+    if particle_detection:
+        selected.append("particle_detection")
+    if registration:
+        selected.append("registration")
+    if visualization:
+        selected.append("visualization")
+    return tuple(selected)
+
+
+def resolve_analysis_execution_sequence(
+    *,
+    deconvolution: bool,
+    particle_detection: bool,
+    registration: bool,
+    visualization: bool,
+    analysis_parameters: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[str, ...]:
+    """Resolve selected analyses into execution order.
+
+    Parameters
+    ----------
+    deconvolution : bool
+        Whether deconvolution is enabled.
+    particle_detection : bool
+        Whether particle detection is enabled.
+    registration : bool
+        Whether registration is enabled.
+    visualization : bool
+        Whether visualization is enabled.
+    analysis_parameters : dict[str, dict[str, Any]], optional
+        Candidate per-operation parameter mapping. The ``execution_order``
+        field in each selected operation controls ordering.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Selected operation names sorted by ``execution_order`` and then by
+        canonical declaration order as a stable tie-breaker.
+    """
+    normalized = normalize_analysis_operation_parameters(analysis_parameters)
+    selected = selected_analysis_operations(
+        deconvolution=deconvolution,
+        particle_detection=particle_detection,
+        registration=registration,
+        visualization=visualization,
+    )
+    index_map = {name: idx for idx, name in enumerate(ANALYSIS_OPERATION_ORDER)}
+    return tuple(
+        sorted(
+            selected,
+            key=lambda name: (
+                int(normalized.get(name, {}).get("execution_order", index_map[name] + 1)),
+                int(index_map[name]),
+            ),
+        )
+    )
 
 
 def _normalize_positive_sequence(
@@ -1014,6 +1323,8 @@ class WorkflowConfig:
         Flag indicating whether visualization workflow should run.
     zarr_save : ZarrSaveConfig
         Analysis-store chunking and pyramid configuration for saved Zarr data.
+    analysis_parameters : dict[str, dict[str, Any]]
+        Per-analysis runtime parameters keyed by analysis name.
     """
 
     file: Optional[str] = None
@@ -1025,6 +1336,30 @@ class WorkflowConfig:
     registration: bool = False
     visualization: bool = False
     zarr_save: ZarrSaveConfig = field(default_factory=ZarrSaveConfig)
+    analysis_parameters: Dict[str, Dict[str, Any]] = field(
+        default_factory=default_analysis_operation_parameters
+    )
+
+    def __post_init__(self) -> None:
+        """Normalize analysis-parameter mappings.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Values are normalized in-place on the dataclass.
+
+        Raises
+        ------
+        ValueError
+            If analysis parameter mappings are invalid.
+        """
+        self.analysis_parameters = normalize_analysis_operation_parameters(
+            self.analysis_parameters
+        )
 
     def has_analysis_selection(self) -> bool:
         """Return whether at least one analysis operation is selected.

@@ -59,16 +59,20 @@ from clearex.workflow import (
     SlurmRunnerConfig,
     WorkflowConfig,
     ZarrSaveConfig,
+    default_analysis_operation_parameters,
     format_dask_backend_summary,
     format_pyramid_levels,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
+    normalize_analysis_operation_parameters,
     parse_pyramid_levels,
 )
 
 # Third Party Imports
+import zarr
+
 try:
-    from PyQt6.QtCore import QThread, Qt, pyqtSignal
+    from PyQt6.QtCore import QEvent, QObject, QThread, Qt, pyqtSignal
     from PyQt6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -77,6 +81,7 @@ try:
         QFileDialog,
         QFormLayout,
         QFrame,
+        QDoubleSpinBox,
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
@@ -2117,7 +2122,75 @@ if HAS_PYQT6:
             self._accept_with_store_path(store_path)
 
     class AnalysisSelectionDialog(QDialog):
-        """Second-step GUI dialog for selecting analysis operations."""
+        """Second-step GUI dialog for selecting and sequencing analysis operations."""
+
+        _OPERATION_KEYS: tuple[str, ...] = (
+            "deconvolution",
+            "particle_detection",
+            "registration",
+            "visualization",
+        )
+        _OPERATION_LABELS: Dict[str, str] = {
+            "deconvolution": "Deconvolution",
+            "particle_detection": "Particle Detection",
+            "registration": "Registration",
+            "visualization": "Visualization",
+        }
+        _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
+            "deconvolution": "results/deconvolution/latest/data",
+            "registration": "results/registration/latest/data",
+            "visualization": "results/visualization/latest/data",
+        }
+        _PARAMETER_HINTS: Dict[str, str] = {
+            "input_source": (
+                "Input source controls which dataset this operation reads from. "
+                "Use raw data, or choose an upstream operation output."
+            ),
+            "channel_index": "Channel index selects the channel axis index used for detection.",
+            "bg_sigma": (
+                "Background sigma controls Gaussian smoothing used in preprocess "
+                "to estimate and remove low-frequency background."
+            ),
+            "fwhm_px": (
+                "fwhm_px defines expected particle diameter in pixels and sets "
+                "the LoG detection scale neighborhood."
+            ),
+            "sigma_min_factor": (
+                "Lower scale factor for blob search relative to fwhm_px."
+            ),
+            "sigma_max_factor": (
+                "Upper scale factor for blob search relative to fwhm_px."
+            ),
+            "threshold": (
+                "Minimum normalized response required to keep a candidate particle."
+            ),
+            "overlap": (
+                "Allowed overlap ratio between nearby blob candidates before "
+                "suppression is applied."
+            ),
+            "exclude_border": (
+                "Excludes detections this many pixels from image borders to "
+                "reduce edge artifacts."
+            ),
+            "use_map_overlap": (
+                "Enable chunk overlap margins to reduce seam artifacts across chunk edges."
+            ),
+            "overlap_zyx": (
+                "Overlap margins in (z, y, x) voxels when chunk overlap is enabled."
+            ),
+            "eliminate_insignificant_particles": (
+                "Post-filter candidates by statistical significance."
+            ),
+            "remove_close_particles": (
+                "Removes particles that are too close to stronger neighbors."
+            ),
+            "min_distance_sigma": (
+                "Minimum allowed separation in units of detected sigma for close-particle removal."
+            ),
+            "execution_order": (
+                "Execution order controls when this operation runs relative to other selected operations."
+            ),
+        }
 
         def __init__(self, initial: WorkflowConfig) -> None:
             """Initialize analysis-selection window.
@@ -2134,11 +2207,32 @@ if HAS_PYQT6:
             """
             super().__init__()
             self.setWindowTitle("ClearEx Analysis")
-            self.setMinimumWidth(720)
-            self.setMinimumHeight(420)
+            self.setMinimumWidth(1120)
+            self.setMinimumHeight(640)
 
             self._base_config = initial
             self.result_config: Optional[WorkflowConfig] = None
+            self._status_label: Optional[QLabel] = None
+            self._parameter_help_default = (
+                "Hover over a parameter to see a detailed explanation."
+            )
+
+            self._operation_defaults = default_analysis_operation_parameters()
+            self._particle_defaults = dict(
+                self._operation_defaults.get("particle_detection", {})
+            )
+
+            self._operation_checkboxes: Dict[str, QCheckBox] = {}
+            self._operation_order_spins: Dict[str, QSpinBox] = {}
+            self._operation_config_buttons: Dict[str, QPushButton] = {}
+            self._operation_input_combos: Dict[str, QComboBox] = {}
+            self._operation_panel_indices: Dict[str, int] = {}
+            self._parameter_help_map: Dict[QObject, str] = {}
+            self._active_config_operation: Optional[str] = None
+
+            self._operation_panel_stack: Optional[QStackedWidget] = None
+            self._parameter_help_label: Optional[QLabel] = None
+            self._store_label: Optional[QLabel] = None
 
             self._build_ui()
             self._apply_theme()
@@ -2164,7 +2258,9 @@ if HAS_PYQT6:
             header_layout = QVBoxLayout(header)
             title = QLabel("Select Analysis Methods")
             title.setObjectName("title")
-            subtitle = QLabel("Choose one or more operations to run on the prepared store.")
+            subtitle = QLabel(
+                "Enable routines, configure each operation, and define execution sequence."
+            )
             subtitle.setObjectName("subtitle")
             header_layout.addWidget(title)
             header_layout.addWidget(subtitle)
@@ -2183,32 +2279,659 @@ if HAS_PYQT6:
             store_row.addWidget(self._store_label, 1)
             root.addLayout(store_row)
 
+            content_row = QHBoxLayout()
+            content_row.setSpacing(12)
+            root.addLayout(content_row, 1)
+
             analysis_group = QGroupBox("Analysis Selection")
-            analysis_layout = QGridLayout(analysis_group)
+            analysis_group.setMinimumWidth(430)
+            analysis_layout = QVBoxLayout(analysis_group)
             analysis_layout.setSpacing(10)
 
-            self._deconvolution_checkbox = QCheckBox("Deconvolution")
-            self._particle_checkbox = QCheckBox("Particle Detection")
-            self._registration_checkbox = QCheckBox("Registration")
-            self._visualization_checkbox = QCheckBox("Visualization")
+            for operation_name in self._OPERATION_KEYS:
+                row = QHBoxLayout()
+                row.setSpacing(8)
 
-            analysis_layout.addWidget(self._deconvolution_checkbox, 0, 0)
-            analysis_layout.addWidget(self._particle_checkbox, 0, 1)
-            analysis_layout.addWidget(self._registration_checkbox, 1, 0)
-            analysis_layout.addWidget(self._visualization_checkbox, 1, 1)
-            root.addWidget(analysis_group)
+                checkbox = QCheckBox(self._OPERATION_LABELS[operation_name])
+                checkbox.setObjectName("operationCheckbox")
+                row.addWidget(checkbox, 1)
+                self._operation_checkboxes[operation_name] = checkbox
+
+                order_label = QLabel("Order")
+                order_label.setObjectName("statusLabel")
+                row.addWidget(order_label)
+
+                order_spin = QSpinBox()
+                order_spin.setRange(1, len(self._OPERATION_KEYS))
+                order_spin.setMinimumWidth(64)
+                row.addWidget(order_spin)
+                self._operation_order_spins[operation_name] = order_spin
+                self._register_parameter_hint(
+                    order_spin, self._PARAMETER_HINTS["execution_order"]
+                )
+
+                configure_button = QPushButton("Configure")
+                configure_button.setCheckable(True)
+                configure_button.setObjectName("configureButton")
+                row.addWidget(configure_button)
+                self._operation_config_buttons[operation_name] = configure_button
+
+                analysis_layout.addLayout(row)
+
+                checkbox.toggled.connect(self._on_operation_selection_changed)
+                order_spin.valueChanged.connect(self._on_operation_order_changed)
+                configure_button.clicked.connect(
+                    lambda _checked=False, op=operation_name: self._show_operation_configuration(op)
+                )
+
+            analysis_hint = QLabel(
+                "Use Configure to edit one operation at a time. "
+                "Only selected operations can be configured."
+            )
+            analysis_hint.setObjectName("statusLabel")
+            analysis_hint.setWordWrap(True)
+            analysis_layout.addWidget(analysis_hint)
+            analysis_layout.addStretch(1)
+            content_row.addWidget(analysis_group, 1)
+
+            parameters_group = QGroupBox("Operation Parameters")
+            parameters_layout = QVBoxLayout(parameters_group)
+            parameters_layout.setSpacing(8)
+
+            self._operation_panel_stack = QStackedWidget()
+            self._operation_panel_stack.addWidget(self._build_no_selection_panel())
+            for operation_name in self._OPERATION_KEYS:
+                panel = self._build_operation_panel(operation_name)
+                panel_index = self._operation_panel_stack.addWidget(panel)
+                self._operation_panel_indices[operation_name] = panel_index
+            parameters_layout.addWidget(self._operation_panel_stack, 1)
+
+            help_card = QFrame()
+            help_card.setObjectName("helpCard")
+            help_layout = QVBoxLayout(help_card)
+            help_layout.setSpacing(4)
+            help_title = QLabel("Parameter Help")
+            help_title.setObjectName("helpTitle")
+            help_layout.addWidget(help_title)
+            self._parameter_help_label = QLabel(self._parameter_help_default)
+            self._parameter_help_label.setObjectName("helpBody")
+            self._parameter_help_label.setWordWrap(True)
+            help_layout.addWidget(self._parameter_help_label)
+            parameters_layout.addWidget(help_card)
+
+            content_row.addWidget(parameters_group, 1)
 
             footer = QHBoxLayout()
+            self._status_label = QLabel("Configure selected analysis routines and click Run.")
+            self._status_label.setObjectName("statusLabel")
+            self._status_label.setWordWrap(True)
+            footer.addWidget(self._status_label, 1)
             self._cancel_button = QPushButton("Cancel")
             self._run_button = QPushButton("Run")
             self._run_button.setObjectName("runButton")
-            footer.addStretch(1)
             footer.addWidget(self._cancel_button)
             footer.addWidget(self._run_button)
             root.addLayout(footer)
 
             self._cancel_button.clicked.connect(self.reject)
             self._run_button.clicked.connect(self._on_run)
+            self._particle_use_overlap_checkbox.toggled.connect(
+                self._set_particle_parameter_enabled_state
+            )
+            self._particle_remove_close_checkbox.toggled.connect(
+                self._set_particle_parameter_enabled_state
+            )
+
+        def _build_no_selection_panel(self) -> QWidget:
+            """Create the default panel shown before Configure is selected.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            QWidget
+                Placeholder panel widget.
+            """
+            widget = QWidget()
+            layout = QVBoxLayout(widget)
+            text = QLabel(
+                "Select an analysis routine on the left, then click Configure to open "
+                "its operation parameters."
+            )
+            text.setWordWrap(True)
+            text.setObjectName("parameterHint")
+            layout.addWidget(text)
+            layout.addStretch(1)
+            return widget
+
+        def _build_operation_panel(self, operation_name: str) -> QWidget:
+            """Build the parameter panel for one operation.
+
+            Parameters
+            ----------
+            operation_name : str
+                Analysis operation key.
+
+            Returns
+            -------
+            QWidget
+                Parameter panel for the operation.
+            """
+            panel = QWidget()
+            layout = QVBoxLayout(panel)
+            layout.setSpacing(8)
+
+            profile = QLabel(
+                f"{self._OPERATION_LABELS[operation_name]} Configuration\n"
+                f"Output component: {self._operation_output_component(operation_name)}"
+            )
+            profile.setObjectName("parameterHint")
+            profile.setWordWrap(True)
+            layout.addWidget(profile)
+
+            form = QFormLayout()
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+            form.setHorizontalSpacing(10)
+            form.setVerticalSpacing(8)
+
+            input_combo = QComboBox()
+            form.addRow("Input source", input_combo)
+            self._operation_input_combos[operation_name] = input_combo
+            self._register_parameter_hint(input_combo, self._PARAMETER_HINTS["input_source"])
+
+            if operation_name == "particle_detection":
+                self._build_particle_parameter_rows(form)
+            else:
+                stub = QLabel(
+                    "Advanced parameters for this operation are not exposed yet. "
+                    "Execution order and input source are fully configurable."
+                )
+                stub.setWordWrap(True)
+                stub.setObjectName("statusLabel")
+                form.addRow("Details", stub)
+
+            layout.addLayout(form)
+            layout.addStretch(1)
+            return panel
+
+        def _build_particle_parameter_rows(self, form: QFormLayout) -> None:
+            """Add particle-detection parameter controls to a form.
+
+            Parameters
+            ----------
+            form : QFormLayout
+                Parent form layout receiving particle controls.
+
+            Returns
+            -------
+            None
+                Widgets are created and attached in-place.
+            """
+            self._particle_channel_spin = QSpinBox()
+            self._particle_channel_spin.setMinimum(0)
+            self._particle_channel_spin.setMaximum(0)
+            form.addRow("Channel Index", self._particle_channel_spin)
+            self._register_parameter_hint(
+                self._particle_channel_spin, self._PARAMETER_HINTS["channel_index"]
+            )
+
+            self._particle_bg_sigma_spin = QDoubleSpinBox()
+            self._particle_bg_sigma_spin.setDecimals(2)
+            self._particle_bg_sigma_spin.setRange(0.0, 1_000_000.0)
+            self._particle_bg_sigma_spin.setSingleStep(1.0)
+            form.addRow("Preprocess bg_sigma", self._particle_bg_sigma_spin)
+            self._register_parameter_hint(
+                self._particle_bg_sigma_spin, self._PARAMETER_HINTS["bg_sigma"]
+            )
+
+            self._particle_fwhm_spin = QDoubleSpinBox()
+            self._particle_fwhm_spin.setDecimals(3)
+            self._particle_fwhm_spin.setRange(0.001, 1_000_000.0)
+            self._particle_fwhm_spin.setSingleStep(0.25)
+            form.addRow("fwhm_px", self._particle_fwhm_spin)
+            self._register_parameter_hint(
+                self._particle_fwhm_spin, self._PARAMETER_HINTS["fwhm_px"]
+            )
+
+            self._particle_sigma_min_spin = QDoubleSpinBox()
+            self._particle_sigma_min_spin.setDecimals(3)
+            self._particle_sigma_min_spin.setRange(0.001, 1000.0)
+            self._particle_sigma_min_spin.setSingleStep(0.1)
+            form.addRow("sigma_min_factor", self._particle_sigma_min_spin)
+            self._register_parameter_hint(
+                self._particle_sigma_min_spin, self._PARAMETER_HINTS["sigma_min_factor"]
+            )
+
+            self._particle_sigma_max_spin = QDoubleSpinBox()
+            self._particle_sigma_max_spin.setDecimals(3)
+            self._particle_sigma_max_spin.setRange(0.001, 1000.0)
+            self._particle_sigma_max_spin.setSingleStep(0.1)
+            form.addRow("sigma_max_factor", self._particle_sigma_max_spin)
+            self._register_parameter_hint(
+                self._particle_sigma_max_spin, self._PARAMETER_HINTS["sigma_max_factor"]
+            )
+
+            self._particle_threshold_spin = QDoubleSpinBox()
+            self._particle_threshold_spin.setDecimals(4)
+            self._particle_threshold_spin.setRange(0.0, 1_000_000.0)
+            self._particle_threshold_spin.setSingleStep(0.01)
+            form.addRow("threshold", self._particle_threshold_spin)
+            self._register_parameter_hint(
+                self._particle_threshold_spin, self._PARAMETER_HINTS["threshold"]
+            )
+
+            self._particle_overlap_spin = QDoubleSpinBox()
+            self._particle_overlap_spin.setDecimals(3)
+            self._particle_overlap_spin.setRange(0.0, 1.0)
+            self._particle_overlap_spin.setSingleStep(0.05)
+            form.addRow("overlap", self._particle_overlap_spin)
+            self._register_parameter_hint(
+                self._particle_overlap_spin, self._PARAMETER_HINTS["overlap"]
+            )
+
+            self._particle_exclude_border_spin = QSpinBox()
+            self._particle_exclude_border_spin.setRange(0, 1_000_000)
+            form.addRow("exclude_border", self._particle_exclude_border_spin)
+            self._register_parameter_hint(
+                self._particle_exclude_border_spin, self._PARAMETER_HINTS["exclude_border"]
+            )
+
+            self._particle_use_overlap_checkbox = QCheckBox("Use map_overlap margins")
+            form.addRow("Chunk overlap", self._particle_use_overlap_checkbox)
+            self._register_parameter_hint(
+                self._particle_use_overlap_checkbox,
+                self._PARAMETER_HINTS["use_map_overlap"],
+            )
+
+            overlap_row = QHBoxLayout()
+            self._particle_overlap_z_spin = QSpinBox()
+            self._particle_overlap_z_spin.setRange(0, 1_000_000)
+            self._particle_overlap_y_spin = QSpinBox()
+            self._particle_overlap_y_spin.setRange(0, 1_000_000)
+            self._particle_overlap_x_spin = QSpinBox()
+            self._particle_overlap_x_spin.setRange(0, 1_000_000)
+            overlap_row.addWidget(QLabel("z"))
+            overlap_row.addWidget(self._particle_overlap_z_spin)
+            overlap_row.addWidget(QLabel("y"))
+            overlap_row.addWidget(self._particle_overlap_y_spin)
+            overlap_row.addWidget(QLabel("x"))
+            overlap_row.addWidget(self._particle_overlap_x_spin)
+            overlap_widget = QWidget()
+            overlap_widget.setLayout(overlap_row)
+            form.addRow("overlap_zyx", overlap_widget)
+            self._register_parameter_hint(
+                self._particle_overlap_z_spin, self._PARAMETER_HINTS["overlap_zyx"]
+            )
+            self._register_parameter_hint(
+                self._particle_overlap_y_spin, self._PARAMETER_HINTS["overlap_zyx"]
+            )
+            self._register_parameter_hint(
+                self._particle_overlap_x_spin, self._PARAMETER_HINTS["overlap_zyx"]
+            )
+
+            self._particle_eliminate_checkbox = QCheckBox(
+                "Eliminate statistically insignificant particles"
+            )
+            form.addRow("Post-filter 1", self._particle_eliminate_checkbox)
+            self._register_parameter_hint(
+                self._particle_eliminate_checkbox,
+                self._PARAMETER_HINTS["eliminate_insignificant_particles"],
+            )
+
+            self._particle_remove_close_checkbox = QCheckBox(
+                "Remove particles that are too close"
+            )
+            form.addRow("Post-filter 2", self._particle_remove_close_checkbox)
+            self._register_parameter_hint(
+                self._particle_remove_close_checkbox,
+                self._PARAMETER_HINTS["remove_close_particles"],
+            )
+
+            self._particle_min_distance_spin = QDoubleSpinBox()
+            self._particle_min_distance_spin.setDecimals(3)
+            self._particle_min_distance_spin.setRange(0.0, 1_000_000.0)
+            self._particle_min_distance_spin.setSingleStep(0.5)
+            form.addRow("min_distance_sigma", self._particle_min_distance_spin)
+            self._register_parameter_hint(
+                self._particle_min_distance_spin, self._PARAMETER_HINTS["min_distance_sigma"]
+            )
+
+        def _register_parameter_hint(self, widget: QWidget, message: str) -> None:
+            """Register hover/focus help text for a widget.
+
+            Parameters
+            ----------
+            widget : QWidget
+                Input widget to register.
+            message : str
+                Help text shown in the parameter help panel.
+
+            Returns
+            -------
+            None
+                Hint mapping is stored in-place.
+            """
+            widget.setToolTip(message)
+            widget.installEventFilter(self)
+            self._parameter_help_map[widget] = str(message)
+
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+            """Handle hover/focus transitions for parameter-help updates.
+
+            Parameters
+            ----------
+            watched : QObject
+                Widget emitting the event.
+            event : QEvent
+                Qt event object.
+
+            Returns
+            -------
+            bool
+                Returns base class event filter result.
+            """
+            message = self._parameter_help_map.get(watched)
+            if message:
+                event_type = event.type()
+                if event_type in (QEvent.Type.Enter, QEvent.Type.FocusIn):
+                    self._set_parameter_help(message)
+                elif event_type in (QEvent.Type.Leave, QEvent.Type.FocusOut):
+                    focus_widget = self.focusWidget()
+                    if focus_widget is not None and focus_widget in self._parameter_help_map:
+                        self._set_parameter_help(self._parameter_help_map[focus_widget])
+                    else:
+                        self._set_parameter_help(self._parameter_help_default)
+            return super().eventFilter(watched, event)
+
+        def _show_operation_configuration(self, operation_name: str) -> None:
+            """Display parameter controls for one operation.
+
+            Parameters
+            ----------
+            operation_name : str
+                Operation key to display.
+
+            Returns
+            -------
+            None
+                Visible parameter panel is updated in-place.
+            """
+            checkbox = self._operation_checkboxes[operation_name]
+            if not checkbox.isChecked():
+                self._set_status(
+                    f"Enable {self._OPERATION_LABELS[operation_name]} before configuring."
+                )
+                return
+
+            if self._operation_panel_stack is None:
+                return
+
+            self._active_config_operation = operation_name
+            panel_index = int(self._operation_panel_indices[operation_name])
+            self._operation_panel_stack.setCurrentIndex(panel_index)
+            for key, button in self._operation_config_buttons.items():
+                button.setChecked(key == operation_name)
+
+            self._set_status(
+                f"Configuring {self._OPERATION_LABELS[operation_name]} parameters."
+            )
+
+        def _operation_output_component(self, operation_name: str) -> str:
+            """Return expected latest output component path for an operation.
+
+            Parameters
+            ----------
+            operation_name : str
+                Operation key.
+
+            Returns
+            -------
+            str
+                Component path used for upstream-input labels.
+            """
+            if operation_name == "particle_detection":
+                return "results/particle_detection/latest/detections"
+            return self._OPERATION_OUTPUT_COMPONENTS.get(
+                operation_name,
+                f"results/{operation_name}/latest/data",
+            )
+
+        def _selected_operations_in_sequence(self) -> list[str]:
+            """Return selected operation keys sorted by execution order.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            list[str]
+                Selected operations sorted by order spin value and declaration order.
+            """
+            selected = [
+                operation_name
+                for operation_name in self._OPERATION_KEYS
+                if self._operation_checkboxes[operation_name].isChecked()
+            ]
+            tie_break = {
+                operation_name: idx
+                for idx, operation_name in enumerate(self._OPERATION_KEYS)
+            }
+            return sorted(
+                selected,
+                key=lambda name: (
+                    int(self._operation_order_spins[name].value()),
+                    int(tie_break[name]),
+                ),
+            )
+
+        def _input_options_for_operation(
+            self,
+            operation_name: str,
+        ) -> list[tuple[str, str]]:
+            """Build input-source options for a specific operation.
+
+            Parameters
+            ----------
+            operation_name : str
+                Operation key for which options are generated.
+
+            Returns
+            -------
+            list[tuple[str, str]]
+                List of ``(value, label)`` input-source options.
+            """
+            options: list[tuple[str, str]] = [("data", "Raw data (data)")]
+            selected_order = self._selected_operations_in_sequence()
+            for upstream_name in selected_order:
+                if upstream_name == operation_name:
+                    break
+                if upstream_name not in self._OPERATION_OUTPUT_COMPONENTS:
+                    continue
+                options.append(
+                    (
+                        upstream_name,
+                        f"{self._OPERATION_LABELS[upstream_name]} output "
+                        f"({self._operation_output_component(upstream_name)})",
+                    )
+                )
+            return options
+
+        def _refresh_input_source_options(self) -> None:
+            """Refresh all input-source combo box options.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Combo options are rebuilt in-place.
+            """
+            for operation_name, combo in self._operation_input_combos.items():
+                current_data = combo.currentData()
+                current_source = (
+                    str(current_data).strip()
+                    if current_data is not None
+                    else "data"
+                ) or "data"
+                options = self._input_options_for_operation(operation_name)
+                option_values = [value for value, _ in options]
+
+                combo.blockSignals(True)
+                combo.clear()
+                selected_index = 0
+                for idx, (value, label) in enumerate(options):
+                    combo.addItem(label, value)
+                    if value == current_source:
+                        selected_index = idx
+
+                if current_source not in option_values:
+                    combo.addItem(
+                        f"Custom component ({current_source})",
+                        current_source,
+                    )
+                    selected_index = combo.count() - 1
+
+                combo.setCurrentIndex(selected_index)
+                combo.setEnabled(self._operation_checkboxes[operation_name].isChecked())
+                combo.blockSignals(False)
+
+        def _set_status(self, text: str) -> None:
+            """Update the analysis status label text.
+
+            Parameters
+            ----------
+            text : str
+                Status message.
+
+            Returns
+            -------
+            None
+                Label text is updated in-place.
+            """
+            if self._status_label is not None:
+                self._status_label.setText(str(text))
+
+        def _set_parameter_help(self, text: str) -> None:
+            """Update verbose parameter-help text.
+
+            Parameters
+            ----------
+            text : str
+                Help text to display.
+
+            Returns
+            -------
+            None
+                Help label is updated in-place.
+            """
+            if self._parameter_help_label is not None:
+                self._parameter_help_label.setText(str(text))
+
+        def _on_operation_selection_changed(self) -> None:
+            """React to operation selection checkbox changes.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widget state and status text are updated in-place.
+            """
+            for operation_name in self._OPERATION_KEYS:
+                enabled = self._operation_checkboxes[operation_name].isChecked()
+                self._operation_order_spins[operation_name].setEnabled(enabled)
+                self._operation_config_buttons[operation_name].setEnabled(enabled)
+                self._operation_input_combos[operation_name].setEnabled(enabled)
+
+            self._refresh_input_source_options()
+            self._set_particle_parameter_enabled_state()
+
+            if (
+                self._active_config_operation is not None
+                and not self._operation_checkboxes[self._active_config_operation].isChecked()
+                and self._operation_panel_stack is not None
+            ):
+                self._active_config_operation = None
+                self._operation_panel_stack.setCurrentIndex(0)
+                for button in self._operation_config_buttons.values():
+                    button.setChecked(False)
+
+            sequence = self._selected_operations_in_sequence()
+            if not sequence:
+                self._set_status("Select at least one analysis routine.")
+                return
+
+            sequence_text = " -> ".join(self._OPERATION_LABELS[name] for name in sequence)
+            self._set_status(f"Current execution sequence: {sequence_text}")
+
+        def _on_operation_order_changed(self) -> None:
+            """Update dependent options when operation order values change.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Input options and status text are refreshed in-place.
+            """
+            self._refresh_input_source_options()
+            sequence = self._selected_operations_in_sequence()
+            if sequence:
+                sequence_text = " -> ".join(
+                    self._OPERATION_LABELS[name] for name in sequence
+                )
+                self._set_status(f"Current execution sequence: {sequence_text}")
+
+        def _set_particle_parameter_enabled_state(self) -> None:
+            """Enable/disable particle widgets based on selection and sub-options.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widget enabled states are updated in-place.
+            """
+            particle_enabled = self._operation_checkboxes["particle_detection"].isChecked()
+            overlap_enabled = (
+                particle_enabled and self._particle_use_overlap_checkbox.isChecked()
+            )
+            close_enabled = (
+                particle_enabled and self._particle_remove_close_checkbox.isChecked()
+            )
+
+            widgets = (
+                self._particle_channel_spin,
+                self._particle_bg_sigma_spin,
+                self._particle_fwhm_spin,
+                self._particle_sigma_min_spin,
+                self._particle_sigma_max_spin,
+                self._particle_threshold_spin,
+                self._particle_overlap_spin,
+                self._particle_exclude_border_spin,
+                self._particle_use_overlap_checkbox,
+                self._particle_eliminate_checkbox,
+                self._particle_remove_close_checkbox,
+            )
+            for widget in widgets:
+                widget.setEnabled(particle_enabled)
+
+            self._particle_overlap_z_spin.setEnabled(overlap_enabled)
+            self._particle_overlap_y_spin.setEnabled(overlap_enabled)
+            self._particle_overlap_x_spin.setEnabled(overlap_enabled)
+            self._particle_min_distance_spin.setEnabled(close_enabled)
 
         def _hydrate(self, initial: WorkflowConfig) -> None:
             """Populate analysis selections from initial workflow values.
@@ -2223,11 +2946,120 @@ if HAS_PYQT6:
             None
                 Widget state is updated in-place.
             """
-            self._store_label.setText(initial.file or "n/a")
-            self._deconvolution_checkbox.setChecked(initial.deconvolution)
-            self._particle_checkbox.setChecked(initial.particle_detection)
-            self._registration_checkbox.setChecked(initial.registration)
-            self._visualization_checkbox.setChecked(initial.visualization)
+            normalized_parameters = normalize_analysis_operation_parameters(
+                initial.analysis_parameters
+            )
+            particle_params = dict(
+                normalized_parameters.get("particle_detection", self._particle_defaults)
+            )
+
+            if self._store_label is not None:
+                self._store_label.setText(initial.file or "n/a")
+
+            checkbox_defaults = {
+                "deconvolution": bool(initial.deconvolution),
+                "particle_detection": bool(initial.particle_detection),
+                "registration": bool(initial.registration),
+                "visualization": bool(initial.visualization),
+            }
+            if not any(checkbox_defaults.values()):
+                checkbox_defaults["particle_detection"] = True
+
+            for idx, operation_name in enumerate(self._OPERATION_KEYS):
+                operation_params = dict(
+                    normalized_parameters.get(
+                        operation_name,
+                        self._operation_defaults.get(operation_name, {}),
+                    )
+                )
+                self._operation_checkboxes[operation_name].setChecked(
+                    checkbox_defaults[operation_name]
+                )
+                self._operation_order_spins[operation_name].setValue(
+                    int(operation_params.get("execution_order", idx + 1))
+                )
+
+            self._refresh_input_source_options()
+            for operation_name in self._OPERATION_KEYS:
+                requested_source = str(
+                    normalized_parameters.get(operation_name, {}).get("input_source", "data")
+                ).strip() or "data"
+                combo = self._operation_input_combos[operation_name]
+                combo.blockSignals(True)
+                combo_index = combo.findData(requested_source)
+                if combo_index < 0:
+                    combo.addItem(
+                        f"Custom component ({requested_source})",
+                        requested_source,
+                    )
+                    combo_index = combo.count() - 1
+                combo.setCurrentIndex(combo_index)
+                combo.blockSignals(False)
+
+            channel_count = 1
+            if initial.file and str(initial.file).lower().endswith((".zarr", ".n5")):
+                try:
+                    root = zarr.open_group(str(initial.file), mode="r")
+                    if "data" in root and len(tuple(root["data"].shape)) == 6:
+                        channel_count = max(1, int(root["data"].shape[2]))
+                except Exception:
+                    channel_count = 1
+            self._particle_channel_spin.setMaximum(channel_count - 1)
+
+            self._particle_channel_spin.setValue(
+                max(
+                    0,
+                    min(
+                        int(self._particle_channel_spin.maximum()),
+                        int(particle_params.get("channel_index", 0)),
+                    ),
+                )
+            )
+            self._particle_bg_sigma_spin.setValue(
+                float(particle_params.get("bg_sigma", 20.0))
+            )
+            self._particle_fwhm_spin.setValue(float(particle_params.get("fwhm_px", 3.0)))
+            self._particle_sigma_min_spin.setValue(
+                float(particle_params.get("sigma_min_factor", 1.0))
+            )
+            self._particle_sigma_max_spin.setValue(
+                float(particle_params.get("sigma_max_factor", 3.0))
+            )
+            self._particle_threshold_spin.setValue(
+                float(particle_params.get("threshold", 0.1))
+            )
+            self._particle_overlap_spin.setValue(
+                float(particle_params.get("overlap", 0.5))
+            )
+            self._particle_exclude_border_spin.setValue(
+                int(particle_params.get("exclude_border", 5))
+            )
+            self._particle_use_overlap_checkbox.setChecked(
+                bool(particle_params.get("use_map_overlap", False))
+            )
+            overlap_zyx = particle_params.get("overlap_zyx", [0, 0, 0])
+            if not isinstance(overlap_zyx, (tuple, list)) or len(overlap_zyx) != 3:
+                overlap_zyx = [0, 0, 0]
+            self._particle_overlap_z_spin.setValue(int(overlap_zyx[0]))
+            self._particle_overlap_y_spin.setValue(int(overlap_zyx[1]))
+            self._particle_overlap_x_spin.setValue(int(overlap_zyx[2]))
+            self._particle_eliminate_checkbox.setChecked(
+                bool(particle_params.get("eliminate_insignificant_particles", False))
+            )
+            self._particle_remove_close_checkbox.setChecked(
+                bool(particle_params.get("remove_close_particles", False))
+            )
+            self._particle_min_distance_spin.setValue(
+                float(particle_params.get("min_distance_sigma", 10.0))
+            )
+
+            self._on_operation_selection_changed()
+            if self._operation_panel_stack is not None:
+                self._operation_panel_stack.setCurrentIndex(0)
+            for button in self._operation_config_buttons.values():
+                button.setChecked(False)
+            self._active_config_operation = None
+            self._set_parameter_help(self._parameter_help_default)
 
         def _apply_theme(self) -> None:
             """Apply stylesheet-based theme for analysis window.
@@ -2267,6 +3099,26 @@ if HAS_PYQT6:
                     font-size: 13px;
                     color: #a6b7d0;
                 }
+                QLabel#parameterHint {
+                    color: #c8daf3;
+                    background-color: #0f1b2a;
+                    border: 1px solid #2a3442;
+                    border-radius: 8px;
+                    padding: 8px;
+                }
+                QFrame#helpCard {
+                    background-color: #0f1b2a;
+                    border: 1px solid #2a3442;
+                    border-radius: 8px;
+                    padding: 8px;
+                }
+                QLabel#helpTitle {
+                    color: #9cc6ff;
+                    font-weight: 700;
+                }
+                QLabel#helpBody {
+                    color: #d9e2f1;
+                }
                 QGroupBox {
                     border: 1px solid #2a3442;
                     border-radius: 10px;
@@ -2292,6 +3144,35 @@ if HAS_PYQT6:
                     spacing: 8px;
                     color: #d9e2f1;
                 }
+                QLabel#statusLabel {
+                    color: #9ab0ca;
+                }
+                QSpinBox, QDoubleSpinBox, QComboBox {
+                    min-height: 28px;
+                    border: 1px solid #2b3f58;
+                    border-radius: 8px;
+                    background-color: #101a29;
+                    color: #e6edf3;
+                    padding: 4px 8px;
+                    selection-background-color: #2f81f7;
+                    selection-color: #f8fbff;
+                }
+                QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+                    border-color: #2f81f7;
+                }
+                QComboBox QAbstractItemView {
+                    background-color: #101a29;
+                    color: #e6edf3;
+                    selection-background-color: #2f81f7;
+                    selection-color: #f8fbff;
+                    border: 1px solid #2b3f58;
+                    outline: 0;
+                }
+                QToolTip {
+                    color: #e6edf3;
+                    background-color: #0f1b2a;
+                    border: 1px solid #2a3442;
+                }
                 QPushButton {
                     background-color: #1a2635;
                     border: 1px solid #2f4460;
@@ -2305,6 +3186,11 @@ if HAS_PYQT6:
                 QPushButton:pressed {
                     background-color: #182639;
                 }
+                QPushButton#configureButton:checked {
+                    background-color: #2f81f7;
+                    border-color: #2f81f7;
+                    color: #f8fbff;
+                }
                 QPushButton#runButton {
                     background-color: #2f81f7;
                     border-color: #2f81f7;
@@ -2316,6 +3202,72 @@ if HAS_PYQT6:
                 }
                 """
             )
+
+        def _collect_particle_parameters(self) -> Dict[str, Any]:
+            """Collect particle-detection parameter values from widgets.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, Any]
+                Particle-detection parameter mapping.
+            """
+            return {
+                "channel_index": int(self._particle_channel_spin.value()),
+                "chunk_basis": "3d",
+                "detect_2d_per_slice": True,
+                "use_map_overlap": bool(self._particle_use_overlap_checkbox.isChecked()),
+                "overlap_zyx": [
+                    int(self._particle_overlap_z_spin.value()),
+                    int(self._particle_overlap_y_spin.value()),
+                    int(self._particle_overlap_x_spin.value()),
+                ],
+                "memory_overhead_factor": float(
+                    self._particle_defaults.get("memory_overhead_factor", 1.5)
+                ),
+                "bg_sigma": float(self._particle_bg_sigma_spin.value()),
+                "fwhm_px": float(self._particle_fwhm_spin.value()),
+                "sigma_min_factor": float(self._particle_sigma_min_spin.value()),
+                "sigma_max_factor": float(self._particle_sigma_max_spin.value()),
+                "threshold": float(self._particle_threshold_spin.value()),
+                "overlap": float(self._particle_overlap_spin.value()),
+                "exclude_border": int(self._particle_exclude_border_spin.value()),
+                "eliminate_insignificant_particles": bool(
+                    self._particle_eliminate_checkbox.isChecked()
+                ),
+                "remove_close_particles": bool(
+                    self._particle_remove_close_checkbox.isChecked()
+                ),
+                "min_distance_sigma": float(self._particle_min_distance_spin.value()),
+            }
+
+        def _collect_operation_parameters(self, operation_name: str) -> Dict[str, Any]:
+            """Collect parameter mapping for one operation.
+
+            Parameters
+            ----------
+            operation_name : str
+                Operation key.
+
+            Returns
+            -------
+            dict[str, Any]
+                Collected operation parameter mapping.
+            """
+            defaults = dict(self._operation_defaults.get(operation_name, {}))
+            defaults["execution_order"] = int(
+                self._operation_order_spins[operation_name].value()
+            )
+            combo_value = self._operation_input_combos[operation_name].currentData()
+            defaults["input_source"] = (
+                str(combo_value).strip() if combo_value is not None else "data"
+            ) or "data"
+            if operation_name == "particle_detection":
+                defaults.update(self._collect_particle_parameters())
+            return defaults
 
         def _on_run(self) -> None:
             """Finalize selected analysis flags and close dialog.
@@ -2329,17 +3281,45 @@ if HAS_PYQT6:
             None
                 Stores selected workflow and accepts this dialog.
             """
+            selected_flags = {
+                operation_name: self._operation_checkboxes[operation_name].isChecked()
+                for operation_name in self._OPERATION_KEYS
+            }
+            if not any(selected_flags.values()):
+                QMessageBox.warning(
+                    self,
+                    "No Analysis Selected",
+                    "Select at least one analysis routine before running.",
+                )
+                self._set_status("Select at least one analysis routine.")
+                return
+
+            analysis_parameters = normalize_analysis_operation_parameters(
+                self._base_config.analysis_parameters
+            )
+            for operation_name in self._OPERATION_KEYS:
+                analysis_parameters[operation_name] = self._collect_operation_parameters(
+                    operation_name
+                )
+            analysis_parameters = normalize_analysis_operation_parameters(
+                analysis_parameters
+            )
+
             self.result_config = WorkflowConfig(
                 file=self._base_config.file,
                 prefer_dask=self._base_config.prefer_dask,
                 dask_backend=self._base_config.dask_backend,
                 chunks=self._base_config.chunks,
-                deconvolution=self._deconvolution_checkbox.isChecked(),
-                particle_detection=self._particle_checkbox.isChecked(),
-                registration=self._registration_checkbox.isChecked(),
-                visualization=self._visualization_checkbox.isChecked(),
+                deconvolution=selected_flags["deconvolution"],
+                particle_detection=selected_flags["particle_detection"],
+                registration=selected_flags["registration"],
+                visualization=selected_flags["visualization"],
                 zarr_save=self._base_config.zarr_save,
+                analysis_parameters=analysis_parameters,
             )
+            sequence = self._selected_operations_in_sequence()
+            sequence_text = " -> ".join(self._OPERATION_LABELS[name] for name in sequence)
+            self._set_status(f"Launching selected analysis routines: {sequence_text}")
             self.accept()
 
 

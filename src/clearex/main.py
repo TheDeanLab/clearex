@@ -35,6 +35,7 @@ import logging
 
 
 # Third Party Imports
+import zarr
 
 # Local Imports
 from clearex.io.read import ImageInfo, ImageOpener
@@ -48,7 +49,14 @@ from clearex.io.experiment import (
 )
 from clearex.io.cli import create_parser, display_logo
 from clearex.io.log import initiate_logger
-from clearex.io.provenance import is_zarr_store_path, persist_run_provenance
+from clearex.io.provenance import (
+    is_zarr_store_path,
+    persist_run_provenance,
+    register_latest_output_reference,
+)
+from clearex.detect.pipeline import (
+    run_particle_detection_analysis,
+)
 from clearex.workflow import (
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
@@ -57,10 +65,20 @@ from clearex.workflow import (
     dask_backend_to_dict,
     format_dask_backend_summary,
     format_chunks,
+    normalize_analysis_operation_parameters,
+    resolve_analysis_execution_sequence,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
     parse_chunks,
 )
+
+
+_ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
+    "data": "data",
+    "deconvolution": "results/deconvolution/latest/data",
+    "registration": "results/registration/latest/data",
+    "visualization": "results/visualization/latest/data",
+}
 
 
 def _is_zarr_like_path(path: Path) -> bool:
@@ -115,6 +133,55 @@ def _resolve_log_directory_for_workflow(workflow: WorkflowConfig) -> Path:
     if _is_zarr_like_path(selected):
         return selected
     return selected.parent if selected.parent != Path("") else Path.cwd().resolve()
+
+
+def _resolve_analysis_input_component(
+    requested_source: str,
+    produced_components: Dict[str, str],
+) -> str:
+    """Resolve an analysis input source key to a Zarr component path.
+
+    Parameters
+    ----------
+    requested_source : str
+        Requested source key or explicit component path.
+    produced_components : dict[str, str]
+        Component paths produced by prior operations in this runtime.
+
+    Returns
+    -------
+    str
+        Resolved component path suitable for Zarr lookup.
+    """
+    source = str(requested_source).strip() or "data"
+    if source in produced_components:
+        return str(produced_components[source])
+    if source in _ANALYSIS_SOURCE_COMPONENT_PATHS:
+        return _ANALYSIS_SOURCE_COMPONENT_PATHS[source]
+    return source
+
+
+def _zarr_component_exists(zarr_path: str, component: str) -> bool:
+    """Return whether a component path exists inside a Zarr store.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Zarr store path.
+    component : str
+        Group/array component path within the store.
+
+    Returns
+    -------
+    bool
+        ``True`` if the component can be resolved, otherwise ``False``.
+    """
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r")
+        _ = root[component]
+    except Exception:
+        return False
+    return True
 
 
 def _create_bootstrap_logger() -> logging.Logger:
@@ -293,6 +360,8 @@ def _configure_dask_backend(
     workflow: WorkflowConfig,
     logger: logging.Logger,
     exit_stack: ExitStack,
+    *,
+    workload: str = "io",
 ) -> Optional[Any]:
     """Initialize and register the configured Dask backend.
 
@@ -304,6 +373,9 @@ def _configure_dask_backend(
         Logger used for status and fallback messages.
     exit_stack : contextlib.ExitStack
         Exit stack used to manage backend resource teardown.
+    workload : str, default="io"
+        Workload profile. ``"io"`` configures local clusters with threads,
+        while ``"analysis"`` configures local clusters with processes.
 
     Returns
     -------
@@ -322,19 +394,26 @@ def _configure_dask_backend(
         return None
 
     backend = workflow.dask_backend
-    logger.info(f"Dask backend selection: {format_dask_backend_summary(backend)}")
+    logger.info(
+        "Dask backend selection: "
+        f"{format_dask_backend_summary(backend)} (workload={workload})"
+    )
 
     try:
         if backend.mode == DASK_BACKEND_LOCAL_CLUSTER:
+            use_processes = workload.strip().lower() == "analysis"
             client = create_dask_client(
                 n_workers=backend.local_cluster.n_workers,
                 threads_per_worker=backend.local_cluster.threads_per_worker,
-                processes=False,
+                processes=use_processes,
                 memory_limit=backend.local_cluster.memory_limit,
                 local_directory=backend.local_cluster.local_directory,
             )
             exit_stack.callback(client.close)
-            logger.info("Connected to LocalCluster backend.")
+            logger.info(
+                "Connected to LocalCluster backend "
+                f"(processes={use_processes})."
+            )
             return client
 
         if backend.mode == DASK_BACKEND_SLURM_RUNNER:
@@ -449,17 +528,19 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
     run_started_at = datetime.now(tz=timezone.utc)
     image_info: Optional[ImageInfo] = None
     step_records: list[Dict[str, object]] = []
+    output_records: Dict[str, Dict[str, object]] = {}
     input_path = workflow.file
     provenance_store_path: Optional[str] = None
 
-    with ExitStack() as exit_stack:
-        dask_client = _configure_dask_backend(
-            workflow=workflow,
-            logger=logger,
-            exit_stack=exit_stack,
-        )
+    if workflow.file:
+        with ExitStack() as io_stack:
+            io_client = _configure_dask_backend(
+                workflow=workflow,
+                logger=logger,
+                exit_stack=io_stack,
+                workload="io",
+            )
 
-        if workflow.file:
             if is_navigate_experiment_file(workflow.file):
                 experiment = load_navigate_experiment(workflow.file)
                 resolved_data_path = resolve_experiment_data_path(experiment)
@@ -502,7 +583,7 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                     source_path=resolved_data_path,
                     chunks=zarr_chunks_tpczyx,
                     pyramid_factors=zarr_pyramid_tpczyx,
-                    client=dask_client,
+                    client=io_client,
                 )
                 image_info = materialized.source_image_info
                 provenance_store_path = str(materialized.store_path)
@@ -532,8 +613,6 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                     }
                 )
             else:
-                experiment = None
-
                 opener = ImageOpener()
                 _, info = opener.open(
                     input_path,
@@ -546,73 +625,245 @@ def _run_workflow(workflow: WorkflowConfig, logger: logging.Logger) -> None:
                 if input_path and is_zarr_store_path(input_path):
                     provenance_store_path = input_path
 
-            step_records.append(
-                {
-                    "name": "load_data",
-                    "parameters": {
-                        "source_path": input_path,
-                        "prefer_dask": workflow.prefer_dask,
-                        "chunks": format_chunks(workflow.chunks) or None,
-                        "dask_backend": dask_backend_to_dict(workflow.dask_backend),
-                    },
-                }
-            )
+        step_records.append(
+            {
+                "name": "load_data",
+                "parameters": {
+                    "source_path": input_path,
+                    "prefer_dask": workflow.prefer_dask,
+                    "chunks": format_chunks(workflow.chunks) or None,
+                    "dask_backend": dask_backend_to_dict(workflow.dask_backend),
+                },
+            }
+        )
 
-        if workflow.deconvolution:
+    with ExitStack() as analysis_stack:
+        analysis_client = (
+            _configure_dask_backend(
+                workflow=workflow,
+                logger=logger,
+                exit_stack=analysis_stack,
+                workload="analysis",
+            )
+            if workflow.has_analysis_selection()
+            else None
+        )
+
+        runtime_analysis_parameters = normalize_analysis_operation_parameters(
+            workflow.analysis_parameters
+        )
+        execution_sequence = resolve_analysis_execution_sequence(
+            deconvolution=workflow.deconvolution,
+            particle_detection=workflow.particle_detection,
+            registration=workflow.registration,
+            visualization=workflow.visualization,
+            analysis_parameters=runtime_analysis_parameters,
+        )
+
+        if execution_sequence:
             logger.info(
-                "Deconvolution selected. Workflow hook is reserved; implementation pending."
+                "Analysis execution sequence: %s",
+                " -> ".join(execution_sequence),
             )
-            step_records.append({"name": "deconvolution", "parameters": {}})
 
-        if workflow.particle_detection:
-            logger.info(
-                "Particle detection selected. Workflow hook is reserved; implementation pending."
+        produced_components: Dict[str, str] = {"data": "data"}
+        for operation_name in execution_sequence:
+            operation_parameters = dict(
+                runtime_analysis_parameters.get(operation_name, {})
             )
-            step_records.append({"name": "particle_detection", "parameters": {}})
-
-        if workflow.registration:
-            logger.info("Running registration workflow.")
-            from clearex.registration import ImageRegistration
-
-            ImageRegistration()
-            step_records.append({"name": "registration", "parameters": {}})
-
-        if workflow.visualization:
-            logger.info("Launching visualization workflow.")
-            print("Launching visualization")
-            step_records.append({"name": "visualization", "parameters": {}})
-
-        if provenance_store_path and is_zarr_store_path(provenance_store_path):
-            provenance_workflow = WorkflowConfig(
-                file=input_path,
-                prefer_dask=workflow.prefer_dask,
-                dask_backend=workflow.dask_backend,
-                chunks=workflow.chunks,
-                deconvolution=workflow.deconvolution,
-                particle_detection=workflow.particle_detection,
-                registration=workflow.registration,
-                visualization=workflow.visualization,
-                zarr_save=workflow.zarr_save,
+            requested_source = str(
+                operation_parameters.get("input_source", "data")
+            ).strip() or "data"
+            resolved_source = _resolve_analysis_input_component(
+                requested_source=requested_source,
+                produced_components=produced_components,
             )
-            try:
-                run_id = persist_run_provenance(
-                    zarr_path=provenance_store_path,
-                    workflow=provenance_workflow,
-                    image_info=image_info,
-                    steps=step_records or None,
-                    started_at_utc=run_started_at,
-                    ended_at_utc=datetime.now(tz=timezone.utc),
-                    repo_root=Path(__file__).resolve().parents[2],
-                )
+            operation_parameters["input_source"] = resolved_source
+            runtime_analysis_parameters[operation_name] = operation_parameters
+
+            if operation_name == "deconvolution":
                 logger.info(
-                    f"Persisted provenance run to store {provenance_store_path} "
-                    f"with run_id={run_id}."
+                    "Deconvolution selected (input=%s). Workflow hook is reserved; "
+                    "implementation pending.",
+                    resolved_source,
                 )
-            except Exception as exc:
-                logger.warning(
-                    f"Failed to persist provenance in Zarr store "
-                    f"{provenance_store_path}: {exc}"
+                step_records.append(
+                    {
+                        "name": "deconvolution",
+                        "parameters": {
+                            **operation_parameters,
+                            "status": "pending_implementation",
+                        },
+                    }
                 )
+                continue
+
+            if operation_name == "particle_detection":
+                particle_parameters = dict(operation_parameters)
+                if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if not _zarr_component_exists(
+                        provenance_store_path,
+                        str(particle_parameters.get("input_source", "data")),
+                    ):
+                        logger.warning(
+                            "Requested particle-detection input component '%s' was "
+                            "not found. Falling back to 'data'.",
+                            particle_parameters.get("input_source", "data"),
+                        )
+                        particle_parameters["input_source"] = "data"
+                        runtime_analysis_parameters["particle_detection"] = dict(
+                            particle_parameters
+                        )
+
+                    progress_state = {"last_percent": -5}
+
+                    def _particle_progress(percent: int, message: str) -> None:
+                        """Throttle particle-detection progress logs.
+
+                        Parameters
+                        ----------
+                        percent : int
+                            Progress percent.
+                        message : str
+                            Progress message.
+
+                        Returns
+                        -------
+                        None
+                            Logger side effects only.
+                        """
+                        last_percent = int(progress_state["last_percent"])
+                        if percent >= 100 or percent - last_percent >= 5:
+                            progress_state["last_percent"] = int(percent)
+                            logger.info(
+                                f"[particle_detection] {int(percent)}% - {message}"
+                            )
+
+                    summary = run_particle_detection_analysis(
+                        zarr_path=provenance_store_path,
+                        parameters=particle_parameters,
+                        client=analysis_client,
+                        progress_callback=_particle_progress,
+                    )
+                    output_records["particle_detection"] = {
+                        "component": summary.component,
+                        "detections": summary.detections,
+                        "chunks_processed": summary.chunks_processed,
+                        "channel_index": summary.channel_index,
+                        "storage_policy": "latest_only",
+                    }
+                    logger.info(
+                        "Particle detection completed: "
+                        f"detections={summary.detections}, "
+                        f"chunks_processed={summary.chunks_processed}, "
+                        f"channel={summary.channel_index}, "
+                        f"component={summary.component}."
+                    )
+                    step_records.append(
+                        {
+                            "name": "particle_detection",
+                            "parameters": {
+                                **particle_parameters,
+                                "detections": summary.detections,
+                                "chunks_processed": summary.chunks_processed,
+                                "component": summary.component,
+                            },
+                        }
+                    )
+                else:
+                    logger.warning(
+                        "Particle detection requires a canonical Zarr/N5 data store."
+                    )
+                    step_records.append(
+                        {
+                            "name": "particle_detection",
+                            "parameters": {
+                                **particle_parameters,
+                                "status": "skipped",
+                                "reason": "no_zarr_store",
+                            },
+                        }
+                    )
+                continue
+
+            if operation_name == "registration":
+                logger.info(
+                    "Running registration workflow (input=%s).",
+                    resolved_source,
+                )
+                from clearex.registration import ImageRegistration
+
+                ImageRegistration()
+                step_records.append(
+                    {
+                        "name": "registration",
+                        "parameters": operation_parameters,
+                    }
+                )
+                continue
+
+            if operation_name == "visualization":
+                logger.info(
+                    "Launching visualization workflow (input=%s).",
+                    resolved_source,
+                )
+                print("Launching visualization")
+                step_records.append(
+                    {
+                        "name": "visualization",
+                        "parameters": operation_parameters,
+                    }
+                )
+                continue
+
+    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+        provenance_workflow = WorkflowConfig(
+            file=input_path,
+            prefer_dask=workflow.prefer_dask,
+            dask_backend=workflow.dask_backend,
+            chunks=workflow.chunks,
+            deconvolution=workflow.deconvolution,
+            particle_detection=workflow.particle_detection,
+            registration=workflow.registration,
+            visualization=workflow.visualization,
+            zarr_save=workflow.zarr_save,
+            analysis_parameters=runtime_analysis_parameters,
+        )
+        try:
+            run_id = persist_run_provenance(
+                zarr_path=provenance_store_path,
+                workflow=provenance_workflow,
+                image_info=image_info,
+                steps=step_records or None,
+                outputs=output_records or None,
+                started_at_utc=run_started_at,
+                ended_at_utc=datetime.now(tz=timezone.utc),
+                repo_root=Path(__file__).resolve().parents[2],
+            )
+            logger.info(
+                f"Persisted provenance run to store {provenance_store_path} "
+                f"with run_id={run_id}."
+            )
+
+            particle_output = output_records.get("particle_detection")
+            if particle_output:
+                try:
+                    root = zarr.open_group(str(provenance_store_path), mode="a")
+                    root["results"]["particle_detection"]["latest"].attrs["run_id"] = run_id
+                except Exception:
+                    pass
+                register_latest_output_reference(
+                    zarr_path=provenance_store_path,
+                    analysis_name="particle_detection",
+                    component=str(particle_output["component"]),
+                    run_id=run_id,
+                    metadata=particle_output,
+                )
+        except Exception as exc:
+            logger.warning(
+                f"Failed to persist provenance in Zarr store "
+                f"{provenance_store_path}: {exc}"
+            )
 
 
 def main() -> None:

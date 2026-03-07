@@ -30,122 +30,11 @@ import numpy as np
 from skimage.feature import blob_log
 from scipy.ndimage import gaussian_filter
 
+from clearex.detect.particles import remove_close_blobs, \
+    eliminate_insignificant_point_sources
 # Local Imports
 from clearex.plot.images import mips
 from clearex.preprocess.scale import resize_data
-
-
-def remove_close_blobs(
-    blobs: np.ndarray, image: np.ndarray, min_dist: float
-) -> np.ndarray:
-    """Remove close particles.
-
-    Remove blobs that are too close to each other using an ellipsoidal search volume
-    defined by the blob's sigma values, discarding the blob with the lower absolute
-    intensity at its centroid.
-
-    distance=0: No filtering (all blobs kept)
-    distance=1: Blobs must be at least 1× their sigma apart
-    distance=10 (default): Blobs must be at least 10× their sigma apart
-
-    Parameters
-    ----------
-    blobs : np.ndarray
-        An Nx4 or Nx6 array of blobs. For isotropic blobs, each row is [z, y, x, sigma].
-        For anisotropic blobs, each row is [z, y, x, z_sigma, y_sigma, x_sigma].
-    image : np.ndarray
-        The 3D image data from which intensities at blob centers will be extracted.
-    min_dist : float
-        A scaling factor for the sigma values to determine the ellipsoidal search
-        volume. If min_dist is 0 or very small, no filtering is performed.
-
-    Returns
-    -------
-    np.ndarray
-        The filtered array of blobs.
-    """
-    blobs = np.array(blobs)
-
-    # If min_dist is zero or very small, skip filtering to avoid division by zero
-    if min_dist < 1e-10:
-        return blobs
-
-    sorted_blobs = sort_by_point_source_intensity(blobs, image)
-
-    final_blobs = []
-    for blob in sorted_blobs:
-        blob_center = blob[:3]
-
-        too_close = False
-        # Check against every already accepted blob
-        for accepted_blob in final_blobs:
-            accepted_center = accepted_blob[:3]
-
-            if accepted_blob.size == 4:
-                # Isotropic sigma
-                accepted_radii = np.array([accepted_blob[3]] * 3) * min_dist
-            elif accepted_blob.size == 6:
-                # Anisotropic sigma
-                accepted_radii = (
-                    np.array([accepted_blob[3], accepted_blob[4], accepted_blob[5]])
-                    * min_dist
-                )
-            else:
-                raise ValueError(f"Unexpected blob format with length {len(blob)}")
-
-            # Skip if any radius is zero (would cause division by zero)
-            if np.any(accepted_radii == 0):
-                continue
-
-            # Calculate the difference vector
-            diff = blob_center - accepted_center
-
-            # Normalized squared distance
-            norm_sq = (
-                (diff[0] / accepted_radii[0]) ** 2
-                + (diff[1] / accepted_radii[1]) ** 2
-                + (diff[2] / accepted_radii[2]) ** 2
-            )
-
-            if norm_sq < 1:
-                too_close = True
-                break
-
-        if not too_close:
-            final_blobs.append(blob)
-
-    return np.array(final_blobs)
-
-
-def sort_by_point_source_intensity(blobs: np.ndarray, image: np.ndarray) -> np.ndarray:
-    """Sort blobs by their intensity in the given image.
-
-    Parameters
-    ----------
-    blobs : np.ndarray
-        An Nx4 or Nx6 array of blobs. For isotropic blobs, each row is [z, y, x, sigma].
-        For anisotropic blobs, each row is [z, y, x, z_sigma, y_sigma, x_sigma].
-    image : np.ndarray
-        The 3D image data from which intensities at blob centers will be extracted.
-
-    Returns
-    -------
-    np.ndarray
-        The sorted array of blobs.
-    """
-    # Compute intensity for each blob using the image data.
-    intensities = []
-    for blob in blobs:
-        # Extract the center coordinates (assumes they lie within image bounds)
-        z, y, x = blob[:3]
-        intensity = image[int(round(z)), int(round(y)), int(round(x))]
-        intensities.append(intensity)
-    intensities = np.array(intensities)
-
-    # Sort blobs in descending order of intensity (highest intensity first)
-    order = np.argsort(intensities)[::-1]
-    sorted_blobs = blobs[order]
-    return sorted_blobs
 
 
 def detect_point_sources(
@@ -258,48 +147,6 @@ def detect_point_sources(
         particle_location[:, 0], particle_location[:, 1], particle_location[:, 2]
     ] = True
     return masked_data, coordinates
-
-
-def eliminate_insignificant_point_sources(
-    chunk_iso: np.ndarray, particle_location: np.ndarray
-) -> np.ndarray:
-    """Eliminate insignificant point sources.
-
-     Evaluate whether the point source is statistically significant relative to the
-     local background. This is done by comparing the point sources's intensity to the
-     mean and standard deviation of a local region. If the point sources's intensity is
-     greater than the mean + 2 * std, it is considered significant.
-
-    Parameters
-    ----------
-    chunk_iso : np.ndarray
-        The 3D image.
-    particle_location : np.ndarray
-        The locations of the blobs. Can be Nx4 (isotropic) or Nx6 (anisotropic).
-
-    Returns
-    -------
-    significant_blobs : np.ndarray
-        The significant blobs.
-    """
-
-    chunk_mean = np.mean(chunk_iso)
-    chunk_std = np.std(chunk_iso)
-    significant_blobs = []
-    for i, blob in enumerate(particle_location):
-        # Handle both 4-element (isotropic) and 6-element (anisotropic) blobs
-        z, y, x = blob[0], blob[1], blob[2]
-        z, y, x = int(z), int(y), int(x)
-        if chunk_iso[z, y, x] < chunk_mean + 2 * chunk_std:
-            continue
-        significant_blobs.append(blob)
-
-    if not significant_blobs:
-        # Return empty array with correct shape based on input
-        num_cols = particle_location.shape[1] if len(particle_location) > 0 else 4
-        return np.array([]).reshape(0, num_cols)
-
-    return np.array(significant_blobs)
 
 
 def background_correction(image: np.ndarray, sigma: float = 20) -> np.ndarray:

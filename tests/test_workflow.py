@@ -27,9 +27,11 @@
 import pytest
 
 from clearex.workflow import (
+    ANALYSIS_OPERATION_ORDER,
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
     DASK_BACKEND_SLURM_RUNNER,
+    DEFAULT_ANALYSIS_OPERATION_PARAMETERS,
     DEFAULT_ZARR_CHUNKS_PTCZYX,
     DEFAULT_ZARR_PYRAMID_PTCZYX,
     DaskBackendConfig,
@@ -46,6 +48,8 @@ from clearex.workflow import (
     format_zarr_pyramid_ptczyx,
     parse_chunks,
     parse_pyramid_levels,
+    normalize_analysis_operation_parameters,
+    resolve_analysis_execution_sequence,
     to_tpczyx_chunks,
     to_tpczyx_pyramid,
 )
@@ -102,6 +106,45 @@ class TestWorkflowConfig:
         assert cfg.zarr_save.chunks_ptczyx == DEFAULT_ZARR_CHUNKS_PTCZYX
         assert cfg.zarr_save.pyramid_ptczyx == DEFAULT_ZARR_PYRAMID_PTCZYX
         assert cfg.dask_backend.mode == DASK_BACKEND_LOCAL_CLUSTER
+        assert "particle_detection" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
+        assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 2
+        assert cfg.analysis_parameters["particle_detection"]["input_source"] == "data"
+
+    def test_normalizes_particle_analysis_parameters(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "particle_detection": {
+                    "channel_index": "2",
+                    "bg_sigma": "12.5",
+                    "overlap_zyx": [1, 2, 3],
+                    "execution_order": "4",
+                    "input_source": "deconvolution",
+                }
+            }
+        )
+        params = cfg.analysis_parameters["particle_detection"]
+        assert params["channel_index"] == 2
+        assert params["bg_sigma"] == 12.5
+        assert params["overlap_zyx"] == [1, 2, 3]
+        assert params["execution_order"] == 4
+        assert params["input_source"] == "deconvolution"
+
+    def test_rejects_invalid_particle_overlap_shape(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={
+                    "particle_detection": {"overlap_zyx": [1, 2]}
+                }
+            )
+
+    def test_rejects_invalid_common_execution_order(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={
+                    "deconvolution": {"execution_order": 0}
+                }
+            )
 
 
 class TestZarrSaveConfig:
@@ -185,3 +228,41 @@ class TestDaskBackendConfig:
     def test_reject_invalid_mode(self):
         with pytest.raises(ValueError):
             DaskBackendConfig(mode="invalid")  # type: ignore[arg-type]
+
+
+def test_normalize_analysis_operation_parameters_returns_defaults():
+    normalized = normalize_analysis_operation_parameters(None)
+    assert normalized["particle_detection"]["bg_sigma"] == 20.0
+    assert "registration" in normalized
+    assert (
+        normalized["particle_detection"]["memory_overhead_factor"]
+        == DEFAULT_ANALYSIS_OPERATION_PARAMETERS["particle_detection"][
+            "memory_overhead_factor"
+        ]
+    )
+    assert normalized["deconvolution"]["execution_order"] == 1
+    assert normalized["visualization"]["input_source"] == "data"
+
+
+def test_resolve_analysis_execution_sequence_uses_execution_order():
+    sequence = resolve_analysis_execution_sequence(
+        deconvolution=True,
+        particle_detection=True,
+        registration=True,
+        visualization=False,
+        analysis_parameters={
+            "deconvolution": {"execution_order": 2},
+            "particle_detection": {"execution_order": 3},
+            "registration": {"execution_order": 1},
+        },
+    )
+    assert sequence == ("registration", "deconvolution", "particle_detection")
+
+
+def test_analysis_operation_order_contains_expected_keys():
+    assert ANALYSIS_OPERATION_ORDER == (
+        "deconvolution",
+        "particle_detection",
+        "registration",
+        "visualization",
+    )
