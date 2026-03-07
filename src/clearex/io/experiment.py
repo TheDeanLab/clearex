@@ -32,7 +32,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
 import json
 import re
 import warnings
@@ -64,6 +64,7 @@ except Exception:
 ArrayLike = Union[np.ndarray, da.Array]
 AxesSpec = Optional[tuple[str, ...]]
 CanonicalShapeTpczyx = tuple[int, int, int, int, int, int]
+ProgressCallback = Callable[[int, str], None]
 
 
 def _is_zarr_like_path(path: Path) -> bool:
@@ -661,6 +662,7 @@ def materialize_experiment_data_store(
         tuple[int, ...],
     ] = ((1,), (1,), (1,), (1, 2, 4, 8), (1, 2, 4, 8), (1, 2, 4, 8)),
     client: Optional["Client"] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> MaterializedDataStore:
     """Materialize experiment source data into canonical Zarr ``data`` array.
 
@@ -676,6 +678,9 @@ def materialize_experiment_data_store(
         Resolution pyramid factors in ``(t, p, c, z, y, x)`` order.
     client : dask.distributed.Client, optional
         Active Dask distributed client used to execute graph writes.
+    progress_callback : callable, optional
+        Callback invoked as ``progress_callback(percent, message)`` with
+        stage-level progress updates from ``0`` to ``100``.
 
     Returns
     -------
@@ -694,18 +699,39 @@ def materialize_experiment_data_store(
     When ``source_path`` is already a Zarr/N5 store, conversion is performed
     in the same store path rather than creating a duplicate store.
     """
+    def _emit_progress(percent: int, message: str) -> None:
+        """Emit optional stage progress updates.
+
+        Parameters
+        ----------
+        percent : int
+            Progress value in ``[0, 100]``.
+        message : str
+            Human-readable stage description.
+
+        Returns
+        -------
+        None
+            Callback side effects only.
+        """
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
     source_resolved = Path(source_path).expanduser().resolve()
     if not source_resolved.exists():
         raise FileNotFoundError(source_resolved)
 
     store_path = resolve_data_store_path(experiment=experiment, source_path=source_resolved)
     write_client = client if _is_zarr_like_path(source_resolved) else None
+    _emit_progress(5, "Opening source data")
 
     with ExitStack() as exit_stack:
         source_array, source_axes, source_meta = _open_source_as_dask(
             source_resolved,
             exit_stack=exit_stack,
         )
+        _emit_progress(20, "Loaded source metadata")
         source_shape = tuple(int(size) for size in source_array.shape)
         source_dtype = np.dtype(source_array.dtype)
         source_component_value = str(source_meta.get("source_component", "")).strip()
@@ -716,6 +742,7 @@ def materialize_experiment_data_store(
             experiment=experiment,
             source_axes=source_axes,
         )
+        _emit_progress(35, "Normalizing canonical axes")
         canonical_shape = _normalize_tpczyx_shape(
             tuple(int(size) for size in canonical.shape)
         )
@@ -725,6 +752,7 @@ def materialize_experiment_data_store(
         )
         with dask.config.set({"array.rechunk.method": "tasks"}):
             canonical = canonical.rechunk(normalized_chunks)
+        _emit_progress(45, "Preparing chunked write graph")
 
         should_stage_same_component = (
             store_path == source_resolved and source_component == "data"
@@ -741,7 +769,9 @@ def materialize_experiment_data_store(
                 overwrite=True,
                 compute=False,
             )
+            _emit_progress(55, "Writing staged data to existing store")
             _compute_dask_graph(write_graph, client=write_client)
+            _emit_progress(88, "Swapping staged data into canonical component")
             if "data" in root:
                 del root["data"]
             root.move(temp_component, "data")
@@ -754,6 +784,7 @@ def materialize_experiment_data_store(
                 dtype=source_dtype.name,
                 shape_tpczyx=canonical_shape,
             )
+            _emit_progress(95, "Finalizing store metadata")
         else:
             initialize_analysis_store(
                 experiment=experiment,
@@ -771,7 +802,9 @@ def materialize_experiment_data_store(
                 lock=False,
                 compute=False,
             )
+            _emit_progress(55, "Writing canonical data")
             _compute_dask_graph(write_graph, client=write_client)
+            _emit_progress(95, "Finalizing store metadata")
 
     root = zarr.open_group(str(store_path), mode="a")
     source_axes_attr = list(source_axes) if source_axes is not None else None
@@ -805,6 +838,7 @@ def materialize_experiment_data_store(
         axes="TPCZYX",
         metadata={"component": "data"},
     )
+    _emit_progress(100, "Materialization complete")
     return MaterializedDataStore(
         source_path=source_resolved,
         store_path=store_path,

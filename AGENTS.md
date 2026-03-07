@@ -50,19 +50,26 @@ This file summarizes the current engineering strategy for agent-driven changes i
 
 - GUI is implemented in `src/clearex/gui/app.py`.
 - UI responsibilities:
-  - data path selection (file/folder),
-  - support direct selection of Navigate `experiment.yml`,
-  - metadata loading via `ImageOpener`,
-  - metadata display (path, shape, dtype, axes, channels, positions, image size, time points, pixel size, metadata keys),
-  - Dask backend configuration popup:
-    - `LocalCluster`, `SLURMRunner`, `SLURMCluster`,
-    - mode guidance text for operators,
-    - required scheduler file for `SLURMRunner`,
-    - required operator email input for `SLURMCluster` notifications,
-  - Zarr save configuration popup:
-    - chunk sizes in `(p, t, c, z, y, x)`,
-    - pyramid factors per axis,
-  - workflow selection toggles.
+  - first-window setup flow:
+    - direct selection of Navigate `experiment.yml`,
+    - metadata loading via `ImageOpener`,
+    - metadata display (path, shape, dtype, axes, channels, positions, image size, time points, pixel size, metadata keys),
+    - Dask backend configuration popup:
+      - `LocalCluster`, `SLURMRunner`, `SLURMCluster`,
+      - mode guidance text for operators,
+      - required scheduler file for `SLURMRunner`,
+      - required operator email input for `SLURMCluster` notifications,
+    - Zarr save configuration popup:
+      - chunk sizes in `(p, t, c, z, y, x)`,
+      - pyramid factors per axis,
+    - `Next` action that validates/creates canonical data store before analysis step.
+  - second-window analysis selection flow:
+    - deconvolution,
+    - particle detection,
+    - registration,
+    - visualization.
+- Setup window should not expose a separate "Use Dask / lazy loading" toggle.
+- If canonical store is missing, setup flow should create it with visible progress feedback before opening analysis-selection window.
 - Metadata panel should stay operator-friendly and compact. Current design uses a 2-column key/value layout.
 - Visual direction: clean modern dark theme.
 - GUI layer should only collect/validate user intent and return a `WorkflowConfig`; core execution remains in `main.py`.
@@ -81,7 +88,9 @@ This file summarizes the current engineering strategy for agent-driven changes i
 - For TIFF-family acquisitions, prefer primary stack files and avoid selecting `MIP` preview outputs as source data.
 - Zarr/N5 ingestion should support nested group layouts (not only root-level arrays).
 - Ingestion should target directory/object-store-friendly Zarr layouts (many chunk objects/files) to maximize safe parallel writes without single-file-handle contention.
-- Canonical analysis store path: `analysis_6d.zarr` in experiment save directory.
+- Canonical prepared-store path:
+  - non-Zarr/N5 sources: `data_store.zarr` beside `experiment.yml`,
+  - Zarr/N5 sources: reuse source store path (no duplicate store path).
 - Canonical array layout: `(t, p, c, z, y, x)`.
 - For new conversion, chunking and pyramid factors come from GUI/backend `WorkflowConfig`.
 - After canonical data array ingest/establishment, treat base image data as read-only for downstream analysis stages.

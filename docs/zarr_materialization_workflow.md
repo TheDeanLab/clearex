@@ -15,6 +15,25 @@ The ingestion path for Navigate `experiment.yml` now materializes source data in
 5. Materialize with parallel Dask writes using GUI-configured chunking and pyramid metadata.
 6. Persist canonical store metadata and source provenance fields in Zarr attributes.
 
+## GUI workflow (two-step)
+
+The GUI now runs in two windows:
+
+1. **Setup window**
+   - User selects `experiment.yml`.
+   - User configures Dask backend and Zarr save settings.
+   - User loads and reviews image metadata.
+   - User clicks **Next**.
+2. **Analysis window**
+   - Opens after canonical store readiness is confirmed.
+   - User selects analysis operations (deconvolution, particle detection, registration, visualization).
+
+Setup-window behavior on **Next**:
+
+- If target canonical store already exists, setup proceeds directly to analysis selection.
+- If target store does not exist, GUI creates it first and shows a styled progress dialog with stage updates.
+- After store creation completes, setup closes and analysis-selection window opens.
+
 ## Store path behavior
 
 - If source is already Zarr/N5, the same store path is reused (no duplicate store path is created).
@@ -69,11 +88,11 @@ Dataset root:
 
 Materialization run on representative cells (`cell_001` to `cell_005`) across TIFF, OME-TIFF, H5, N5, and OME-Zarr with chunks `(1, 1, 1, 8, 128, 128)`:
 
-- `cell_001` TIFF -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `1.97s`
-- `cell_002` OME-TIFF -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `1.85s`
-- `cell_003` H5 -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `26.02s`
-- `cell_004` N5 -> same store `CH00_000000.n5`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `3.01s`
-- `cell_005` OME-Zarr -> same store `CH00_000000.ome.zarr`, shape `(2, 1, 1, 100, 2048, 2048)`, elapsed `3.33s`
+- `cell_001` TIFF -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `1.93s`
+- `cell_002` OME-TIFF -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `2.31s`
+- `cell_003` H5 -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `25.25s`
+- `cell_004` N5 -> same store `CH00_000000.n5`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `5.67s`
+- `cell_005` OME-Zarr -> same store `CH00_000000.ome.zarr`, shape `(2, 1, 1, 100, 2048, 2048)`, elapsed `5.09s`
 
 This confirms output-path policy, canonical layout, and parallel read/write behavior on heterogeneous acquisition formats.
 

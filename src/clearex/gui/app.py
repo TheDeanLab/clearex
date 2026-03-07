@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 # Standard Library Imports
+from contextlib import ExitStack
 import os
 import sys
 from pathlib import Path
@@ -35,9 +36,11 @@ from typing import Any, Dict, Optional, Tuple
 # Local Imports
 from clearex.io.experiment import (
     NavigateExperiment,
-    default_analysis_store_path,
+    create_dask_client,
     is_navigate_experiment_file,
     load_navigate_experiment,
+    materialize_experiment_data_store,
+    resolve_data_store_path,
     resolve_experiment_data_path,
 )
 from clearex.io.read import ImageInfo, ImageOpener
@@ -57,17 +60,15 @@ from clearex.workflow import (
     WorkflowConfig,
     ZarrSaveConfig,
     format_dask_backend_summary,
-    format_chunks,
     format_pyramid_levels,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
-    parse_chunks,
     parse_pyramid_levels,
 )
 
 # Third Party Imports
 try:
-    from PyQt6.QtCore import Qt
+    from PyQt6.QtCore import QThread, Qt, pyqtSignal
     from PyQt6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -83,6 +84,7 @@ try:
         QLineEdit,
         QMessageBox,
         QPlainTextEdit,
+        QProgressBar,
         QPushButton,
         QSpinBox,
         QStackedWidget,
@@ -333,6 +335,111 @@ def _dask_mode_help_text(mode: str) -> str:
         "SLURMCluster submits worker jobs to Slurm directly from ClearEx. "
         "Best for scalable multi-node execution from one configuration dialog."
     )
+
+
+def _configure_dask_backend_client(
+    backend: DaskBackendConfig,
+    *,
+    exit_stack: ExitStack,
+) -> Optional[Any]:
+    """Create and register a Dask client for a configured backend mode.
+
+    Parameters
+    ----------
+    backend : DaskBackendConfig
+        User-selected Dask backend configuration.
+    exit_stack : contextlib.ExitStack
+        Exit stack used to register client/cluster cleanup callbacks.
+
+    Returns
+    -------
+    Any, optional
+        Dask client-like object when backend initialization succeeds.
+
+    Raises
+    ------
+    ValueError
+        If backend settings are incomplete for the selected mode.
+    Exception
+        Propagates backend connection or cluster startup failures.
+    """
+    if backend.mode == DASK_BACKEND_LOCAL_CLUSTER:
+        client = create_dask_client(
+            n_workers=backend.local_cluster.n_workers,
+            threads_per_worker=backend.local_cluster.threads_per_worker,
+            processes=False,
+            memory_limit=backend.local_cluster.memory_limit,
+            local_directory=backend.local_cluster.local_directory,
+        )
+        exit_stack.callback(client.close)
+        return client
+
+    if backend.mode == DASK_BACKEND_SLURM_RUNNER:
+        scheduler_file = backend.slurm_runner.scheduler_file
+        if not scheduler_file:
+            raise ValueError("SLURMRunner backend requires a scheduler file path.")
+
+        from dask.distributed import Client
+        from dask_jobqueue.slurm import SLURMRunner
+
+        runner = exit_stack.enter_context(SLURMRunner(scheduler_file=scheduler_file))
+        client = exit_stack.enter_context(Client(runner))
+
+        wait_for_workers = backend.slurm_runner.wait_for_workers
+        if wait_for_workers is None:
+            runner_workers = getattr(runner, "n_workers", None)
+            if isinstance(runner_workers, int) and runner_workers > 0:
+                wait_for_workers = runner_workers
+        if wait_for_workers is not None:
+            client.wait_for_workers(wait_for_workers)
+        return client
+
+    if backend.mode == DASK_BACKEND_SLURM_CLUSTER:
+        from dask.distributed import Client
+        from dask_jobqueue import SLURMCluster
+
+        cluster_cfg = backend.slurm_cluster
+        extra_directives = [
+            directive.strip()
+            for directive in cluster_cfg.job_extra_directives
+            if directive.strip()
+        ]
+        if cluster_cfg.mail_user:
+            extra_directives = [
+                directive
+                for directive in extra_directives
+                if not directive.startswith("--mail-user=")
+            ]
+            extra_directives.append(f"--mail-user={cluster_cfg.mail_user}")
+
+        cluster_kwargs = {
+            "cores": cluster_cfg.cores,
+            "processes": cluster_cfg.processes,
+            "memory": cluster_cfg.memory,
+            "local_directory": cluster_cfg.local_directory,
+            "interface": cluster_cfg.interface,
+            "walltime": cluster_cfg.walltime,
+            "job_name": cluster_cfg.job_name,
+            "queue": cluster_cfg.queue,
+            "death_timeout": cluster_cfg.death_timeout,
+            "job_extra_directives": extra_directives,
+            "scheduler_options": {
+                "dashboard_address": cluster_cfg.dashboard_address,
+                "interface": cluster_cfg.scheduler_interface,
+                "idle_timeout": cluster_cfg.idle_timeout,
+                "allowed_failures": cluster_cfg.allowed_failures,
+            },
+        }
+        cluster = SLURMCluster(**cluster_kwargs)
+        exit_stack.callback(cluster.close)
+        cluster.scale(jobs=cluster_cfg.workers)
+
+        client = Client(cluster)
+        exit_stack.callback(client.close)
+        client.wait_for_workers(cluster_cfg.workers)
+        return client
+
+    raise ValueError(f"Unsupported Dask backend mode: {backend.mode}")
 
 
 if HAS_PYQT6:
@@ -1110,50 +1217,253 @@ if HAS_PYQT6:
 
             self.accept()
 
-    class ClearExDialog(QDialog):
-        """GUI dialog for workflow selection and metadata preview.
+    class DataStoreMaterializationWorker(QThread):
+        """Background worker that materializes canonical store data.
 
         Parameters
         ----------
-        initial : WorkflowConfig
-            Initial configuration used to pre-populate the form controls.
+        experiment : NavigateExperiment
+            Parsed Navigate experiment metadata.
+        source_data_path : pathlib.Path
+            Source acquisition data path.
+        dask_backend : DaskBackendConfig
+            Backend configuration used for Dask execution.
+        zarr_save : ZarrSaveConfig
+            Zarr chunk and pyramid configuration.
 
         Attributes
         ----------
-        result_config : WorkflowConfig, optional
-            Final workflow configuration selected by the user.
+        progress_changed : pyqtSignal
+            Signal with ``(percent, message)`` progress payload.
+        succeeded : pyqtSignal
+            Signal with resulting store path string.
+        failed : pyqtSignal
+            Signal with error text.
         """
 
-        def __init__(self, initial: WorkflowConfig) -> None:
-            """Initialize the dialog and load initial workflow values.
+        progress_changed = pyqtSignal(int, str)
+        succeeded = pyqtSignal(str)
+        failed = pyqtSignal(str)
+
+        def __init__(
+            self,
+            *,
+            experiment: NavigateExperiment,
+            source_data_path: Path,
+            dask_backend: DaskBackendConfig,
+            zarr_save: ZarrSaveConfig,
+        ) -> None:
+            """Initialize worker state.
 
             Parameters
             ----------
-            initial : WorkflowConfig
-                Initial workflow settings used to hydrate the UI controls.
+            experiment : NavigateExperiment
+                Parsed Navigate experiment metadata.
+            source_data_path : pathlib.Path
+                Source acquisition data path.
+            dask_backend : DaskBackendConfig
+                Backend configuration used for Dask execution.
+            zarr_save : ZarrSaveConfig
+                Zarr chunk and pyramid configuration.
 
             Returns
             -------
             None
-                The dialog is initialized in-place.
+                Worker is initialized in-place.
+            """
+            super().__init__()
+            self._experiment = experiment
+            self._source_data_path = source_data_path
+            self._dask_backend = dask_backend
+            self._zarr_save = zarr_save
+
+        def _emit_progress(self, percent: int, message: str) -> None:
+            """Emit stage progress updates from worker thread.
+
+            Parameters
+            ----------
+            percent : int
+                Progress percentage value.
+            message : str
+                Human-readable stage text.
+
+            Returns
+            -------
+            None
+                Signal side effects only.
+            """
+            self.progress_changed.emit(int(percent), str(message))
+
+        def run(self) -> None:
+            """Execute materialization workflow in the background.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Emits success/failure signals on completion.
+
+            Raises
+            ------
+            None
+                Exceptions are converted to ``failed`` signals.
+            """
+            try:
+                with ExitStack() as exit_stack:
+                    client = _configure_dask_backend_client(
+                        self._dask_backend,
+                        exit_stack=exit_stack,
+                    )
+                    result = materialize_experiment_data_store(
+                        experiment=self._experiment,
+                        source_path=self._source_data_path,
+                        chunks=self._zarr_save.chunks_tpczyx(),
+                        pyramid_factors=self._zarr_save.pyramid_tpczyx(),
+                        client=client,
+                        progress_callback=self._emit_progress,
+                    )
+                self.succeeded.emit(str(result.store_path))
+            except Exception as exc:
+                self.failed.emit(str(exc))
+
+    class MaterializationProgressDialog(QDialog):
+        """Modal progress dialog for canonical store creation.
+
+        Parameters
+        ----------
+        parent : QDialog, optional
+            Parent window.
+        """
+
+        def __init__(self, parent: Optional[QDialog] = None) -> None:
+            """Initialize progress dialog widgets.
+
+            Parameters
+            ----------
+            parent : QDialog, optional
+                Parent window.
+
+            Returns
+            -------
+            None
+                Dialog is initialized in-place.
+            """
+            super().__init__(parent)
+            self.setWindowTitle("Preparing Data Store")
+            self.setMinimumWidth(620)
+            self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+
+            root = QVBoxLayout(self)
+            root.setSpacing(14)
+
+            title = QLabel("Building `data_store.zarr`")
+            title.setObjectName("progressTitle")
+            root.addWidget(title)
+
+            self._message_label = QLabel("Starting materialization...")
+            self._message_label.setObjectName("progressMessage")
+            self._message_label.setWordWrap(True)
+            root.addWidget(self._message_label)
+
+            self._progress = QProgressBar()
+            self._progress.setRange(0, 100)
+            self._progress.setValue(0)
+            self._progress.setTextVisible(True)
+            self._progress.setFormat("%p%")
+            root.addWidget(self._progress)
+
+            self.setStyleSheet(
+                """
+                QDialog {
+                    background-color: #0c1118;
+                    color: #e6edf3;
+                    font-family: "Segoe UI", "Avenir Next", sans-serif;
+                }
+                QLabel#progressTitle {
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: #f0f5ff;
+                }
+                QLabel#progressMessage {
+                    color: #a6b7d0;
+                }
+                QProgressBar {
+                    border: 1px solid #2a3442;
+                    border-radius: 8px;
+                    background-color: #111925;
+                    text-align: center;
+                    height: 22px;
+                    color: #e6edf3;
+                }
+                QProgressBar::chunk {
+                    border-radius: 7px;
+                    background: qlineargradient(
+                        x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #1f7fdc, stop:1 #33c3a5
+                    );
+                }
+                """
+            )
+
+        def update_progress(self, percent: int, message: str) -> None:
+            """Update progress bar and stage text.
+
+            Parameters
+            ----------
+            percent : int
+                Progress percentage value.
+            message : str
+                Human-readable stage text.
+
+            Returns
+            -------
+            None
+                Widget state is updated in-place.
+            """
+            self._progress.setValue(max(0, min(100, int(percent))))
+            self._message_label.setText(str(message))
+
+    class ClearExSetupDialog(QDialog):
+        """First-step GUI dialog for experiment setup and store readiness."""
+
+        def __init__(self, initial: WorkflowConfig) -> None:
+            """Initialize setup window state and widgets.
+
+            Parameters
+            ----------
+            initial : WorkflowConfig
+                Initial workflow values for pre-population.
+
+            Returns
+            -------
+            None
+                Dialog is initialized in-place.
             """
             super().__init__()
             self.setWindowTitle("ClearEx")
             self.setMinimumWidth(960)
-            self.setMinimumHeight(720)
+            self.setMinimumHeight(700)
 
             self._opener = ImageOpener()
             self.result_config: Optional[WorkflowConfig] = None
             self._metadata_labels: Dict[str, QLabel] = {}
-            self._dask_backend_config: DaskBackendConfig = DaskBackendConfig()
-            self._zarr_save_config: ZarrSaveConfig = ZarrSaveConfig()
+            self._dask_backend_config: DaskBackendConfig = initial.dask_backend
+            self._zarr_save_config: ZarrSaveConfig = initial.zarr_save
+            self._chunks = initial.chunks
+            self._loaded_experiment: Optional[NavigateExperiment] = None
+            self._loaded_experiment_path: Optional[Path] = None
+            self._loaded_source_data_path: Optional[Path] = None
+            self._materialization_worker: Optional[DataStoreMaterializationWorker] = None
 
             self._build_ui()
             self._apply_theme()
             self._hydrate(initial)
 
         def _build_ui(self) -> None:
-            """Build and wire all dialog widgets.
+            """Build setup window widgets and connect actions.
 
             Parameters
             ----------
@@ -1172,39 +1482,26 @@ if HAS_PYQT6:
             header_layout = QVBoxLayout(header)
             title = QLabel("ClearEx")
             title.setObjectName("title")
-            subtitle = QLabel("Scalable Image Analysis")
+            subtitle = QLabel("Experiment Setup")
             subtitle.setObjectName("subtitle")
             header_layout.addWidget(title)
             header_layout.addWidget(subtitle)
             root.addWidget(header)
 
-            data_group = QGroupBox("Data Source")
+            data_group = QGroupBox("Navigate Experiment")
             data_layout = QVBoxLayout(data_group)
 
             path_row = QHBoxLayout()
             self._path_input = QLineEdit()
             self._path_input.setPlaceholderText(
-                "Select a data file, Navigate experiment.yml, or directory "
-                "(.yml/.yaml/.tif/.tiff/.zarr/.n5/.npy/.npz/.h5/.nd2)"
+                "Select Navigate experiment.yml or experiment.yaml"
             )
-            self._browse_file_button = QPushButton("Browse File")
-            self._browse_directory_button = QPushButton("Browse Folder")
+            self._browse_file_button = QPushButton("Browse Experiment")
             self._load_button = QPushButton("Load Metadata")
             path_row.addWidget(self._path_input, 1)
             path_row.addWidget(self._browse_file_button)
-            path_row.addWidget(self._browse_directory_button)
             path_row.addWidget(self._load_button)
             data_layout.addLayout(path_row)
-
-            options_row = QHBoxLayout()
-            self._dask_checkbox = QCheckBox("Use Dask / lazy loading")
-            self._chunks_input = QLineEdit()
-            self._chunks_input.setPlaceholderText(
-                "Chunks (optional): e.g. 256 or 1,256,256"
-            )
-            options_row.addWidget(self._dask_checkbox)
-            options_row.addWidget(self._chunks_input, 1)
-            data_layout.addLayout(options_row)
 
             dask_backend_row = QHBoxLayout()
             dask_backend_label = QLabel("Dask backend:")
@@ -1278,47 +1575,31 @@ if HAS_PYQT6:
             metadata_layout.setColumnStretch(3, 1)
             root.addWidget(metadata_group)
 
-            analysis_group = QGroupBox("Analysis Selection")
-            analysis_layout = QGridLayout(analysis_group)
-            analysis_layout.setSpacing(10)
-
-            self._deconvolution_checkbox = QCheckBox("Deconvolution")
-            self._particle_checkbox = QCheckBox("Particle Detection")
-            self._registration_checkbox = QCheckBox("Registration")
-            self._visualization_checkbox = QCheckBox("Visualization")
-
-            analysis_layout.addWidget(self._deconvolution_checkbox, 0, 0)
-            analysis_layout.addWidget(self._particle_checkbox, 0, 1)
-            analysis_layout.addWidget(self._registration_checkbox, 1, 0)
-            analysis_layout.addWidget(self._visualization_checkbox, 1, 1)
-            root.addWidget(analysis_group)
-
             footer = QHBoxLayout()
             self._status_label = QLabel("Ready")
             self._status_label.setObjectName("statusLabel")
             self._cancel_button = QPushButton("Cancel")
-            self._run_button = QPushButton("Run")
-            self._run_button.setObjectName("runButton")
+            self._next_button = QPushButton("Next")
+            self._next_button.setObjectName("runButton")
             footer.addWidget(self._status_label, 1)
             footer.addWidget(self._cancel_button)
-            footer.addWidget(self._run_button)
+            footer.addWidget(self._next_button)
             root.addLayout(footer)
 
             self._browse_file_button.clicked.connect(self._on_browse_file)
-            self._browse_directory_button.clicked.connect(self._on_browse_directory)
             self._load_button.clicked.connect(self._on_load_metadata)
             self._dask_backend_button.clicked.connect(self._on_edit_dask_backend)
             self._zarr_config_button.clicked.connect(self._on_edit_zarr_settings)
             self._cancel_button.clicked.connect(self.reject)
-            self._run_button.clicked.connect(self._on_run)
+            self._next_button.clicked.connect(self._on_next)
 
         def _hydrate(self, initial: WorkflowConfig) -> None:
-            """Populate UI widgets from a workflow configuration.
+            """Populate setup window fields from initial workflow config.
 
             Parameters
             ----------
             initial : WorkflowConfig
-                Initial values for path, chunking, and selected analyses.
+                Initial workflow values for the setup window.
 
             Returns
             -------
@@ -1326,19 +1607,11 @@ if HAS_PYQT6:
                 Widget state is updated in-place.
             """
             self._path_input.setText(initial.file or "")
-            self._dask_checkbox.setChecked(initial.prefer_dask)
-            self._dask_backend_config = initial.dask_backend
-            self._chunks_input.setText(format_chunks(initial.chunks))
-            self._deconvolution_checkbox.setChecked(initial.deconvolution)
-            self._particle_checkbox.setChecked(initial.particle_detection)
-            self._registration_checkbox.setChecked(initial.registration)
-            self._visualization_checkbox.setChecked(initial.visualization)
             self._refresh_dask_backend_summary()
-            self._zarr_save_config = initial.zarr_save
             self._refresh_zarr_save_summary()
 
         def _refresh_dask_backend_summary(self) -> None:
-            """Refresh the main dialog summary for Dask backend settings.
+            """Refresh setup summary text for Dask backend configuration.
 
             Parameters
             ----------
@@ -1347,14 +1620,14 @@ if HAS_PYQT6:
             Returns
             -------
             None
-                Summary label is updated in-place.
+                Summary labels are updated in-place.
             """
             summary = format_dask_backend_summary(self._dask_backend_config)
             self._dask_backend_summary.setText(summary)
             self._dask_backend_summary.setToolTip(summary)
 
-        def _on_edit_dask_backend(self) -> None:
-            """Launch the Dask backend settings popup and apply its result.
+        def _refresh_zarr_save_summary(self) -> None:
+            """Refresh setup summary text for Zarr save configuration.
 
             Parameters
             ----------
@@ -1363,7 +1636,23 @@ if HAS_PYQT6:
             Returns
             -------
             None
-                Updates stored backend config when dialog is accepted.
+                Summary labels are updated in-place.
+            """
+            summary = _format_zarr_save_summary(self._zarr_save_config)
+            self._zarr_config_summary.setText(summary)
+            self._zarr_config_summary.setToolTip(summary)
+
+        def _on_edit_dask_backend(self) -> None:
+            """Open backend dialog and apply selected configuration.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Selected backend values are stored in-place.
             """
             dialog = DaskBackendConfigDialog(
                 initial=self._dask_backend_config,
@@ -1376,24 +1665,8 @@ if HAS_PYQT6:
             self._refresh_dask_backend_summary()
             self._set_status("Updated Dask backend settings.")
 
-        def _refresh_zarr_save_summary(self) -> None:
-            """Refresh the main dialog summary for Zarr save settings.
-
-            Parameters
-            ----------
-            None
-
-            Returns
-            -------
-            None
-                Summary label is updated in-place.
-            """
-            summary = _format_zarr_save_summary(self._zarr_save_config)
-            self._zarr_config_summary.setText(summary)
-            self._zarr_config_summary.setToolTip(summary)
-
         def _on_edit_zarr_settings(self) -> None:
-            """Launch the Zarr save settings popup and apply its result.
+            """Open Zarr settings dialog and apply selected configuration.
 
             Parameters
             ----------
@@ -1402,7 +1675,7 @@ if HAS_PYQT6:
             Returns
             -------
             None
-                Updates stored Zarr save config when dialog is accepted.
+                Selected Zarr settings are stored in-place.
             """
             dialog = ZarrSaveConfigDialog(initial=self._zarr_save_config, parent=self)
             result = dialog.exec()
@@ -1413,7 +1686,7 @@ if HAS_PYQT6:
             self._set_status("Updated Zarr save settings.")
 
         def _apply_theme(self) -> None:
-            """Apply stylesheet-based dark theme for the dialog.
+            """Apply stylesheet-based theme for setup window.
 
             Parameters
             ----------
@@ -1422,7 +1695,7 @@ if HAS_PYQT6:
             Returns
             -------
             None
-                Styles are applied in-place to the dialog.
+                Styles are applied in-place.
             """
             self.setStyleSheet(
                 """
@@ -1515,12 +1788,12 @@ if HAS_PYQT6:
             )
 
         def _set_status(self, text: str) -> None:
-            """Update the footer status label.
+            """Set setup footer status text.
 
             Parameters
             ----------
             text : str
-                Status message displayed in the dialog footer.
+                Status message text.
 
             Returns
             -------
@@ -1530,7 +1803,7 @@ if HAS_PYQT6:
             self._status_label.setText(text)
 
         def _on_browse_file(self) -> None:
-            """Open file picker and update the selected data path.
+            """Open file picker for Navigate experiment descriptor.
 
             Parameters
             ----------
@@ -1539,109 +1812,139 @@ if HAS_PYQT6:
             Returns
             -------
             None
-                Updates the path field when a file is selected.
+                Selected path is written into the input field.
             """
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
-                "Select Image Data",
+                "Select Navigate experiment.yml",
                 str(Path.cwd()),
-                "All Files (*);;Image Data (*.yml *.yaml *.tif *.tiff *.zarr *.n5 *.npy *.npz *.h5 *.hdf5 *.hdf *.nd2)",
+                "Navigate Experiment (experiment.yml experiment.yaml *.yml *.yaml)",
             )
             if file_path:
                 self._path_input.setText(file_path)
 
-        def _on_browse_directory(self) -> None:
-            """Open directory picker and update the selected data path.
+        def _load_experiment_context(
+            self,
+            *,
+            path_text: str,
+        ) -> tuple[Path, NavigateExperiment, Path, ImageInfo]:
+            """Load experiment and source metadata for setup validation.
 
             Parameters
             ----------
-            None
+            path_text : str
+                User-entered experiment path text.
 
             Returns
             -------
-            None
-                Updates the path field when a directory is selected.
-            """
-            directory = QFileDialog.getExistingDirectory(
-                self,
-                "Select Data Directory",
-                str(Path.cwd()),
-            )
-            if directory:
-                self._path_input.setText(directory)
-
-        def _on_load_metadata(self) -> None:
-            """Load metadata for the currently selected dataset path.
-
-            Parameters
-            ----------
-            None
-
-            Returns
-            -------
-            None
-                Metadata labels are refreshed in-place.
+            tuple[pathlib.Path, NavigateExperiment, pathlib.Path, ImageInfo]
+                Experiment path, parsed experiment, resolved source path, and
+                source metadata.
 
             Raises
             ------
-            None
-                Exceptions during loading are caught and presented as GUI
-                error messages.
+            ValueError
+                If path is missing or not an experiment descriptor.
+            FileNotFoundError
+                If the selected path does not exist.
+            Exception
+                Propagates parse/read failures from experiment or image I/O.
             """
-            path = self._path_input.text().strip()
-            if not path:
-                QMessageBox.warning(self, "Missing Path", "Select a data path first.")
-                return
-            if not Path(path).exists():
-                QMessageBox.warning(
-                    self, "Missing Path", f"Path does not exist:\n{path}"
+            if not path_text:
+                raise ValueError("Select a Navigate experiment.yml path first.")
+            selected_path = Path(path_text).expanduser()
+            if not selected_path.exists():
+                raise FileNotFoundError(f"Path does not exist: {selected_path}")
+            if not is_navigate_experiment_file(selected_path):
+                raise ValueError(
+                    "This setup window requires Navigate experiment.yml or "
+                    "experiment.yaml."
                 )
-                return
 
+            experiment_path = selected_path.resolve()
+            experiment = load_navigate_experiment(experiment_path)
+            source_data_path = resolve_experiment_data_path(experiment)
+            _, info = self._opener.open(
+                path=str(source_data_path),
+                prefer_dask=True,
+                chunks=self._chunks,
+            )
+            return experiment_path, experiment, source_data_path, info
+
+        def _on_load_metadata(self) -> None:
+            """Load and display source metadata from selected experiment.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Metadata display fields and internal setup state are updated.
+            """
             try:
-                chunks = parse_chunks(self._chunks_input.text())
-                selected_path = Path(path)
-                source_data_path = selected_path
-                experiment = None
-                if is_navigate_experiment_file(selected_path):
-                    experiment = load_navigate_experiment(selected_path)
-                    source_data_path = resolve_experiment_data_path(experiment)
-                _, info = self._opener.open(
-                    path=str(source_data_path),
-                    prefer_dask=self._dask_checkbox.isChecked(),
-                    chunks=chunks,
+                experiment_path, experiment, source_data_path, info = (
+                    self._load_experiment_context(path_text=self._path_input.text().strip())
                 )
             except Exception as exc:
                 QMessageBox.critical(
                     self,
                     "Metadata Load Failed",
-                    f"Failed to load data metadata.\n\n{exc}",
+                    f"Failed to load experiment metadata.\n\n{exc}",
                 )
                 self._set_status("Failed to load metadata.")
                 return
 
             summary = summarize_image_info(info)
-            if experiment is not None:
-                summary = _apply_experiment_overrides(
-                    summary=summary,
-                    experiment_path=selected_path,
-                    resolved_data_path=source_data_path,
-                    experiment=experiment,
-                )
+            summary = _apply_experiment_overrides(
+                summary=summary,
+                experiment_path=experiment_path,
+                resolved_data_path=source_data_path,
+                experiment=experiment,
+            )
 
             for key, value in summary.items():
                 self._metadata_labels[key].setText(value)
-            if experiment is not None:
-                target_store = default_analysis_store_path(experiment)
-                self._set_status(
-                    "Metadata loaded from experiment.yml. "
-                    f"Analysis store target: {target_store}"
-                )
-            else:
-                self._set_status("Metadata loaded.")
 
-        def _on_run(self) -> None:
-            """Validate form values and finalize workflow selection.
+            self._loaded_experiment = experiment
+            self._loaded_experiment_path = experiment_path
+            self._loaded_source_data_path = source_data_path
+
+            target_store = resolve_data_store_path(experiment, source_data_path)
+            self._set_status(
+                "Metadata loaded. "
+                f"Target store: {target_store}"
+            )
+
+        def _accept_with_store_path(self, store_path: Path) -> None:
+            """Finalize setup dialog with prepared store path configuration.
+
+            Parameters
+            ----------
+            store_path : pathlib.Path
+                Prepared canonical store path.
+
+            Returns
+            -------
+            None
+                Stores setup workflow config and accepts this dialog.
+            """
+            self.result_config = WorkflowConfig(
+                file=str(store_path),
+                prefer_dask=True,
+                dask_backend=self._dask_backend_config,
+                chunks=self._chunks,
+                deconvolution=False,
+                particle_detection=False,
+                registration=False,
+                visualization=False,
+                zarr_save=self._zarr_save_config,
+            )
+            self.accept()
+
+        def _on_next(self) -> None:
+            """Advance to analysis-selection step after store readiness checks.
 
             Parameters
             ----------
@@ -1650,43 +1953,293 @@ if HAS_PYQT6:
             Returns
             -------
             None
-                Stores a :class:`WorkflowConfig` and accepts the dialog when
-                validation succeeds.
-
-            Raises
-            ------
-            None
-                Validation errors are reported via message boxes and handled
-                without raising exceptions.
+                Proceeds only when canonical store is confirmed ready.
             """
-            path = self._path_input.text().strip()
-            if not path:
-                QMessageBox.warning(
-                    self, "Missing Path", "Select a data path before running."
+            path_text = self._path_input.text().strip()
+            needs_reload = True
+            if self._loaded_experiment_path is not None:
+                needs_reload = str(self._loaded_experiment_path) != str(
+                    Path(path_text).expanduser().resolve()
                 )
-                return
-            if not Path(path).exists():
-                QMessageBox.warning(
-                    self, "Missing Path", f"Path does not exist:\n{path}"
-                )
+
+            if needs_reload or self._loaded_experiment is None or self._loaded_source_data_path is None:
+                self._on_load_metadata()
+                if self._loaded_experiment is None or self._loaded_source_data_path is None:
+                    return
+
+            experiment = self._loaded_experiment
+            source_data_path = self._loaded_source_data_path
+            target_store = resolve_data_store_path(experiment, source_data_path)
+
+            if target_store.exists():
+                self._set_status("Found existing data store. Opening analysis selection.")
+                self._accept_with_store_path(target_store)
                 return
 
-            try:
-                chunks = parse_chunks(self._chunks_input.text())
-            except Exception as exc:
-                QMessageBox.warning(self, "Invalid Chunks", str(exc))
-                return
+            progress_dialog = MaterializationProgressDialog(parent=self)
+            failure_messages: list[str] = []
+            success_paths: list[Path] = []
 
-            self.result_config = WorkflowConfig(
-                file=path,
-                prefer_dask=self._dask_checkbox.isChecked(),
+            worker = DataStoreMaterializationWorker(
+                experiment=experiment,
+                source_data_path=source_data_path,
                 dask_backend=self._dask_backend_config,
-                chunks=chunks,
+                zarr_save=self._zarr_save_config,
+            )
+            self._materialization_worker = worker
+            worker.progress_changed.connect(progress_dialog.update_progress)
+            worker.succeeded.connect(lambda store: success_paths.append(Path(store)))
+            worker.succeeded.connect(lambda _: progress_dialog.accept())
+            worker.failed.connect(lambda text: failure_messages.append(text))
+            worker.failed.connect(lambda _: progress_dialog.reject())
+
+            worker.start()
+            progress_dialog.exec()
+            worker.wait()
+            self._materialization_worker = None
+
+            if failure_messages:
+                QMessageBox.critical(
+                    self,
+                    "Store Creation Failed",
+                    f"Failed to create canonical data store.\n\n{failure_messages[0]}",
+                )
+                self._set_status("Store creation failed.")
+                return
+
+            if not success_paths:
+                self._set_status("Store creation was cancelled.")
+                return
+
+            store_path = success_paths[0]
+            self._set_status(
+                "Created canonical data store. Opening analysis selection."
+            )
+            self._accept_with_store_path(store_path)
+
+    class AnalysisSelectionDialog(QDialog):
+        """Second-step GUI dialog for selecting analysis operations."""
+
+        def __init__(self, initial: WorkflowConfig) -> None:
+            """Initialize analysis-selection window.
+
+            Parameters
+            ----------
+            initial : WorkflowConfig
+                Workflow values from setup step.
+
+            Returns
+            -------
+            None
+                Dialog is initialized in-place.
+            """
+            super().__init__()
+            self.setWindowTitle("ClearEx Analysis")
+            self.setMinimumWidth(720)
+            self.setMinimumHeight(420)
+
+            self._base_config = initial
+            self.result_config: Optional[WorkflowConfig] = None
+
+            self._build_ui()
+            self._apply_theme()
+            self._hydrate(initial)
+
+        def _build_ui(self) -> None:
+            """Build analysis window controls and connect actions.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widgets are created and connected in-place.
+            """
+            root = QVBoxLayout(self)
+            root.setSpacing(14)
+
+            header = QFrame()
+            header.setObjectName("headerCard")
+            header_layout = QVBoxLayout(header)
+            title = QLabel("Select Analysis Methods")
+            title.setObjectName("title")
+            subtitle = QLabel("Choose one or more operations to run on the prepared store.")
+            subtitle.setObjectName("subtitle")
+            header_layout.addWidget(title)
+            header_layout.addWidget(subtitle)
+            root.addWidget(header)
+
+            store_row = QHBoxLayout()
+            label = QLabel("Data store:")
+            label.setObjectName("metadataFieldLabel")
+            self._store_label = QLabel("n/a")
+            self._store_label.setObjectName("metadataFieldValue")
+            self._store_label.setWordWrap(True)
+            self._store_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            store_row.addWidget(label)
+            store_row.addWidget(self._store_label, 1)
+            root.addLayout(store_row)
+
+            analysis_group = QGroupBox("Analysis Selection")
+            analysis_layout = QGridLayout(analysis_group)
+            analysis_layout.setSpacing(10)
+
+            self._deconvolution_checkbox = QCheckBox("Deconvolution")
+            self._particle_checkbox = QCheckBox("Particle Detection")
+            self._registration_checkbox = QCheckBox("Registration")
+            self._visualization_checkbox = QCheckBox("Visualization")
+
+            analysis_layout.addWidget(self._deconvolution_checkbox, 0, 0)
+            analysis_layout.addWidget(self._particle_checkbox, 0, 1)
+            analysis_layout.addWidget(self._registration_checkbox, 1, 0)
+            analysis_layout.addWidget(self._visualization_checkbox, 1, 1)
+            root.addWidget(analysis_group)
+
+            footer = QHBoxLayout()
+            self._cancel_button = QPushButton("Cancel")
+            self._run_button = QPushButton("Run")
+            self._run_button.setObjectName("runButton")
+            footer.addStretch(1)
+            footer.addWidget(self._cancel_button)
+            footer.addWidget(self._run_button)
+            root.addLayout(footer)
+
+            self._cancel_button.clicked.connect(self.reject)
+            self._run_button.clicked.connect(self._on_run)
+
+        def _hydrate(self, initial: WorkflowConfig) -> None:
+            """Populate analysis selections from initial workflow values.
+
+            Parameters
+            ----------
+            initial : WorkflowConfig
+                Workflow values from setup step.
+
+            Returns
+            -------
+            None
+                Widget state is updated in-place.
+            """
+            self._store_label.setText(initial.file or "n/a")
+            self._deconvolution_checkbox.setChecked(initial.deconvolution)
+            self._particle_checkbox.setChecked(initial.particle_detection)
+            self._registration_checkbox.setChecked(initial.registration)
+            self._visualization_checkbox.setChecked(initial.visualization)
+
+        def _apply_theme(self) -> None:
+            """Apply stylesheet-based theme for analysis window.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Styles are applied in-place.
+            """
+            self.setStyleSheet(
+                """
+                QDialog {
+                    background-color: #0c1118;
+                    color: #e6edf3;
+                    font-family: "Segoe UI", "Avenir Next", sans-serif;
+                    font-size: 13px;
+                }
+                #headerCard {
+                    background: qlineargradient(
+                        x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #121a28, stop:1 #162538
+                    );
+                    border: 1px solid #2a3442;
+                    border-radius: 12px;
+                    padding: 10px;
+                }
+                QLabel#title {
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: #f0f5ff;
+                }
+                QLabel#subtitle {
+                    font-size: 13px;
+                    color: #a6b7d0;
+                }
+                QGroupBox {
+                    border: 1px solid #2a3442;
+                    border-radius: 10px;
+                    margin-top: 14px;
+                    padding: 12px;
+                    background-color: #111925;
+                    font-weight: 600;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 6px;
+                    color: #9cc6ff;
+                }
+                QLabel#metadataFieldLabel {
+                    color: #9cc6ff;
+                    font-weight: 600;
+                }
+                QLabel#metadataFieldValue {
+                    color: #d9e2f1;
+                }
+                QCheckBox {
+                    spacing: 8px;
+                    color: #d9e2f1;
+                }
+                QPushButton {
+                    background-color: #1a2635;
+                    border: 1px solid #2f4460;
+                    border-radius: 8px;
+                    padding: 8px 12px;
+                    color: #dbe9ff;
+                }
+                QPushButton:hover {
+                    background-color: #22354c;
+                }
+                QPushButton:pressed {
+                    background-color: #182639;
+                }
+                QPushButton#runButton {
+                    background-color: #2f81f7;
+                    border-color: #2f81f7;
+                    color: #f8fbff;
+                    font-weight: 700;
+                }
+                QPushButton#runButton:hover {
+                    background-color: #1f6cd8;
+                }
+                """
+            )
+
+        def _on_run(self) -> None:
+            """Finalize selected analysis flags and close dialog.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Stores selected workflow and accepts this dialog.
+            """
+            self.result_config = WorkflowConfig(
+                file=self._base_config.file,
+                prefer_dask=self._base_config.prefer_dask,
+                dask_backend=self._base_config.dask_backend,
+                chunks=self._base_config.chunks,
                 deconvolution=self._deconvolution_checkbox.isChecked(),
                 particle_detection=self._particle_checkbox.isChecked(),
                 registration=self._registration_checkbox.isChecked(),
                 visualization=self._visualization_checkbox.isChecked(),
-                zarr_save=self._zarr_save_config,
+                zarr_save=self._base_config.zarr_save,
             )
             self.accept()
 
@@ -1724,9 +2277,18 @@ def launch_gui(initial: Optional[WorkflowConfig] = None) -> Optional[WorkflowCon
     if app is None:
         app = QApplication(sys.argv)
 
-    dialog = ClearExDialog(initial=initial or WorkflowConfig())
-    result = dialog.exec()
-    selected = dialog.result_config if result == QDialog.DialogCode.Accepted else None
+    setup_dialog = ClearExSetupDialog(initial=initial or WorkflowConfig())
+    setup_result = setup_dialog.exec()
+    if setup_result != QDialog.DialogCode.Accepted or setup_dialog.result_config is None:
+        selected = None
+    else:
+        analysis_dialog = AnalysisSelectionDialog(initial=setup_dialog.result_config)
+        analysis_result = analysis_dialog.exec()
+        selected = (
+            analysis_dialog.result_config
+            if analysis_result == QDialog.DialogCode.Accepted
+            else None
+        )
 
     if owns_app:
         app.quit()
