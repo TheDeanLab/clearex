@@ -32,7 +32,7 @@ import numpy as np
 # Local Imports
 
 
-def make_3d_structured_element(radius, shape="sphere"):
+def make_3d_structured_element(radius: int, shape: str = "sphere") -> np.ndarray:
     """Create a 3D structuring element.
 
     Parameters
@@ -63,7 +63,7 @@ def make_3d_structured_element(radius, shape="sphere"):
     return structured_element
 
 
-def gaussian_kernel(sigma):
+def gaussian_kernel(sigma: float) -> np.ndarray:
     """Create a 1D Gaussian kernel.
 
     Parameters
@@ -83,7 +83,7 @@ def gaussian_kernel(sigma):
     return g
 
 
-def second_derivative_gaussian_kernel(sigma):
+def second_derivative_gaussian_kernel(sigma: float) -> np.ndarray:
     """Create a 1D second derivative Gaussian kernel.
 
     Parameters

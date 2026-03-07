@@ -233,13 +233,19 @@ def inspect_affine_transform(
     _extract_scale(affine_matrix=final_matrix)
 
 
-def _extract_scale(affine_matrix: np.ndarray):
+def _extract_scale(affine_matrix: np.ndarray) -> None:
     """Extract the scaling factors from an affine matrix.
 
     Parameters
     ----------
     affine_matrix: np.ndarray
         4x4 affine transform matrix.
+
+    Returns
+    -------
+    None
+        Writes the extracted scale factors to stdout and the registration
+        logger.
     """
     polar_decomposed: tuple = polar(a=affine_matrix[:3, :3])
 
@@ -256,13 +262,20 @@ def _extract_scale(affine_matrix: np.ndarray):
         logger.info(f"{label} Scale: {scale:.2f}-fold")
         print(f"{label} Scale: {scale:.2f}-fold")
 
-def _extract_shear(affine_matrix):
+
+def _extract_shear(affine_matrix: np.ndarray) -> None:
     """Extract the shearing factors from an affine matrix.
 
     Parameters
     ----------
     affine_matrix: np.ndarray
         4x4 affine transform matrix.
+
+    Returns
+    -------
+    None
+        Writes the extracted shear angles to stdout and the registration
+        logger.
     """
     # Extract shear directly from the 3x3 matrix using RQ decomposition
     # This gives us the "raw" shear without removing rotation first
@@ -286,13 +299,19 @@ def _extract_shear(affine_matrix):
         print(f"Shear angle {label}: {angle:.2f} degrees")
 
 
-def _extract_translation(affine_matrix):
+def _extract_translation(affine_matrix: np.ndarray) -> None:
     """Extract the translation factors from an affine matrix.
 
     Parameters
     ----------
     affine_matrix: np.ndarray
         4x4 affine transform matrix.
+
+    Returns
+    -------
+    None
+        Writes the extracted translations to stdout and the registration
+        logger.
     """
     # Extract the translation
     translation: np.ndarray = affine_matrix[:3, 3]
@@ -302,20 +321,28 @@ def _extract_translation(affine_matrix):
         print(f"Translation distance in {label}: {distance:.2f} voxels")
 
 
-def _extract_rotation(affine_matrix):
+def _extract_rotation(affine_matrix: np.ndarray) -> None:
     """Extract the rotation factors from an affine matrix.
 
     Parameters
     ----------
     affine_matrix: np.ndarray
         4x4 affine transform matrix.
+
+    Returns
+    -------
+    None
+        Writes the extracted Euler angles to stdout and the registration
+        logger.
     """
     rotation, _ = polar(a=affine_matrix[:3, :3])
 
     # Check for reflection (negative determinant)
     det = np.linalg.det(rotation)
     if det < 0:
-        logger.warning("Transform contains reflection (negative determinant). Reporting zero rotation.")
+        logger.warning(
+            "Transform contains reflection (negative determinant). Reporting zero rotation."
+        )
         print("Warning: Transform contains reflection (negative determinant).")
         # For reflection transforms, report zero rotation
         euler_angles_deg = np.array([0.0, 0.0, 0.0])

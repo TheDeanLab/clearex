@@ -26,30 +26,58 @@
 
 # Standard Library Imports
 
-# Third Party Imports
+import numpy as np
+from numpy.typing import NDArray
 from skimage import img_as_float
 from skimage.exposure import rescale_intensity
-from skimage.filters import gaussian
 from skimage.feature import blob_dog
-import numpy as np
+from skimage.filters import gaussian
 
 # Local Imports
 from clearex.filter.filters import fwhm_to_sigma
 
 
 def detect_particles(
-        img,
-        fwhm_px=10.0,
-        sigma_min_factor=0.7,
-        sigma_max_factor=1.7,
-        sigma_ratio=1.2,
-        threshold=0.03,
-        overlap=0.5, exclude_border=0):
-    """
-    blob_dog assumes blobs are bright-on-dark. If your mitochondria are dark-on-bright,
-    invert first: img = 1 - img.
+    img: NDArray[np.floating | np.integer],
+    fwhm_px: float = 10.0,
+    sigma_min_factor: float = 0.7,
+    sigma_max_factor: float = 1.7,
+    sigma_ratio: float = 1.2,
+    threshold: float = 0.03,
+    overlap: float = 0.5,
+    exclude_border: int | tuple[int, ...] | bool = 0,
+) -> NDArray[np.floating]:
+    """Detect bright blob-like particles in a normalized 2D image.
 
-    Uses threshold_rel (supported in modern scikit-image) for stability after normalization.
+    Parameters
+    ----------
+    img : numpy.ndarray
+        Input image containing bright particles on a dark background. If the
+        source data are dark-on-bright, invert the image before calling this
+        helper.
+    fwhm_px : float, default=10.0
+        Expected particle full width at half maximum, in pixels.
+    sigma_min_factor : float, default=0.7
+        Multiplier applied to the inferred sigma when computing the minimum
+        scale for Difference-of-Gaussians detection.
+    sigma_max_factor : float, default=1.7
+        Multiplier applied to the inferred sigma when computing the maximum
+        scale for Difference-of-Gaussians detection.
+    sigma_ratio : float, default=1.2
+        Geometric ratio between successive scales evaluated by
+        :func:`skimage.feature.blob_dog`.
+    threshold : float, default=0.03
+        Absolute detection threshold passed to :func:`blob_dog`.
+    overlap : float, default=0.5
+        Maximum allowed overlap fraction between detected blobs before the
+        weaker blob is suppressed.
+    exclude_border : int or tuple of int or bool, default=0
+        Border exclusion rule forwarded to :func:`blob_dog`.
+
+    Returns
+    -------
+    numpy.ndarray
+        Detected blobs with columns ``(row, col, sigma)``.
     """
     sigma0 = fwhm_to_sigma(fwhm_px)
     min_sigma = sigma_min_factor * sigma0
@@ -62,17 +90,28 @@ def detect_particles(
         sigma_ratio=sigma_ratio,
         threshold=threshold,
         overlap=overlap,
-        exclude_border=exclude_border
+        exclude_border=exclude_border,
     )
     # blobs: array of shape (N, 3) with columns [row, col, sigma]
     return blobs
 
 
-def preprocess(img, bg_sigma=20):
-    """ Preprocess an image by converting to float and background subtracting.
+def preprocess(
+    img: NDArray[np.floating | np.integer], bg_sigma: float = 20
+) -> NDArray[np.floating]:
+    """Normalize an image for particle detection.
 
     Parameters
+    ----------
+    img : numpy.ndarray
+        Input 2D image or 3D image with the channel axis last.
+    bg_sigma : float, default=20
+        Gaussian sigma used to estimate the low-frequency background.
 
+    Returns
+    -------
+    numpy.ndarray
+        Background-subtracted image rescaled to the ``[0, 1]`` range.
     """
     img = img_as_float(img)
     if img.ndim == 3:
@@ -84,10 +123,32 @@ def preprocess(img, bg_sigma=20):
     hp = rescale_intensity(hp, in_range="image", out_range=(0, 1))
     return hp
 
-def intensity_weighted_centroids(img, blobs, radius_factor=2.0, local_baseline_percentile=20):
-    """
-    Optional: refine blob centers to subpixel-ish locations using intensity-weighted centroid.
-    This can improve registration error estimates.
+
+def intensity_weighted_centroids(
+    img: NDArray[np.floating | np.integer],
+    blobs: NDArray[np.floating | np.integer],
+    radius_factor: float = 2.0,
+    local_baseline_percentile: float = 20,
+) -> NDArray[np.floating]:
+    """Refine blob centroids with local intensity weighting.
+
+    Parameters
+    ----------
+    img : numpy.ndarray
+        Input 2D image used to compute local weighted centroids.
+    blobs : numpy.ndarray
+        Blob detections with columns ``(row, col, sigma)``.
+    radius_factor : float, default=2.0
+        Multiplier that expands the centroiding window relative to blob scale.
+    local_baseline_percentile : float, default=20
+        Local intensity percentile subtracted before computing weighted
+        coordinates.
+
+    Returns
+    -------
+    numpy.ndarray
+        Refined blob coordinates with the same ``(row, col, sigma)`` layout as
+        the input detections.
     """
     refined = []
     H, W = img.shape

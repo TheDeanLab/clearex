@@ -25,6 +25,7 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 # Standard Library Imports
+from typing import Any, Literal
 
 # Third Party Imports
 from skimage.feature import BRIEF, match_descriptors, plot_matched_features
@@ -35,14 +36,40 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 # Local Imports
-from clearex.detect.particles import preprocess, detect_particles, intensity_weighted_centroids
+from clearex.detect.particles import (
+    preprocess,
+    detect_particles,
+    intensity_weighted_centroids,
+)
 
 
+TransformModel = SimilarityTransform | AffineTransform
 
-def brief_descriptors_at_keypoints(img, keypoints_rc, patch_size=31, n_bits=256):
-    """
-    Compute BRIEF descriptors at given (row, col) keypoints.
-    BRIEF produces binary descriptors; match with Hamming distance.  [oai_citation:1‡Scikit-image](https://scikit-image.org/docs/0.25.x/auto_examples/features_detection/plot_brief.html?utm_source=chatgpt.com)
+
+def brief_descriptors_at_keypoints(
+    img: np.ndarray,
+    keypoints_rc: np.ndarray,
+    patch_size: int = 31,
+    n_bits: int = 256,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute BRIEF descriptors at a set of row/column keypoints.
+
+    Parameters
+    ----------
+    img : numpy.ndarray
+        Input 2D image.
+    keypoints_rc : numpy.ndarray
+        Candidate keypoints in ``(row, col)`` format.
+    patch_size : int, default=31
+        BRIEF patch size in pixels.
+    n_bits : int, default=256
+        Descriptor length in bits.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Rounded keypoints that produced valid descriptors and their BRIEF
+        descriptor matrix.
     """
     keypoints_rc = np.asarray(keypoints_rc, dtype=float)
     kpi = np.round(keypoints_rc).astype(int)
@@ -50,8 +77,10 @@ def brief_descriptors_at_keypoints(img, keypoints_rc, patch_size=31, n_bits=256)
     half = patch_size // 2
     H, W = img.shape
     ok = (
-        (kpi[:, 0] >= half) & (kpi[:, 0] < H - half) &
-        (kpi[:, 1] >= half) & (kpi[:, 1] < W - half)
+        (kpi[:, 0] >= half)
+        & (kpi[:, 0] < H - half)
+        & (kpi[:, 1] >= half)
+        & (kpi[:, 1] < W - half)
     )
     kpi = kpi[ok]
 
@@ -61,23 +90,59 @@ def brief_descriptors_at_keypoints(img, keypoints_rc, patch_size=31, n_bits=256)
     return kpi[brief.mask], brief.descriptors
 
 
-def xy_from_rc(rc):
-    """Convert (row, col) -> (x, y) == (col, row) for skimage.transform models."""
+def xy_from_rc(rc: np.ndarray) -> np.ndarray:
+    """Convert row/column coordinates to x/y coordinates.
+
+    Parameters
+    ----------
+    rc : numpy.ndarray
+        Array of coordinates in ``(row, col)`` order.
+
+    Returns
+    -------
+    numpy.ndarray
+        Coordinates in ``(x, y)`` order.
+    """
     rc = np.asarray(rc)
     return np.stack([rc[:, 1], rc[:, 0]], axis=1).astype(float)
 
 
-def fit_transform_ransac(src_xy, dst_xy, model="similarity", residual_threshold=2.0, max_trials=1000):
-    """
-    Fit robust transform using RANSAC, as recommended when using match_descriptors
-    due to spurious matches.  [oai_citation:2‡Scikit-image](https://scikit-image.org/docs/0.25.x/user_guide/geometrical_transform.html?utm_source=chatgpt.com)
+def fit_transform_ransac(
+    src_xy: np.ndarray,
+    dst_xy: np.ndarray,
+    model: Literal["similarity", "affine"] = "similarity",
+    residual_threshold: float = 2.0,
+    max_trials: int = 1000,
+) -> tuple[TransformModel, np.ndarray]:
+    """Fit a robust geometric transform using RANSAC.
+
+    Parameters
+    ----------
+    src_xy : numpy.ndarray
+        Source points in ``(x, y)`` order.
+    dst_xy : numpy.ndarray
+        Destination points in ``(x, y)`` order.
+    model : {"similarity", "affine"}, default="similarity"
+        Transform family used by RANSAC.
+    residual_threshold : float, default=2.0
+        Maximum inlier residual in pixels.
+    max_trials : int, default=1000
+        Maximum number of RANSAC iterations.
+
+    Returns
+    -------
+    tuple
+        Robust transform model and the Boolean inlier mask returned by
+        :func:`skimage.measure.ransac`.
     """
     if model == "affine":
         ModelClass = AffineTransform
         min_samples = 3
     else:
         ModelClass = SimilarityTransform
-        min_samples = 2  # Similarity can be estimated with 2 point pairs (though 3+ is safer)
+        min_samples = (
+            2  # Similarity can be estimated with 2 point pairs (though 3+ is safer)
+        )
 
     # Use at least 3 if you can, for stability:
     min_samples = max(min_samples, 3) if len(src_xy) >= 3 else min_samples
@@ -87,28 +152,68 @@ def fit_transform_ransac(src_xy, dst_xy, model="similarity", residual_threshold=
         ModelClass,
         min_samples=min_samples,
         residual_threshold=residual_threshold,
-        max_trials=max_trials
+        max_trials=max_trials,
     )
     return model_robust, inliers
 
 
-def registration_errors(model, src_xy, dst_xy):
+def registration_errors(
+    model: TransformModel, src_xy: np.ndarray, dst_xy: np.ndarray
+) -> tuple[np.ndarray, float, float, float]:
+    """Compute residual summary statistics for a fitted transform.
+
+    Parameters
+    ----------
+    model : skimage.transform.SimilarityTransform or skimage.transform.AffineTransform
+        Transform used to map source points into destination space.
+    src_xy : numpy.ndarray
+        Source points in ``(x, y)`` order.
+    dst_xy : numpy.ndarray
+        Target points in ``(x, y)`` order.
+
+    Returns
+    -------
+    tuple
+        Residual vector, RMS residual, median residual, and 95th percentile
+        residual, all in pixels.
+    """
     pred = model(src_xy)
     residuals = np.linalg.norm(pred - dst_xy, axis=1)
-    rms = float(np.sqrt(np.mean(residuals ** 2))) if residuals.size else np.nan
+    rms = float(np.sqrt(np.mean(residuals**2))) if residuals.size else np.nan
     med = float(np.median(residuals)) if residuals.size else np.nan
     p95 = float(np.percentile(residuals, 95)) if residuals.size else np.nan
     return residuals, rms, med, p95
 
 
-def cv_tre_proxy(src_xy, dst_xy, n_splits=20, test_fraction=0.2, random_state=0, model="similarity"):
-    """
-    Cross-validated proxy for TRE:
-      - repeatedly hold out a subset of matches
-      - fit transform on the rest (least squares estimate)
-      - compute RMS error on held-out points
+def cv_tre_proxy(
+    src_xy: np.ndarray,
+    dst_xy: np.ndarray,
+    n_splits: int = 20,
+    test_fraction: float = 0.2,
+    random_state: int = 0,
+    model: Literal["similarity", "affine"] = "similarity",
+) -> tuple[float, np.ndarray]:
+    """Estimate a proxy target-registration error by repeated holdout.
 
-    This is closer to TRE than reporting residuals on the same points used to fit (FRE).
+    Parameters
+    ----------
+    src_xy : numpy.ndarray
+        Source points in ``(x, y)`` order.
+    dst_xy : numpy.ndarray
+        Destination points in ``(x, y)`` order.
+    n_splits : int, default=20
+        Number of random holdout repetitions.
+    test_fraction : float, default=0.2
+        Fraction of matches assigned to each holdout split.
+    random_state : int, default=0
+        Seed for the split generator.
+    model : {"similarity", "affine"}, default="similarity"
+        Transform family evaluated during cross-validation.
+
+    Returns
+    -------
+    tuple
+        RMS holdout error and the full array of holdout residuals.
     """
     rng = np.random.default_rng(random_state)
     n = len(src_xy)
@@ -138,25 +243,58 @@ def cv_tre_proxy(src_xy, dst_xy, n_splits=20, test_fraction=0.2, random_state=0,
         errs.extend(e.tolist())
 
     errs = np.array(errs, dtype=float)
-    tre_rms = float(np.sqrt(np.mean(errs ** 2))) if errs.size else np.nan
+    tre_rms = float(np.sqrt(np.mean(errs**2))) if errs.size else np.nan
     return tre_rms, errs
 
 
 def particle_registration_tre(
-    img1,
-    img2,
-    fwhm_px=10.0,
-    invert=False,
-    thresholds=(0.03, 0.03),
-    brief_patch_size=31,
-    model="similarity",
-    ransac_residual_threshold=2.0,
-    show_debug=False,
-    optimize=False,
-):
-    """
-    Returns:
-      dict with blobs, matches, inliers, transform, FRE, CV-TRE proxy
+    img1: np.ndarray,
+    img2: np.ndarray,
+    fwhm_px: float = 10.0,
+    invert: bool = False,
+    thresholds: tuple[float, float] = (0.03, 0.03),
+    brief_patch_size: int = 31,
+    model: Literal["similarity", "affine"] = "similarity",
+    ransac_residual_threshold: float = 2.0,
+    show_debug: bool = False,
+    optimize: bool = False,
+) -> dict[str, Any] | None:
+    """Register two particle images and summarize landmark error metrics.
+
+    Parameters
+    ----------
+    img1 : numpy.ndarray
+        Fixed image in 2D.
+    img2 : numpy.ndarray
+        Moving image in 2D.
+    fwhm_px : float, default=10.0
+        Expected particle full width at half maximum in pixels.
+    invert : bool, default=False
+        If ``True``, invert both preprocessed images before blob detection.
+    thresholds : tuple of float, default=(0.03, 0.03)
+        Detection thresholds for ``img1`` and ``img2``.
+    brief_patch_size : int, default=31
+        Patch size used for BRIEF descriptors.
+    model : {"similarity", "affine"}, default="similarity"
+        Geometric model fitted during robust registration.
+    ransac_residual_threshold : float, default=2.0
+        Inlier threshold in pixels for RANSAC.
+    show_debug : bool, default=False
+        If ``True``, plot intermediate match diagnostics.
+    optimize : bool, default=False
+        If ``True``, stop after detection and visualization to help tune
+        detector parameters.
+
+    Returns
+    -------
+    dict or None
+        Registration summary dictionary, or ``None`` when ``optimize=True`` and
+        the helper exits after visualization.
+
+    Raises
+    ------
+    ValueError
+        If either input image is not 2D.
     """
     # If the image dimensions are >2, raise an error. Only implemented in 2D currently.
     if img1.ndim != 2 or img2.ndim != 2:
@@ -177,31 +315,25 @@ def particle_registration_tre(
     img2_thresh = thresholds[1]
 
     b1 = detect_particles(
-        I1,
-        fwhm_px=fwhm_px,
-        threshold=img1_thresh,
-        exclude_border=exclude_border
+        I1, fwhm_px=fwhm_px, threshold=img1_thresh, exclude_border=exclude_border
     )
     b2 = detect_particles(
-        I2,
-        fwhm_px=fwhm_px,
-        threshold=img2_thresh,
-        exclude_border=exclude_border
+        I2, fwhm_px=fwhm_px, threshold=img2_thresh, exclude_border=exclude_border
     )
     print(f"Detected {len(b1)} blobs in image 1 and {len(b2)} blobs in image 2.")
 
     if optimize:
         # Visualize blobs on round 1
         fig, ax = plt.subplots(figsize=(8, 8))
-        ax.imshow(I1, cmap='gray', vmin=0, vmax=np.percentile(I1, 99))
-        ax.scatter(b1[:, 1], b1[:, 0], s=5, facecolors='none', edgecolors='r')
-        ax.axis('off')
+        ax.imshow(I1, cmap="gray", vmin=0, vmax=np.percentile(I1, 99))
+        ax.scatter(b1[:, 1], b1[:, 0], s=5, facecolors="none", edgecolors="r")
+        ax.axis("off")
         plt.show()
 
         fig, ax = plt.subplots(figsize=(8, 8))
-        ax.imshow(I2, cmap='gray', vmin=0, vmax=np.percentile(I2, 99))
-        ax.scatter(b2[:, 1], b2[:, 0], s=5, facecolors='none', edgecolors='r')
-        ax.axis('off')
+        ax.imshow(I2, cmap="gray", vmin=0, vmax=np.percentile(I2, 99))
+        ax.scatter(b2[:, 1], b2[:, 0], s=5, facecolors="none", edgecolors="r")
+        ax.axis("off")
         plt.show()
 
         return None
@@ -211,16 +343,21 @@ def particle_registration_tre(
     b2r = intensity_weighted_centroids(I2, b2)
 
     # 4) descriptors at blob centers
-    kp1_rc, d1 = brief_descriptors_at_keypoints(I1, b1r[:, :2], patch_size=brief_patch_size)
-    kp2_rc, d2 = brief_descriptors_at_keypoints(I2, b2r[:, :2], patch_size=brief_patch_size)
+    kp1_rc, d1 = brief_descriptors_at_keypoints(
+        I1, b1r[:, :2], patch_size=brief_patch_size
+    )
+    kp2_rc, d2 = brief_descriptors_at_keypoints(
+        I2, b2r[:, :2], patch_size=brief_patch_size
+    )
 
     # 5) match descriptors
     # Hamming is appropriate for BRIEF/binary descriptors; match_descriptors supports it.  [oai_citation:3‡Scikit-image](https://scikit-image.org/docs/0.25.x/api/skimage.feature.html)
     matches = match_descriptors(
-        d1, d2,
+        d1,
+        d2,
         metric="hamming",
         cross_check=False,
-        max_ratio=1.0  # keep all matches for RANSAC to filter
+        max_ratio=1.0,  # keep all matches for RANSAC to filter
     )
 
     src_rc = kp1_rc[matches[:, 0]]
@@ -235,18 +372,20 @@ def particle_registration_tre(
         dst_xy,
         model=model,
         residual_threshold=ransac_residual_threshold,
-        max_trials=1*10**6
+        max_trials=1 * 10**6,
     )
 
     # Refit on inliers (least squares) for final residuals
     in_src = src_xy[inliers]
     in_dst = dst_xy[inliers]
 
-    final_model = (AffineTransform() if model == "affine" else SimilarityTransform())
+    final_model = AffineTransform() if model == "affine" else SimilarityTransform()
     final_model.estimate(in_src, in_dst)
 
     # 7) errors
-    in_resid, fre_rms, fre_med, fre_p95 = registration_errors(final_model, in_src, in_dst)
+    in_resid, fre_rms, fre_med, fre_p95 = registration_errors(
+        final_model, in_src, in_dst
+    )
     cv_rms, cv_errs = cv_tre_proxy(in_src, in_dst, model=model)
 
     out = {
@@ -281,44 +420,45 @@ def particle_registration_tre(
 
         fig, ax = plt.subplots(figsize=(10, 5))
         plot_matched_features(
-            I1, I2,
-            keypoints0=kp1_rc,
-            keypoints1=kp2_rc,
-            matches=m_in,
-            ax=ax
+            I1, I2, keypoints0=kp1_rc, keypoints1=kp2_rc, matches=m_in, ax=ax
         )
         ax.set_title(f"Inlier matches (n={len(m_in)})")
         plt.tight_layout()
         plt.show()
 
         print(f"Blobs: img1={out['n_blobs_img1']}, img2={out['n_blobs_img2']}")
-        print(f"Keypoints: img1={out['n_keypoints_img1']}, img2={out['n_keypoints_img2']}")
+        print(
+            f"Keypoints: img1={out['n_keypoints_img1']}, img2={out['n_keypoints_img2']}"
+        )
         print(f"Matches={out['n_matches']}, Inliers={out['n_inliers']}")
-        print(f"FRE RMS (inliers) = {out['fre_rms_px']:.3f} px; median={out['fre_median_px']:.3f} px; p95={out['fre_p95_px']:.3f} px")
+        print(
+            f"FRE RMS (inliers) = {out['fre_rms_px']:.3f} px; median={out['fre_median_px']:.3f} px; p95={out['fre_p95_px']:.3f} px"
+        )
         print(f"CV-TRE proxy RMS   = {out['cv_tre_rms_px']:.3f} px")
 
     return out
 
 
-def mutual_nn_pairs(fixed_rc, moving_rc, max_dist=None):
-    """
-    Find mutual nearest neighbor pairs between two point sets.
+def mutual_nn_pairs(
+    fixed_rc: np.ndarray, moving_rc: np.ndarray, max_dist: float | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Match points by mutual nearest-neighbor assignment.
 
-    Parameters:
-    -----------
-    fixed_rc : ndarray (N, 2)
-        Fixed points in (row, col) format
-    moving_rc : ndarray (M, 2)
-        Moving points in (row, col) format (should already be transformed to fixed space)
+    Parameters
+    ----------
+    fixed_rc : numpy.ndarray
+        Fixed points in ``(row, col)`` format.
+    moving_rc : numpy.ndarray
+        Moving points in ``(row, col)`` format, typically already mapped into
+        fixed-image space.
     max_dist : float, optional
-        Maximum distance threshold for valid pairs
+        Maximum distance allowed for a retained match.
 
-    Returns:
-    --------
-    pairs : ndarray (K, 2)
-        Indices of matched pairs: [moving_idx, fixed_idx]
-    dists : ndarray (K,)
-        Distances for each pair
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Pair indices ``[moving_idx, fixed_idx]`` and their corresponding
+        Euclidean distances.
     """
     tree_fixed = cKDTree(fixed_rc)
     tree_moving = cKDTree(moving_rc)

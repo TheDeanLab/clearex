@@ -31,7 +31,7 @@ from __future__ import annotations
 # Standard Library Imports
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 import json
 import re
 
@@ -42,6 +42,10 @@ import zarr
 
 # Local Imports
 from clearex.io.read import ImageInfo
+
+if TYPE_CHECKING:
+    from dask.delayed import Delayed
+    from dask.distributed import Client
 
 # YAML parsing is optional because many Navigate ``experiment.yml`` files are JSON.
 try:
@@ -208,9 +212,7 @@ def _parse_serialized_text(text: str, *, context: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         if not HAS_PYYAML:
-            raise ValueError(
-                f"{context} is not valid JSON and PyYAML is unavailable."
-            )
+            raise ValueError(f"{context} is not valid JSON and PyYAML is unavailable.")
         return yaml.safe_load(text)
 
 
@@ -451,12 +453,8 @@ def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
         image_mode=str(state.get("image_mode")) if state.get("image_mode") else None,
         timepoints=max(1, int(state.get("timepoints", 1))),
         number_z_steps=max(1, int(state.get("number_z_steps", 1))),
-        y_pixels=max(
-            1, int(camera.get("img_y_pixels", camera.get("y_pixels", 1)))
-        ),
-        x_pixels=max(
-            1, int(camera.get("img_x_pixels", camera.get("x_pixels", 1)))
-        ),
+        y_pixels=max(1, int(camera.get("img_y_pixels", camera.get("y_pixels", 1)))),
+        x_pixels=max(1, int(camera.get("img_x_pixels", camera.get("x_pixels", 1)))),
         multiposition_count=max(1, multiposition_count),
         selected_channels=selected_channels,
     )
@@ -583,7 +581,11 @@ def find_experiment_data_candidates(experiment: NavigateExperiment) -> list[Path
 
     # Fallback: search known formats in priority order.
     fallback_tiffs = sorted(
-        [p for p in {*base.rglob("*.tif"), *base.rglob("*.tiff")} if not _is_mip_path(p)],
+        [
+            p
+            for p in {*base.rglob("*.tif"), *base.rglob("*.tiff")}
+            if not _is_mip_path(p)
+        ],
         key=lambda p: str(p),
     )
     if not fallback_tiffs:
@@ -720,9 +722,7 @@ def initialize_analysis_store(
     """
     axis_names = ("t", "p", "c", "z", "y", "x")
     if len(chunks) != len(axis_names):
-        raise ValueError(
-            "chunks must define six values in (t, p, c, z, y, x) order."
-        )
+        raise ValueError("chunks must define six values in (t, p, c, z, y, x) order.")
     requested_chunks = tuple(int(chunk) for chunk in chunks)
     if any(chunk <= 0 for chunk in requested_chunks):
         raise ValueError("chunks values must be greater than zero.")
@@ -749,7 +749,9 @@ def initialize_analysis_store(
     output_path = Path(zarr_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    z_size, y_size, x_size = infer_zyx_shape(experiment=experiment, image_info=image_info)
+    z_size, y_size, x_size = infer_zyx_shape(
+        experiment=experiment, image_info=image_info
+    )
     shape = (
         int(experiment.timepoints),
         int(experiment.multiposition_count),
@@ -791,7 +793,9 @@ def initialize_analysis_store(
                     "axes": ["t", "p", "c", "z", "y", "x"],
                     "storage_policy": "latest_only",
                     "chunk_shape_tpczyx": existing_chunks,
-                    "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
+                    "configured_chunks_tpczyx": [
+                        int(chunk) for chunk in requested_chunks
+                    ],
                     "resolution_pyramid_factors_tpczyx": pyramid_payload,
                 }
             )
@@ -851,7 +855,7 @@ def create_dask_client(
     threads_per_worker: int = 1,
     memory_limit: Union[str, float] = "auto",
     local_directory: Optional[Union[str, Path]] = None,
-):
+) -> "Client":
     """Create Dask distributed client (local default, cluster optional).
 
     Parameters
@@ -900,7 +904,7 @@ def write_zyx_block(
     p_index: int,
     c_index: int,
     compute: bool = True,
-):
+) -> "Delayed | None":
     """Write one non-overlapping ``(z, y, x)`` block into 6D analysis store.
 
     Parameters

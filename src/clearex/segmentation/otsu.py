@@ -103,7 +103,9 @@ def otsu(image_data: np.ndarray, down_sampling: Optional[int] = 4) -> np.ndarray
     return image_binary
 
 
-def noise_normalized_otsu(image_data: np.ndarray, down_sampling: Optional[int] = 4):
+def noise_normalized_otsu(
+    image_data: np.ndarray, down_sampling: Optional[int] = 4
+) -> np.ndarray:
     """Normalized Otsu Thresholding for 3D images.
 
     Identifies the threshold for the image data using Otsu's method and normalizes

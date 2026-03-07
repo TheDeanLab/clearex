@@ -222,7 +222,25 @@ def identify_robust_bounding_box(
     y_dist = binary.sum(axis=(0, 2)).astype(np.int32)
     x_dist = binary.sum(axis=(0, 1)).astype(np.int32)
 
-    def find_bounds(dist, low, high):
+    def find_bounds(
+        dist: np.ndarray, low: float, high: float
+    ) -> tuple[np.integer[Any], np.integer[Any]]:
+        """Locate inclusive lower and exclusive upper foreground bounds.
+
+        Parameters
+        ----------
+        dist : numpy.ndarray
+            Marginal foreground counts along a single axis.
+        low : float
+            Lower percentile cutoff to include.
+        high : float
+            Upper percentile cutoff to include.
+
+        Returns
+        -------
+        tuple of numpy.integer
+            Lower and upper indices for the retained region.
+        """
         cumsum = np.cumsum(dist)
         total = cumsum[-1]
         if total == 0:
@@ -241,7 +259,7 @@ def identify_robust_bounding_box(
 def identify_minimal_bounding_box(
     image: Union[np.ndarray, ants.core.ants_image.ANTsImage],
     down_sampling: int = 8,
-    robust=False,
+    robust: bool = False,
     lower_pct: float = 5,
     upper_pct: float = 95,
 ) -> Tuple[int, int, int, int, int, int]:

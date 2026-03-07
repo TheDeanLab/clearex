@@ -25,6 +25,7 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 import os
+from typing import Any, Sequence
 
 # import pylab as plt
 import matplotlib.pyplot as plt
@@ -33,15 +34,15 @@ import numpy as np
 
 
 def mips(
-    *channels,
-    bounding_boxes=None,
-    filepath=None,
-    filename=None,
-    block_info=None,
-    points=None,
-    scale_intensity=False,
-    lut="gray",
-    titles=None,
+    *channels: np.ndarray,
+    bounding_boxes: Sequence[tuple[int, int, int, int, int, int]] | None = None,
+    filepath: str | os.PathLike[str] | None = None,
+    filename: str | None = None,
+    block_info: Sequence[dict[str, Any]] | None = None,
+    points: Sequence[np.ndarray] | None = None,
+    scale_intensity: bool | float = False,
+    lut: str = "gray",
+    titles: Sequence[str] | None = None,
 ) -> None:
     """Display Maximum Intensity Projections (MIPs) for multiple channels.
 
@@ -63,10 +64,10 @@ def mips(
     filename : str, optional
         If provided, save the plot with this filename.
 
-    block_info : list of dict, optional
-        If provided, save the plot with this block information
+    block_info : sequence of dict, optional
+        Dask block metadata used to prefix saved filenames.
 
-    points : list of np.ndarray, optional
+    points : sequence of np.ndarray, optional
         Each element is an array of shape (N,3) containing (z, y, x) coordinates
         for detected blobs corresponding to each channel.
 
@@ -78,7 +79,7 @@ def mips(
         The lookup table to use for the image. Default is 'gray'. Other options
         include 'nipy_spectral', 'viridis', 'plasma', 'inferno', 'magma', 'cividis'...
 
-    titles : list of str, optional
+    titles : sequence of str, optional
         Titles for each channel. If provided, should have the same length as channels.
 
     Returns
@@ -159,19 +160,20 @@ def mips(
         # Display the plot
         plt.show()
     else:
+        output_directory = os.fspath(filepath)
         # Save the plot
         if filename is None:
             filename = "mip.pdf"
 
         if block_info is None:
-            save_path = os.path.join(filepath, filename)
+            save_path = os.path.join(output_directory, filename)
         else:
             # Dask block information is a list of dictionaries.
             info = block_info[0]
             chunk_location = info["chunk-location"]
             chunk_id = "_".join(map(str, chunk_location))
             filename = f"{chunk_id}_{filename}"
-            save_path = os.path.join(filepath, filename)
+            save_path = os.path.join(output_directory, filename)
         plt.savefig(save_path, dpi=300)
         plt.close()
 

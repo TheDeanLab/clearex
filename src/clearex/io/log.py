@@ -27,11 +27,12 @@
 # Standard Library Imports
 import logging
 import os
+import socket
 import sys
 import tempfile
+from collections.abc import Callable
 from datetime import datetime
-import socket
-from pathlib import Path
+from typing import Any, TypeVar
 
 
 # Local Imports
@@ -79,7 +80,7 @@ def initialize_logging(
         return root_logger
 
 
-def initiate_logger(log_directory) -> logging.Logger:
+def initiate_logger(log_directory: os.PathLike[str] | str) -> logging.Logger:
     """Set up logging to a file in the specified directory.
 
     This function configures the root logger to write log messages to a file
@@ -136,8 +137,34 @@ def initiate_logger(log_directory) -> logging.Logger:
     return root_logger
 
 
-def capture_c_level_output(func, *args, **kwargs):
-    """Capture stdout/stderr including C-level output from function calls."""
+T = TypeVar("T")
+
+
+def capture_c_level_output(
+    func: Callable[..., T], *args: Any, **kwargs: Any
+) -> tuple[T, str, str]:
+    """Capture Python and C-level stdout/stderr from a function call.
+
+    Parameters
+    ----------
+    func : collections.abc.Callable
+        Callable to execute while stdout and stderr are temporarily redirected.
+    *args : Any
+        Positional arguments forwarded to ``func``.
+    **kwargs : Any
+        Keyword arguments forwarded to ``func``.
+
+    Returns
+    -------
+    tuple
+        Tuple ``(result, stdout_text, stderr_text)`` containing the callable's
+        return value and the captured output streams.
+
+    Notes
+    -----
+    This helper redirects file descriptors, so it captures output emitted by
+    native libraries in addition to normal Python ``print`` statements.
+    """
 
     # Create temporary files for stdout and stderr
     with (

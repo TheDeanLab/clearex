@@ -27,73 +27,68 @@
 import numpy as np
 from scipy.stats import ks_2samp, wasserstein_distance
 
-def compare_intensity(fixed, moving, *,
-                        max_sample=100_000,
-                        use_hist_wasserstein=True,
-                        hist_bins=256,
-                        alpha=0.05,
-                        seed=0):
-    """
-    KS + Wasserstein comparison of two images, memory-safe.
+from typing import Any
 
-    Compare two image-intensity populations with a distribution-free test
-    and a complementary effect-size metric.
 
-    Why these tests?
-    ----------------
-    * Two-sample Kolmogorov–Smirnov (KS) test
-      A non-parametric test that compares the entire empirical cumulative
-      distribution functions (ECDFs) of the two samples.
-      It makes no assumption about normality or equal variances and is
-      sensitive to differences in location, spread, and tail behaviour—
-      ideal for raw pixel intensities that are integer-quantised and often
-      skewed.
-
-    * 1-Wasserstein / Earth-Mover distance (EMD)
-      A scalar effect size that measures how far one distribution must be
-      “moved” to match the other (same units as the data, e.g. ADU).
-      Reporting EMD alongside the KS p-value prevents over-interpreting
-      trivial but statistically significant differences when the sample size
-      is large.
-
-    Null hypotheses
-    ---------------
-    * KS testEMSPH₀ : The two intensity distributions are identical.
-      We reject H₀ when the maximum vertical distance between their ECDFs
-      (statistic D) is large enough that the associated p-value
-      <p α (default α = 0.05).
-
-    * EMDEMSPNo formal hypothesis—EMD is descriptive.
-      Smaller values imply more similar distributions; thresholds for
-      “practical equivalence” should be defined by domain expertise.
-
-    Sampling strategy
-    -----------------
-    * Convert each volume to a flat NumPy `float32` vector.
-    * Randomly sample up to `max_sample` pixels without replacement;
-      this preserves distribution shape while limiting `n`.
-    * Optionally compute EMD on coarse histograms (`hist_bins` ≤ 256),
-        reducing RAM from O(n) to O(bins) while leaving KS unaffected.
+def compare_intensity(
+    fixed: Any,
+    moving: Any,
+    *,
+    max_sample: int = 100_000,
+    use_hist_wasserstein: bool = True,
+    hist_bins: int = 256,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> tuple[float, float, float]:
+    """Compare two intensity distributions with KS and Wasserstein metrics.
 
     Parameters
     ----------
     fixed, moving : array-like or ANTsImage
-        2-D/3-D images.  Anything with `.numpy()` is accepted.
-    max_sample : int
-        Cap on the *pixel* sample taken from each image.
-    use_hist_wasserstein : bool
-        If True, compute the Wasserstein distance on coarse histograms
-        (fast, <10 MB); otherwise use the exact sample (can be heavy).
-    hist_bins : int
-        Number of bins per histogram when `use_hist_wasserstein=True`.
-    alpha : float
-        Significance level for the KS test.
-    seed : int
-        RNG seed for reproducibility.
+        Images or array-like objects. Any object exposing ``.numpy()`` is also
+        accepted.
+    max_sample : int, default=100000
+        Maximum number of pixels drawn from each image before statistics are
+        computed.
+    use_hist_wasserstein : bool, default=True
+        If ``True``, approximate the Wasserstein distance from histograms to
+        reduce memory use.
+    hist_bins : int, default=256
+        Number of histogram bins used when ``use_hist_wasserstein`` is enabled.
+    alpha : float, default=0.05
+        Significance threshold used for the printed KS-test verdict.
+    seed : int, default=0
+        Seed for the random subsampling step.
+
+    Returns
+    -------
+    tuple of float
+        ``(D, p_value, emd)`` where ``D`` is the KS statistic, ``p_value`` is
+        the KS p-value, and ``emd`` is the Wasserstein distance.
     """
 
-    def to_1d(x, name):
-        """ Helper function to convert o a flat 1d float32 array. """
+    def to_1d(x: Any, name: str) -> np.ndarray:
+        """Convert an image-like input to a flat ``float32`` NumPy vector.
+
+        Parameters
+        ----------
+        x : Any
+            Input image or array-like object.
+        name : str
+            Name used in error messages.
+
+        Returns
+        -------
+        numpy.ndarray
+            Flattened ``float32`` array view of the input.
+
+        Raises
+        ------
+        TypeError
+            If ``x`` cannot be interpreted as a NumPy array.
+        ValueError
+            If ``x`` is empty.
+        """
         if hasattr(x, "numpy"):
             x = x.numpy()
         if not isinstance(x, np.ndarray):
@@ -132,9 +127,11 @@ def compare_intensity(fixed, moving, *,
         # Can use a lot of RAM when n is large
         emd = wasserstein_distance(fixed_samp, moving_samp)
 
-    verdict = ("Reject H₀ → distributions differ"
-               if p < alpha else
-               "Fail to reject H₀ → no evidence of a difference")
+    verdict = (
+        "Reject H₀ → distributions differ"
+        if p < alpha
+        else "Fail to reject H₀ → no evidence of a difference"
+    )
 
     print(f"KS D = {D:.4f} | p = {p:.3g} | {verdict}")
     print(f"Wasserstein distance = {emd:.2f} ADU\n")

@@ -317,14 +317,33 @@ def get_viewer_perspective(
     return angle, zoom, center, step, time
 
 
-def spin_azimuth(viewer, n_frames=180, seconds=6.0, save_dir=None, prefix="az_spin"):
-    """
-    Sweep the camera azimuth by 360° around the current camera center.
-    - n_frames: how many steps around the circle
-    - seconds: total duration of the sweep
-    - save_dir: folder path to save PNG frames (None = don't save)
-    - prefix: filename prefix if saving frames
-    Returns the QTimer so you can stop it if needed (timer.stop()).
+def spin_azimuth(
+    viewer: napari.Viewer,
+    n_frames: int = 180,
+    seconds: float = 6.0,
+    save_dir: str | os.PathLike[str] | None = None,
+    prefix: str = "az_spin",
+) -> QTimer:
+    """Animate a full azimuth sweep around the current scene.
+
+    Parameters
+    ----------
+    viewer : napari.Viewer
+        Viewer whose camera should orbit around the scene.
+    n_frames : int, default=180
+        Number of rendered camera positions across the 360 degree sweep.
+    seconds : float, default=6.0
+        Total sweep duration in seconds.
+    save_dir : str or os.PathLike, optional
+        Directory where PNG frames are written. If omitted, frames are not
+        saved to disk.
+    prefix : str, default="az_spin"
+        Filename prefix used when saving frames.
+
+    Returns
+    -------
+    qtpy.QtCore.QTimer
+        Active timer driving the animation.
     """
     # Lock camera center to the scene’s midpoint for a true “orbit”
     # (use your main 3D layer; replace 'viewer.layers[0]' if needed)
@@ -346,7 +365,8 @@ def spin_azimuth(viewer, n_frames=180, seconds=6.0, save_dir=None, prefix="az_sp
     interval_ms = max(1, int(1000 * seconds / n_frames))
     timer = QTimer()
 
-    def step():
+    def step() -> None:
+        """Advance the camera by one animation frame."""
         i = idx["i"]
         if i >= len(azimuths):
             timer.stop()
@@ -362,7 +382,30 @@ def spin_azimuth(viewer, n_frames=180, seconds=6.0, save_dir=None, prefix="az_sp
     return timer
 
 
-def lut_strip_for_layer(layer, width=140, height=10, alpha=0.6) -> np.ndarray:
+def lut_strip_for_layer(
+    layer: napari.layers.Layer,
+    width: int = 140,
+    height: int = 10,
+    alpha: float = 0.6,
+) -> np.ndarray:
+    """Render a compact LUT preview strip for a napari image layer.
+
+    Parameters
+    ----------
+    layer : napari.layers.Layer
+        Layer whose colormap should be visualized.
+    width : int, default=140
+        Output strip width in pixels.
+    height : int, default=10
+        Output strip height in pixels.
+    alpha : float, default=0.6
+        Alpha multiplier applied to the generated strip.
+
+    Returns
+    -------
+    numpy.ndarray
+        RGBA lookup-table image with shape ``(height, width, 4)``.
+    """
     gamma = float(getattr(layer, "gamma", 1.0))
     xs = np.linspace(0, 1, width, dtype=np.float32)
     xs_g = np.clip(xs, 0, 1) ** gamma
@@ -377,8 +420,24 @@ def lut_strip_for_layer(layer, width=140, height=10, alpha=0.6) -> np.ndarray:
 
 
 def representative_text_rgba_for_layer(
-    layer, u=0.85, alpha=0.85
+    layer: napari.layers.Layer, u: float = 0.85, alpha: float = 0.85
 ) -> tuple[int, int, int, int]:
+    """Pick a readable RGBA text color from a layer colormap.
+
+    Parameters
+    ----------
+    layer : napari.layers.Layer
+        Layer whose display colormap should be sampled.
+    u : float, default=0.85
+        Position along the normalized colormap range used for sampling.
+    alpha : float, default=0.85
+        Output alpha in the ``0..1`` range.
+
+    Returns
+    -------
+    tuple of int
+        RGBA color in 8-bit integer form.
+    """
     gamma = float(getattr(layer, "gamma", 1.0))
     xg = float(np.clip(u, 0, 1) ** gamma)
     rgba = _colormap_map(layer.colormap, np.array([xg], dtype=np.float32))[
@@ -442,7 +501,9 @@ def _layer(viewer: napari.Viewer, name: str) -> Optional[napari.layers.Layer]:
     return None
 
 
-def _active_set(component: str, groups: dict, anchor_labels=()):
+def _active_set(
+    component: str, groups: dict[str, list[str]], anchor_labels: tuple[str, ...] = ()
+) -> set[str]:
     """Return the set of labels that should be visible for this component.
 
     Parameters
@@ -462,35 +523,35 @@ def _active_set(component: str, groups: dict, anchor_labels=()):
     return set(anchor_labels) | set(groups.get(component, []))
 
 
-def _targets_for_set(active: set, data: dict, anchor_labels=(), anchor_opacity=0.25):
-    """
-    Build per-layer target opacities:
-      - active layers -> their configured opacity
-      - inactive -> 0
-      - anchor layers -> dimmed to anchor_opacity (min of both)
+def _targets_for_set(
+    active: set[str],
+    data: dict[str, dict[str, Any]],
+    anchor_labels: tuple[str, ...] = (),
+    anchor_opacity: float = 0.25,
+) -> dict[str, float]:
+    """Build target opacities for the currently active component set.
 
     Parameters
     ----------
-    active : set
+    active : set of str
         Set of active layer names.
     data : dict
-        Dictionary of layer configurations.
+        Mapping of layer name to display configuration.
     anchor_labels : tuple[str, ...], optional
         Labels to keep as anchors, by default ()
-    anchor_opacity : float, optional
-        Opacity for anchor labels, by default 0.25
+    anchor_opacity : float, default=0.25
+        Opacity assigned to anchor labels that remain dimly visible.
 
     Returns
     -------
-    dict
-        Dictionary of layer name → target opacity.
+    dict of str to float
+        Target opacity for each configured layer.
     """
     targets = {}
 
     # Iterate through the data dictionary
     # name is the name of the label. cfg is its configuration dict (with opacity, etc.)
     for name, cfg in data.items():
-
         # If the name is active, get the opacity from the config
         if name in active:
             targets[name] = float(cfg.get("opacity", 1.0))
@@ -502,12 +563,29 @@ def _targets_for_set(active: set, data: dict, anchor_labels=(), anchor_opacity=0
 
 
 def _apply_targets(
-    viewer, targets: dict, hide_when_zero: bool = True, extra_whitelist=()
-):
-    """
-    Apply opacity/visibility to layers named in `targets`. Also hide any
-    viewer layers that are in `data` but not in targets (defensive), except
-    for layers in extra_whitelist (text_overlay, scale bars, etc).
+    viewer: napari.Viewer,
+    targets: dict[str, float],
+    hide_when_zero: bool = True,
+    extra_whitelist: tuple[str, ...] = (),
+) -> None:
+    """Apply a target visibility/opacity state to viewer layers.
+
+    Parameters
+    ----------
+    viewer : napari.Viewer
+        Viewer containing the layers to update.
+    targets : dict of str to float
+        Mapping of layer name to target opacity.
+    hide_when_zero : bool, default=True
+        If ``True``, layers reaching zero opacity are also hidden.
+    extra_whitelist : tuple of str, default=()
+        Additional layer names that should never be hidden by the defensive
+        sweep.
+
+    Returns
+    -------
+    None
+        Layers are updated in place.
     """
     # apply targets for names we can look up
     for name, targ in targets.items():
@@ -547,16 +625,34 @@ def _apply_targets(
 
 
 def _fade_between(
-    viewer,
-    start_targets: dict,
-    end_targets: dict,
+    viewer: napari.Viewer,
+    start_targets: dict[str, float],
+    end_targets: dict[str, float],
     n_frames: int = 12,
     hide_when_zero: bool = True,
-    on_frame=None,
-):
-    """
-    Linear fade between two opacity dictionaries.
-    `on_frame(i, alpha)` can be used to update camera/text/screenshot per frame.
+    on_frame: Callable[[int, float], None] | None = None,
+) -> None:
+    """Interpolate layer opacities between two target states.
+
+    Parameters
+    ----------
+    viewer : napari.Viewer
+        Viewer containing the layers to fade.
+    start_targets : dict of str to float
+        Starting opacities.
+    end_targets : dict of str to float
+        Ending opacities.
+    n_frames : int, default=12
+        Number of interpolation frames.
+    hide_when_zero : bool, default=True
+        If ``True``, layers become invisible when their opacity reaches zero.
+    on_frame : callable, optional
+        Callback invoked after each frame as ``on_frame(index, alpha)``.
+
+    Returns
+    -------
+    None
+        Viewer layers are updated in place.
     """
     names = sorted(set(start_targets.keys()) | set(end_targets.keys()))
     for i, a in enumerate(np.linspace(0, 1, max(n_frames, 1))):
@@ -575,8 +671,21 @@ def _fade_between(
             on_frame(i, a)
 
 
-def _screenshot(viewer, out_path: str):
-    """Save a canvas-only PNG frame."""
+def _screenshot(viewer: napari.Viewer, out_path: str) -> None:
+    """Save a canvas-only PNG frame.
+
+    Parameters
+    ----------
+    viewer : napari.Viewer
+        Viewer to capture.
+    out_path : str
+        Destination PNG path.
+
+    Returns
+    -------
+    None
+        Writes the screenshot to disk.
+    """
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     QApplication.processEvents()
     try:
@@ -611,14 +720,30 @@ def _as_array(
 
 
 def representative_rgba_from_image_layer(
-    layer, q=0.90, sample_max=200_000, fallback_x=0.85
-):
-    """
-    Return an RGBA tuple (floats 0..1) that matches the layer's *display*
-    mapping: contrast_limits -> gamma -> colormap.
+    layer: napari.layers.Layer,
+    q: float = 0.90,
+    sample_max: int = 200_000,
+    fallback_x: float = 0.85,
+) -> tuple[float, float, float, float] | None:
+    """Estimate a representative RGBA display color for an image layer.
 
-    q: quantile of normalized-in-range values to sample (0..1). Use high (0.85–0.95)
-       to get a bright, representative channel color.
+    Parameters
+    ----------
+    layer : napari.layers.Layer
+        Layer whose display mapping should be sampled.
+    q : float, default=0.90
+        Quantile of normalized in-range intensities used for colormap lookup.
+    sample_max : int, default=200000
+        Maximum number of pixels sampled from the layer.
+    fallback_x : float, default=0.85
+        Fallback normalized position used when the layer has no finite in-range
+        pixels.
+
+    Returns
+    -------
+    tuple of float or None
+        RGBA tuple in the ``0..1`` range, or ``None`` when the layer has no
+        colormap.
     """
     if getattr(layer, "colormap", None) is None:
         return None
@@ -659,6 +784,23 @@ def representative_rgba_from_image_layer(
 
 
 def _ensure_rgba_u8(frame: Union[np.ndarray, Any]) -> np.ndarray:
+    """Normalize screenshot data to RGBA ``uint8`` format.
+
+    Parameters
+    ----------
+    frame : numpy.ndarray or Any
+        Screenshot-like array in grayscale, RGB, or RGBA form.
+
+    Returns
+    -------
+    numpy.ndarray
+        RGBA array with dtype ``uint8``.
+
+    Raises
+    ------
+    ValueError
+        If the input cannot be coerced to four channels.
+    """
     arr = np.asarray(frame)
     if arr.dtype != np.uint8:
         # handle float screenshots (0..1) or odd ranges defensively
@@ -680,8 +822,21 @@ def _ensure_rgba_u8(frame: Union[np.ndarray, Any]) -> np.ndarray:
     return arr
 
 
-def _colormap_map(cm, x: np.ndarray) -> np.ndarray:
-    """Return (N,4) float RGBA in [0,1] from a napari colormap."""
+def _colormap_map(cm: Any, x: np.ndarray) -> np.ndarray:
+    """Map normalized positions through a napari colormap.
+
+    Parameters
+    ----------
+    cm : Any
+        Colormap object exposing a ``map`` method.
+    x : numpy.ndarray
+        Normalized lookup positions in the ``0..1`` range.
+
+    Returns
+    -------
+    numpy.ndarray
+        RGBA array with shape ``(N, 4)`` and float values in ``[0, 1]``.
+    """
     rgba = cm.map(x.astype(np.float32, copy=False))
     rgba = np.asarray(rgba, dtype=float)
     if rgba.ndim == 1:
@@ -692,8 +847,19 @@ def _colormap_map(cm, x: np.ndarray) -> np.ndarray:
     return rgba
 
 
-def _load_font(size: int):
-    # Try a common font; fall back to default
+def _load_font(size: int) -> ImageFont.ImageFont:
+    """Load a font suitable for frame annotation.
+
+    Parameters
+    ----------
+    size : int
+        Requested font size in pixels.
+
+    Returns
+    -------
+    PIL.ImageFont.ImageFont
+        Loaded TrueType font when available, otherwise Pillow's default font.
+    """
     for path in [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -721,18 +887,52 @@ def make_black_background_transparent(
 
 def annotate_frame_with_component_legend(
     frame_rgba_u8: np.ndarray,
-    viewer,
+    viewer: napari.Viewer,
     component: str,
     label_names: list[str],
-    x=20,
-    y=20,
-    title_rgba=(255, 255, 255, 255),
-    box_rgba=(0, 0, 0, 140),  # semi-transparent box
-    draw_lut=True,
-    transparent_background=False,
-    bg_thresh=2,
-        z_idx=None,
-):
+    x: int = 20,
+    y: int = 20,
+    title_rgba: tuple[int, int, int, int] = (255, 255, 255, 255),
+    box_rgba: tuple[int, int, int, int] = (0, 0, 0, 140),
+    draw_lut: bool = True,
+    transparent_background: bool = False,
+    bg_thresh: int = 2,
+    z_idx: int | None = None,
+) -> np.ndarray:
+    """Annotate a screenshot with a component title and layer legend.
+
+    Parameters
+    ----------
+    frame_rgba_u8 : numpy.ndarray
+        Input frame in RGB/RGBA form.
+    viewer : napari.Viewer
+        Viewer used to resolve layer colors and LUT previews.
+    component : str
+        Name of the component being rendered.
+    label_names : list of str
+        Layer names shown in the legend.
+    x : int, default=20
+        Left pixel coordinate of the legend box.
+    y : int, default=20
+        Top pixel coordinate of the legend box.
+    title_rgba : tuple of int, default=(255, 255, 255, 255)
+        RGBA color for the title text.
+    box_rgba : tuple of int, default=(0, 0, 0, 140)
+        RGBA fill color for the legend background.
+    draw_lut : bool, default=True
+        If ``True``, draw a short LUT strip beside each label.
+    transparent_background : bool, default=False
+        If ``True``, near-black pixels are made transparent before annotation.
+    bg_thresh : int, default=2
+        Threshold used when making black backgrounds transparent.
+    z_idx : int, optional
+        Z index to print beneath the title.
+
+    Returns
+    -------
+    numpy.ndarray
+        Annotated RGBA frame.
+    """
     frame_rgba_u8 = _ensure_rgba_u8(frame_rgba_u8)
 
     # OPTIONAL: make background transparent
@@ -792,7 +992,7 @@ def annotate_frame_with_component_legend(
     # Z-index (if provided)
     if z_idx is not None:
         # z_text = (f"Z-position: {z_idx * 0.065 / 4.2} µm")
-        z_text = (f"Z-position: {z_idx * 0.15 / 4.2:.2f} µm")
+        z_text = f"Z-position: {z_idx * 0.15 / 4.2:.2f} µm"
 
         draw.text((x, cy), z_text, font=title_font, fill=title_rgba)
         cy += (draw.textbbox((0, 0), z_text, font=title_font)[3]) + line_gap
@@ -825,9 +1025,35 @@ def annotate_frame_with_component_legend(
 
 
 def save_frame(
-    viewer, out_path: str, comp: str, groups: dict, transparent_background=True,
-    z_idx=None
-):
+    viewer: napari.Viewer,
+    out_path: str,
+    comp: str,
+    groups: dict[str, list[str]],
+    transparent_background: bool = True,
+    z_idx: int | None = None,
+) -> None:
+    """Capture and annotate a single viewer frame.
+
+    Parameters
+    ----------
+    viewer : napari.Viewer
+        Viewer to capture.
+    out_path : str
+        Destination PNG path.
+    comp : str
+        Component name shown in the legend.
+    groups : dict
+        Mapping of component name to displayed label names.
+    transparent_background : bool, default=True
+        If ``True``, remove black background pixels before saving.
+    z_idx : int, optional
+        Z index to print in the legend.
+
+    Returns
+    -------
+    None
+        Writes the annotated frame to disk.
+    """
     frame = viewer.screenshot(canvas_only=True, flash=False, size=(4000, 4000))
     labels = groups.get(comp, [])
 
@@ -846,22 +1072,57 @@ def save_frame(
 
 
 def make_component_movie_frames(
-    viewer,
-    data: dict,
-    groups: dict,
+    viewer: napari.Viewer,
+    data: dict[str, dict[str, Any]],
+    groups: dict[str, list[str]],
     out_dir: str,
     components: list[str],
-    frames_per_component: int = 90,  # 3 seconds at 30 fps
+    frames_per_component: int = 90,
     transition_frames: int = 12,
-    anchor_labels: tuple[str, ...] = ("Nuclei",),  # keep a dim anchor for context
+    anchor_labels: tuple[str, ...] = ("Nuclei",),
     anchor_opacity: float = 0.20,
     hide_when_zero: bool = True,
-    initial_angles: tuple[float, float, float] = None,
-    initial_zoom: float = None,
-    initial_center: tuple[float, float, float] = None,
-):
-    """
-    Writes PNG frames to out_dir/frames/frame_00000.png, ...
+    initial_angles: tuple[float, float, float] | None = None,
+    initial_zoom: float | None = None,
+    initial_center: tuple[float, float, float] | None = None,
+) -> str:
+    """Render a per-component turntable animation sequence to disk.
+
+    Parameters
+    ----------
+    viewer : napari.Viewer
+        Viewer containing the layers to animate.
+    data : dict
+        Mapping of layer name to configuration dictionaries containing opacity
+        metadata.
+    groups : dict
+        Mapping of component name to the layer names that define that
+        component.
+    out_dir : str
+        Output directory that will receive a ``frames`` subdirectory.
+    components : list of str
+        Ordered list of components to render.
+    frames_per_component : int, default=90
+        Number of orbit frames rendered for each component.
+    transition_frames : int, default=12
+        Number of fade frames inserted between components.
+    anchor_labels : tuple of str, default=("Nuclei",)
+        Labels kept dimly visible throughout the sequence.
+    anchor_opacity : float, default=0.20
+        Opacity used for anchor labels.
+    hide_when_zero : bool, default=True
+        If ``True``, layers reaching zero opacity are hidden.
+    initial_angles : tuple of float, optional
+        Initial camera angles ``(elevation, azimuth, roll)``.
+    initial_zoom : float, optional
+        Initial camera zoom.
+    initial_center : tuple of float, optional
+        Initial camera center.
+
+    Returns
+    -------
+    str
+        Path to the directory containing rendered frame PNGs.
     """
     os.makedirs(out_dir, exist_ok=True)
     frames_dir = os.path.join(out_dir, "frames")
@@ -893,7 +1154,6 @@ def make_component_movie_frames(
     prev_targets = None
 
     for ci, comp in enumerate(components):
-
         # Determine which layers should be visible for this component
         active = _active_set(comp, groups, anchor_labels=anchor_labels)
 
@@ -909,7 +1169,6 @@ def make_component_movie_frames(
 
         # Transition (fade) from previous component
         if prev_targets is None:
-
             # Sets visibility/opacities directly for the first component
             _apply_targets(
                 viewer, targets, hide_when_zero=True, extra_whitelist=("Nuclei",)
@@ -921,7 +1180,8 @@ def make_component_movie_frames(
             # Transition: fade opacities while keeping the camera at the base
             # perspective (no complicated camera sweep). We still render every
             # transition frame so the fade is captured to disk.
-            def on_fade_frame(i, a):
+            def on_fade_frame(i: int, a: float) -> None:
+                """Render one fade-transition frame at the base viewpoint."""
                 # Keep camera fixed at the base perspective during fade
                 viewer.camera.angles = base_angles
                 viewer.camera.zoom = base_zoom

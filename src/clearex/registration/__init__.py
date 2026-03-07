@@ -68,7 +68,7 @@ from clearex.io.log import (
     initialize_logging,
     capture_c_level_output,
 )
-from clearex.io.read import ImageOpener, ImageInfo
+from clearex.io.read import ImageOpener
 from clearex.registration.common import (
     export_tiff,
     crop_data,
@@ -78,6 +78,7 @@ from clearex.registration.common import (
 
 # Type Aliases
 ImageType = Union[NDArray[Any], ants.ANTsImage]
+PixelSize = tuple[float, float, float]
 
 
 class ImageRegistration:
@@ -128,11 +129,11 @@ class ImageRegistration:
         moving_image_path: str | os.PathLike[str],
         save_directory: str | os.PathLike[str],
         imaging_round: int = 0,
-        pixel_size: tuple = (0.15, 0.15, 0.15),
+        pixel_size: PixelSize = (0.15, 0.15, 0.15),
         crop: bool = False,
         enable_logging: bool = True,
         force_override: bool = False,
-    ):
+    ) -> None:
         """
         Initialize the ImageRegistration instance.
 
@@ -328,13 +329,13 @@ class ImageRegistration:
 
     def _perform_linear_registration(
         self,
-        fixed_image,
-        moving_image,
-        fixed_mask: ants.ANTsImage = None,
-        moving_mask: ants.ANTsImage = None,
+        fixed_image: ImageType,
+        moving_image: ImageType,
+        fixed_mask: ants.ANTsImage | None = None,
+        moving_mask: ants.ANTsImage | None = None,
         imaging_round: int | None = None,
-        save_directory: str | os.PathLike = None,
-    ) -> Tuple[ants.ANTsImage, ants.ANTsImage]:
+        save_directory: str | os.PathLike | None = None,
+    ) -> Tuple[ants.ANTsImage, ants.ANTsImage | None]:
         """
         Perform linear (affine) registration.
 
@@ -361,6 +362,7 @@ class ImageRegistration:
         linear_transformation_path: str = os.path.join(
             save_directory, f"linear_transform_{imaging_round}.mat"
         )
+        moving_linear_mask: ants.ANTsImage | None = None
 
         if os.path.exists(path=linear_transformation_path) and not self.force_override:
             self._log.info(
@@ -422,11 +424,11 @@ class ImageRegistration:
         self,
         fixed_image: ants.ANTsImage,
         moving_linear_aligned: ants.ANTsImage,
-        fixed_mask: ants.ANTsImage = None,
-        moving_mask: ants.ANTsImage = None,
+        fixed_mask: ants.ANTsImage | None = None,
+        moving_mask: ants.ANTsImage | None = None,
         imaging_round: int | None = None,
-        save_directory: str | os.PathLike = None,
-    ) -> Tuple[ants.ANTsImage, ants.ANTsImage]:
+        save_directory: str | os.PathLike | None = None,
+    ) -> Tuple[ants.ANTsImage, ants.ANTsImage | None]:
         """
         Perform nonlinear (deformable) registration.
 
@@ -453,6 +455,7 @@ class ImageRegistration:
         nonlinear_transformation_path: str = os.path.join(
             save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
         )
+        nonlinear_transformed_mask: ants.ANTsImage | None = None
 
         if os.path.exists(nonlinear_transformation_path) and not self.force_override:
             self._log.info(
@@ -469,7 +472,7 @@ class ImageRegistration:
                 reference=fixed_image,
                 interpolation="linear",
             )
-            return nonlinear_transformed
+            return nonlinear_transformed, nonlinear_transformed_mask
         else:
             if self.force_override and os.path.exists(nonlinear_transformation_path):
                 self._log.info(
@@ -622,11 +625,11 @@ class ChunkedImageRegistration(ImageRegistration):
         moving_image_path: str | os.PathLike[str],
         save_directory: str | os.PathLike[str],
         imaging_round: int = 0,
-        pixel_size: tuple = (0.15, 0.15, 0.15),
+        pixel_size: PixelSize = (0.15, 0.15, 0.15),
         crop: bool = False,
         enable_logging: bool = True,
         force_override: bool = False,
-    ):
+    ) -> None:
         """
         Initialize the ChunkedImageRegistration instance.
 
@@ -670,11 +673,11 @@ class ChunkedImageRegistration(ImageRegistration):
         self,
         fixed_image: ants.ANTsImage,
         moving_linear_aligned: ants.ANTsImage,
-        fixed_mask: ants.ANTsImage = None,
-        moving_mask: ants.ANTsImage = None,
+        fixed_mask: ants.ANTsImage | None = None,
+        moving_mask: ants.ANTsImage | None = None,
         imaging_round: int | None = None,
-        save_directory: str | os.PathLike = None,
-    ) -> Tuple[ants.ANTsImage, ants.ANTsImage]:
+        save_directory: str | os.PathLike | None = None,
+    ) -> Tuple[ants.ANTsImage, ants.ANTsImage | None]:
         """
         Perform nonlinear (deformable) registration.
 
@@ -699,6 +702,7 @@ class ChunkedImageRegistration(ImageRegistration):
         nonlinear_transformation_path = os.path.join(
             save_directory, f"nonlinear_warp_{imaging_round}.nii.gz"
         )
+        nonlinear_transformed_mask: ants.ANTsImage | None = None
 
         if os.path.exists(nonlinear_transformation_path) and not self.force_override:
             self._log.info(
@@ -724,7 +728,6 @@ class ChunkedImageRegistration(ImageRegistration):
                 )
             return nonlinear_transformed, nonlinear_transformed_mask
         else:
-
             # Compute the chunk grid.
             self._compute_chunk_grid(self.fixed_image.shape)
 
@@ -750,7 +753,7 @@ class ChunkedImageRegistration(ImageRegistration):
 
             # Process each chunk
             for i, chunk in enumerate(self.chunk_info_list):
-                self._log.info(f"Chunk {i+1}/{len(self.chunk_info_list)}")
+                self._log.info(f"Chunk {i + 1}/{len(self.chunk_info_list)}")
                 updated_chunk, local_warp = self.register_chunk(
                     chunk=chunk,
                     fixed_image=fixed_image,
@@ -836,7 +839,9 @@ class ChunkedImageRegistration(ImageRegistration):
             registered_image: ants.ANTsImage = ants.from_numpy(registered_image)
             return registered_image, nonlinear_transformed_mask
 
-    def _compute_chunk_grid(self, image_shape) -> List[ChunkInfo]:
+    def _compute_chunk_grid(
+        self, image_shape: tuple[int, int, int] | list[int]
+    ) -> List[ChunkInfo]:
         """
         Compute the grid of overlapping chunks.
 
@@ -1318,12 +1323,12 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
         moving_image_path: str | os.PathLike[str],
         save_directory: str | os.PathLike[str],
         imaging_round: int = 0,
-        pixel_size: tuple = (0.15, 0.15, 0.15),
+        pixel_size: PixelSize = (0.15, 0.15, 0.15),
         crop: bool = False,
         enable_logging: bool = True,
         force_override: bool = False,
         num_workers: int = 4,
-    ):
+    ) -> None:
         """
         Initialize the ParallelChunkedImageRegistration instance.
 
@@ -1365,10 +1370,35 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
         self,
         fixed_image: ants.ANTsImage,
         moving_linear_aligned: ants.ANTsImage,
-        imaging_round: int,
-        save_directory: str,
-    ):
-        """Perform chunked nonlinear registration with parallel processing."""
+        fixed_mask: ants.ANTsImage | None = None,
+        moving_mask: ants.ANTsImage | None = None,
+        imaging_round: int | None = None,
+        save_directory: str | os.PathLike[str] | None = None,
+    ) -> Tuple[ants.ANTsImage, ants.ANTsImage | None]:
+        """Perform chunked nonlinear registration with parallel processing.
+
+        Parameters
+        ----------
+        fixed_image : ants.ANTsImage
+            Reference image that defines the target coordinate space.
+        moving_linear_aligned : ants.ANTsImage
+            Moving image after linear alignment.
+        fixed_mask : ants.ANTsImage, optional
+            Unused placeholder to preserve the parent method signature.
+        moving_mask : ants.ANTsImage, optional
+            Optional moving-image mask. The current parallel path does not warp
+            masks and therefore returns ``None`` for the transformed mask.
+        imaging_round : int, optional
+            Round identifier used in output filenames.
+        save_directory : str or os.PathLike, optional
+            Output directory for the registered image and warp field.
+
+        Returns
+        -------
+        tuple
+            Registered moving image converted back to ``ANTsImage`` space and
+            ``None`` for the transformed mask.
+        """
         self._log.info("Beginning Chunked Nonlinear Registration...")
 
         # Determine optimal number of workers (leave some cores free)
@@ -1461,18 +1491,24 @@ class ParallelChunkedImageRegistration(ChunkedImageRegistration):
             f"Nonlinear transform written to: {nonlinear_transformation_path}"
         )
 
-        return registered_image, nonlinear_transformation_path
+        registered_image_ants = ants.from_numpy(
+            registered_image,
+            origin=fixed_image.origin,
+            spacing=fixed_image.spacing,
+            direction=fixed_image.direction,
+        )
+        return registered_image_ants, None
 
 
 def _process_chunk_wrapper(
     chunk_idx: int,
-    chunk,
+    chunk: ChunkInfo,
     fixed_image: ants.ANTsImage,
     moving_image: ants.ANTsImage,
     imaging_round: int,
     chunk_dir: str,
     force_override: bool,
-):
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Wrapper for chunk processing that can be pickled for multiprocessing.
 

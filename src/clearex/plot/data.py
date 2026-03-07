@@ -25,6 +25,7 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 # Standard Library Imports
+from typing import Any
 
 # Third Party Imports
 import matplotlib.pyplot as plt
@@ -34,10 +35,13 @@ import numpy as np
 # Local Imports
 
 
-def histograms(*images, bins=256, sample=200_000, labels=None):
-    """
-    Plot side-by-side histograms for an arbitrary number of images,
-    using identical bin edges so the distributions are directly comparable.
+def histograms(
+    *images: Any,
+    bins: int = 256,
+    sample: int = 200_000,
+    labels: list[str] | None = None,
+) -> None:
+    """Plot comparable histograms for one or more images.
 
     Parameters
     ----------
@@ -45,24 +49,22 @@ def histograms(*images, bins=256, sample=200_000, labels=None):
         One or more 2-D / 3-D images (or already-flat arrays) to visualise.
         Each input is converted to a 1-D ``float32`` NumPy vector.
         ANTsImages are handled transparently via their ``.numpy()`` method.
-    bins : int or sequence or str, optional
-        Controls the binning rule passed to `numpy.histogram_bin_edges`.
-
-            - *int* → that many equal-width bins;
-            - *str* (e.g. ``"auto"``,``"fd"``) → NumPy’s data-driven rules.
-            - Default is ``"auto"``.
-    sample : int
-        Number of samples to use from the data. Randomly retrieved.
+    bins : int, default=256
+        Number of equally spaced histogram bins shared by all inputs.
+    sample : int, default=200000
+        Maximum number of pixels sampled per image before plotting.
     labels : list of str, optional
-        Titles for the per-image subplots (and legend, if added later).
-        If *None*, defaults to ``["Image 1", "Image 2", …]``.
+        Titles for the per-image subplots. If omitted, generic labels are used.
+
+    Returns
+    -------
+    None
+        Displays the histogram figure using Matplotlib.
 
     Notes
     -----
-    * Each histogram uses the same ``common_bins`` array calculated from the
-    concatenation of *all* input vectors to ensure a fair comparison.
-
-    * Bars are drawn semi-transparent (``alpha = 0.85``) with white edges.
+    Each histogram uses identical bin edges computed from the global intensity
+    range across all provided images.
 
     Examples
     --------

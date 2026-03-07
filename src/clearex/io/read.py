@@ -525,6 +525,20 @@ class ZarrReader(Reader):
         arrays: list[tuple[str, Any]] = []
 
         def _walk_arrays(group: Any, prefix: str = "") -> None:
+            """Recursively collect arrays from a nested Zarr group.
+
+            Parameters
+            ----------
+            group : Any
+                Zarr group-like object that may expose array and group accessors.
+            prefix : str, default=""
+                Path prefix prepended to discovered array keys.
+
+            Returns
+            -------
+            None
+                The function mutates the outer ``arrays`` list in place.
+            """
             if hasattr(group, "array_keys") and callable(group.array_keys):
                 for key in sorted(group.array_keys()):
                     arrays.append((f"{prefix}{key}", group[key]))
@@ -732,7 +746,19 @@ class HDF5Reader(Reader):
         f = h5py.File(path_str, mode="r")
 
         # Recursively collect all datasets in the file
-        def _collect_datasets(group: h5py.Group) -> list:
+        def _collect_datasets(group: h5py.Group) -> list[h5py.Dataset]:
+            """Recursively collect datasets beneath an HDF5 group.
+
+            Parameters
+            ----------
+            group : h5py.Group
+                Group to traverse.
+
+            Returns
+            -------
+            list of h5py.Dataset
+                Datasets contained in ``group`` and its descendants.
+            """
             out = []
             for key, obj in group.items():
                 if isinstance(obj, h5py.Dataset):
