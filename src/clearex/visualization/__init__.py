@@ -23,3 +23,12 @@
 #  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
+
+"""Visualization helpers and napari workflow entrypoints."""
+
+from .pipeline import VisualizationSummary, run_visualization_analysis
+
+__all__ = [
+    "VisualizationSummary",
+    "run_visualization_analysis",
+]

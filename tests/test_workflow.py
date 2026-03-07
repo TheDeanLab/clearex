@@ -110,6 +110,8 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
         assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 2
         assert cfg.analysis_parameters["particle_detection"]["input_source"] == "data"
+        assert cfg.analysis_parameters["visualization"]["position_index"] == 0
+        assert cfg.analysis_parameters["visualization"]["use_multiscale"] is True
 
     def test_normalizes_particle_analysis_parameters(self):
         cfg = WorkflowConfig(
@@ -145,6 +147,23 @@ class TestWorkflowConfig:
                     "deconvolution": {"execution_order": 0}
                 }
             )
+
+    def test_normalizes_visualization_parameters(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "visualization": {
+                    "position_index": "3",
+                    "use_multiscale": 0,
+                    "overlay_particle_detections": 1,
+                    "launch_mode": "subprocess",
+                }
+            }
+        )
+        params = cfg.analysis_parameters["visualization"]
+        assert params["position_index"] == 3
+        assert params["use_multiscale"] is False
+        assert params["overlay_particle_detections"] is True
+        assert params["launch_mode"] == "subprocess"
 
 
 class TestZarrSaveConfig:
@@ -242,6 +261,7 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     )
     assert normalized["deconvolution"]["execution_order"] == 1
     assert normalized["visualization"]["input_source"] == "data"
+    assert normalized["visualization"]["use_multiscale"] is True
 
 
 def test_resolve_analysis_execution_sequence_uses_execution_order():

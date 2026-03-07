@@ -57,6 +57,9 @@ from clearex.io.provenance import (
 from clearex.detect.pipeline import (
     run_particle_detection_analysis,
 )
+from clearex.visualization.pipeline import (
+    run_visualization_analysis,
+)
 from clearex.workflow import (
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
@@ -77,7 +80,7 @@ _ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
     "data": "data",
     "deconvolution": "results/deconvolution/latest/data",
     "registration": "results/registration/latest/data",
-    "visualization": "results/visualization/latest/data",
+    "visualization": "data",
 }
 
 
@@ -876,25 +879,116 @@ def _run_workflow(
                 continue
 
             if operation_name == "visualization":
-                _emit_analysis_progress(
-                    operation_start,
-                    "Launching visualization workflow.",
-                )
-                logger.info(
-                    "Launching visualization workflow (input=%s).",
-                    resolved_source,
-                )
-                print("Launching visualization")
-                step_records.append(
-                    {
-                        "name": "visualization",
-                        "parameters": operation_parameters,
+                visualization_parameters = dict(operation_parameters)
+                if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if not _zarr_component_exists(
+                        provenance_store_path,
+                        str(visualization_parameters.get("input_source", "data")),
+                    ):
+                        logger.warning(
+                            "Requested visualization input component '%s' was "
+                            "not found. Falling back to 'data'.",
+                            visualization_parameters.get("input_source", "data"),
+                        )
+                        visualization_parameters["input_source"] = "data"
+                        runtime_analysis_parameters["visualization"] = dict(
+                            visualization_parameters
+                        )
+
+                    def _visualization_progress(percent: int, message: str) -> None:
+                        """Map visualization progress into workflow-scale progress.
+
+                        Parameters
+                        ----------
+                        percent : int
+                            Visualization progress percent.
+                        message : str
+                            Progress status text.
+
+                        Returns
+                        -------
+                        None
+                            Logger and progress-callback side effects only.
+                        """
+                        mapped = operation_start + int(
+                            (max(0, min(100, int(percent))) / 100)
+                            * max(1, operation_end - operation_start)
+                        )
+                        logger.info(
+                            f"[visualization] {int(percent)}% - {message}"
+                        )
+                        _emit_analysis_progress(
+                            mapped,
+                            f"visualization: {message}",
+                        )
+
+                    summary = run_visualization_analysis(
+                        zarr_path=provenance_store_path,
+                        parameters=visualization_parameters,
+                        progress_callback=_visualization_progress,
+                    )
+                    output_records["visualization"] = {
+                        "component": summary.component,
+                        "source_component": summary.source_component,
+                        "source_components": list(summary.source_components),
+                        "position_index": summary.position_index,
+                        "overlay_points_count": summary.overlay_points_count,
+                        "launch_mode": summary.launch_mode,
+                        "viewer_pid": summary.viewer_pid,
+                        "storage_policy": "latest_only",
                     }
-                )
-                _emit_analysis_progress(
-                    operation_end,
-                    "Visualization workflow complete.",
-                )
+                    logger.info(
+                        "Visualization workflow completed: "
+                        f"component={summary.component}, "
+                        f"source={summary.source_component}, "
+                        f"position={summary.position_index}, "
+                        f"multiscale_levels={len(summary.source_components)}, "
+                        f"overlay_points={summary.overlay_points_count}, "
+                        f"launch_mode={summary.launch_mode}."
+                    )
+                    step_records.append(
+                        {
+                            "name": "visualization",
+                            "parameters": {
+                                **visualization_parameters,
+                                "component": summary.component,
+                                "source_component": summary.source_component,
+                                "source_components": list(summary.source_components),
+                                "position_index": summary.position_index,
+                                "overlay_points_count": summary.overlay_points_count,
+                                "launch_mode": summary.launch_mode,
+                                "viewer_pid": summary.viewer_pid,
+                            },
+                        }
+                    )
+                    if summary.launch_mode == "subprocess":
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Visualization launched in a separate napari process.",
+                        )
+                    else:
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Visualization viewer closed; workflow continuing.",
+                        )
+                else:
+                    logger.warning(
+                        "Visualization requires a canonical Zarr/N5 data store."
+                    )
+                    step_records.append(
+                        {
+                            "name": "visualization",
+                            "parameters": {
+                                **visualization_parameters,
+                                "status": "skipped",
+                                "reason": "no_zarr_store",
+                            },
+                        }
+                    )
+                    _emit_analysis_progress(
+                        operation_end,
+                        "Visualization skipped (no Zarr/N5 store).",
+                    )
                 continue
 
     if provenance_store_path and is_zarr_store_path(provenance_store_path):
@@ -939,6 +1033,20 @@ def _run_workflow(
                     component=str(particle_output["component"]),
                     run_id=run_id,
                     metadata=particle_output,
+                )
+            visualization_output = output_records.get("visualization")
+            if visualization_output:
+                try:
+                    root = zarr.open_group(str(provenance_store_path), mode="a")
+                    root["results"]["visualization"]["latest"].attrs["run_id"] = run_id
+                except Exception:
+                    pass
+                register_latest_output_reference(
+                    zarr_path=provenance_store_path,
+                    analysis_name="visualization",
+                    component=str(visualization_output["component"]),
+                    run_id=run_id,
+                    metadata=visualization_output,
                 )
         except Exception as exc:
             logger.warning(

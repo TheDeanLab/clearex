@@ -2501,7 +2501,6 @@ if HAS_PYQT6:
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
             "deconvolution": "results/deconvolution/latest/data",
             "registration": "results/registration/latest/data",
-            "visualization": "results/visualization/latest/data",
         }
         _PARAMETER_HINTS: Dict[str, str] = {
             "input_source": (
@@ -2552,6 +2551,18 @@ if HAS_PYQT6:
             "execution_order": (
                 "Execution order controls when this operation runs relative to other selected operations."
             ),
+            "position_index": (
+                "Position index selects which multiposition volume is rendered in napari. "
+                "Single-position datasets should remain at 0."
+            ),
+            "use_multiscale": (
+                "When enabled, napari loads pyramid levels as a multiscale image "
+                "for faster navigation across zoom levels."
+            ),
+            "overlay_particle_detections": (
+                "Overlay particle detections as a napari points layer when "
+                "results/particle_detection/latest/detections is available."
+            ),
         }
 
         def __init__(self, initial: WorkflowConfig) -> None:
@@ -2582,6 +2593,9 @@ if HAS_PYQT6:
             self._operation_defaults = default_analysis_operation_parameters()
             self._particle_defaults = dict(
                 self._operation_defaults.get("particle_detection", {})
+            )
+            self._visualization_defaults = dict(
+                self._operation_defaults.get("visualization", {})
             )
 
             self._operation_checkboxes: Dict[str, QCheckBox] = {}
@@ -2806,6 +2820,8 @@ if HAS_PYQT6:
 
             if operation_name == "particle_detection":
                 self._build_particle_parameter_rows(form)
+            elif operation_name == "visualization":
+                self._build_visualization_parameter_rows(form)
             else:
                 stub = QLabel(
                     "Advanced parameters for this operation are not exposed yet. "
@@ -2961,6 +2977,45 @@ if HAS_PYQT6:
                 self._particle_min_distance_spin, self._PARAMETER_HINTS["min_distance_sigma"]
             )
 
+        def _build_visualization_parameter_rows(self, form: QFormLayout) -> None:
+            """Add visualization parameter controls to a form.
+
+            Parameters
+            ----------
+            form : QFormLayout
+                Parent form layout receiving visualization controls.
+
+            Returns
+            -------
+            None
+                Widgets are created and attached in-place.
+            """
+            self._visualization_position_spin = QSpinBox()
+            self._visualization_position_spin.setRange(0, 0)
+            form.addRow("Position index", self._visualization_position_spin)
+            self._register_parameter_hint(
+                self._visualization_position_spin,
+                self._PARAMETER_HINTS["position_index"],
+            )
+
+            self._visualization_multiscale_checkbox = QCheckBox(
+                "Load as multiscale pyramid"
+            )
+            form.addRow("Multiscale", self._visualization_multiscale_checkbox)
+            self._register_parameter_hint(
+                self._visualization_multiscale_checkbox,
+                self._PARAMETER_HINTS["use_multiscale"],
+            )
+
+            self._visualization_overlay_points_checkbox = QCheckBox(
+                "Overlay particle detections"
+            )
+            form.addRow("Particle overlay", self._visualization_overlay_points_checkbox)
+            self._register_parameter_hint(
+                self._visualization_overlay_points_checkbox,
+                self._PARAMETER_HINTS["overlay_particle_detections"],
+            )
+
         def _register_parameter_hint(self, widget: QWidget, message: str) -> None:
             """Register hover/focus help text for a widget.
 
@@ -3056,6 +3111,8 @@ if HAS_PYQT6:
             """
             if operation_name == "particle_detection":
                 return "results/particle_detection/latest/detections"
+            if operation_name == "visualization":
+                return "results/visualization/latest"
             return self._OPERATION_OUTPUT_COMPONENTS.get(
                 operation_name,
                 f"results/{operation_name}/latest/data",
@@ -3215,6 +3272,7 @@ if HAS_PYQT6:
 
             self._refresh_input_source_options()
             self._set_particle_parameter_enabled_state()
+            self._set_visualization_parameter_enabled_state()
 
             if (
                 self._active_config_operation is not None
@@ -3295,6 +3353,25 @@ if HAS_PYQT6:
             self._particle_overlap_x_spin.setEnabled(overlap_enabled)
             self._particle_min_distance_spin.setEnabled(close_enabled)
 
+        def _set_visualization_parameter_enabled_state(self) -> None:
+            """Enable/disable visualization widgets based on operation selection.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widget enabled states are updated in-place.
+            """
+            visualization_enabled = self._operation_checkboxes["visualization"].isChecked()
+            self._visualization_position_spin.setEnabled(visualization_enabled)
+            self._visualization_multiscale_checkbox.setEnabled(visualization_enabled)
+            self._visualization_overlay_points_checkbox.setEnabled(
+                visualization_enabled
+            )
+
         def _hydrate(self, initial: WorkflowConfig) -> None:
             """Populate analysis selections from initial workflow values.
 
@@ -3313,6 +3390,9 @@ if HAS_PYQT6:
             )
             particle_params = dict(
                 normalized_parameters.get("particle_detection", self._particle_defaults)
+            )
+            visualization_params = dict(
+                normalized_parameters.get("visualization", self._visualization_defaults)
             )
 
             if self._store_label is not None:
@@ -3359,13 +3439,17 @@ if HAS_PYQT6:
                 combo.blockSignals(False)
 
             channel_count = 1
+            position_count = 1
             if initial.file and str(initial.file).lower().endswith((".zarr", ".n5")):
                 try:
                     root = zarr.open_group(str(initial.file), mode="r")
                     if "data" in root and len(tuple(root["data"].shape)) == 6:
+                        position_count = max(1, int(root["data"].shape[1]))
                         channel_count = max(1, int(root["data"].shape[2]))
                 except Exception:
+                    position_count = 1
                     channel_count = 1
+            self._visualization_position_spin.setMaximum(position_count - 1)
             self._particle_channel_spin.setMaximum(channel_count - 1)
 
             self._particle_channel_spin.setValue(
@@ -3413,6 +3497,21 @@ if HAS_PYQT6:
             )
             self._particle_min_distance_spin.setValue(
                 float(particle_params.get("min_distance_sigma", 10.0))
+            )
+            self._visualization_position_spin.setValue(
+                max(
+                    0,
+                    min(
+                        int(self._visualization_position_spin.maximum()),
+                        int(visualization_params.get("position_index", 0)),
+                    ),
+                )
+            )
+            self._visualization_multiscale_checkbox.setChecked(
+                bool(visualization_params.get("use_multiscale", True))
+            )
+            self._visualization_overlay_points_checkbox.setChecked(
+                bool(visualization_params.get("overlay_particle_detections", True))
             )
 
             self._on_operation_selection_changed()
@@ -3606,6 +3705,44 @@ if HAS_PYQT6:
                 "min_distance_sigma": float(self._particle_min_distance_spin.value()),
             }
 
+        def _collect_visualization_parameters(self) -> Dict[str, Any]:
+            """Collect visualization parameter values from widgets.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, Any]
+                Visualization parameter mapping.
+            """
+            return {
+                "chunk_basis": "2d",
+                "detect_2d_per_slice": True,
+                "use_map_overlap": False,
+                "overlap_zyx": [0, 0, 0],
+                "memory_overhead_factor": float(
+                    self._visualization_defaults.get("memory_overhead_factor", 1.0)
+                ),
+                "position_index": int(self._visualization_position_spin.value()),
+                "use_multiscale": bool(
+                    self._visualization_multiscale_checkbox.isChecked()
+                ),
+                "overlay_particle_detections": bool(
+                    self._visualization_overlay_points_checkbox.isChecked()
+                ),
+                "particle_detection_component": str(
+                    self._visualization_defaults.get(
+                        "particle_detection_component",
+                        "results/particle_detection/latest/detections",
+                    )
+                ),
+                "launch_mode": str(
+                    self._visualization_defaults.get("launch_mode", "auto")
+                ),
+            }
+
         def _collect_operation_parameters(self, operation_name: str) -> Dict[str, Any]:
             """Collect parameter mapping for one operation.
 
@@ -3629,6 +3766,8 @@ if HAS_PYQT6:
             ) or "data"
             if operation_name == "particle_detection":
                 defaults.update(self._collect_particle_parameters())
+            elif operation_name == "visualization":
+                defaults.update(self._collect_visualization_parameters())
             return defaults
 
         def _on_run(self) -> None:

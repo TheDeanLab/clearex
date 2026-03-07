@@ -20,6 +20,11 @@ This folder owns the PyQt6 UX in `app.py`.
 - Clicking `Configure` on one operation hides the prior panel.
 - Unselected operations should not be configurable.
 - Per-operation `Input source` options depend on selected upstream operations and execution order.
+- `Visualization` is treated as a terminal/view step; it should not be offered as an upstream image source for later operations.
+- Visualization configuration currently exposes:
+  - `position_index` for multiposition datasets
+  - multiscale loading toggle
+  - particle-overlay toggle
 
 ## Theme Requirements
 

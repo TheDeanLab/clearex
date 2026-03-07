@@ -107,6 +107,11 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "use_map_overlap": False,
         "overlap_zyx": [0, 0, 0],
         "memory_overhead_factor": 1.0,
+        "position_index": 0,
+        "use_multiscale": True,
+        "overlay_particle_detections": True,
+        "particle_detection_component": "results/particle_detection/latest/detections",
+        "launch_mode": "auto",
     },
 }
 
@@ -231,6 +236,50 @@ def _normalize_particle_detection_parameters(
     return normalized
 
 
+def _normalize_visualization_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize visualization runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate visualization parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized visualization parameters.
+
+    Raises
+    ------
+    ValueError
+        If launch mode is unsupported.
+    """
+    normalized = _normalize_common_operation_parameters("visualization", params)
+    normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
+    normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
+    normalized["overlay_particle_detections"] = bool(
+        normalized.get("overlay_particle_detections", True)
+    )
+    normalized["particle_detection_component"] = (
+        str(
+            normalized.get(
+                "particle_detection_component",
+                "results/particle_detection/latest/detections",
+            )
+        ).strip()
+        or "results/particle_detection/latest/detections"
+    )
+    launch_mode = str(normalized.get("launch_mode", "auto")).strip().lower() or "auto"
+    if launch_mode not in {"auto", "in_process", "subprocess"}:
+        raise ValueError(
+            "visualization launch_mode must be one of auto, in_process, subprocess."
+        )
+    normalized["launch_mode"] = launch_mode
+    return normalized
+
+
 def normalize_analysis_operation_parameters(
     parameters: Optional[Dict[str, Dict[str, Any]]],
 ) -> Dict[str, Dict[str, Any]]:
@@ -267,6 +316,10 @@ def normalize_analysis_operation_parameters(
             continue
         if operation_name == "particle_detection":
             merged[operation_name] = _normalize_particle_detection_parameters(
+                merged[operation_name]
+            )
+        elif operation_name == "visualization":
+            merged[operation_name] = _normalize_visualization_parameters(
                 merged[operation_name]
             )
         else:

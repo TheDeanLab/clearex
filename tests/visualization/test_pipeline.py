@@ -1,0 +1,192 @@
+#  Copyright (c) 2021-2025  The University of Texas Southwestern Medical Center.
+#  All rights reserved.
+
+from __future__ import annotations
+
+# Standard Library Imports
+from pathlib import Path
+
+# Third Party Imports
+import numpy as np
+import zarr
+
+# Local Imports
+import clearex.visualization.pipeline as visualization_pipeline
+from clearex.visualization.pipeline import run_visualization_analysis
+
+
+def test_run_visualization_analysis_in_process_writes_latest_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(2, 2, 1, 4, 4, 4),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.create_dataset(
+        name="data_pyramid/level_1",
+        shape=(2, 2, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.attrs.update(
+        {
+            "data_pyramid_levels": ["data", "data_pyramid/level_1"],
+        }
+    )
+    root["data"].attrs.update(
+        {
+            "pyramid_levels": ["data", "data_pyramid/level_1"],
+        }
+    )
+
+    detections = np.asarray(
+        [
+            [0, 0, 0, 1, 2, 3, 1.2, 100.0],
+            [1, 1, 0, 2, 1, 0, 0.8, 80.0],
+        ],
+        dtype=np.float32,
+    )
+    latest_group = (
+        root.require_group("results")
+        .require_group("particle_detection")
+        .require_group("latest")
+    )
+    latest_group.create_dataset(
+        name="detections",
+        data=detections,
+        overwrite=True,
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_launch_napari_viewer(
+        *,
+        zarr_path,
+        source_components,
+        source_component,
+        position_index,
+        points,
+        point_properties,
+    ) -> None:
+        del zarr_path, source_component, point_properties
+        captured["source_components"] = tuple(source_components)
+        captured["position_index"] = int(position_index)
+        captured["points"] = np.asarray(points, dtype=np.float32)
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_launch_napari_viewer",
+        _fake_launch_napari_viewer,
+    )
+
+    summary = run_visualization_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "position_index": 1,
+            "use_multiscale": True,
+            "launch_mode": "in_process",
+        },
+    )
+
+    assert summary.component == "results/visualization/latest"
+    assert summary.source_component == "data"
+    assert summary.source_components == ("data", "data_pyramid/level_1")
+    assert summary.position_index == 1
+    assert summary.overlay_points_count == 1
+    assert summary.launch_mode == "in_process"
+    assert summary.viewer_pid is None
+
+    assert captured["source_components"] == ("data", "data_pyramid/level_1")
+    assert captured["position_index"] == 1
+    points = np.asarray(captured["points"], dtype=np.float32)
+    assert points.shape == (1, 5)
+    assert np.allclose(points[0], np.asarray([1, 0, 2, 1, 0], dtype=np.float32))
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    latest_attrs = dict(output_root["results"]["visualization"]["latest"].attrs)
+    assert latest_attrs["position_index"] == 1
+    assert latest_attrs["launch_mode"] == "in_process"
+    assert latest_attrs["overlay_points_count"] == 1
+    assert latest_attrs["source_components"] == ["data", "data_pyramid/level_1"]
+    assert (
+        output_root["provenance"]["latest_outputs"]["visualization"].attrs["component"]
+        == "results/visualization/latest"
+    )
+
+
+def test_run_visualization_analysis_subprocess_launch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_launch_napari_subprocess(
+        *,
+        zarr_path,
+        normalized_parameters,
+    ) -> int:
+        captured["zarr_path"] = str(zarr_path)
+        captured["parameters"] = dict(normalized_parameters)
+        return 43210
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_launch_napari_subprocess",
+        _fake_launch_napari_subprocess,
+    )
+
+    summary = run_visualization_analysis(
+        zarr_path=store_path,
+        parameters={
+            "launch_mode": "subprocess",
+            "overlay_particle_detections": False,
+        },
+    )
+
+    assert summary.launch_mode == "subprocess"
+    assert summary.viewer_pid == 43210
+    assert captured["zarr_path"] == str(store_path)
+    assert dict(captured["parameters"])["launch_mode"] == "in_process"
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    latest_attrs = dict(output_root["results"]["visualization"]["latest"].attrs)
+    assert latest_attrs["viewer_pid"] == 43210
+    assert latest_attrs["launch_mode"] == "subprocess"
+
+
+def test_run_visualization_analysis_rejects_invalid_position(tmp_path: Path) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    try:
+        run_visualization_analysis(
+            zarr_path=store_path,
+            parameters={"position_index": 3, "launch_mode": "subprocess"},
+        )
+    except ValueError as exc:
+        assert "out of bounds" in str(exc)
+        return
+    raise AssertionError("Expected ValueError for invalid position index")
