@@ -2,7 +2,7 @@
 
 ## Implemented workflow
 
-The ingestion path for Navigate `experiment.yml` now materializes source data into a canonical 6D Zarr `data` array using Dask-native readers and parallel writes.
+The ingestion path for Navigate `experiment.yml` now materializes source data into a canonical 6D Zarr `data` array and writes configured resolution-pyramid levels with Dask-parallel writes.
 
 1. Load and normalize experiment metadata from `experiment.yml`.
 2. Resolve source data path from acquisition outputs.
@@ -12,8 +12,21 @@ The ingestion path for Navigate `experiment.yml` now materializes source data in
    - Zarr/N5 via `da.from_zarr(...)`
    - NPY/NPZ via `numpy` + `da.from_array(...)`
 4. Infer/normalize axis order and coerce to canonical `(t, p, c, z, y, x)`.
-5. Materialize with parallel Dask writes using GUI-configured chunking and pyramid metadata.
-6. Persist canonical store metadata and source provenance fields in Zarr attributes.
+5. Materialize base `data` using GUI-configured chunks.
+6. Build downsampled levels in `data_pyramid/level_<n>` according to GUI pyramid factors.
+7. Persist canonical store metadata and source provenance fields in Zarr attributes.
+
+## Pyramid downsampling behavior
+
+- Pyramid levels are generated in the same materialization run, immediately after base `data` write.
+- Writes run through Dask and Zarr for chunk-parallel persistence.
+- Levels are generated with stride-based decimation (nearest-neighbor) for speed and dtype preservation.
+- Metadata is stored at root and base-array attrs:
+  - `data_pyramid_levels`
+  - `data_pyramid_factors_tpczyx`
+  - `data_pyramid_shapes_tpczyx`
+  - `data.attrs["pyramid_levels"]`
+  - `data.attrs["pyramid_factors_tpczyx"]`
 
 ## GUI workflow (two-step)
 
@@ -69,6 +82,7 @@ Added coverage validates:
 - Existing Zarr source reuses same store path.
 - Same-component (`data`) in-place Zarr rewrite path works.
 - Canonical shape/chunk expectations and value integrity.
+- Downsampled pyramid levels are written and have expected shapes/values.
 
 ### Lint checks
 
@@ -86,15 +100,15 @@ Dataset root:
 
 - `/Users/Dean/Desktop/kevin/20260307_lung_mv3_488nm/`
 
-Materialization run on representative cells (`cell_001` to `cell_005`) across TIFF, OME-TIFF, H5, N5, and OME-Zarr with chunks `(1, 1, 1, 8, 128, 128)`:
+Materialization run on representative cells (`cell_006` to `cell_010`) across TIFF, OME-TIFF, H5, N5, and OME-Zarr with chunks `(1, 1, 1, 8, 128, 128)` and pyramid factors `((1,), (1,), (1,), (1, 2, 4), (1, 2, 4), (1, 2, 4))`:
 
-- `cell_001` TIFF -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `1.93s`
-- `cell_002` OME-TIFF -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `2.31s`
-- `cell_003` H5 -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `25.25s`
-- `cell_004` N5 -> same store `CH00_000000.n5`, shape `(1, 1, 1, 100, 2048, 2048)`, elapsed `5.67s`
-- `cell_005` OME-Zarr -> same store `CH00_000000.ome.zarr`, shape `(2, 1, 1, 100, 2048, 2048)`, elapsed `5.09s`
+- `cell_006` TIFF -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, pyramid shapes `[(1, 1, 1, 50, 1024, 1024), (1, 1, 1, 25, 512, 512)]`, elapsed `6.63s`
+- `cell_007` OME-TIFF -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, pyramid shapes `[(1, 1, 1, 50, 1024, 1024), (1, 1, 1, 25, 512, 512)]`, elapsed `6.27s`
+- `cell_008` H5 -> `data_store.zarr`, shape `(1, 1, 1, 100, 2048, 2048)`, pyramid shapes `[(1, 1, 1, 50, 1024, 1024), (1, 1, 1, 25, 512, 512)]`, elapsed `29.76s`
+- `cell_009` N5 -> same store `CH00_000000.n5`, shape `(1, 1, 1, 100, 512, 512)`, pyramid shapes `[(1, 1, 1, 50, 256, 256), (1, 1, 1, 25, 128, 128)]`, elapsed `0.69s`
+- `cell_010` OME-Zarr -> same store `CH00_000000.ome.zarr`, shape `(2, 1, 2, 100, 512, 512)`, pyramid shapes `[(2, 1, 2, 50, 256, 256), (2, 1, 2, 25, 128, 128)]`, elapsed `1.46s`
 
-This confirms output-path policy, canonical layout, and parallel read/write behavior on heterogeneous acquisition formats.
+This confirms output-path policy, canonical layout, and actual persisted downsample pyramid levels on heterogeneous acquisition formats.
 
 ### Headless workflow smoke test
 

@@ -538,6 +538,326 @@ def _normalize_write_chunks(
     )
 
 
+def _normalize_pyramid_level_factors(
+    pyramid_factors: tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+    ],
+) -> tuple[CanonicalShapeTpczyx, ...]:
+    """Normalize per-axis pyramid factors into concrete per-level factors.
+
+    Parameters
+    ----------
+    pyramid_factors : tuple[tuple[int, ...], ...]
+        Per-axis factors in ``(t, p, c, z, y, x)`` order.
+
+    Returns
+    -------
+    tuple[tuple[int, int, int, int, int, int], ...]
+        Per-level downsampling factors. Level ``0`` is always
+        ``(1, 1, 1, 1, 1, 1)``.
+
+    Raises
+    ------
+    ValueError
+        If factor definitions are missing, malformed, or invalid.
+
+    Notes
+    -----
+    If axes define different numbers of levels, shorter axes repeat their last
+    factor for deeper levels so all levels resolve to complete 6D factor tuples.
+    """
+    axis_names = ("t", "p", "c", "z", "y", "x")
+    if len(pyramid_factors) != len(axis_names):
+        raise ValueError(
+            "pyramid_factors must define six axis entries in "
+            "(t, p, c, z, y, x) order."
+        )
+
+    normalized_axes: list[tuple[int, ...]] = []
+    for axis_name, axis_levels in zip(axis_names, pyramid_factors, strict=False):
+        parsed_levels = tuple(int(level) for level in axis_levels)
+        if not parsed_levels:
+            raise ValueError(f"pyramid_factors for axis '{axis_name}' cannot be empty.")
+        if any(level <= 0 for level in parsed_levels):
+            raise ValueError(
+                f"pyramid_factors for axis '{axis_name}' must be greater than zero."
+            )
+        if parsed_levels[0] != 1:
+            raise ValueError(
+                f"pyramid_factors for axis '{axis_name}' must start with 1."
+            )
+        normalized_axes.append(parsed_levels)
+
+    max_levels = max(len(levels) for levels in normalized_axes)
+    levels: list[CanonicalShapeTpczyx] = []
+    for level_index in range(max_levels):
+        factors: CanonicalShapeTpczyx = (
+            int(normalized_axes[0][min(level_index, len(normalized_axes[0]) - 1)]),
+            int(normalized_axes[1][min(level_index, len(normalized_axes[1]) - 1)]),
+            int(normalized_axes[2][min(level_index, len(normalized_axes[2]) - 1)]),
+            int(normalized_axes[3][min(level_index, len(normalized_axes[3]) - 1)]),
+            int(normalized_axes[4][min(level_index, len(normalized_axes[4]) - 1)]),
+            int(normalized_axes[5][min(level_index, len(normalized_axes[5]) - 1)]),
+        )
+        if levels and factors == levels[-1]:
+            continue
+        levels.append(factors)
+
+    return tuple(levels)
+
+
+def _downsample_tpczyx_by_stride(
+    array: da.Array,
+    factors_tpczyx: CanonicalShapeTpczyx,
+) -> da.Array:
+    """Create a strided downsampled pyramid level from a canonical array.
+
+    Parameters
+    ----------
+    array : dask.array.Array
+        Source canonical array in ``(t, p, c, z, y, x)`` order.
+    factors_tpczyx : tuple[int, int, int, int, int, int]
+        Integer stride factors for each canonical axis.
+
+    Returns
+    -------
+    dask.array.Array
+        Downsampled view with nearest-neighbor decimation.
+
+    Raises
+    ------
+    ValueError
+        If ``factors_tpczyx`` does not define six positive integers.
+    """
+    if len(factors_tpczyx) != 6:
+        raise ValueError(
+            "factors_tpczyx must define six values in (t, p, c, z, y, x) order."
+        )
+    if any(int(factor) <= 0 for factor in factors_tpczyx):
+        raise ValueError("factors_tpczyx values must be greater than zero.")
+
+    slices = tuple(slice(None, None, int(factor)) for factor in factors_tpczyx)
+    return array[slices]
+
+
+def _derive_pyramid_level_chunks(
+    *,
+    base_chunks_tpczyx: CanonicalShapeTpczyx,
+    level_shape_tpczyx: CanonicalShapeTpczyx,
+    level_factors_tpczyx: CanonicalShapeTpczyx,
+) -> CanonicalShapeTpczyx:
+    """Derive chunk sizes for one pyramid level from base chunks and factors.
+
+    Parameters
+    ----------
+    base_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Base-level chunk shape in canonical order.
+    level_shape_tpczyx : tuple[int, int, int, int, int, int]
+        Target level shape.
+    level_factors_tpczyx : tuple[int, int, int, int, int, int]
+        Absolute level downsampling factors in canonical order.
+
+    Returns
+    -------
+    tuple[int, int, int, int, int, int]
+        Normalized chunk sizes for the level.
+
+    Raises
+    ------
+    ValueError
+        If any provided tuple is malformed or contains non-positive values.
+    """
+    requested_chunks: CanonicalShapeTpczyx = (
+        max(1, int(base_chunks_tpczyx[0]) // int(level_factors_tpczyx[0])),
+        max(1, int(base_chunks_tpczyx[1]) // int(level_factors_tpczyx[1])),
+        max(1, int(base_chunks_tpczyx[2]) // int(level_factors_tpczyx[2])),
+        max(1, int(base_chunks_tpczyx[3]) // int(level_factors_tpczyx[3])),
+        max(1, int(base_chunks_tpczyx[4]) // int(level_factors_tpczyx[4])),
+        max(1, int(base_chunks_tpczyx[5]) // int(level_factors_tpczyx[5])),
+    )
+    return _normalize_write_chunks(level_shape_tpczyx, requested_chunks)
+
+
+def _materialize_data_pyramid(
+    *,
+    store_path: Path,
+    base_chunks_tpczyx: CanonicalShapeTpczyx,
+    pyramid_factors: tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+    ],
+    client: Optional["Client"] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_start: int = 60,
+    progress_end: int = 96,
+) -> list[str]:
+    """Build and persist downsampled Zarr pyramid levels in canonical store.
+
+    Parameters
+    ----------
+    store_path : pathlib.Path
+        Target Zarr store containing canonical ``data`` array.
+    base_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Effective base chunking in canonical order.
+    pyramid_factors : tuple[tuple[int, ...], ...]
+        Per-axis pyramid factors in ``(t, p, c, z, y, x)`` order.
+    client : dask.distributed.Client, optional
+        Active Dask client used for parallel writes.
+    progress_callback : callable, optional
+        Optional callback invoked as ``callback(percent, message)``.
+    progress_start : int, default=60
+        Start percentage for pyramid generation progress.
+    progress_end : int, default=96
+        End percentage for pyramid generation progress.
+
+    Returns
+    -------
+    list[str]
+        Ordered component paths including base level at index ``0``.
+
+    Raises
+    ------
+    ValueError
+        If canonical base data or pyramid configuration is invalid.
+
+    Notes
+    -----
+    Levels are stored under ``data_pyramid/level_<n>`` where ``n`` starts at 1.
+    Downsampling uses stride-based nearest-neighbor decimation for speed and
+    deterministic dtype preservation.
+    """
+    level_factors = _normalize_pyramid_level_factors(pyramid_factors)
+    root = zarr.open_group(str(store_path), mode="a")
+    if "data" not in root:
+        raise ValueError(f"Expected canonical data array at {store_path}/data.")
+
+    if "data_pyramid" in root:
+        del root["data_pyramid"]
+    root.require_group("data_pyramid")
+
+    base_shape = _normalize_tpczyx_shape(tuple(int(size) for size in root["data"].shape))
+    level_paths = ["data"]
+    level_factor_payload = [[int(value) for value in level_factors[0]]]
+    level_shapes_payload = [[int(value) for value in base_shape]]
+    total_downsample_levels = max(0, len(level_factors) - 1)
+
+    if total_downsample_levels == 0:
+        root["data"].attrs.update(
+            {
+                "pyramid_levels": level_paths,
+                "pyramid_factors_tpczyx": level_factor_payload,
+            }
+        )
+        root.attrs.update(
+            {
+                "data_pyramid_levels": level_paths,
+                "data_pyramid_factors_tpczyx": level_factor_payload,
+                "data_pyramid_shapes_tpczyx": level_shapes_payload,
+            }
+        )
+        if progress_callback is not None:
+            progress_callback(int(progress_end), "Pyramid configuration has only base level")
+        return level_paths
+
+    prior_component = "data"
+    prior_factors = level_factors[0]
+    for level_index, absolute_factors in enumerate(level_factors[1:], start=1):
+        all_relative = all(
+            int(current) % int(previous) == 0
+            for current, previous in zip(absolute_factors, prior_factors, strict=False)
+        )
+        if all_relative:
+            relative_factors: CanonicalShapeTpczyx = (
+                int(absolute_factors[0] // prior_factors[0]),
+                int(absolute_factors[1] // prior_factors[1]),
+                int(absolute_factors[2] // prior_factors[2]),
+                int(absolute_factors[3] // prior_factors[3]),
+                int(absolute_factors[4] // prior_factors[4]),
+                int(absolute_factors[5] // prior_factors[5]),
+            )
+            source_component = prior_component
+            downsample_factors = relative_factors
+        else:
+            source_component = "data"
+            downsample_factors = absolute_factors
+
+        message = (
+            f"Writing pyramid level {level_index}/{total_downsample_levels} "
+            f"(factors={absolute_factors})"
+        )
+        if progress_callback is not None:
+            progress = progress_start + int(
+                ((level_index - 1) / total_downsample_levels)
+                * max(0, progress_end - progress_start)
+            )
+            progress_callback(progress, message)
+
+        source_array = da.from_zarr(str(store_path), component=source_component)
+        downsampled = _downsample_tpczyx_by_stride(source_array, downsample_factors)
+        level_shape = _normalize_tpczyx_shape(
+            tuple(int(size) for size in downsampled.shape)
+        )
+        level_chunks = _derive_pyramid_level_chunks(
+            base_chunks_tpczyx=base_chunks_tpczyx,
+            level_shape_tpczyx=level_shape,
+            level_factors_tpczyx=absolute_factors,
+        )
+        with dask.config.set({"array.rechunk.method": "tasks"}):
+            downsampled = downsampled.rechunk(level_chunks)
+
+        component = f"data_pyramid/level_{level_index}"
+        write_graph = da.to_zarr(
+            downsampled,
+            url=str(store_path),
+            component=component,
+            overwrite=True,
+            compute=False,
+        )
+        _compute_dask_graph(write_graph, client=client)
+
+        root = zarr.open_group(str(store_path), mode="a")
+        root[component].attrs.update(
+            {
+                "axes": ["t", "p", "c", "z", "y", "x"],
+                "pyramid_level": int(level_index),
+                "downsample_factors_tpczyx": [int(value) for value in absolute_factors],
+                "chunk_shape_tpczyx": [int(value) for value in level_chunks],
+                "source_component": source_component,
+            }
+        )
+        level_paths.append(component)
+        level_factor_payload.append([int(value) for value in absolute_factors])
+        level_shapes_payload.append([int(value) for value in level_shape])
+        prior_component = component
+        prior_factors = absolute_factors
+
+    root["data"].attrs.update(
+        {
+            "pyramid_levels": level_paths,
+            "pyramid_factors_tpczyx": level_factor_payload,
+        }
+    )
+    root.attrs.update(
+        {
+            "data_pyramid_levels": level_paths,
+            "data_pyramid_factors_tpczyx": level_factor_payload,
+            "data_pyramid_shapes_tpczyx": level_shapes_payload,
+        }
+    )
+    if progress_callback is not None:
+        progress_callback(int(progress_end), "Pyramid generation complete")
+    return level_paths
+
+
 def _compute_dask_graph(graph: Any, *, client: Optional["Client"] = None) -> None:
     """Execute a Dask graph via a configured client or local scheduler.
 
@@ -664,7 +984,7 @@ def materialize_experiment_data_store(
     client: Optional["Client"] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> MaterializedDataStore:
-    """Materialize experiment source data into canonical Zarr ``data`` array.
+    """Materialize experiment source data into canonical Zarr ``data`` pyramid.
 
     Parameters
     ----------
@@ -685,7 +1005,7 @@ def materialize_experiment_data_store(
     Returns
     -------
     MaterializedDataStore
-        Materialization summary including source/store metadata.
+        Materialization summary including source/store metadata for base level.
 
     Raises
     ------
@@ -696,8 +1016,11 @@ def materialize_experiment_data_store(
 
     Notes
     -----
-    When ``source_path`` is already a Zarr/N5 store, conversion is performed
-    in the same store path rather than creating a duplicate store.
+    The workflow writes canonical base data to ``data`` and then writes
+    downsampled levels under ``data_pyramid/level_<n>`` according to
+    ``pyramid_factors``. When ``source_path`` is already a Zarr/N5 store,
+    conversion is performed in the same store path rather than creating
+    a duplicate store.
     """
     def _emit_progress(percent: int, message: str) -> None:
         """Emit optional stage progress updates.
@@ -771,7 +1094,7 @@ def materialize_experiment_data_store(
             )
             _emit_progress(55, "Writing staged data to existing store")
             _compute_dask_graph(write_graph, client=write_client)
-            _emit_progress(88, "Swapping staged data into canonical component")
+            _emit_progress(82, "Swapping staged data into canonical component")
             if "data" in root:
                 del root["data"]
             root.move(temp_component, "data")
@@ -784,7 +1107,16 @@ def materialize_experiment_data_store(
                 dtype=source_dtype.name,
                 shape_tpczyx=canonical_shape,
             )
-            _emit_progress(95, "Finalizing store metadata")
+            _materialize_data_pyramid(
+                store_path=store_path,
+                base_chunks_tpczyx=normalized_chunks,
+                pyramid_factors=pyramid_factors,
+                client=client,
+                progress_callback=progress_callback,
+                progress_start=86,
+                progress_end=96,
+            )
+            _emit_progress(97, "Finalizing store metadata")
         else:
             initialize_analysis_store(
                 experiment=experiment,
@@ -804,7 +1136,16 @@ def materialize_experiment_data_store(
             )
             _emit_progress(55, "Writing canonical data")
             _compute_dask_graph(write_graph, client=write_client)
-            _emit_progress(95, "Finalizing store metadata")
+            _materialize_data_pyramid(
+                store_path=store_path,
+                base_chunks_tpczyx=normalized_chunks,
+                pyramid_factors=pyramid_factors,
+                client=client,
+                progress_callback=progress_callback,
+                progress_start=60,
+                progress_end=96,
+            )
+            _emit_progress(97, "Finalizing store metadata")
 
     root = zarr.open_group(str(store_path), mode="a")
     source_axes_attr = list(source_axes) if source_axes is not None else None

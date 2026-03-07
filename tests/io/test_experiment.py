@@ -278,6 +278,7 @@ def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(tmp_p
         experiment=experiment,
         source_path=source_path,
         chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
     )
 
     expected_store = (experiment_path.parent / "data_store.zarr").resolve()
@@ -286,6 +287,12 @@ def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(tmp_p
     assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
     assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
     assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
+    assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
+    assert np.array_equal(
+        np.array(root["data_pyramid/level_1"][0, 0, 0, :, :, :]),
+        source_data[::2, ::2, ::2],
+    )
 
 
 def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: Path):
@@ -305,6 +312,7 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
         experiment=experiment,
         source_path=source_store,
         chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
     )
 
     assert materialized.store_path == source_store.resolve()
@@ -313,6 +321,8 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
     assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
     assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
     assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
+    assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
     assert not (experiment_path.parent / "data_store.zarr").exists()
 
 
@@ -333,9 +343,12 @@ def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_pa
         experiment=experiment,
         source_path=source_store,
         chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
     )
 
     root = zarr.open_group(str(source_store), mode="r")
     assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
     assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
     assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
+    assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
