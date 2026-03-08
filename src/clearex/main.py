@@ -57,6 +57,9 @@ from clearex.io.provenance import (
 from clearex.detect.pipeline import (
     run_particle_detection_analysis,
 )
+from clearex.deconvolution.pipeline import (
+    run_deconvolution_analysis,
+)
 from clearex.visualization.pipeline import (
     run_visualization_analysis,
 )
@@ -204,7 +207,9 @@ def _create_bootstrap_logger() -> logging.Logger:
     logger.propagate = False
     if not logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
         logger.addHandler(handler)
     return logger
 
@@ -302,7 +307,9 @@ def _log_loaded_image(info: ImageInfo, logger: logging.Logger) -> None:
     logger.info(f"Pixel size (um): {getattr(info, 'pixel_size', None) or 'n/a'}")
 
     if info.metadata:
-        metadata_types = {key: type(value).__name__ for key, value in info.metadata.items()}
+        metadata_types = {
+            key: type(value).__name__ for key, value in info.metadata.items()
+        }
         logger.info(f"Image metadata keys/types: {metadata_types}")
 
 
@@ -349,7 +356,9 @@ def _apply_gui_if_requested(
             from clearex.gui import GuiUnavailableError
 
             if isinstance(exc, GuiUnavailableError):
-                logger.warning(f"GUI unavailable: {exc}. Falling back to headless mode.")
+                logger.warning(
+                    f"GUI unavailable: {exc}. Falling back to headless mode."
+                )
                 return workflow
         except Exception:
             pass
@@ -414,22 +423,21 @@ def _configure_dask_backend(
             )
             exit_stack.callback(client.close)
             logger.info(
-                "Connected to LocalCluster backend "
-                f"(processes={use_processes})."
+                f"Connected to LocalCluster backend (processes={use_processes})."
             )
             return client
 
         if backend.mode == DASK_BACKEND_SLURM_RUNNER:
             scheduler_file = backend.slurm_runner.scheduler_file
             if not scheduler_file:
-                raise ValueError(
-                    "SLURMRunner backend requires a scheduler file path."
-                )
+                raise ValueError("SLURMRunner backend requires a scheduler file path.")
 
             from dask.distributed import Client
             from dask_jobqueue.slurm import SLURMRunner
 
-            runner = exit_stack.enter_context(SLURMRunner(scheduler_file=scheduler_file))
+            runner = exit_stack.enter_context(
+                SLURMRunner(scheduler_file=scheduler_file)
+            )
             client = exit_stack.enter_context(Client(runner))
 
             wait_for_workers = backend.slurm_runner.wait_for_workers
@@ -441,8 +449,7 @@ def _configure_dask_backend(
                 client.wait_for_workers(wait_for_workers)
 
             logger.info(
-                "Connected to SLURMRunner backend "
-                f"(scheduler_file={scheduler_file})."
+                f"Connected to SLURMRunner backend (scheduler_file={scheduler_file})."
             )
             return client
 
@@ -535,6 +542,7 @@ def _run_workflow(
     ValueError
         If no reader can open the configured file.
     """
+
     def _emit_analysis_progress(percent: int, message: str) -> None:
         """Emit analysis progress callback updates when configured.
 
@@ -603,9 +611,12 @@ def _run_workflow(
                             "positions": experiment.multiposition_count,
                             "channels": experiment.channel_count,
                             "z_steps": experiment.number_z_steps,
-                            "zarr_chunks_ptczyx": list(workflow.zarr_save.chunks_ptczyx),
+                            "zarr_chunks_ptczyx": list(
+                                workflow.zarr_save.chunks_ptczyx
+                            ),
                             "zarr_pyramid_ptczyx": [
-                                list(levels) for levels in workflow.zarr_save.pyramid_ptczyx
+                                list(levels)
+                                for levels in workflow.zarr_save.pyramid_ptczyx
                             ],
                         },
                     }
@@ -638,9 +649,12 @@ def _run_workflow(
                                 materialized.data_image_info.shape
                             ),
                             "chunks_tpczyx": list(materialized.chunks_tpczyx),
-                            "zarr_chunks_ptczyx": list(workflow.zarr_save.chunks_ptczyx),
+                            "zarr_chunks_ptczyx": list(
+                                workflow.zarr_save.chunks_ptczyx
+                            ),
                             "zarr_pyramid_ptczyx": [
-                                list(levels) for levels in workflow.zarr_save.pyramid_ptczyx
+                                list(levels)
+                                for levels in workflow.zarr_save.pyramid_ptczyx
                             ],
                         },
                     }
@@ -715,9 +729,9 @@ def _run_workflow(
             operation_parameters = dict(
                 runtime_analysis_parameters.get(operation_name, {})
             )
-            requested_source = str(
-                operation_parameters.get("input_source", "data")
-            ).strip() or "data"
+            requested_source = (
+                str(operation_parameters.get("input_source", "data")).strip() or "data"
+            )
             resolved_source = _resolve_analysis_input_component(
                 requested_source=requested_source,
                 produced_components=produced_components,
@@ -726,28 +740,110 @@ def _run_workflow(
             runtime_analysis_parameters[operation_name] = operation_parameters
 
             if operation_name == "deconvolution":
-                _emit_analysis_progress(
-                    operation_start,
-                    "Deconvolution selected; implementation pending.",
-                )
-                logger.info(
-                    "Deconvolution selected (input=%s). Workflow hook is reserved; "
-                    "implementation pending.",
-                    resolved_source,
-                )
-                step_records.append(
-                    {
-                        "name": "deconvolution",
-                        "parameters": {
-                            **operation_parameters,
-                            "status": "pending_implementation",
-                        },
+                decon_parameters = dict(operation_parameters)
+                if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if not _zarr_component_exists(
+                        provenance_store_path,
+                        str(decon_parameters.get("input_source", "data")),
+                    ):
+                        logger.warning(
+                            "Requested deconvolution input component '%s' was not "
+                            "found. Falling back to 'data'.",
+                            decon_parameters.get("input_source", "data"),
+                        )
+                        decon_parameters["input_source"] = "data"
+                        runtime_analysis_parameters["deconvolution"] = dict(
+                            decon_parameters
+                        )
+
+                    progress_state = {"last_percent": -5}
+
+                    def _decon_progress(percent: int, message: str) -> None:
+                        """Throttle deconvolution progress logs.
+
+                        Parameters
+                        ----------
+                        percent : int
+                            Progress percent.
+                        message : str
+                            Progress message.
+
+                        Returns
+                        -------
+                        None
+                            Logger side effects only.
+                        """
+                        last_percent = int(progress_state["last_percent"])
+                        if percent >= 100 or percent - last_percent >= 5:
+                            progress_state["last_percent"] = int(percent)
+                            logger.info(f"[deconvolution] {int(percent)}% - {message}")
+                        mapped = operation_start + int(
+                            (max(0, min(100, int(percent))) / 100)
+                            * max(1, operation_end - operation_start)
+                        )
+                        _emit_analysis_progress(
+                            mapped,
+                            f"deconvolution: {message}",
+                        )
+
+                    summary = run_deconvolution_analysis(
+                        zarr_path=provenance_store_path,
+                        parameters=decon_parameters,
+                        client=analysis_client,
+                        progress_callback=_decon_progress,
+                    )
+                    produced_components["deconvolution"] = summary.data_component
+                    output_records["deconvolution"] = {
+                        "component": summary.component,
+                        "data_component": summary.data_component,
+                        "volumes_processed": summary.volumes_processed,
+                        "channel_count": summary.channel_count,
+                        "psf_mode": summary.psf_mode,
+                        "output_chunks_tpczyx": list(summary.output_chunks_tpczyx),
+                        "storage_policy": "latest_only",
                     }
-                )
-                _emit_analysis_progress(
-                    operation_end,
-                    "Deconvolution step skipped (pending implementation).",
-                )
+                    logger.info(
+                        "Deconvolution completed: "
+                        f"volumes_processed={summary.volumes_processed}, "
+                        f"channels={summary.channel_count}, "
+                        f"psf_mode={summary.psf_mode}, "
+                        f"component={summary.component}."
+                    )
+                    step_records.append(
+                        {
+                            "name": "deconvolution",
+                            "parameters": {
+                                **decon_parameters,
+                                "component": summary.component,
+                                "data_component": summary.data_component,
+                                "volumes_processed": summary.volumes_processed,
+                                "channel_count": summary.channel_count,
+                                "psf_mode": summary.psf_mode,
+                            },
+                        }
+                    )
+                    _emit_analysis_progress(
+                        operation_end,
+                        "Deconvolution complete.",
+                    )
+                else:
+                    logger.warning(
+                        "Deconvolution requires a canonical Zarr/N5 data store."
+                    )
+                    step_records.append(
+                        {
+                            "name": "deconvolution",
+                            "parameters": {
+                                **decon_parameters,
+                                "status": "skipped",
+                                "reason": "no_zarr_store",
+                            },
+                        }
+                    )
+                    _emit_analysis_progress(
+                        operation_end,
+                        "Deconvolution skipped (no Zarr/N5 store).",
+                    )
                 continue
 
             if operation_name == "particle_detection":
@@ -914,9 +1010,7 @@ def _run_workflow(
                             (max(0, min(100, int(percent))) / 100)
                             * max(1, operation_end - operation_start)
                         )
-                        logger.info(
-                            f"[visualization] {int(percent)}% - {message}"
-                        )
+                        logger.info(f"[visualization] {int(percent)}% - {message}")
                         _emit_analysis_progress(
                             mapped,
                             f"visualization: {message}",
@@ -1020,11 +1114,28 @@ def _run_workflow(
                 f"with run_id={run_id}."
             )
 
+            deconvolution_output = output_records.get("deconvolution")
+            if deconvolution_output:
+                try:
+                    root = zarr.open_group(str(provenance_store_path), mode="a")
+                    root["results"]["deconvolution"]["latest"].attrs["run_id"] = run_id
+                except Exception:
+                    pass
+                register_latest_output_reference(
+                    zarr_path=provenance_store_path,
+                    analysis_name="deconvolution",
+                    component=str(deconvolution_output["component"]),
+                    run_id=run_id,
+                    metadata=deconvolution_output,
+                )
+
             particle_output = output_records.get("particle_detection")
             if particle_output:
                 try:
                     root = zarr.open_group(str(provenance_store_path), mode="a")
-                    root["results"]["particle_detection"]["latest"].attrs["run_id"] = run_id
+                    root["results"]["particle_detection"]["latest"].attrs["run_id"] = (
+                        run_id
+                    )
                 except Exception:
                     pass
                 register_latest_output_reference(

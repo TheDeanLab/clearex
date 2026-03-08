@@ -226,11 +226,17 @@ def _infer_source_axes(
     if ndim == 4:
         if shape[0] == experiment.timepoints and shape[1] == experiment.number_z_steps:
             return ("t", "z", "y", "x")
-        if shape[0] == experiment.number_z_steps and shape[1] == experiment.channel_count:
+        if (
+            shape[0] == experiment.number_z_steps
+            and shape[1] == experiment.channel_count
+        ):
             return ("z", "c", "y", "x")
         return ("c", "z", "y", "x")
     if ndim == 5:
-        if shape[0] == experiment.multiposition_count and shape[1] == experiment.channel_count:
+        if (
+            shape[0] == experiment.multiposition_count
+            and shape[1] == experiment.channel_count
+        ):
             return ("p", "c", "z", "y", "x")
         return ("t", "c", "z", "y", "x")
     if ndim == 6:
@@ -483,8 +489,7 @@ def _normalize_tpczyx_shape(shape: tuple[int, ...]) -> CanonicalShapeTpczyx:
     normalized = tuple(int(size) for size in shape)
     if any(size <= 0 for size in normalized):
         raise ValueError(
-            "Canonical data shape values must be greater than zero; "
-            f"got {normalized}."
+            f"Canonical data shape values must be greater than zero; got {normalized}."
         )
     return (
         normalized[0],
@@ -574,8 +579,7 @@ def _normalize_pyramid_level_factors(
     axis_names = ("t", "p", "c", "z", "y", "x")
     if len(pyramid_factors) != len(axis_names):
         raise ValueError(
-            "pyramid_factors must define six axis entries in "
-            "(t, p, c, z, y, x) order."
+            "pyramid_factors must define six axis entries in (t, p, c, z, y, x) order."
         )
 
     normalized_axes: list[tuple[int, ...]] = []
@@ -744,7 +748,9 @@ def _materialize_data_pyramid(
         del root["data_pyramid"]
     root.require_group("data_pyramid")
 
-    base_shape = _normalize_tpczyx_shape(tuple(int(size) for size in root["data"].shape))
+    base_shape = _normalize_tpczyx_shape(
+        tuple(int(size) for size in root["data"].shape)
+    )
     level_paths = ["data"]
     level_factor_payload = [[int(value) for value in level_factors[0]]]
     level_shapes_payload = [[int(value) for value in base_shape]]
@@ -765,7 +771,9 @@ def _materialize_data_pyramid(
             }
         )
         if progress_callback is not None:
-            progress_callback(int(progress_end), "Pyramid configuration has only base level")
+            progress_callback(
+                int(progress_end), "Pyramid configuration has only base level"
+            )
         return level_paths
 
     prior_component = "data"
@@ -885,6 +893,7 @@ def _compute_dask_graph(graph: Any, *, client: Optional["Client"] = None) -> Non
     cannot be serialized for distributed workers. In those cases, execution
     automatically falls back to local Dask compute.
     """
+
     def _compute_with_threads() -> None:
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -904,7 +913,10 @@ def _compute_dask_graph(graph: Any, *, client: Optional["Client"] = None) -> Non
         client.gather(futures)
     except Exception as exc:
         message = str(exc)
-        if "Could not serialize object" not in message and "cannot pickle" not in message:
+        if (
+            "Could not serialize object" not in message
+            and "cannot pickle" not in message
+        ):
             raise
         _compute_with_threads()
 
@@ -1022,6 +1034,7 @@ def materialize_experiment_data_store(
     conversion is performed in the same store path rather than creating
     a duplicate store.
     """
+
     def _emit_progress(percent: int, message: str) -> None:
         """Emit optional stage progress updates.
 
@@ -1045,7 +1058,9 @@ def materialize_experiment_data_store(
     if not source_resolved.exists():
         raise FileNotFoundError(source_resolved)
 
-    store_path = resolve_data_store_path(experiment=experiment, source_path=source_resolved)
+    store_path = resolve_data_store_path(
+        experiment=experiment, source_path=source_resolved
+    )
     write_client = client if _is_zarr_like_path(source_resolved) else None
     _emit_progress(5, "Opening source data")
 
@@ -1149,10 +1164,23 @@ def materialize_experiment_data_store(
 
     root = zarr.open_group(str(store_path), mode="a")
     source_axes_attr = list(source_axes) if source_axes is not None else None
+    voxel_size_um_zyx = None
+    if (
+        experiment.z_step_um is not None
+        and experiment.xy_pixel_size_um is not None
+        and experiment.z_step_um > 0
+        and experiment.xy_pixel_size_um > 0
+    ):
+        voxel_size_um_zyx = [
+            float(experiment.z_step_um),
+            float(experiment.xy_pixel_size_um),
+            float(experiment.xy_pixel_size_um),
+        ]
     root["data"].attrs.update(
         {
             "source_path": str(source_resolved),
             "source_axes": source_axes_attr,
+            "voxel_size_um_zyx": voxel_size_um_zyx,
         }
     )
     if source_component is not None:
@@ -1162,6 +1190,7 @@ def materialize_experiment_data_store(
             "source_data_path": str(source_resolved),
             "source_data_axes": source_axes_attr,
             "source_data_component": source_component,
+            "voxel_size_um_zyx": voxel_size_um_zyx,
         }
     )
 
@@ -1245,6 +1274,10 @@ class NavigateExperiment:
         Number of multiposition entries recorded.
     selected_channels : list[NavigateChannel]
         Channels marked as selected in acquisition state.
+    xy_pixel_size_um : float, optional
+        Estimated sample-space XY pixel size in microns.
+    z_step_um : float, optional
+        Z-step size in microns.
     """
 
     path: Path
@@ -1259,6 +1292,8 @@ class NavigateExperiment:
     x_pixels: int
     multiposition_count: int
     selected_channels: list[NavigateChannel]
+    xy_pixel_size_um: Optional[float] = None
+    z_step_um: Optional[float] = None
 
     @property
     def channel_count(self) -> int:
@@ -1289,6 +1324,8 @@ class NavigateExperiment:
             "number_z_steps": self.number_z_steps,
             "multiposition_count": self.multiposition_count,
             "channel_count": self.channel_count,
+            "xy_pixel_size_um": self.xy_pixel_size_um,
+            "z_step_um": self.z_step_um,
             "selected_channels": [
                 {
                     "name": channel.name,
@@ -1490,6 +1527,96 @@ def _infer_multiposition_count(
     return 1
 
 
+def _safe_optional_float(value: Any) -> Optional[float]:
+    """Parse an optional float value.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate value.
+
+    Returns
+    -------
+    float, optional
+        Parsed float value, or ``None`` when parsing fails.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _camera_profile_mapping(
+    *,
+    camera: Dict[str, Any],
+    microscope_name: Optional[str],
+) -> Dict[str, Any]:
+    """Resolve microscope-specific camera parameter mapping when available.
+
+    Parameters
+    ----------
+    camera : dict[str, Any]
+        Top-level ``CameraParameters`` mapping.
+    microscope_name : str, optional
+        Active microscope profile name.
+
+    Returns
+    -------
+    dict[str, Any]
+        Profile-specific mapping when available, otherwise ``camera``.
+    """
+    if microscope_name and isinstance(camera.get(microscope_name), dict):
+        return camera[microscope_name]
+    return camera
+
+
+def _infer_xy_pixel_size_um(
+    *,
+    camera: Dict[str, Any],
+    microscope_name: Optional[str],
+) -> Optional[float]:
+    """Infer sample-space XY pixel size in microns.
+
+    Parameters
+    ----------
+    camera : dict[str, Any]
+        ``CameraParameters`` mapping from experiment metadata.
+    microscope_name : str, optional
+        Active microscope profile name.
+
+    Returns
+    -------
+    float, optional
+        Estimated XY pixel size in microns, or ``None`` when unavailable.
+
+    Notes
+    -----
+    This uses profile-specific values when available. Preferred estimate is
+    ``fov_x / img_x_pixels`` (or ``fov_y / img_y_pixels``). If unavailable,
+    ``pixel_size`` is used as a fallback.
+    """
+    profile = _camera_profile_mapping(
+        camera=camera,
+        microscope_name=microscope_name,
+    )
+    fov_x = _safe_optional_float(profile.get("fov_x"))
+    img_x = _safe_optional_float(profile.get("img_x_pixels", profile.get("x_pixels")))
+    if fov_x is not None and img_x is not None and img_x > 0:
+        return float(fov_x / img_x)
+
+    fov_y = _safe_optional_float(profile.get("fov_y"))
+    img_y = _safe_optional_float(profile.get("img_y_pixels", profile.get("y_pixels")))
+    if fov_y is not None and img_y is not None and img_y > 0:
+        return float(fov_y / img_y)
+
+    pixel_size = _safe_optional_float(profile.get("pixel_size"))
+    if pixel_size is not None and pixel_size > 0:
+        return float(pixel_size)
+    return None
+
+
 def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
     """Load and normalize Navigate ``experiment.yml`` metadata.
 
@@ -1570,17 +1697,23 @@ def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
         state=state,
         save_directory=save_directory,
     )
+    microscope_name = (
+        str(state.get("microscope_name"))
+        if state.get("microscope_name") is not None
+        else None
+    )
+    xy_pixel_size_um = _infer_xy_pixel_size_um(
+        camera=camera,
+        microscope_name=microscope_name,
+    )
+    z_step_um = _safe_optional_float(state.get("step_size"))
 
     return NavigateExperiment(
         path=experiment_path,
         raw=raw,
         save_directory=save_directory,
         file_type=str(saving.get("file_type", "UNKNOWN")).upper(),
-        microscope_name=(
-            str(state.get("microscope_name"))
-            if state.get("microscope_name") is not None
-            else None
-        ),
+        microscope_name=microscope_name,
         image_mode=str(state.get("image_mode")) if state.get("image_mode") else None,
         timepoints=max(1, int(state.get("timepoints", 1))),
         number_z_steps=max(1, int(state.get("number_z_steps", 1))),
@@ -1588,6 +1721,8 @@ def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
         x_pixels=max(1, int(camera.get("img_x_pixels", camera.get("x_pixels", 1)))),
         multiposition_count=max(1, multiposition_count),
         selected_channels=selected_channels,
+        xy_pixel_size_um=xy_pixel_size_um,
+        z_step_um=z_step_um,
     )
 
 
@@ -1898,8 +2033,7 @@ def initialize_analysis_store(
     else:
         if len(shape_tpczyx) != len(axis_names):
             raise ValueError(
-                "shape_tpczyx must define six values in "
-                "(t, p, c, z, y, x) order."
+                "shape_tpczyx must define six values in (t, p, c, z, y, x) order."
             )
         shape = tuple(int(size) for size in shape_tpczyx)
         if any(size <= 0 for size in shape):
@@ -1918,6 +2052,18 @@ def initialize_analysis_store(
         for chunk, dim in zip(requested_chunks, shape, strict=False)
     )
     pyramid_payload = [list(levels) for levels in normalized_pyramid]
+    voxel_size_um_zyx = None
+    if (
+        experiment.z_step_um is not None
+        and experiment.xy_pixel_size_um is not None
+        and experiment.z_step_um > 0
+        and experiment.xy_pixel_size_um > 0
+    ):
+        voxel_size_um_zyx = [
+            float(experiment.z_step_um),
+            float(experiment.xy_pixel_size_um),
+            float(experiment.xy_pixel_size_um),
+        ]
 
     root = zarr.open_group(str(output_path), mode="a")
     root.require_group("results")
@@ -1941,6 +2087,7 @@ def initialize_analysis_store(
                         int(chunk) for chunk in requested_chunks
                     ],
                     "resolution_pyramid_factors_tpczyx": pyramid_payload,
+                    "voxel_size_um_zyx": voxel_size_um_zyx,
                 }
             )
             root.attrs.update(
@@ -1956,6 +2103,7 @@ def initialize_analysis_store(
                         int(chunk) for chunk in requested_chunks
                     ],
                     "resolution_pyramid_factors_tpczyx": pyramid_payload,
+                    "voxel_size_um_zyx": voxel_size_um_zyx,
                 }
             )
             return output_path
@@ -1974,6 +2122,7 @@ def initialize_analysis_store(
             "chunk_shape_tpczyx": [int(chunk) for chunk in normalized_chunks],
             "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
             "resolution_pyramid_factors_tpczyx": pyramid_payload,
+            "voxel_size_um_zyx": voxel_size_um_zyx,
         }
     )
     root.attrs.update(
@@ -1987,6 +2136,7 @@ def initialize_analysis_store(
             "chunk_shape_tpczyx": [int(chunk) for chunk in normalized_chunks],
             "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
             "resolution_pyramid_factors_tpczyx": pyramid_payload,
+            "voxel_size_um_zyx": voxel_size_um_zyx,
         }
     )
     return output_path

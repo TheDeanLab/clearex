@@ -135,16 +135,51 @@ class TestWorkflowConfig:
     def test_rejects_invalid_particle_overlap_shape(self):
         with pytest.raises(ValueError):
             WorkflowConfig(
-                analysis_parameters={
-                    "particle_detection": {"overlap_zyx": [1, 2]}
-                }
+                analysis_parameters={"particle_detection": {"overlap_zyx": [1, 2]}}
             )
 
     def test_rejects_invalid_common_execution_order(self):
         with pytest.raises(ValueError):
             WorkflowConfig(
+                analysis_parameters={"deconvolution": {"execution_order": 0}}
+            )
+
+    def test_normalizes_deconvolution_analysis_parameters(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "deconvolution": {
+                    "psf_mode": "synthetic",
+                    "synthetic_excitation_nm": "488,561",
+                    "synthetic_emission_nm": "520,610",
+                    "synthetic_numerical_aperture": "0.8,1.0",
+                    "hann_window_bounds": "0.75,1.0",
+                    "wiener_alpha": "0.01",
+                    "background": "120",
+                    "decon_iterations": "4",
+                    "block_size_zyx": "64,128,128",
+                    "batch_size_zyx": "256,256,256",
+                    "cpus_per_task": "3",
+                }
+            }
+        )
+        params = cfg.analysis_parameters["deconvolution"]
+        assert params["psf_mode"] == "synthetic"
+        assert params["synthetic_excitation_nm"] == [488.0, 561.0]
+        assert params["synthetic_emission_nm"] == [520.0, 610.0]
+        assert params["synthetic_numerical_aperture"] == [0.8, 1.0]
+        assert params["hann_window_bounds"] == [0.75, 1.0]
+        assert params["wiener_alpha"] == 0.01
+        assert params["background"] == 120.0
+        assert params["decon_iterations"] == 4
+        assert params["block_size_zyx"] == [64, 128, 128]
+        assert params["batch_size_zyx"] == [256, 256, 256]
+        assert params["cpus_per_task"] == 3
+
+    def test_rejects_invalid_deconvolution_hann_bounds(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
                 analysis_parameters={
-                    "deconvolution": {"execution_order": 0}
+                    "deconvolution": {"hann_window_bounds": [1.0, 0.5]}
                 }
             )
 
@@ -181,9 +216,7 @@ class TestZarrSaveConfig:
 
     def test_conversions_reorder_position_and_time(self):
         assert to_tpczyx_chunks((9, 7, 5, 3, 2, 1)) == (7, 9, 5, 3, 2, 1)
-        assert to_tpczyx_pyramid(
-            ((1, 4), (1, 2), (1,), (1, 2), (1, 2), (1, 2))
-        ) == (
+        assert to_tpczyx_pyramid(((1, 4), (1, 2), (1,), (1, 2), (1, 2), (1, 2))) == (
             (1, 2),
             (1, 4),
             (1,),
@@ -194,9 +227,7 @@ class TestZarrSaveConfig:
 
     def test_reject_invalid_pyramid_start(self):
         with pytest.raises(ValueError):
-            ZarrSaveConfig(
-                pyramid_ptczyx=((2,), (1,), (1,), (1, 2), (1, 2), (1, 2))
-            )
+            ZarrSaveConfig(pyramid_ptczyx=((2,), (1,), (1,), (1, 2), (1, 2), (1, 2)))
 
 
 class TestPyramidLevelFormatting:

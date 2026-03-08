@@ -66,9 +66,37 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "input_source": "data",
         "chunk_basis": "3d",
         "detect_2d_per_slice": False,
-        "use_map_overlap": True,
-        "overlap_zyx": [4, 16, 16],
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
         "memory_overhead_factor": 2.0,
+        "psf_mode": "measured",
+        "channel_indices": [],
+        "measured_psf_paths": [],
+        "measured_psf_xy_um": [],
+        "measured_psf_z_um": [],
+        "synthetic_excitation_nm": [488.0],
+        "synthetic_emission_nm": [520.0],
+        "synthetic_numerical_aperture": [0.7],
+        "synthetic_refractive_index": 1.33,
+        "synthetic_psf_size_zyx": [65, 129, 129],
+        "data_xy_pixel_um": 0.0,
+        "data_z_pixel_um": 0.0,
+        "hann_window_bounds": [0.8, 1.0],
+        "wiener_alpha": 0.005,
+        "background": 110.0,
+        "decon_iterations": 2,
+        "otf_cum_thresh": 0.6,
+        "large_file": False,
+        "block_size_zyx": [256, 256, 256],
+        "batch_size_zyx": [1024, 1024, 1024],
+        "save_16bit": True,
+        "save_zarr": False,
+        "gpu_job": False,
+        "debug": False,
+        "cpus_per_task": 2,
+        "mcc_mode": True,
+        "config_file": "",
+        "gpu_config_file": "",
     },
     "particle_detection": {
         "execution_order": 2,
@@ -185,6 +213,203 @@ def _normalize_common_operation_parameters(
     return normalized
 
 
+def _normalize_parameter_string_list(value: Any) -> list[str]:
+    """Normalize parameter value into a list of non-empty strings.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate value. Accepts strings, sequences, and ``None``.
+
+    Returns
+    -------
+    list[str]
+        Normalized list of non-empty strings.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.replace("\n", ",")
+        return [item.strip() for item in text.split(",") if item.strip()]
+    if isinstance(value, (tuple, list)):
+        out: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                out.append(text)
+        return out
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _normalize_parameter_float_list(value: Any) -> list[float]:
+    """Normalize parameter value into a float list.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate value. Accepts strings, sequences, and scalars.
+
+    Returns
+    -------
+    list[float]
+        Parsed float list.
+    """
+    out: list[float] = []
+    for item in _normalize_parameter_string_list(value):
+        out.append(float(item))
+    return out
+
+
+def _normalize_parameter_int_triplet(
+    value: Any,
+    *,
+    field_name: str,
+    default: tuple[int, int, int],
+) -> list[int]:
+    """Normalize parameter value into a positive integer triplet.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate value to parse.
+    field_name : str
+        Field name used in validation errors.
+    default : tuple[int, int, int]
+        Default triplet when value is empty.
+
+    Returns
+    -------
+    list[int]
+        Positive integer triplet.
+
+    Raises
+    ------
+    ValueError
+        If value does not define exactly three positive integers.
+    """
+    tokens = _normalize_parameter_string_list(value)
+    if not tokens:
+        return [int(default[0]), int(default[1]), int(default[2])]
+    if len(tokens) != 3:
+        raise ValueError(f"{field_name} must define exactly three values.")
+    parsed = [int(tokens[0]), int(tokens[1]), int(tokens[2])]
+    if any(item <= 0 for item in parsed):
+        raise ValueError(f"{field_name} values must be greater than zero.")
+    return parsed
+
+
+def _normalize_deconvolution_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize deconvolution runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate deconvolution parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized deconvolution parameter mapping.
+
+    Raises
+    ------
+    ValueError
+        If required values are invalid.
+    """
+    normalized = _normalize_common_operation_parameters("deconvolution", params)
+
+    psf_mode = str(normalized.get("psf_mode", "measured")).strip().lower()
+    if psf_mode not in {"measured", "synthetic"}:
+        raise ValueError("deconvolution psf_mode must be 'measured' or 'synthetic'.")
+    normalized["psf_mode"] = psf_mode
+
+    normalized["channel_indices"] = [
+        max(0, int(value))
+        for value in _normalize_parameter_float_list(
+            normalized.get("channel_indices", [])
+        )
+    ]
+    normalized["measured_psf_paths"] = _normalize_parameter_string_list(
+        normalized.get("measured_psf_paths", [])
+    )
+    normalized["measured_psf_xy_um"] = _normalize_parameter_float_list(
+        normalized.get("measured_psf_xy_um", [])
+    )
+    normalized["measured_psf_z_um"] = _normalize_parameter_float_list(
+        normalized.get("measured_psf_z_um", [])
+    )
+    normalized["synthetic_excitation_nm"] = _normalize_parameter_float_list(
+        normalized.get("synthetic_excitation_nm", [488.0])
+    )
+    normalized["synthetic_emission_nm"] = _normalize_parameter_float_list(
+        normalized.get("synthetic_emission_nm", [520.0])
+    )
+    normalized["synthetic_numerical_aperture"] = _normalize_parameter_float_list(
+        normalized.get("synthetic_numerical_aperture", [0.7])
+    )
+    normalized["synthetic_refractive_index"] = float(
+        normalized.get("synthetic_refractive_index", 1.33)
+    )
+    if normalized["synthetic_refractive_index"] <= 0:
+        raise ValueError("deconvolution synthetic_refractive_index must be positive.")
+
+    normalized["synthetic_psf_size_zyx"] = _normalize_parameter_int_triplet(
+        normalized.get("synthetic_psf_size_zyx", [65, 129, 129]),
+        field_name="deconvolution synthetic_psf_size_zyx",
+        default=(65, 129, 129),
+    )
+    hann_bounds = _normalize_parameter_float_list(
+        normalized.get("hann_window_bounds", [0.8, 1.0])
+    )
+    if len(hann_bounds) != 2:
+        raise ValueError("deconvolution hann_window_bounds must define two values.")
+    if hann_bounds[0] <= 0 or hann_bounds[1] <= 0 or hann_bounds[0] > hann_bounds[1]:
+        raise ValueError(
+            "deconvolution hann_window_bounds must satisfy 0 < low <= high."
+        )
+    normalized["hann_window_bounds"] = [float(hann_bounds[0]), float(hann_bounds[1])]
+
+    normalized["wiener_alpha"] = float(normalized.get("wiener_alpha", 0.005))
+    if normalized["wiener_alpha"] < 0:
+        raise ValueError("deconvolution wiener_alpha cannot be negative.")
+
+    normalized["background"] = float(normalized.get("background", 110.0))
+    if normalized["background"] < 0:
+        raise ValueError("deconvolution background cannot be negative.")
+
+    normalized["decon_iterations"] = max(1, int(normalized.get("decon_iterations", 2)))
+    normalized["otf_cum_thresh"] = float(normalized.get("otf_cum_thresh", 0.6))
+
+    normalized["data_xy_pixel_um"] = float(normalized.get("data_xy_pixel_um", 0.0))
+    normalized["data_z_pixel_um"] = float(normalized.get("data_z_pixel_um", 0.0))
+    if normalized["data_xy_pixel_um"] < 0 or normalized["data_z_pixel_um"] < 0:
+        raise ValueError("deconvolution data pixel sizes cannot be negative.")
+
+    normalized["large_file"] = bool(normalized.get("large_file", False))
+    normalized["save_16bit"] = bool(normalized.get("save_16bit", True))
+    normalized["save_zarr"] = bool(normalized.get("save_zarr", False))
+    normalized["gpu_job"] = bool(normalized.get("gpu_job", False))
+    normalized["debug"] = bool(normalized.get("debug", False))
+    normalized["mcc_mode"] = bool(normalized.get("mcc_mode", True))
+    normalized["cpus_per_task"] = max(1, int(normalized.get("cpus_per_task", 2)))
+    normalized["config_file"] = str(normalized.get("config_file", "")).strip()
+    normalized["gpu_config_file"] = str(normalized.get("gpu_config_file", "")).strip()
+    normalized["block_size_zyx"] = _normalize_parameter_int_triplet(
+        normalized.get("block_size_zyx", [256, 256, 256]),
+        field_name="deconvolution block_size_zyx",
+        default=(256, 256, 256),
+    )
+    normalized["batch_size_zyx"] = _normalize_parameter_int_triplet(
+        normalized.get("batch_size_zyx", [1024, 1024, 1024]),
+        field_name="deconvolution batch_size_zyx",
+        default=(1024, 1024, 1024),
+    )
+    return normalized
+
+
 def _normalize_particle_detection_parameters(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -205,9 +430,7 @@ def _normalize_particle_detection_parameters(
     ValueError
         If required values are invalid.
     """
-    normalized = _normalize_common_operation_parameters(
-        "particle_detection", params
-    )
+    normalized = _normalize_common_operation_parameters("particle_detection", params)
 
     normalized["channel_index"] = max(0, int(normalized.get("channel_index", 0)))
     normalized["detect_2d_per_slice"] = bool(
@@ -227,9 +450,7 @@ def _normalize_particle_detection_parameters(
     normalized["remove_close_particles"] = bool(
         normalized.get("remove_close_particles", False)
     )
-    normalized["min_distance_sigma"] = float(
-        normalized.get("min_distance_sigma", 10.0)
-    )
+    normalized["min_distance_sigma"] = float(normalized.get("min_distance_sigma", 10.0))
     if normalized["min_distance_sigma"] < 0:
         raise ValueError("particle_detection min_distance_sigma cannot be negative.")
 
@@ -314,7 +535,11 @@ def normalize_analysis_operation_parameters(
     for operation_name in ANALYSIS_OPERATION_ORDER:
         if operation_name not in merged:
             continue
-        if operation_name == "particle_detection":
+        if operation_name == "deconvolution":
+            merged[operation_name] = _normalize_deconvolution_parameters(
+                merged[operation_name]
+            )
+        elif operation_name == "particle_detection":
             merged[operation_name] = _normalize_particle_detection_parameters(
                 merged[operation_name]
             )
@@ -409,7 +634,9 @@ def resolve_analysis_execution_sequence(
         sorted(
             selected,
             key=lambda name: (
-                int(normalized.get(name, {}).get("execution_order", index_map[name] + 1)),
+                int(
+                    normalized.get(name, {}).get("execution_order", index_map[name] + 1)
+                ),
                 int(index_map[name]),
             ),
         )
@@ -476,8 +703,7 @@ def _normalize_ptczyx_chunks(chunks_ptczyx: Sequence[int]) -> ZarrAxisSpec:
     if len(chunks_ptczyx) != len(PTCZYX_AXES):
         axes_text = ", ".join(PTCZYX_AXES)
         raise ValueError(
-            "Zarr chunk sizes must define exactly six axes "
-            f"in ({axes_text}) order."
+            f"Zarr chunk sizes must define exactly six axes in ({axes_text}) order."
         )
     normalized = _normalize_positive_sequence(
         chunks_ptczyx,
@@ -517,8 +743,7 @@ def _normalize_ptczyx_pyramid(
     if len(pyramid_ptczyx) != len(PTCZYX_AXES):
         axes_text = ", ".join(PTCZYX_AXES)
         raise ValueError(
-            "Zarr pyramid factors must define exactly six axes "
-            f"in ({axes_text}) order."
+            f"Zarr pyramid factors must define exactly six axes in ({axes_text}) order."
         )
 
     normalized_axes: list[Tuple[int, ...]] = []
@@ -694,8 +919,7 @@ def format_zarr_chunks_ptczyx(chunks_ptczyx: Sequence[int]) -> str:
     """
     normalized = _normalize_ptczyx_chunks(chunks_ptczyx)
     return ", ".join(
-        f"{axis}={size}"
-        for axis, size in zip(PTCZYX_AXES, normalized, strict=False)
+        f"{axis}={size}" for axis, size in zip(PTCZYX_AXES, normalized, strict=False)
     )
 
 

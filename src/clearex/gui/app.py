@@ -2561,6 +2561,69 @@ if HAS_PYQT6:
                 "Input source controls which dataset this operation reads from. "
                 "Use raw data, or choose an upstream operation output."
             ),
+            "psf_mode": (
+                "Choose whether to use measured PSFs from files or generate synthetic "
+                "PSFs from optical parameters."
+            ),
+            "measured_psf_paths": (
+                "Measured PSF paths in channel order. Provide a single path to reuse "
+                "for all channels, or comma-separated paths per channel."
+            ),
+            "measured_psf_xy_um": (
+                "Measured PSF XY pixel size in microns. Single value or comma-separated "
+                "values per channel."
+            ),
+            "measured_psf_z_um": (
+                "Measured PSF Z pixel size in microns. Single value or comma-separated "
+                "values per channel."
+            ),
+            "synthetic_excitation_nm": (
+                "Synthetic PSF excitation wavelength in nanometers. Single value or "
+                "comma-separated values per channel."
+            ),
+            "synthetic_emission_nm": (
+                "Synthetic PSF emission wavelength in nanometers. Single value or "
+                "comma-separated values per channel."
+            ),
+            "synthetic_numerical_aperture": (
+                "Synthetic PSF numerical aperture. Single value or comma-separated "
+                "values per channel."
+            ),
+            "data_xy_pixel_um": (
+                "Input data XY pixel size in microns. Defaults from store metadata "
+                "when available."
+            ),
+            "data_z_pixel_um": (
+                "Input data Z step in microns. Defaults from store metadata when available."
+            ),
+            "hann_window_bounds": (
+                "OTF Hann window lower and upper bounds. These control frequency-domain "
+                "windowing before Richardson-Lucy updates."
+            ),
+            "wiener_alpha": (
+                "Wiener regularization alpha used by OWM deconvolution. Higher values "
+                "increase regularization."
+            ),
+            "background": (
+                "Background offset removed before deconvolution. Use values in source "
+                "intensity units."
+            ),
+            "decon_iterations": (
+                "Number of Richardson-Lucy iterations for each 3D volume."
+            ),
+            "large_file": (
+                "Enable block/batch processing for large volumes in PyPetaKit5D."
+            ),
+            "block_size_zyx": (
+                "Block size in (z, y, x) when large-file mode is enabled."
+            ),
+            "batch_size_zyx": (
+                "Batch size in (z, y, x) when large-file mode is enabled."
+            ),
+            "cpus_per_task": (
+                "CPU count passed to each PyPetaKit5D job. Keep low when many tasks run "
+                "in parallel on process workers."
+            ),
             "channel_index": "Channel index selects the channel axis index used for detection.",
             "bg_sigma": (
                 "Background sigma controls Gaussian smoothing used in preprocess "
@@ -2645,6 +2708,9 @@ if HAS_PYQT6:
             )
 
             self._operation_defaults = default_analysis_operation_parameters()
+            self._decon_defaults = dict(
+                self._operation_defaults.get("deconvolution", {})
+            )
             self._particle_defaults = dict(
                 self._operation_defaults.get("particle_detection", {})
             )
@@ -2811,6 +2877,12 @@ if HAS_PYQT6:
 
             self._cancel_button.clicked.connect(self.reject)
             self._run_button.clicked.connect(self._on_run)
+            self._decon_psf_mode_combo.currentIndexChanged.connect(
+                self._on_deconvolution_psf_mode_changed
+            )
+            self._decon_large_file_checkbox.toggled.connect(
+                self._set_deconvolution_parameter_enabled_state
+            )
             self._particle_use_overlap_checkbox.toggled.connect(
                 self._set_particle_parameter_enabled_state
             )
@@ -2882,7 +2954,9 @@ if HAS_PYQT6:
                 input_combo, self._PARAMETER_HINTS["input_source"]
             )
 
-            if operation_name == "particle_detection":
+            if operation_name == "deconvolution":
+                self._build_deconvolution_parameter_rows(form)
+            elif operation_name == "particle_detection":
                 self._build_particle_parameter_rows(form)
             elif operation_name == "visualization":
                 self._build_visualization_parameter_rows(form)
@@ -2898,6 +2972,211 @@ if HAS_PYQT6:
             layout.addLayout(form)
             layout.addStretch(1)
             return panel
+
+        def _build_deconvolution_parameter_rows(self, form: QFormLayout) -> None:
+            """Add deconvolution parameter controls to a form.
+
+            Parameters
+            ----------
+            form : QFormLayout
+                Parent form layout receiving deconvolution controls.
+
+            Returns
+            -------
+            None
+                Widgets are created and attached in-place.
+            """
+            self._decon_psf_mode_combo = QComboBox()
+            self._decon_psf_mode_combo.addItem("Measured PSF", "measured")
+            self._decon_psf_mode_combo.addItem("Synthetic PSF", "synthetic")
+            form.addRow("PSF mode", self._decon_psf_mode_combo)
+            self._register_parameter_hint(
+                self._decon_psf_mode_combo, self._PARAMETER_HINTS["psf_mode"]
+            )
+
+            self._decon_measured_psf_paths_input = QLineEdit()
+            self._decon_measured_psf_paths_input.setPlaceholderText(
+                "/path/to/ch0_psf.tif,/path/to/ch1_psf.tif"
+            )
+            form.addRow("Measured PSF path(s)", self._decon_measured_psf_paths_input)
+            self._register_parameter_hint(
+                self._decon_measured_psf_paths_input,
+                self._PARAMETER_HINTS["measured_psf_paths"],
+            )
+
+            self._decon_measured_psf_xy_input = QLineEdit()
+            self._decon_measured_psf_xy_input.setPlaceholderText("0.108,0.108")
+            form.addRow("Measured PSF XY size (um)", self._decon_measured_psf_xy_input)
+            self._register_parameter_hint(
+                self._decon_measured_psf_xy_input,
+                self._PARAMETER_HINTS["measured_psf_xy_um"],
+            )
+
+            self._decon_measured_psf_z_input = QLineEdit()
+            self._decon_measured_psf_z_input.setPlaceholderText("0.5,0.5")
+            form.addRow("Measured PSF Z size (um)", self._decon_measured_psf_z_input)
+            self._register_parameter_hint(
+                self._decon_measured_psf_z_input,
+                self._PARAMETER_HINTS["measured_psf_z_um"],
+            )
+
+            self._decon_synth_excitation_input = QLineEdit()
+            self._decon_synth_excitation_input.setPlaceholderText("488,561")
+            form.addRow("Synthetic excitation (nm)", self._decon_synth_excitation_input)
+            self._register_parameter_hint(
+                self._decon_synth_excitation_input,
+                self._PARAMETER_HINTS["synthetic_excitation_nm"],
+            )
+
+            self._decon_synth_emission_input = QLineEdit()
+            self._decon_synth_emission_input.setPlaceholderText("520,610")
+            form.addRow("Synthetic emission (nm)", self._decon_synth_emission_input)
+            self._register_parameter_hint(
+                self._decon_synth_emission_input,
+                self._PARAMETER_HINTS["synthetic_emission_nm"],
+            )
+
+            self._decon_synth_na_input = QLineEdit()
+            self._decon_synth_na_input.setPlaceholderText("0.7,0.7")
+            form.addRow("Synthetic NA", self._decon_synth_na_input)
+            self._register_parameter_hint(
+                self._decon_synth_na_input,
+                self._PARAMETER_HINTS["synthetic_numerical_aperture"],
+            )
+
+            self._decon_data_xy_spin = QDoubleSpinBox()
+            self._decon_data_xy_spin.setDecimals(5)
+            self._decon_data_xy_spin.setRange(0.0, 1_000_000.0)
+            self._decon_data_xy_spin.setSingleStep(0.01)
+            form.addRow("Data XY size (um)", self._decon_data_xy_spin)
+            self._register_parameter_hint(
+                self._decon_data_xy_spin, self._PARAMETER_HINTS["data_xy_pixel_um"]
+            )
+
+            self._decon_data_z_spin = QDoubleSpinBox()
+            self._decon_data_z_spin.setDecimals(5)
+            self._decon_data_z_spin.setRange(0.0, 1_000_000.0)
+            self._decon_data_z_spin.setSingleStep(0.01)
+            form.addRow("Data Z size (um)", self._decon_data_z_spin)
+            self._register_parameter_hint(
+                self._decon_data_z_spin, self._PARAMETER_HINTS["data_z_pixel_um"]
+            )
+
+            hann_row = QHBoxLayout()
+            apply_compact_row_spacing(hann_row)
+            self._decon_hann_low_spin = QDoubleSpinBox()
+            self._decon_hann_low_spin.setDecimals(3)
+            self._decon_hann_low_spin.setRange(0.001, 10.0)
+            self._decon_hann_low_spin.setSingleStep(0.05)
+            self._decon_hann_high_spin = QDoubleSpinBox()
+            self._decon_hann_high_spin.setDecimals(3)
+            self._decon_hann_high_spin.setRange(0.001, 10.0)
+            self._decon_hann_high_spin.setSingleStep(0.05)
+            hann_row.addWidget(QLabel("low"))
+            hann_row.addWidget(self._decon_hann_low_spin)
+            hann_row.addWidget(QLabel("high"))
+            hann_row.addWidget(self._decon_hann_high_spin)
+            hann_widget = QWidget()
+            hann_widget.setLayout(hann_row)
+            form.addRow("OTF Hann window", hann_widget)
+            self._register_parameter_hint(
+                self._decon_hann_low_spin, self._PARAMETER_HINTS["hann_window_bounds"]
+            )
+            self._register_parameter_hint(
+                self._decon_hann_high_spin, self._PARAMETER_HINTS["hann_window_bounds"]
+            )
+
+            self._decon_wiener_spin = QDoubleSpinBox()
+            self._decon_wiener_spin.setDecimals(6)
+            self._decon_wiener_spin.setRange(0.0, 1000.0)
+            self._decon_wiener_spin.setSingleStep(0.001)
+            form.addRow("Wiener regularization", self._decon_wiener_spin)
+            self._register_parameter_hint(
+                self._decon_wiener_spin, self._PARAMETER_HINTS["wiener_alpha"]
+            )
+
+            self._decon_background_spin = QDoubleSpinBox()
+            self._decon_background_spin.setDecimals(3)
+            self._decon_background_spin.setRange(0.0, 1_000_000_000.0)
+            self._decon_background_spin.setSingleStep(1.0)
+            form.addRow("Background offset", self._decon_background_spin)
+            self._register_parameter_hint(
+                self._decon_background_spin, self._PARAMETER_HINTS["background"]
+            )
+
+            self._decon_iterations_spin = QSpinBox()
+            self._decon_iterations_spin.setRange(1, 10_000)
+            form.addRow("RL iterations", self._decon_iterations_spin)
+            self._register_parameter_hint(
+                self._decon_iterations_spin, self._PARAMETER_HINTS["decon_iterations"]
+            )
+
+            self._decon_large_file_checkbox = QCheckBox("Enable large-file mode")
+            form.addRow("Large-file mode", self._decon_large_file_checkbox)
+            self._register_parameter_hint(
+                self._decon_large_file_checkbox, self._PARAMETER_HINTS["large_file"]
+            )
+
+            block_row = QHBoxLayout()
+            apply_compact_row_spacing(block_row)
+            self._decon_block_z_spin = QSpinBox()
+            self._decon_block_z_spin.setRange(1, 1_000_000)
+            self._decon_block_y_spin = QSpinBox()
+            self._decon_block_y_spin.setRange(1, 1_000_000)
+            self._decon_block_x_spin = QSpinBox()
+            self._decon_block_x_spin.setRange(1, 1_000_000)
+            block_row.addWidget(QLabel("z"))
+            block_row.addWidget(self._decon_block_z_spin)
+            block_row.addWidget(QLabel("y"))
+            block_row.addWidget(self._decon_block_y_spin)
+            block_row.addWidget(QLabel("x"))
+            block_row.addWidget(self._decon_block_x_spin)
+            block_widget = QWidget()
+            block_widget.setLayout(block_row)
+            form.addRow("Block size (z,y,x)", block_widget)
+            self._register_parameter_hint(
+                self._decon_block_z_spin, self._PARAMETER_HINTS["block_size_zyx"]
+            )
+            self._register_parameter_hint(
+                self._decon_block_y_spin, self._PARAMETER_HINTS["block_size_zyx"]
+            )
+            self._register_parameter_hint(
+                self._decon_block_x_spin, self._PARAMETER_HINTS["block_size_zyx"]
+            )
+
+            batch_row = QHBoxLayout()
+            apply_compact_row_spacing(batch_row)
+            self._decon_batch_z_spin = QSpinBox()
+            self._decon_batch_z_spin.setRange(1, 1_000_000)
+            self._decon_batch_y_spin = QSpinBox()
+            self._decon_batch_y_spin.setRange(1, 1_000_000)
+            self._decon_batch_x_spin = QSpinBox()
+            self._decon_batch_x_spin.setRange(1, 1_000_000)
+            batch_row.addWidget(QLabel("z"))
+            batch_row.addWidget(self._decon_batch_z_spin)
+            batch_row.addWidget(QLabel("y"))
+            batch_row.addWidget(self._decon_batch_y_spin)
+            batch_row.addWidget(QLabel("x"))
+            batch_row.addWidget(self._decon_batch_x_spin)
+            batch_widget = QWidget()
+            batch_widget.setLayout(batch_row)
+            form.addRow("Batch size (z,y,x)", batch_widget)
+            self._register_parameter_hint(
+                self._decon_batch_z_spin, self._PARAMETER_HINTS["batch_size_zyx"]
+            )
+            self._register_parameter_hint(
+                self._decon_batch_y_spin, self._PARAMETER_HINTS["batch_size_zyx"]
+            )
+            self._register_parameter_hint(
+                self._decon_batch_x_spin, self._PARAMETER_HINTS["batch_size_zyx"]
+            )
+
+            self._decon_cpus_spin = QSpinBox()
+            self._decon_cpus_spin.setRange(1, 1024)
+            form.addRow("CPUs per task", self._decon_cpus_spin)
+            self._register_parameter_hint(
+                self._decon_cpus_spin, self._PARAMETER_HINTS["cpus_per_task"]
+            )
 
         def _build_particle_parameter_rows(self, form: QFormLayout) -> None:
             """Add particle-detection parameter controls to a form.
@@ -3339,6 +3618,7 @@ if HAS_PYQT6:
                 self._operation_input_combos[operation_name].setEnabled(enabled)
 
             self._refresh_input_source_options()
+            self._set_deconvolution_parameter_enabled_state()
             self._set_particle_parameter_enabled_state()
             self._set_visualization_parameter_enabled_state()
 
@@ -3383,6 +3663,82 @@ if HAS_PYQT6:
                     self._OPERATION_LABELS[name] for name in sequence
                 )
                 self._set_status(f"Current execution sequence: {sequence_text}")
+
+        def _on_deconvolution_psf_mode_changed(self, _: int) -> None:
+            """Update deconvolution PSF-parameter widget states.
+
+            Parameters
+            ----------
+            _ : int
+                Unused combo-box index.
+
+            Returns
+            -------
+            None
+                Deconvolution widget state is updated in-place.
+            """
+            self._set_deconvolution_parameter_enabled_state()
+
+        def _set_deconvolution_parameter_enabled_state(self) -> None:
+            """Enable or disable deconvolution widgets based on mode/selection.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widget enabled states are updated in-place.
+            """
+            decon_enabled = self._operation_checkboxes["deconvolution"].isChecked()
+            psf_mode = str(self._decon_psf_mode_combo.currentData() or "measured")
+            measured_mode = psf_mode == "measured"
+            large_file_enabled = (
+                decon_enabled and self._decon_large_file_checkbox.isChecked()
+            )
+
+            general_widgets = (
+                self._decon_psf_mode_combo,
+                self._decon_data_xy_spin,
+                self._decon_data_z_spin,
+                self._decon_hann_low_spin,
+                self._decon_hann_high_spin,
+                self._decon_wiener_spin,
+                self._decon_background_spin,
+                self._decon_iterations_spin,
+                self._decon_large_file_checkbox,
+                self._decon_cpus_spin,
+            )
+            for widget in general_widgets:
+                widget.setEnabled(decon_enabled)
+
+            measured_widgets = (
+                self._decon_measured_psf_paths_input,
+                self._decon_measured_psf_xy_input,
+                self._decon_measured_psf_z_input,
+            )
+            for widget in measured_widgets:
+                widget.setEnabled(decon_enabled and measured_mode)
+
+            synthetic_widgets = (
+                self._decon_synth_excitation_input,
+                self._decon_synth_emission_input,
+                self._decon_synth_na_input,
+            )
+            for widget in synthetic_widgets:
+                widget.setEnabled(decon_enabled and not measured_mode)
+
+            block_widgets = (
+                self._decon_block_z_spin,
+                self._decon_block_y_spin,
+                self._decon_block_x_spin,
+                self._decon_batch_z_spin,
+                self._decon_batch_y_spin,
+                self._decon_batch_x_spin,
+            )
+            for widget in block_widgets:
+                widget.setEnabled(large_file_enabled)
 
         def _set_particle_parameter_enabled_state(self) -> None:
             """Enable/disable particle widgets based on selection and sub-options.
@@ -3464,6 +3820,9 @@ if HAS_PYQT6:
             normalized_parameters = normalize_analysis_operation_parameters(
                 initial.analysis_parameters
             )
+            decon_params = dict(
+                normalized_parameters.get("deconvolution", self._decon_defaults)
+            )
             particle_params = dict(
                 normalized_parameters.get("particle_detection", self._particle_defaults)
             )
@@ -3521,17 +3880,127 @@ if HAS_PYQT6:
 
             channel_count = 1
             position_count = 1
+            store_xy_um: Optional[float] = None
+            store_z_um: Optional[float] = None
             if initial.file and str(initial.file).lower().endswith((".zarr", ".n5")):
                 try:
                     root = zarr.open_group(str(initial.file), mode="r")
                     if "data" in root and len(tuple(root["data"].shape)) == 6:
                         position_count = max(1, int(root["data"].shape[1]))
                         channel_count = max(1, int(root["data"].shape[2]))
+                        voxel_size = root["data"].attrs.get("voxel_size_um_zyx")
+                        if (
+                            isinstance(voxel_size, (list, tuple))
+                            and len(voxel_size) >= 3
+                        ):
+                            store_z_um = float(voxel_size[0])
+                            store_xy_um = float(voxel_size[2])
+                    if store_xy_um is None or store_z_um is None:
+                        root_voxel_size = root.attrs.get("voxel_size_um_zyx")
+                        if (
+                            isinstance(root_voxel_size, (list, tuple))
+                            and len(root_voxel_size) >= 3
+                        ):
+                            store_z_um = float(root_voxel_size[0])
+                            store_xy_um = float(root_voxel_size[2])
+                    if store_xy_um is None or store_z_um is None:
+                        navigate = root.attrs.get("navigate_experiment")
+                        if isinstance(navigate, dict):
+                            xy_value = navigate.get("xy_pixel_size_um")
+                            z_value = navigate.get("z_step_um")
+                            if xy_value is not None and z_value is not None:
+                                store_xy_um = float(xy_value)
+                                store_z_um = float(z_value)
                 except Exception:
                     position_count = 1
                     channel_count = 1
+                    store_xy_um = None
+                    store_z_um = None
             self._visualization_position_spin.setMaximum(position_count - 1)
             self._particle_channel_spin.setMaximum(channel_count - 1)
+
+            decon_mode = str(decon_params.get("psf_mode", "measured")).strip().lower()
+            decon_mode_index = self._decon_psf_mode_combo.findData(decon_mode)
+            if decon_mode_index < 0:
+                decon_mode_index = self._decon_psf_mode_combo.findData("measured")
+            if decon_mode_index < 0:
+                decon_mode_index = 0
+            self._decon_psf_mode_combo.setCurrentIndex(decon_mode_index)
+            self._decon_measured_psf_paths_input.setText(
+                ",".join(
+                    str(value) for value in decon_params.get("measured_psf_paths", [])
+                )
+            )
+            self._decon_measured_psf_xy_input.setText(
+                ",".join(
+                    str(float(value))
+                    for value in decon_params.get("measured_psf_xy_um", [])
+                )
+            )
+            self._decon_measured_psf_z_input.setText(
+                ",".join(
+                    str(float(value))
+                    for value in decon_params.get("measured_psf_z_um", [])
+                )
+            )
+            self._decon_synth_excitation_input.setText(
+                ",".join(
+                    str(float(value))
+                    for value in decon_params.get("synthetic_excitation_nm", [488.0])
+                )
+            )
+            self._decon_synth_emission_input.setText(
+                ",".join(
+                    str(float(value))
+                    for value in decon_params.get("synthetic_emission_nm", [520.0])
+                )
+            )
+            self._decon_synth_na_input.setText(
+                ",".join(
+                    str(float(value))
+                    for value in decon_params.get("synthetic_numerical_aperture", [0.7])
+                )
+            )
+            data_xy_um = float(decon_params.get("data_xy_pixel_um", 0.0))
+            data_z_um = float(decon_params.get("data_z_pixel_um", 0.0))
+            if data_xy_um <= 0 and store_xy_um is not None:
+                data_xy_um = float(store_xy_um)
+            if data_z_um <= 0 and store_z_um is not None:
+                data_z_um = float(store_z_um)
+            self._decon_data_xy_spin.setValue(max(0.0, data_xy_um))
+            self._decon_data_z_spin.setValue(max(0.0, data_z_um))
+            hann_bounds = decon_params.get("hann_window_bounds", [0.8, 1.0])
+            if not isinstance(hann_bounds, (tuple, list)) or len(hann_bounds) != 2:
+                hann_bounds = [0.8, 1.0]
+            self._decon_hann_low_spin.setValue(float(hann_bounds[0]))
+            self._decon_hann_high_spin.setValue(float(hann_bounds[1]))
+            self._decon_wiener_spin.setValue(
+                float(decon_params.get("wiener_alpha", 0.005))
+            )
+            self._decon_background_spin.setValue(
+                float(decon_params.get("background", 110.0))
+            )
+            self._decon_iterations_spin.setValue(
+                max(1, int(decon_params.get("decon_iterations", 2)))
+            )
+            self._decon_large_file_checkbox.setChecked(
+                bool(decon_params.get("large_file", False))
+            )
+            block_size = decon_params.get("block_size_zyx", [256, 256, 256])
+            if not isinstance(block_size, (tuple, list)) or len(block_size) != 3:
+                block_size = [256, 256, 256]
+            self._decon_block_z_spin.setValue(max(1, int(block_size[0])))
+            self._decon_block_y_spin.setValue(max(1, int(block_size[1])))
+            self._decon_block_x_spin.setValue(max(1, int(block_size[2])))
+            batch_size = decon_params.get("batch_size_zyx", [1024, 1024, 1024])
+            if not isinstance(batch_size, (tuple, list)) or len(batch_size) != 3:
+                batch_size = [1024, 1024, 1024]
+            self._decon_batch_z_spin.setValue(max(1, int(batch_size[0])))
+            self._decon_batch_y_spin.setValue(max(1, int(batch_size[1])))
+            self._decon_batch_x_spin.setValue(max(1, int(batch_size[2])))
+            self._decon_cpus_spin.setValue(
+                max(1, int(decon_params.get("cpus_per_task", 2)))
+            )
 
             self._particle_channel_spin.setValue(
                 max(
@@ -3691,7 +4160,7 @@ if HAS_PYQT6:
                 QLabel#statusLabel {
                     color: #9ab0ca;
                 }
-                QSpinBox, QDoubleSpinBox, QComboBox {
+                QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
                     min-height: 28px;
                     border: 1px solid #2b3f58;
                     border-radius: 8px;
@@ -3701,7 +4170,7 @@ if HAS_PYQT6:
                     selection-background-color: #2f81f7;
                     selection-color: #f8fbff;
                 }
-                QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+                QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
                     border-color: #2f81f7;
                 }
                 QComboBox QAbstractItemView {
@@ -3746,6 +4215,115 @@ if HAS_PYQT6:
                 }
                 """
             )
+
+        @staticmethod
+        def _split_csv_values(text: str) -> list[str]:
+            """Split comma-separated text values.
+
+            Parameters
+            ----------
+            text : str
+                Input CSV-like text.
+
+            Returns
+            -------
+            list[str]
+                Non-empty stripped tokens.
+            """
+            return [
+                token.strip()
+                for token in str(text).replace("\n", ",").split(",")
+                if token.strip()
+            ]
+
+        def _collect_deconvolution_parameters(self) -> Dict[str, Any]:
+            """Collect deconvolution parameter values from widgets.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, Any]
+                Deconvolution parameter mapping.
+            """
+            psf_mode = str(self._decon_psf_mode_combo.currentData() or "measured")
+            return {
+                "chunk_basis": "3d",
+                "detect_2d_per_slice": False,
+                "use_map_overlap": False,
+                "overlap_zyx": [0, 0, 0],
+                "memory_overhead_factor": float(
+                    self._decon_defaults.get("memory_overhead_factor", 2.0)
+                ),
+                "psf_mode": psf_mode,
+                "channel_indices": [],
+                "measured_psf_paths": self._split_csv_values(
+                    self._decon_measured_psf_paths_input.text()
+                ),
+                "measured_psf_xy_um": [
+                    float(value)
+                    for value in self._split_csv_values(
+                        self._decon_measured_psf_xy_input.text()
+                    )
+                ],
+                "measured_psf_z_um": [
+                    float(value)
+                    for value in self._split_csv_values(
+                        self._decon_measured_psf_z_input.text()
+                    )
+                ],
+                "synthetic_excitation_nm": [
+                    float(value)
+                    for value in self._split_csv_values(
+                        self._decon_synth_excitation_input.text()
+                    )
+                ],
+                "synthetic_emission_nm": [
+                    float(value)
+                    for value in self._split_csv_values(
+                        self._decon_synth_emission_input.text()
+                    )
+                ],
+                "synthetic_numerical_aperture": [
+                    float(value)
+                    for value in self._split_csv_values(
+                        self._decon_synth_na_input.text()
+                    )
+                ],
+                "data_xy_pixel_um": float(self._decon_data_xy_spin.value()),
+                "data_z_pixel_um": float(self._decon_data_z_spin.value()),
+                "hann_window_bounds": [
+                    float(self._decon_hann_low_spin.value()),
+                    float(self._decon_hann_high_spin.value()),
+                ],
+                "wiener_alpha": float(self._decon_wiener_spin.value()),
+                "background": float(self._decon_background_spin.value()),
+                "decon_iterations": int(self._decon_iterations_spin.value()),
+                "otf_cum_thresh": float(
+                    self._decon_defaults.get("otf_cum_thresh", 0.6)
+                ),
+                "large_file": bool(self._decon_large_file_checkbox.isChecked()),
+                "block_size_zyx": [
+                    int(self._decon_block_z_spin.value()),
+                    int(self._decon_block_y_spin.value()),
+                    int(self._decon_block_x_spin.value()),
+                ],
+                "batch_size_zyx": [
+                    int(self._decon_batch_z_spin.value()),
+                    int(self._decon_batch_y_spin.value()),
+                    int(self._decon_batch_x_spin.value()),
+                ],
+                "save_16bit": bool(self._decon_defaults.get("save_16bit", True)),
+                "save_zarr": bool(self._decon_defaults.get("save_zarr", False)),
+                "gpu_job": bool(self._decon_defaults.get("gpu_job", False)),
+                "debug": bool(self._decon_defaults.get("debug", False)),
+                "cpus_per_task": int(self._decon_cpus_spin.value()),
+                "mcc_mode": bool(self._decon_defaults.get("mcc_mode", True)),
+                "config_file": str(self._decon_defaults.get("config_file", "")),
+                "gpu_config_file": str(self._decon_defaults.get("gpu_config_file", "")),
+            }
 
         def _collect_particle_parameters(self) -> Dict[str, Any]:
             """Collect particle-detection parameter values from widgets.
@@ -3849,7 +4427,9 @@ if HAS_PYQT6:
             defaults["input_source"] = (
                 str(combo_value).strip() if combo_value is not None else "data"
             ) or "data"
-            if operation_name == "particle_detection":
+            if operation_name == "deconvolution":
+                defaults.update(self._collect_deconvolution_parameters())
+            elif operation_name == "particle_detection":
                 defaults.update(self._collect_particle_parameters())
             elif operation_name == "visualization":
                 defaults.update(self._collect_visualization_parameters())
@@ -3884,12 +4464,65 @@ if HAS_PYQT6:
                 self._base_config.analysis_parameters
             )
             for operation_name in self._OPERATION_KEYS:
-                analysis_parameters[operation_name] = (
-                    self._collect_operation_parameters(operation_name)
-                )
+                try:
+                    analysis_parameters[operation_name] = (
+                        self._collect_operation_parameters(operation_name)
+                    )
+                except ValueError as exc:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Operation Parameters",
+                        f"Invalid values for {self._OPERATION_LABELS[operation_name]}.\n\n{exc}",
+                    )
+                    self._set_status(
+                        f"Invalid {self._OPERATION_LABELS[operation_name]} parameters."
+                    )
+                    return
             analysis_parameters = normalize_analysis_operation_parameters(
                 analysis_parameters
             )
+
+            if selected_flags["deconvolution"]:
+                decon_params = dict(analysis_parameters.get("deconvolution", {}))
+                psf_mode = str(decon_params.get("psf_mode", "measured"))
+                if psf_mode == "measured":
+                    if not decon_params.get("measured_psf_paths"):
+                        QMessageBox.warning(
+                            self,
+                            "Missing PSF Paths",
+                            "Measured PSF mode requires at least one PSF path.",
+                        )
+                        self._set_status(
+                            "Provide at least one measured PSF path for deconvolution."
+                        )
+                        return
+                    if not decon_params.get(
+                        "measured_psf_xy_um"
+                    ) or not decon_params.get("measured_psf_z_um"):
+                        QMessageBox.warning(
+                            self,
+                            "Missing PSF Pixel Size",
+                            "Measured PSF mode requires PSF XY and Z pixel sizes.",
+                        )
+                        self._set_status(
+                            "Provide PSF XY and Z pixel sizes for measured PSF mode."
+                        )
+                        return
+                else:
+                    if (
+                        not decon_params.get("synthetic_excitation_nm")
+                        or not decon_params.get("synthetic_emission_nm")
+                        or not decon_params.get("synthetic_numerical_aperture")
+                    ):
+                        QMessageBox.warning(
+                            self,
+                            "Missing Synthetic PSF Parameters",
+                            "Synthetic PSF mode requires excitation, emission, and NA values.",
+                        )
+                        self._set_status(
+                            "Provide synthetic PSF excitation/emission/NA values."
+                        )
+                        return
 
             self.result_config = WorkflowConfig(
                 file=self._base_config.file,
