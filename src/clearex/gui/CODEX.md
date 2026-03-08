@@ -35,6 +35,20 @@ This folder owns the PyQt6 UX in `app.py`.
   - selected background and selected text colors
 - Keep parameter cards, help panels, and popups visually aligned with title/label palette.
 
+## Spacing System
+
+- Use `src/clearex/gui/spacing.py` as the single source of truth for layout spacing/margins.
+- Do not add ad hoc `setSpacing`, `setHorizontalSpacing`, or `setVerticalSpacing` calls in dialog/window code.
+- Apply helper presets by layout role:
+  - root windows/popups: `apply_window_root_spacing` / `apply_popup_root_spacing`
+  - stacked sections: `apply_stack_spacing`
+  - normal rows: `apply_row_spacing`
+  - compact control rows: `apply_compact_row_spacing`
+  - action/status footers: `apply_footer_row_spacing`
+  - config grids and metadata grids: `apply_dialog_grid_spacing` / `apply_metadata_grid_spacing`
+  - forms and help cards: `apply_form_spacing` / `apply_help_stack_spacing`
+- If a new layout role is needed, add a typed preset/helper in `spacing.py` instead of embedding numeric spacing in `app.py`.
+
 ## Parameter Help UX
 
 - Verbose help text is shown in-panel, not as disruptive popups.

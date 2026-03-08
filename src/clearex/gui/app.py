@@ -34,6 +34,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 # Local Imports
+from .spacing import (
+    apply_compact_row_spacing,
+    apply_dialog_grid_spacing,
+    apply_footer_row_spacing,
+    apply_form_spacing,
+    apply_help_stack_spacing,
+    apply_metadata_grid_spacing,
+    apply_popup_root_spacing,
+    apply_row_spacing,
+    apply_stack_spacing,
+    apply_window_root_spacing,
+)
 from clearex.io.experiment import (
     NavigateExperiment,
     create_dask_client,
@@ -606,7 +618,7 @@ if HAS_PYQT6:
                 Widgets are created and connected in-place.
             """
             root = QVBoxLayout(self)
-            root.setSpacing(12)
+            apply_popup_root_spacing(root)
 
             description = QLabel(
                 "Configure Zarr save chunk sizes and downsampling pyramid in "
@@ -617,8 +629,7 @@ if HAS_PYQT6:
 
             chunk_group = QGroupBox("Chunk Size")
             chunk_layout = QGridLayout(chunk_group)
-            chunk_layout.setHorizontalSpacing(16)
-            chunk_layout.setVerticalSpacing(8)
+            apply_dialog_grid_spacing(chunk_layout)
 
             for row, axis_name in enumerate(PTCZYX_AXES):
                 axis_label = QLabel(axis_name.upper())
@@ -633,8 +644,7 @@ if HAS_PYQT6:
 
             pyramid_group = QGroupBox("Resolution Pyramid Factors")
             pyramid_layout = QGridLayout(pyramid_group)
-            pyramid_layout.setHorizontalSpacing(16)
-            pyramid_layout.setVerticalSpacing(8)
+            apply_dialog_grid_spacing(pyramid_layout)
 
             for row, axis_name in enumerate(PTCZYX_AXES):
                 axis_label = QLabel(axis_name.upper())
@@ -650,6 +660,7 @@ if HAS_PYQT6:
             root.addWidget(pyramid_group)
 
             footer = QHBoxLayout()
+            apply_footer_row_spacing(footer)
             self._defaults_button = QPushButton("Reset Defaults")
             self._cancel_button = QPushButton("Cancel")
             self._apply_button = QPushButton("Apply")
@@ -822,7 +833,7 @@ if HAS_PYQT6:
                 Widgets are created and connected in-place.
             """
             root = QVBoxLayout(self)
-            root.setSpacing(12)
+            apply_popup_root_spacing(root)
 
             overview = QLabel(
                 "Choose how ClearEx orchestrates Dask workers for loading and analysis. "
@@ -832,12 +843,22 @@ if HAS_PYQT6:
             root.addWidget(overview)
 
             mode_row = QHBoxLayout()
+            apply_row_spacing(mode_row)
             mode_label = QLabel("Backend mode:")
             self._mode_combo = QComboBox()
             mode_specs = (
-                (DASK_BACKEND_LOCAL_CLUSTER, DASK_BACKEND_MODE_LABELS[DASK_BACKEND_LOCAL_CLUSTER]),
-                (DASK_BACKEND_SLURM_RUNNER, DASK_BACKEND_MODE_LABELS[DASK_BACKEND_SLURM_RUNNER]),
-                (DASK_BACKEND_SLURM_CLUSTER, DASK_BACKEND_MODE_LABELS[DASK_BACKEND_SLURM_CLUSTER]),
+                (
+                    DASK_BACKEND_LOCAL_CLUSTER,
+                    DASK_BACKEND_MODE_LABELS[DASK_BACKEND_LOCAL_CLUSTER],
+                ),
+                (
+                    DASK_BACKEND_SLURM_RUNNER,
+                    DASK_BACKEND_MODE_LABELS[DASK_BACKEND_SLURM_RUNNER],
+                ),
+                (
+                    DASK_BACKEND_SLURM_CLUSTER,
+                    DASK_BACKEND_MODE_LABELS[DASK_BACKEND_SLURM_CLUSTER],
+                ),
             )
             for idx, (mode_key, mode_text) in enumerate(mode_specs):
                 self._mode_combo.addItem(mode_text, mode_key)
@@ -858,6 +879,7 @@ if HAS_PYQT6:
             root.addWidget(self._mode_stack, 1)
 
             footer = QHBoxLayout()
+            apply_footer_row_spacing(footer)
             self._defaults_button = QPushButton("Reset Defaults")
             self._cancel_button = QPushButton("Cancel")
             self._apply_button = QPushButton("Apply")
@@ -887,7 +909,10 @@ if HAS_PYQT6:
             """
             page = QWidget()
             form = QFormLayout(page)
-            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            apply_form_spacing(form)
+            form.setFieldGrowthPolicy(
+                QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+            )
 
             self._local_workers_input = QLineEdit()
             self._local_workers_input.setPlaceholderText("blank = auto")
@@ -907,6 +932,7 @@ if HAS_PYQT6:
                 lambda: self._browse_directory(self._local_directory_input)
             )
             local_dir_row = QHBoxLayout()
+            apply_row_spacing(local_dir_row)
             local_dir_row.addWidget(self._local_directory_input, 1)
             local_dir_row.addWidget(self._local_directory_browse)
             local_dir_widget = QWidget()
@@ -928,15 +954,21 @@ if HAS_PYQT6:
             """
             page = QWidget()
             form = QFormLayout(page)
-            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            apply_form_spacing(form)
+            form.setFieldGrowthPolicy(
+                QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+            )
 
             self._runner_scheduler_file_input = QLineEdit()
-            self._runner_scheduler_file_input.setPlaceholderText("Path to scheduler file")
+            self._runner_scheduler_file_input.setPlaceholderText(
+                "Path to scheduler file"
+            )
             self._runner_scheduler_file_browse = QPushButton("Browse")
             self._runner_scheduler_file_browse.clicked.connect(
                 self._on_browse_scheduler_file
             )
             scheduler_row = QHBoxLayout()
+            apply_row_spacing(scheduler_row)
             scheduler_row.addWidget(self._runner_scheduler_file_input, 1)
             scheduler_row.addWidget(self._runner_scheduler_file_browse)
             scheduler_widget = QWidget()
@@ -963,10 +995,11 @@ if HAS_PYQT6:
             """
             page = QWidget()
             root = QVBoxLayout(page)
-            root.setSpacing(10)
+            apply_stack_spacing(root)
 
             worker_group = QGroupBox("Worker Job Settings")
             worker_form = QFormLayout(worker_group)
+            apply_form_spacing(worker_form)
             worker_form.setFieldGrowthPolicy(
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
             )
@@ -992,6 +1025,7 @@ if HAS_PYQT6:
                 lambda: self._browse_directory(self._cluster_local_directory_input)
             )
             cluster_local_dir_row = QHBoxLayout()
+            apply_row_spacing(cluster_local_dir_row)
             cluster_local_dir_row.addWidget(self._cluster_local_directory_input, 1)
             cluster_local_dir_row.addWidget(self._cluster_local_directory_browse)
             cluster_local_dir_widget = QWidget()
@@ -1026,6 +1060,7 @@ if HAS_PYQT6:
 
             scheduler_group = QGroupBox("Scheduler Options")
             scheduler_form = QFormLayout(scheduler_group)
+            apply_form_spacing(scheduler_form)
             scheduler_form.setFieldGrowthPolicy(
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
             )
@@ -1142,7 +1177,9 @@ if HAS_PYQT6:
             self._cluster_cores_spin.setValue(cluster_cfg.cores)
             self._cluster_processes_spin.setValue(cluster_cfg.processes)
             self._cluster_memory_input.setText(cluster_cfg.memory)
-            self._cluster_local_directory_input.setText(cluster_cfg.local_directory or "")
+            self._cluster_local_directory_input.setText(
+                cluster_cfg.local_directory or ""
+            )
             self._cluster_interface_input.setText(cluster_cfg.interface)
             self._cluster_walltime_input.setText(cluster_cfg.walltime)
             self._cluster_job_name_input.setText(cluster_cfg.job_name)
@@ -1462,7 +1499,7 @@ if HAS_PYQT6:
             self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
 
             root = QVBoxLayout(self)
-            root.setSpacing(14)
+            apply_window_root_spacing(root)
 
             title = QLabel("Building `data_store.zarr`")
             title.setObjectName("progressTitle")
@@ -1648,7 +1685,7 @@ if HAS_PYQT6:
             self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
 
             root = QVBoxLayout(self)
-            root.setSpacing(14)
+            apply_window_root_spacing(root)
 
             title = QLabel("Executing selected analysis routines")
             title.setObjectName("progressTitle")
@@ -1748,7 +1785,9 @@ if HAS_PYQT6:
             self._loaded_experiment: Optional[NavigateExperiment] = None
             self._loaded_experiment_path: Optional[Path] = None
             self._loaded_source_data_path: Optional[Path] = None
-            self._materialization_worker: Optional[DataStoreMaterializationWorker] = None
+            self._materialization_worker: Optional[DataStoreMaterializationWorker] = (
+                None
+            )
 
             self._build_ui()
             self._apply_theme()
@@ -1767,11 +1806,12 @@ if HAS_PYQT6:
                 Widgets are created and connected in-place.
             """
             root = QVBoxLayout(self)
-            root.setSpacing(14)
+            apply_window_root_spacing(root)
 
             header = QFrame()
             header.setObjectName("headerCard")
             header_layout = QVBoxLayout(header)
+            apply_stack_spacing(header_layout)
             title = QLabel("ClearEx")
             title.setObjectName("title")
             subtitle = QLabel("Experiment Setup")
@@ -1782,8 +1822,10 @@ if HAS_PYQT6:
 
             data_group = QGroupBox("Navigate Experiment")
             data_layout = QVBoxLayout(data_group)
+            apply_stack_spacing(data_layout)
 
             path_row = QHBoxLayout()
+            apply_row_spacing(path_row)
             self._path_input = QLineEdit()
             self._path_input.setPlaceholderText(
                 "Select Navigate experiment.yml or experiment.yaml"
@@ -1801,6 +1843,7 @@ if HAS_PYQT6:
             data_layout.addLayout(path_row)
 
             dask_backend_row = QHBoxLayout()
+            apply_row_spacing(dask_backend_row)
             dask_backend_label = QLabel("Dask backend:")
             dask_backend_label.setObjectName("metadataFieldLabel")
             self._dask_backend_summary = QLabel("n/a")
@@ -1816,6 +1859,7 @@ if HAS_PYQT6:
             data_layout.addLayout(dask_backend_row)
 
             zarr_row = QHBoxLayout()
+            apply_row_spacing(zarr_row)
             zarr_label = QLabel("Zarr save config:")
             zarr_label.setObjectName("metadataFieldLabel")
             self._zarr_config_summary = QLabel("n/a")
@@ -1834,8 +1878,7 @@ if HAS_PYQT6:
 
             metadata_group = QGroupBox("Image Metadata")
             metadata_layout = QGridLayout(metadata_group)
-            metadata_layout.setHorizontalSpacing(18)
-            metadata_layout.setVerticalSpacing(8)
+            apply_metadata_grid_spacing(metadata_layout)
 
             metadata_items = (
                 ("path", "Path"),
@@ -1873,6 +1916,7 @@ if HAS_PYQT6:
             root.addWidget(metadata_group)
 
             footer = QHBoxLayout()
+            apply_footer_row_spacing(footer)
             self._status_label = QLabel("Ready")
             self._status_label.setObjectName("statusLabel")
             self._cancel_button = QPushButton("Cancel")
@@ -2131,7 +2175,9 @@ if HAS_PYQT6:
                             return experiment_path.resolve()
                     continue
 
-                if candidate_path.exists() and is_navigate_experiment_file(candidate_path):
+                if candidate_path.exists() and is_navigate_experiment_file(
+                    candidate_path
+                ):
                     return candidate_path.resolve()
             return None
 
@@ -2351,7 +2397,9 @@ if HAS_PYQT6:
             """
             try:
                 experiment_path, experiment, source_data_path, info = (
-                    self._load_experiment_context(path_text=self._path_input.text().strip())
+                    self._load_experiment_context(
+                        path_text=self._path_input.text().strip()
+                    )
                 )
             except Exception as exc:
                 QMessageBox.critical(
@@ -2378,10 +2426,7 @@ if HAS_PYQT6:
             self._loaded_source_data_path = source_data_path
 
             target_store = resolve_data_store_path(experiment, source_data_path)
-            self._set_status(
-                "Metadata loaded. "
-                f"Target store: {target_store}"
-            )
+            self._set_status(f"Metadata loaded. Target store: {target_store}")
 
         def _accept_with_store_path(self, store_path: Path) -> None:
             """Finalize setup dialog with prepared store path configuration.
@@ -2428,9 +2473,16 @@ if HAS_PYQT6:
                     Path(path_text).expanduser().resolve()
                 )
 
-            if needs_reload or self._loaded_experiment is None or self._loaded_source_data_path is None:
+            if (
+                needs_reload
+                or self._loaded_experiment is None
+                or self._loaded_source_data_path is None
+            ):
                 self._on_load_metadata()
-                if self._loaded_experiment is None or self._loaded_source_data_path is None:
+                if (
+                    self._loaded_experiment is None
+                    or self._loaded_source_data_path is None
+                ):
                     return
 
             experiment = self._loaded_experiment
@@ -2438,7 +2490,9 @@ if HAS_PYQT6:
             target_store = resolve_data_store_path(experiment, source_data_path)
 
             if target_store.exists():
-                self._set_status("Found existing data store. Opening analysis selection.")
+                self._set_status(
+                    "Found existing data store. Opening analysis selection."
+                )
                 self._accept_with_store_path(target_store)
                 return
 
@@ -2627,11 +2681,12 @@ if HAS_PYQT6:
                 Widgets are created and connected in-place.
             """
             root = QVBoxLayout(self)
-            root.setSpacing(14)
+            apply_window_root_spacing(root)
 
             header = QFrame()
             header.setObjectName("headerCard")
             header_layout = QVBoxLayout(header)
+            apply_stack_spacing(header_layout)
             title = QLabel("Select Analysis Methods")
             title.setObjectName("title")
             subtitle = QLabel(
@@ -2643,6 +2698,7 @@ if HAS_PYQT6:
             root.addWidget(header)
 
             store_row = QHBoxLayout()
+            apply_row_spacing(store_row)
             label = QLabel("Data store:")
             label.setObjectName("metadataFieldLabel")
             self._store_label = QLabel("n/a")
@@ -2656,17 +2712,17 @@ if HAS_PYQT6:
             root.addLayout(store_row)
 
             content_row = QHBoxLayout()
-            content_row.setSpacing(12)
+            apply_stack_spacing(content_row)
             root.addLayout(content_row, 1)
 
             analysis_group = QGroupBox("Analysis Selection")
             analysis_group.setMinimumWidth(430)
             analysis_layout = QVBoxLayout(analysis_group)
-            analysis_layout.setSpacing(10)
+            apply_stack_spacing(analysis_layout)
 
             for operation_name in self._OPERATION_KEYS:
                 row = QHBoxLayout()
-                row.setSpacing(8)
+                apply_compact_row_spacing(row)
 
                 checkbox = QCheckBox(self._OPERATION_LABELS[operation_name])
                 checkbox.setObjectName("operationCheckbox")
@@ -2697,7 +2753,8 @@ if HAS_PYQT6:
                 checkbox.toggled.connect(self._on_operation_selection_changed)
                 order_spin.valueChanged.connect(self._on_operation_order_changed)
                 configure_button.clicked.connect(
-                    lambda _checked=False, op=operation_name: self._show_operation_configuration(op)
+                    lambda _checked=False,
+                    op=operation_name: self._show_operation_configuration(op)
                 )
 
             analysis_hint = QLabel(
@@ -2712,7 +2769,7 @@ if HAS_PYQT6:
 
             parameters_group = QGroupBox("Operation Parameters")
             parameters_layout = QVBoxLayout(parameters_group)
-            parameters_layout.setSpacing(8)
+            apply_stack_spacing(parameters_layout)
 
             self._operation_panel_stack = QStackedWidget()
             self._operation_panel_stack.addWidget(self._build_no_selection_panel())
@@ -2725,7 +2782,7 @@ if HAS_PYQT6:
             help_card = QFrame()
             help_card.setObjectName("helpCard")
             help_layout = QVBoxLayout(help_card)
-            help_layout.setSpacing(4)
+            apply_help_stack_spacing(help_layout)
             help_title = QLabel("Parameter Help")
             help_title.setObjectName("helpTitle")
             help_layout.addWidget(help_title)
@@ -2738,7 +2795,10 @@ if HAS_PYQT6:
             content_row.addWidget(parameters_group, 1)
 
             footer = QHBoxLayout()
-            self._status_label = QLabel("Configure selected analysis routines and click Run.")
+            apply_footer_row_spacing(footer)
+            self._status_label = QLabel(
+                "Configure selected analysis routines and click Run."
+            )
             self._status_label.setObjectName("statusLabel")
             self._status_label.setWordWrap(True)
             footer.addWidget(self._status_label, 1)
@@ -2772,6 +2832,7 @@ if HAS_PYQT6:
             """
             widget = QWidget()
             layout = QVBoxLayout(widget)
+            apply_stack_spacing(layout)
             text = QLabel(
                 "Select an analysis routine on the left, then click Configure to open "
                 "its operation parameters."
@@ -2797,7 +2858,7 @@ if HAS_PYQT6:
             """
             panel = QWidget()
             layout = QVBoxLayout(panel)
-            layout.setSpacing(8)
+            apply_stack_spacing(layout)
 
             profile = QLabel(
                 f"{self._OPERATION_LABELS[operation_name]} Configuration\n"
@@ -2808,15 +2869,18 @@ if HAS_PYQT6:
             layout.addWidget(profile)
 
             form = QFormLayout()
-            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            form.setLabelAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
             form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-            form.setHorizontalSpacing(10)
-            form.setVerticalSpacing(8)
+            apply_form_spacing(form)
 
             input_combo = QComboBox()
             form.addRow("Input source", input_combo)
             self._operation_input_combos[operation_name] = input_combo
-            self._register_parameter_hint(input_combo, self._PARAMETER_HINTS["input_source"])
+            self._register_parameter_hint(
+                input_combo, self._PARAMETER_HINTS["input_source"]
+            )
 
             if operation_name == "particle_detection":
                 self._build_particle_parameter_rows(form)
@@ -2914,7 +2978,8 @@ if HAS_PYQT6:
             self._particle_exclude_border_spin.setRange(0, 1_000_000)
             form.addRow("exclude_border", self._particle_exclude_border_spin)
             self._register_parameter_hint(
-                self._particle_exclude_border_spin, self._PARAMETER_HINTS["exclude_border"]
+                self._particle_exclude_border_spin,
+                self._PARAMETER_HINTS["exclude_border"],
             )
 
             self._particle_use_overlap_checkbox = QCheckBox("Use map_overlap margins")
@@ -2925,6 +2990,7 @@ if HAS_PYQT6:
             )
 
             overlap_row = QHBoxLayout()
+            apply_compact_row_spacing(overlap_row)
             self._particle_overlap_z_spin = QSpinBox()
             self._particle_overlap_z_spin.setRange(0, 1_000_000)
             self._particle_overlap_y_spin = QSpinBox()
@@ -2974,7 +3040,8 @@ if HAS_PYQT6:
             self._particle_min_distance_spin.setSingleStep(0.5)
             form.addRow("min_distance_sigma", self._particle_min_distance_spin)
             self._register_parameter_hint(
-                self._particle_min_distance_spin, self._PARAMETER_HINTS["min_distance_sigma"]
+                self._particle_min_distance_spin,
+                self._PARAMETER_HINTS["min_distance_sigma"],
             )
 
         def _build_visualization_parameter_rows(self, form: QFormLayout) -> None:
@@ -3057,7 +3124,10 @@ if HAS_PYQT6:
                     self._set_parameter_help(message)
                 elif event_type in (QEvent.Type.Leave, QEvent.Type.FocusOut):
                     focus_widget = self.focusWidget()
-                    if focus_widget is not None and focus_widget in self._parameter_help_map:
+                    if (
+                        focus_widget is not None
+                        and focus_widget in self._parameter_help_map
+                    ):
                         self._set_parameter_help(self._parameter_help_map[focus_widget])
                     else:
                         self._set_parameter_help(self._parameter_help_default)
@@ -3194,9 +3264,7 @@ if HAS_PYQT6:
             for operation_name, combo in self._operation_input_combos.items():
                 current_data = combo.currentData()
                 current_source = (
-                    str(current_data).strip()
-                    if current_data is not None
-                    else "data"
+                    str(current_data).strip() if current_data is not None else "data"
                 ) or "data"
                 options = self._input_options_for_operation(operation_name)
                 option_values = [value for value, _ in options]
@@ -3276,7 +3344,9 @@ if HAS_PYQT6:
 
             if (
                 self._active_config_operation is not None
-                and not self._operation_checkboxes[self._active_config_operation].isChecked()
+                and not self._operation_checkboxes[
+                    self._active_config_operation
+                ].isChecked()
                 and self._operation_panel_stack is not None
             ):
                 self._active_config_operation = None
@@ -3289,7 +3359,9 @@ if HAS_PYQT6:
                 self._set_status("Select at least one analysis routine.")
                 return
 
-            sequence_text = " -> ".join(self._OPERATION_LABELS[name] for name in sequence)
+            sequence_text = " -> ".join(
+                self._OPERATION_LABELS[name] for name in sequence
+            )
             self._set_status(f"Current execution sequence: {sequence_text}")
 
         def _on_operation_order_changed(self) -> None:
@@ -3324,7 +3396,9 @@ if HAS_PYQT6:
             None
                 Widget enabled states are updated in-place.
             """
-            particle_enabled = self._operation_checkboxes["particle_detection"].isChecked()
+            particle_enabled = self._operation_checkboxes[
+                "particle_detection"
+            ].isChecked()
             overlap_enabled = (
                 particle_enabled and self._particle_use_overlap_checkbox.isChecked()
             )
@@ -3365,7 +3439,9 @@ if HAS_PYQT6:
             None
                 Widget enabled states are updated in-place.
             """
-            visualization_enabled = self._operation_checkboxes["visualization"].isChecked()
+            visualization_enabled = self._operation_checkboxes[
+                "visualization"
+            ].isChecked()
             self._visualization_position_spin.setEnabled(visualization_enabled)
             self._visualization_multiscale_checkbox.setEnabled(visualization_enabled)
             self._visualization_overlay_points_checkbox.setEnabled(
@@ -3423,9 +3499,14 @@ if HAS_PYQT6:
 
             self._refresh_input_source_options()
             for operation_name in self._OPERATION_KEYS:
-                requested_source = str(
-                    normalized_parameters.get(operation_name, {}).get("input_source", "data")
-                ).strip() or "data"
+                requested_source = (
+                    str(
+                        normalized_parameters.get(operation_name, {}).get(
+                            "input_source", "data"
+                        )
+                    ).strip()
+                    or "data"
+                )
                 combo = self._operation_input_combos[operation_name]
                 combo.blockSignals(True)
                 combo_index = combo.findData(requested_source)
@@ -3464,7 +3545,9 @@ if HAS_PYQT6:
             self._particle_bg_sigma_spin.setValue(
                 float(particle_params.get("bg_sigma", 20.0))
             )
-            self._particle_fwhm_spin.setValue(float(particle_params.get("fwhm_px", 3.0)))
+            self._particle_fwhm_spin.setValue(
+                float(particle_params.get("fwhm_px", 3.0))
+            )
             self._particle_sigma_min_spin.setValue(
                 float(particle_params.get("sigma_min_factor", 1.0))
             )
@@ -3680,7 +3763,9 @@ if HAS_PYQT6:
                 "channel_index": int(self._particle_channel_spin.value()),
                 "chunk_basis": "3d",
                 "detect_2d_per_slice": True,
-                "use_map_overlap": bool(self._particle_use_overlap_checkbox.isChecked()),
+                "use_map_overlap": bool(
+                    self._particle_use_overlap_checkbox.isChecked()
+                ),
                 "overlap_zyx": [
                     int(self._particle_overlap_z_spin.value()),
                     int(self._particle_overlap_y_spin.value()),
@@ -3799,8 +3884,8 @@ if HAS_PYQT6:
                 self._base_config.analysis_parameters
             )
             for operation_name in self._OPERATION_KEYS:
-                analysis_parameters[operation_name] = self._collect_operation_parameters(
-                    operation_name
+                analysis_parameters[operation_name] = (
+                    self._collect_operation_parameters(operation_name)
                 )
             analysis_parameters = normalize_analysis_operation_parameters(
                 analysis_parameters
@@ -3819,7 +3904,9 @@ if HAS_PYQT6:
                 analysis_parameters=analysis_parameters,
             )
             sequence = self._selected_operations_in_sequence()
-            sequence_text = " -> ".join(self._OPERATION_LABELS[name] for name in sequence)
+            sequence_text = " -> ".join(
+                self._OPERATION_LABELS[name] for name in sequence
+            )
             self._set_status(f"Launching selected analysis routines: {sequence_text}")
             self.accept()
 
@@ -3869,11 +3956,16 @@ def launch_gui(
 
     setup_dialog = ClearExSetupDialog(initial=initial or WorkflowConfig())
     setup_result = setup_dialog.exec()
-    if setup_result != QDialog.DialogCode.Accepted or setup_dialog.result_config is None:
+    if (
+        setup_result != QDialog.DialogCode.Accepted
+        or setup_dialog.result_config is None
+    ):
         selected = None
     else:
         if run_callback is None:
-            analysis_dialog = AnalysisSelectionDialog(initial=setup_dialog.result_config)
+            analysis_dialog = AnalysisSelectionDialog(
+                initial=setup_dialog.result_config
+            )
             analysis_result = analysis_dialog.exec()
             selected = (
                 analysis_dialog.result_config
