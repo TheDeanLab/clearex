@@ -74,8 +74,12 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "measured_psf_paths": [],
         "measured_psf_xy_um": [],
         "measured_psf_z_um": [],
+        "synthetic_microscopy_mode": "widefield",
+        "synthetic_illumination_wavelength_nm": [488.0],
+        "synthetic_illumination_numerical_aperture": [0.2],
         "synthetic_excitation_nm": [488.0],
         "synthetic_emission_nm": [520.0],
+        "synthetic_detection_numerical_aperture": [0.7],
         "synthetic_numerical_aperture": [0.7],
         "synthetic_refractive_index": 1.33,
         "synthetic_psf_size_zyx": [65, 129, 129],
@@ -341,15 +345,126 @@ def _normalize_deconvolution_parameters(
     normalized["measured_psf_z_um"] = _normalize_parameter_float_list(
         normalized.get("measured_psf_z_um", [])
     )
+    mode_raw = str(normalized.get("synthetic_microscopy_mode", "widefield")).strip()
+    microscopy_mode = mode_raw.lower().replace("-", "_").replace(" ", "_")
+    if microscopy_mode == "lightsheet":
+        microscopy_mode = "light_sheet"
+    if microscopy_mode not in {"widefield", "confocal", "light_sheet"}:
+        raise ValueError(
+            "deconvolution synthetic_microscopy_mode must be one of "
+            "'widefield', 'confocal', or 'light_sheet'."
+        )
+    normalized["synthetic_microscopy_mode"] = microscopy_mode
+
+    default_illumination_wavelengths = [
+        float(value)
+        for value in DEFAULT_ANALYSIS_OPERATION_PARAMETERS["deconvolution"].get(
+            "synthetic_illumination_wavelength_nm",
+            [488.0],
+        )
+    ]
+    illumination_wavelengths = _normalize_parameter_float_list(
+        normalized.get("synthetic_illumination_wavelength_nm", [])
+    )
+    excitation_wavelengths = _normalize_parameter_float_list(
+        normalized.get("synthetic_excitation_nm", [])
+    )
+    if (
+        illumination_wavelengths
+        and excitation_wavelengths
+        and illumination_wavelengths == default_illumination_wavelengths
+        and excitation_wavelengths != default_illumination_wavelengths
+    ):
+        illumination_wavelengths = list(excitation_wavelengths)
+    elif not illumination_wavelengths:
+        illumination_wavelengths = (
+            list(excitation_wavelengths)
+            if excitation_wavelengths
+            else list(default_illumination_wavelengths)
+        )
+    if not illumination_wavelengths:
+        illumination_wavelengths = [488.0]
+    normalized["synthetic_illumination_wavelength_nm"] = [
+        float(value) for value in illumination_wavelengths
+    ]
+    # Compatibility alias used by existing configs.
+    normalized["synthetic_excitation_nm"] = [
+        float(value) for value in illumination_wavelengths
+    ]
+
+    normalized["synthetic_illumination_numerical_aperture"] = [
+        float(value)
+        for value in _normalize_parameter_float_list(
+            normalized.get("synthetic_illumination_numerical_aperture", [0.2])
+        )
+    ]
     normalized["synthetic_excitation_nm"] = _normalize_parameter_float_list(
         normalized.get("synthetic_excitation_nm", [488.0])
     )
     normalized["synthetic_emission_nm"] = _normalize_parameter_float_list(
         normalized.get("synthetic_emission_nm", [520.0])
     )
-    normalized["synthetic_numerical_aperture"] = _normalize_parameter_float_list(
-        normalized.get("synthetic_numerical_aperture", [0.7])
+    default_detection_na = [
+        float(value)
+        for value in DEFAULT_ANALYSIS_OPERATION_PARAMETERS["deconvolution"].get(
+            "synthetic_detection_numerical_aperture",
+            [0.7],
+        )
+    ]
+    detection_na = _normalize_parameter_float_list(
+        normalized.get("synthetic_detection_numerical_aperture", [])
     )
+    legacy_detection_na = _normalize_parameter_float_list(
+        normalized.get("synthetic_numerical_aperture", [])
+    )
+    if (
+        detection_na
+        and legacy_detection_na
+        and detection_na == default_detection_na
+        and legacy_detection_na != default_detection_na
+    ):
+        detection_na = list(legacy_detection_na)
+    elif not detection_na:
+        detection_na = (
+            list(legacy_detection_na)
+            if legacy_detection_na
+            else list(default_detection_na)
+        )
+    if not detection_na:
+        detection_na = [0.7]
+    normalized["synthetic_detection_numerical_aperture"] = [
+        float(value) for value in detection_na
+    ]
+    # Compatibility alias used by existing configs.
+    normalized["synthetic_numerical_aperture"] = [
+        float(value) for value in detection_na
+    ]
+
+    for field_name in (
+        "synthetic_illumination_wavelength_nm",
+        "synthetic_emission_nm",
+        "synthetic_detection_numerical_aperture",
+        "synthetic_illumination_numerical_aperture",
+    ):
+        for value in normalized.get(field_name, []):
+            if float(value) <= 0:
+                raise ValueError(f"deconvolution {field_name} values must be positive.")
+
+    if (
+        normalized["synthetic_microscopy_mode"] == "light_sheet"
+        and not normalized["synthetic_illumination_wavelength_nm"]
+    ):
+        raise ValueError(
+            "deconvolution light_sheet mode requires synthetic_illumination_wavelength_nm."
+        )
+    if (
+        normalized["synthetic_microscopy_mode"] == "light_sheet"
+        and not normalized["synthetic_illumination_numerical_aperture"]
+    ):
+        raise ValueError(
+            "deconvolution light_sheet mode requires "
+            "synthetic_illumination_numerical_aperture."
+        )
     normalized["synthetic_refractive_index"] = float(
         normalized.get("synthetic_refractive_index", 1.33)
     )

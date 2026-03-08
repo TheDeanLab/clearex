@@ -149,9 +149,11 @@ class TestWorkflowConfig:
             analysis_parameters={
                 "deconvolution": {
                     "psf_mode": "synthetic",
+                    "synthetic_microscopy_mode": "confocal",
                     "synthetic_excitation_nm": "488,561",
+                    "synthetic_illumination_numerical_aperture": "0.2,0.25",
                     "synthetic_emission_nm": "520,610",
-                    "synthetic_numerical_aperture": "0.8,1.0",
+                    "synthetic_detection_numerical_aperture": "0.8,1.0",
                     "hann_window_bounds": "0.75,1.0",
                     "wiener_alpha": "0.01",
                     "background": "120",
@@ -164,8 +166,12 @@ class TestWorkflowConfig:
         )
         params = cfg.analysis_parameters["deconvolution"]
         assert params["psf_mode"] == "synthetic"
+        assert params["synthetic_microscopy_mode"] == "confocal"
+        assert params["synthetic_illumination_wavelength_nm"] == [488.0, 561.0]
         assert params["synthetic_excitation_nm"] == [488.0, 561.0]
+        assert params["synthetic_illumination_numerical_aperture"] == [0.2, 0.25]
         assert params["synthetic_emission_nm"] == [520.0, 610.0]
+        assert params["synthetic_detection_numerical_aperture"] == [0.8, 1.0]
         assert params["synthetic_numerical_aperture"] == [0.8, 1.0]
         assert params["hann_window_bounds"] == [0.75, 1.0]
         assert params["wiener_alpha"] == 0.01
@@ -174,6 +180,36 @@ class TestWorkflowConfig:
         assert params["block_size_zyx"] == [64, 128, 128]
         assert params["batch_size_zyx"] == [256, 256, 256]
         assert params["cpus_per_task"] == 3
+
+    def test_normalizes_lightsheet_mode_alias(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "deconvolution": {
+                    "psf_mode": "synthetic",
+                    "synthetic_microscopy_mode": "lightsheet",
+                    "synthetic_illumination_wavelength_nm": "488",
+                    "synthetic_illumination_numerical_aperture": "0.2",
+                    "synthetic_emission_nm": "520",
+                    "synthetic_detection_numerical_aperture": "0.8",
+                }
+            }
+        )
+        params = cfg.analysis_parameters["deconvolution"]
+        assert params["synthetic_microscopy_mode"] == "light_sheet"
+        assert params["synthetic_illumination_wavelength_nm"] == [488.0]
+        assert params["synthetic_illumination_numerical_aperture"] == [0.2]
+        assert params["synthetic_detection_numerical_aperture"] == [0.8]
+
+    def test_rejects_invalid_deconvolution_synthetic_mode(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={
+                    "deconvolution": {
+                        "psf_mode": "synthetic",
+                        "synthetic_microscopy_mode": "invalid_mode",
+                    }
+                }
+            )
 
     def test_rejects_invalid_deconvolution_hann_bounds(self):
         with pytest.raises(ValueError):

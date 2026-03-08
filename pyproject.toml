@@ -38,7 +38,10 @@ dependencies = [
 
 [project.optional-dependencies]
 
-decon = ["PyPetaKit5D",]
+decon = [
+    "PyPetaKit5D",
+    "psfmodels @ git+https://github.com/tlambert03/PSFmodels.git",
+]
 
 dev = [
     "black>=25.11.0",

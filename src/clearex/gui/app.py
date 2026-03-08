@@ -85,7 +85,13 @@ import zarr
 
 try:
     from PyQt6.QtCore import QEvent, QMimeData, QObject, QThread, Qt, pyqtSignal
-    from PyQt6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+    from PyQt6.QtGui import (
+        QDragEnterEvent,
+        QDragMoveEvent,
+        QDropEvent,
+        QImage,
+        QPixmap,
+    )
     from PyQt6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -104,6 +110,7 @@ try:
         QPlainTextEdit,
         QProgressBar,
         QPushButton,
+        QScrollArea,
         QSpinBox,
         QStackedWidget,
         QVBoxLayout,
@@ -371,7 +378,7 @@ def _popup_dialog_stylesheet() -> str:
         QDialog {
             background-color: #0c1118;
             color: #e6edf3;
-            font-family: "Segoe UI", "Avenir Next", sans-serif;
+            font-family: "Avenir Next", "Helvetica Neue", "Arial", sans-serif;
             font-size: 13px;
         }
         QLabel {
@@ -1522,7 +1529,7 @@ if HAS_PYQT6:
                 QDialog {
                     background-color: #0c1118;
                     color: #e6edf3;
-                    font-family: "Segoe UI", "Avenir Next", sans-serif;
+                    font-family: "Avenir Next", "Helvetica Neue", "Arial", sans-serif;
                 }
                 QLabel#progressTitle {
                     font-size: 18px;
@@ -1708,7 +1715,7 @@ if HAS_PYQT6:
                 QDialog {
                     background-color: #0c1118;
                     color: #e6edf3;
-                    font-family: "Segoe UI", "Avenir Next", sans-serif;
+                    font-family: "Avenir Next", "Helvetica Neue", "Arial", sans-serif;
                 }
                 QLabel#progressTitle {
                     font-size: 18px;
@@ -2043,8 +2050,11 @@ if HAS_PYQT6:
                 QDialog {
                     background-color: #0c1118;
                     color: #e6edf3;
-                    font-family: "Segoe UI", "Avenir Next", sans-serif;
+                    font-family: "Avenir Next", "Helvetica Neue", "Arial", sans-serif;
                     font-size: 13px;
+                }
+                QLabel {
+                    color: #d9e2f1;
                 }
                 #headerCard {
                     background: qlineargradient(
@@ -2578,16 +2588,35 @@ if HAS_PYQT6:
                 "values per channel."
             ),
             "synthetic_excitation_nm": (
-                "Synthetic PSF excitation wavelength in nanometers. Single value or "
-                "comma-separated values per channel."
+                "Synthetic illumination wavelength in nanometers. In light-sheet mode, "
+                "this is the illumination laser wavelength."
             ),
             "synthetic_emission_nm": (
                 "Synthetic PSF emission wavelength in nanometers. Single value or "
                 "comma-separated values per channel."
             ),
+            "synthetic_microscopy_mode": (
+                "Select the synthetic PSF model: widefield, confocal, or light-sheet."
+            ),
+            "synthetic_illumination_wavelength_nm": (
+                "Light-sheet illumination wavelength in nanometers. Single value or "
+                "comma-separated values per channel."
+            ),
+            "synthetic_illumination_numerical_aperture": (
+                "Light-sheet illumination NA values. Single value or comma-separated "
+                "values per channel."
+            ),
+            "synthetic_detection_numerical_aperture": (
+                "Synthetic detection objective NA. Single value or comma-separated "
+                "values per channel."
+            ),
             "synthetic_numerical_aperture": (
                 "Synthetic PSF numerical aperture. Single value or comma-separated "
                 "values per channel."
+            ),
+            "synthetic_preview": (
+                "Render a synthetic PSF preview image using the current synthetic "
+                "parameters and voxel sizes."
             ),
             "data_xy_pixel_um": (
                 "Input data XY pixel size in microns. Defaults from store metadata "
@@ -2727,8 +2756,12 @@ if HAS_PYQT6:
             self._active_config_operation: Optional[str] = None
 
             self._operation_panel_stack: Optional[QStackedWidget] = None
+            self._operation_panel_scroll: Optional[QScrollArea] = None
             self._parameter_help_label: Optional[QLabel] = None
             self._store_label: Optional[QLabel] = None
+            self._decon_measured_section: Optional[QFrame] = None
+            self._decon_synthetic_section: Optional[QFrame] = None
+            self._decon_light_sheet_section: Optional[QFrame] = None
 
             self._build_ui()
             self._apply_theme()
@@ -2843,7 +2876,11 @@ if HAS_PYQT6:
                 panel = self._build_operation_panel(operation_name)
                 panel_index = self._operation_panel_stack.addWidget(panel)
                 self._operation_panel_indices[operation_name] = panel_index
-            parameters_layout.addWidget(self._operation_panel_stack, 1)
+            self._operation_panel_scroll = QScrollArea()
+            self._operation_panel_scroll.setWidgetResizable(True)
+            self._operation_panel_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self._operation_panel_scroll.setWidget(self._operation_panel_stack)
+            parameters_layout.addWidget(self._operation_panel_scroll, 1)
 
             help_card = QFrame()
             help_card.setObjectName("helpCard")
@@ -2879,6 +2916,12 @@ if HAS_PYQT6:
             self._run_button.clicked.connect(self._on_run)
             self._decon_psf_mode_combo.currentIndexChanged.connect(
                 self._on_deconvolution_psf_mode_changed
+            )
+            self._decon_synth_mode_combo.currentIndexChanged.connect(
+                self._set_deconvolution_parameter_enabled_state
+            )
+            self._decon_preview_psf_button.clicked.connect(
+                self._on_preview_synthetic_psf
             )
             self._decon_large_file_checkbox.toggled.connect(
                 self._set_deconvolution_parameter_enabled_state
@@ -2973,6 +3016,39 @@ if HAS_PYQT6:
             layout.addStretch(1)
             return panel
 
+        def _build_parameter_section_card(
+            self, title: str
+        ) -> tuple[QFrame, QFormLayout]:
+            """Create a themed section card containing a form layout.
+
+            Parameters
+            ----------
+            title : str
+                Section title text.
+
+            Returns
+            -------
+            tuple[QFrame, QFormLayout]
+                Created section card and inner form layout.
+            """
+            section = QFrame()
+            section.setObjectName("operationSection")
+            section_layout = QVBoxLayout(section)
+            apply_stack_spacing(section_layout)
+
+            title_label = QLabel(str(title))
+            title_label.setObjectName("operationSectionTitle")
+            section_layout.addWidget(title_label)
+
+            section_form = QFormLayout()
+            section_form.setLabelAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            section_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+            apply_form_spacing(section_form)
+            section_layout.addLayout(section_form)
+            return section, section_form
+
         def _build_deconvolution_parameter_rows(self, form: QFormLayout) -> None:
             """Add deconvolution parameter controls to a form.
 
@@ -2994,11 +3070,17 @@ if HAS_PYQT6:
                 self._decon_psf_mode_combo, self._PARAMETER_HINTS["psf_mode"]
             )
 
+            self._decon_measured_section, measured_form = (
+                self._build_parameter_section_card("Measured PSF Settings")
+            )
             self._decon_measured_psf_paths_input = QLineEdit()
             self._decon_measured_psf_paths_input.setPlaceholderText(
                 "/path/to/ch0_psf.tif,/path/to/ch1_psf.tif"
             )
-            form.addRow("Measured PSF path(s)", self._decon_measured_psf_paths_input)
+            measured_form.addRow(
+                "Measured PSF path(s)",
+                self._decon_measured_psf_paths_input,
+            )
             self._register_parameter_hint(
                 self._decon_measured_psf_paths_input,
                 self._PARAMETER_HINTS["measured_psf_paths"],
@@ -3006,7 +3088,10 @@ if HAS_PYQT6:
 
             self._decon_measured_psf_xy_input = QLineEdit()
             self._decon_measured_psf_xy_input.setPlaceholderText("0.108,0.108")
-            form.addRow("Measured PSF XY size (um)", self._decon_measured_psf_xy_input)
+            measured_form.addRow(
+                "Measured PSF XY size (um)",
+                self._decon_measured_psf_xy_input,
+            )
             self._register_parameter_hint(
                 self._decon_measured_psf_xy_input,
                 self._PARAMETER_HINTS["measured_psf_xy_um"],
@@ -3014,23 +3099,35 @@ if HAS_PYQT6:
 
             self._decon_measured_psf_z_input = QLineEdit()
             self._decon_measured_psf_z_input.setPlaceholderText("0.5,0.5")
-            form.addRow("Measured PSF Z size (um)", self._decon_measured_psf_z_input)
+            measured_form.addRow(
+                "Measured PSF Z size (um)",
+                self._decon_measured_psf_z_input,
+            )
             self._register_parameter_hint(
                 self._decon_measured_psf_z_input,
                 self._PARAMETER_HINTS["measured_psf_z_um"],
             )
+            form.addRow(self._decon_measured_section)
 
-            self._decon_synth_excitation_input = QLineEdit()
-            self._decon_synth_excitation_input.setPlaceholderText("488,561")
-            form.addRow("Synthetic excitation (nm)", self._decon_synth_excitation_input)
+            self._decon_synthetic_section, synthetic_form = (
+                self._build_parameter_section_card("Synthetic PSF Settings")
+            )
+            self._decon_synth_mode_combo = QComboBox()
+            self._decon_synth_mode_combo.addItem("Widefield", "widefield")
+            self._decon_synth_mode_combo.addItem("Confocal", "confocal")
+            self._decon_synth_mode_combo.addItem("Light-Sheet", "light_sheet")
+            synthetic_form.addRow("Synthetic microscopy", self._decon_synth_mode_combo)
             self._register_parameter_hint(
-                self._decon_synth_excitation_input,
-                self._PARAMETER_HINTS["synthetic_excitation_nm"],
+                self._decon_synth_mode_combo,
+                self._PARAMETER_HINTS["synthetic_microscopy_mode"],
             )
 
             self._decon_synth_emission_input = QLineEdit()
             self._decon_synth_emission_input.setPlaceholderText("520,610")
-            form.addRow("Synthetic emission (nm)", self._decon_synth_emission_input)
+            synthetic_form.addRow(
+                "Detection emission (nm)",
+                self._decon_synth_emission_input,
+            )
             self._register_parameter_hint(
                 self._decon_synth_emission_input,
                 self._PARAMETER_HINTS["synthetic_emission_nm"],
@@ -3038,11 +3135,45 @@ if HAS_PYQT6:
 
             self._decon_synth_na_input = QLineEdit()
             self._decon_synth_na_input.setPlaceholderText("0.7,0.7")
-            form.addRow("Synthetic NA", self._decon_synth_na_input)
+            synthetic_form.addRow("Detection NA", self._decon_synth_na_input)
             self._register_parameter_hint(
                 self._decon_synth_na_input,
-                self._PARAMETER_HINTS["synthetic_numerical_aperture"],
+                self._PARAMETER_HINTS["synthetic_detection_numerical_aperture"],
             )
+
+            self._decon_light_sheet_section, light_sheet_form = (
+                self._build_parameter_section_card("Light-Sheet Optical Settings")
+            )
+            self._decon_synth_excitation_input = QLineEdit()
+            self._decon_synth_excitation_input.setPlaceholderText("488,561")
+            light_sheet_form.addRow(
+                "Illumination wavelength (nm)",
+                self._decon_synth_excitation_input,
+            )
+            self._register_parameter_hint(
+                self._decon_synth_excitation_input,
+                self._PARAMETER_HINTS["synthetic_illumination_wavelength_nm"],
+            )
+
+            self._decon_synth_illum_na_input = QLineEdit()
+            self._decon_synth_illum_na_input.setPlaceholderText("0.2,0.2")
+            light_sheet_form.addRow(
+                "Illumination NA",
+                self._decon_synth_illum_na_input,
+            )
+            self._register_parameter_hint(
+                self._decon_synth_illum_na_input,
+                self._PARAMETER_HINTS["synthetic_illumination_numerical_aperture"],
+            )
+            synthetic_form.addRow(self._decon_light_sheet_section)
+
+            self._decon_preview_psf_button = QPushButton("Preview Synthetic PSF")
+            synthetic_form.addRow("Synthetic preview", self._decon_preview_psf_button)
+            self._register_parameter_hint(
+                self._decon_preview_psf_button,
+                self._PARAMETER_HINTS["synthetic_preview"],
+            )
+            form.addRow(self._decon_synthetic_section)
 
             self._decon_data_xy_spin = QDoubleSpinBox()
             self._decon_data_xy_spin.setDecimals(5)
@@ -3679,6 +3810,126 @@ if HAS_PYQT6:
             """
             self._set_deconvolution_parameter_enabled_state()
 
+        def _on_preview_synthetic_psf(self) -> None:
+            """Render and display a synthetic PSF preview dialog.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Opens a modal preview dialog on success.
+            """
+            try:
+                params = self._collect_deconvolution_parameters()
+                if str(params.get("psf_mode", "measured")) != "synthetic":
+                    QMessageBox.information(
+                        self,
+                        "Synthetic Preview Unavailable",
+                        "Switch PSF mode to Synthetic to preview synthetic PSFs.",
+                    )
+                    return
+                from clearex.deconvolution.pipeline import (
+                    generate_synthetic_psf_preview,
+                )
+
+                preview_png, metadata = generate_synthetic_psf_preview(
+                    parameters=params
+                )
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Synthetic Preview Failed",
+                    f"Could not generate synthetic PSF preview.\n\n{exc}",
+                )
+                return
+
+            image = QImage.fromData(preview_png, "PNG")
+            if image.isNull():
+                QMessageBox.warning(
+                    self,
+                    "Synthetic Preview Failed",
+                    "Generated preview image data is not a valid PNG.",
+                )
+                return
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Synthetic PSF Preview")
+            dialog.setMinimumWidth(840)
+            dialog.setMinimumHeight(700)
+            dialog.setStyleSheet(
+                """
+                QDialog {
+                    background-color: #0c1118;
+                    color: #e6edf3;
+                }
+                QLabel#previewTitle {
+                    color: #9cc6ff;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+                QLabel#previewDetails {
+                    color: #c8daf3;
+                    background-color: #0f1b2a;
+                    border: 1px solid #2a3442;
+                    border-radius: 8px;
+                    padding: 8px;
+                }
+                QLabel#previewImage {
+                    background-color: #111925;
+                    border: 1px solid #2a3442;
+                    border-radius: 8px;
+                }
+                QPushButton {
+                    background-color: #1a2635;
+                    border: 1px solid #2f4460;
+                    border-radius: 8px;
+                    padding: 8px 14px;
+                    color: #dbe9ff;
+                }
+                QPushButton:hover {
+                    background-color: #22354c;
+                }
+                """
+            )
+            layout = QVBoxLayout(dialog)
+            apply_popup_root_spacing(layout)
+
+            title = QLabel("Vectorial Synthetic PSF Preview")
+            title.setObjectName("previewTitle")
+            layout.addWidget(title)
+
+            details = QLabel(
+                ", ".join(f"{key}={value}" for key, value in sorted(metadata.items()))
+            )
+            details.setObjectName("previewDetails")
+            details.setWordWrap(True)
+            layout.addWidget(details)
+
+            image_label = QLabel()
+            image_label.setObjectName("previewImage")
+            image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            image_label.setPixmap(
+                QPixmap.fromImage(image).scaled(
+                    780,
+                    560,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            layout.addWidget(image_label, 1)
+
+            footer = QHBoxLayout()
+            apply_footer_row_spacing(footer)
+            footer.addStretch(1)
+            close_button = QPushButton("Close")
+            close_button.clicked.connect(dialog.accept)
+            footer.addWidget(close_button)
+            layout.addLayout(footer)
+            dialog.exec()
+
         def _set_deconvolution_parameter_enabled_state(self) -> None:
             """Enable or disable deconvolution widgets based on mode/selection.
 
@@ -3694,12 +3945,18 @@ if HAS_PYQT6:
             decon_enabled = self._operation_checkboxes["deconvolution"].isChecked()
             psf_mode = str(self._decon_psf_mode_combo.currentData() or "measured")
             measured_mode = psf_mode == "measured"
+            synthetic_mode = decon_enabled and not measured_mode
+            synthetic_microscopy_mode = str(
+                self._decon_synth_mode_combo.currentData() or "widefield"
+            )
+            light_sheet_mode = synthetic_microscopy_mode == "light_sheet"
             large_file_enabled = (
                 decon_enabled and self._decon_large_file_checkbox.isChecked()
             )
 
             general_widgets = (
                 self._decon_psf_mode_combo,
+                self._decon_synth_mode_combo,
                 self._decon_data_xy_spin,
                 self._decon_data_z_spin,
                 self._decon_hann_low_spin,
@@ -3720,14 +3977,31 @@ if HAS_PYQT6:
             )
             for widget in measured_widgets:
                 widget.setEnabled(decon_enabled and measured_mode)
+            if self._decon_measured_section is not None:
+                self._decon_measured_section.setVisible(decon_enabled and measured_mode)
 
             synthetic_widgets = (
                 self._decon_synth_excitation_input,
+                self._decon_synth_illum_na_input,
                 self._decon_synth_emission_input,
                 self._decon_synth_na_input,
+                self._decon_preview_psf_button,
             )
             for widget in synthetic_widgets:
-                widget.setEnabled(decon_enabled and not measured_mode)
+                widget.setEnabled(synthetic_mode)
+            if self._decon_synthetic_section is not None:
+                self._decon_synthetic_section.setVisible(synthetic_mode)
+
+            light_sheet_widgets = (
+                self._decon_synth_excitation_input,
+                self._decon_synth_illum_na_input,
+            )
+            for widget in light_sheet_widgets:
+                widget.setEnabled(synthetic_mode and light_sheet_mode)
+            if self._decon_light_sheet_section is not None:
+                self._decon_light_sheet_section.setVisible(
+                    synthetic_mode and light_sheet_mode
+                )
 
             block_widgets = (
                 self._decon_block_z_spin,
@@ -3943,10 +4217,43 @@ if HAS_PYQT6:
                     for value in decon_params.get("measured_psf_z_um", [])
                 )
             )
+            synth_mode = (
+                str(
+                    decon_params.get(
+                        "synthetic_microscopy_mode",
+                        self._decon_defaults.get(
+                            "synthetic_microscopy_mode", "widefield"
+                        ),
+                    )
+                )
+                .strip()
+                .lower()
+                .replace("-", "_")
+            )
+            if synth_mode == "lightsheet":
+                synth_mode = "light_sheet"
+            synth_mode_index = self._decon_synth_mode_combo.findData(synth_mode)
+            if synth_mode_index < 0:
+                synth_mode_index = self._decon_synth_mode_combo.findData("widefield")
+            if synth_mode_index < 0:
+                synth_mode_index = 0
+            self._decon_synth_mode_combo.setCurrentIndex(synth_mode_index)
             self._decon_synth_excitation_input.setText(
                 ",".join(
                     str(float(value))
-                    for value in decon_params.get("synthetic_excitation_nm", [488.0])
+                    for value in decon_params.get(
+                        "synthetic_illumination_wavelength_nm",
+                        decon_params.get("synthetic_excitation_nm", [488.0]),
+                    )
+                )
+            )
+            self._decon_synth_illum_na_input.setText(
+                ",".join(
+                    str(float(value))
+                    for value in decon_params.get(
+                        "synthetic_illumination_numerical_aperture",
+                        [0.2],
+                    )
                 )
             )
             self._decon_synth_emission_input.setText(
@@ -3958,7 +4265,10 @@ if HAS_PYQT6:
             self._decon_synth_na_input.setText(
                 ",".join(
                     str(float(value))
-                    for value in decon_params.get("synthetic_numerical_aperture", [0.7])
+                    for value in decon_params.get(
+                        "synthetic_detection_numerical_aperture",
+                        decon_params.get("synthetic_numerical_aperture", [0.7]),
+                    )
                 )
             )
             data_xy_um = float(decon_params.get("data_xy_pixel_um", 0.0))
@@ -4091,7 +4401,7 @@ if HAS_PYQT6:
                 QDialog {
                     background-color: #0c1118;
                     color: #e6edf3;
-                    font-family: "Segoe UI", "Avenir Next", sans-serif;
+                    font-family: "Avenir Next", "Helvetica Neue", "Arial", sans-serif;
                     font-size: 13px;
                 }
                 #headerCard {
@@ -4131,6 +4441,21 @@ if HAS_PYQT6:
                 }
                 QLabel#helpBody {
                     color: #d9e2f1;
+                }
+                QScrollArea {
+                    border: none;
+                    background: transparent;
+                }
+                QFrame#operationSection {
+                    background-color: #0f1b2a;
+                    border: 1px solid #2a3442;
+                    border-radius: 10px;
+                    padding: 8px;
+                }
+                QLabel#operationSectionTitle {
+                    color: #9cc6ff;
+                    font-weight: 700;
+                    font-size: 12px;
                 }
                 QGroupBox {
                     border: 1px solid #2a3442;
@@ -4258,6 +4583,9 @@ if HAS_PYQT6:
                     self._decon_defaults.get("memory_overhead_factor", 2.0)
                 ),
                 "psf_mode": psf_mode,
+                "synthetic_microscopy_mode": str(
+                    self._decon_synth_mode_combo.currentData() or "widefield"
+                ),
                 "channel_indices": [],
                 "measured_psf_paths": self._split_csv_values(
                     self._decon_measured_psf_paths_input.text()
@@ -4280,13 +4608,31 @@ if HAS_PYQT6:
                         self._decon_synth_excitation_input.text()
                     )
                 ],
+                "synthetic_illumination_wavelength_nm": [
+                    float(value)
+                    for value in self._split_csv_values(
+                        self._decon_synth_excitation_input.text()
+                    )
+                ],
                 "synthetic_emission_nm": [
                     float(value)
                     for value in self._split_csv_values(
                         self._decon_synth_emission_input.text()
                     )
                 ],
+                "synthetic_illumination_numerical_aperture": [
+                    float(value)
+                    for value in self._split_csv_values(
+                        self._decon_synth_illum_na_input.text()
+                    )
+                ],
                 "synthetic_numerical_aperture": [
+                    float(value)
+                    for value in self._split_csv_values(
+                        self._decon_synth_na_input.text()
+                    )
+                ],
+                "synthetic_detection_numerical_aperture": [
                     float(value)
                     for value in self._split_csv_values(
                         self._decon_synth_na_input.text()
@@ -4509,18 +4855,35 @@ if HAS_PYQT6:
                         )
                         return
                 else:
-                    if (
-                        not decon_params.get("synthetic_excitation_nm")
-                        or not decon_params.get("synthetic_emission_nm")
-                        or not decon_params.get("synthetic_numerical_aperture")
-                    ):
+                    microscopy_mode = str(
+                        decon_params.get("synthetic_microscopy_mode", "widefield")
+                    ).strip()
+                    if not decon_params.get(
+                        "synthetic_emission_nm"
+                    ) or not decon_params.get("synthetic_detection_numerical_aperture"):
                         QMessageBox.warning(
                             self,
                             "Missing Synthetic PSF Parameters",
-                            "Synthetic PSF mode requires excitation, emission, and NA values.",
+                            "Synthetic PSF mode requires detection emission and detection NA values.",
                         )
                         self._set_status(
-                            "Provide synthetic PSF excitation/emission/NA values."
+                            "Provide synthetic detection emission and NA values."
+                        )
+                        return
+                    if microscopy_mode == "light_sheet" and (
+                        not decon_params.get("synthetic_illumination_wavelength_nm")
+                        or not decon_params.get(
+                            "synthetic_illumination_numerical_aperture"
+                        )
+                    ):
+                        QMessageBox.warning(
+                            self,
+                            "Missing Light-Sheet Parameters",
+                            "Light-sheet synthetic PSF mode requires illumination "
+                            "wavelength and illumination NA values.",
+                        )
+                        self._set_status(
+                            "Provide light-sheet illumination wavelength and NA values."
                         )
                         return
 

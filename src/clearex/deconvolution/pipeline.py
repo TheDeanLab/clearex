@@ -30,6 +30,7 @@ from __future__ import annotations
 
 # Standard Library Imports
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence, Union
@@ -78,6 +79,31 @@ class DeconvolutionSummary:
     channel_count: int
     psf_mode: str
     output_chunks_tpczyx: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class SyntheticPsfArtifacts:
+    """Synthetic PSF arrays and preview payload for one channel.
+
+    Attributes
+    ----------
+    combined_psf_zyx : numpy.ndarray
+        Final PSF used for deconvolution in ``(z, y, x)`` order.
+    detection_psf_zyx : numpy.ndarray
+        Detection PSF used to construct ``combined_psf_zyx``.
+    illumination_psf_zyx : numpy.ndarray, optional
+        Illumination PSF used only for light-sheet mode.
+    preview_png_bytes : bytes
+        PNG bytes showing PSF slices/profile preview.
+    metadata : dict[str, Any]
+        Lightweight metadata describing synthetic PSF generation settings.
+    """
+
+    combined_psf_zyx: np.ndarray
+    detection_psf_zyx: np.ndarray
+    illumination_psf_zyx: Optional[np.ndarray]
+    preview_png_bytes: bytes
+    metadata: dict[str, Any]
 
 
 def _as_string_list(value: Any) -> list[str]:
@@ -244,14 +270,126 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     normalized["measured_psf_z_um"] = _as_float_list(
         normalized.get("measured_psf_z_um")
     )
-    normalized["synthetic_excitation_nm"] = _as_float_list(
-        normalized.get("synthetic_excitation_nm")
+    mode_raw = str(normalized.get("synthetic_microscopy_mode", "widefield")).strip()
+    microscopy_mode = mode_raw.lower().replace("-", "_").replace(" ", "_")
+    if microscopy_mode == "lightsheet":
+        microscopy_mode = "light_sheet"
+    if microscopy_mode not in {"widefield", "confocal", "light_sheet"}:
+        raise ValueError(
+            "deconvolution synthetic_microscopy_mode must be one of "
+            "'widefield', 'confocal', or 'light_sheet'."
+        )
+    normalized["synthetic_microscopy_mode"] = microscopy_mode
+
+    default_illumination_wavelengths = [488.0]
+    illumination_wavelengths = _as_float_list(
+        normalized.get("synthetic_illumination_wavelength_nm", [])
     )
+    excitation_wavelengths = _as_float_list(
+        normalized.get("synthetic_excitation_nm", [])
+    )
+    if (
+        illumination_wavelengths
+        and excitation_wavelengths
+        and illumination_wavelengths == default_illumination_wavelengths
+        and excitation_wavelengths != default_illumination_wavelengths
+    ):
+        illumination_wavelengths = list(excitation_wavelengths)
+    elif not illumination_wavelengths:
+        illumination_wavelengths = (
+            list(excitation_wavelengths)
+            if excitation_wavelengths
+            else list(default_illumination_wavelengths)
+        )
+    if not illumination_wavelengths:
+        illumination_wavelengths = [488.0]
+    normalized["synthetic_illumination_wavelength_nm"] = [
+        float(value) for value in illumination_wavelengths
+    ]
+    # Backward-compatible alias used by existing configs.
+    normalized["synthetic_excitation_nm"] = [
+        float(value) for value in illumination_wavelengths
+    ]
+
+    illumination_na = _as_float_list(
+        normalized.get("synthetic_illumination_numerical_aperture", [0.2])
+    )
+    if not illumination_na:
+        illumination_na = [0.2]
+    normalized["synthetic_illumination_numerical_aperture"] = [
+        float(value) for value in illumination_na
+    ]
+
     normalized["synthetic_emission_nm"] = _as_float_list(
-        normalized.get("synthetic_emission_nm")
+        normalized.get("synthetic_emission_nm", [520.0])
     )
+    default_detection_na = [0.7]
+    detection_na = _as_float_list(
+        normalized.get("synthetic_detection_numerical_aperture", [])
+    )
+    legacy_detection_na = _as_float_list(
+        normalized.get("synthetic_numerical_aperture", [])
+    )
+    if (
+        detection_na
+        and legacy_detection_na
+        and detection_na == default_detection_na
+        and legacy_detection_na != default_detection_na
+    ):
+        detection_na = list(legacy_detection_na)
+    elif not detection_na:
+        detection_na = (
+            list(legacy_detection_na)
+            if legacy_detection_na
+            else list(default_detection_na)
+        )
+    if not detection_na:
+        detection_na = [0.7]
+    normalized["synthetic_detection_numerical_aperture"] = [
+        float(value) for value in detection_na
+    ]
+    # Backward-compatible alias used by existing configs.
+    normalized["synthetic_numerical_aperture"] = [
+        float(value) for value in detection_na
+    ]
+
+    for field_name in (
+        "synthetic_illumination_wavelength_nm",
+        "synthetic_illumination_numerical_aperture",
+        "synthetic_emission_nm",
+        "synthetic_detection_numerical_aperture",
+    ):
+        for value in normalized.get(field_name, []):
+            if float(value) <= 0:
+                raise ValueError(f"deconvolution {field_name} values must be positive.")
+    if (
+        normalized["synthetic_microscopy_mode"] == "light_sheet"
+        and not normalized["synthetic_illumination_wavelength_nm"]
+    ):
+        raise ValueError(
+            "deconvolution light_sheet mode requires "
+            "synthetic_illumination_wavelength_nm."
+        )
+    if (
+        normalized["synthetic_microscopy_mode"] == "light_sheet"
+        and not normalized["synthetic_illumination_numerical_aperture"]
+    ):
+        raise ValueError(
+            "deconvolution light_sheet mode requires "
+            "synthetic_illumination_numerical_aperture."
+        )
+    if not normalized["synthetic_emission_nm"]:
+        raise ValueError("deconvolution synthetic_emission_nm cannot be empty.")
+    if not normalized["synthetic_detection_numerical_aperture"]:
+        raise ValueError(
+            "deconvolution synthetic_detection_numerical_aperture cannot be empty."
+        )
+
     normalized["synthetic_numerical_aperture"] = _as_float_list(
-        normalized.get("synthetic_numerical_aperture")
+        normalized.get(
+            "synthetic_detection_numerical_aperture",
+            normalized.get("synthetic_numerical_aperture", [0.7]),
+        )
     )
     normalized["synthetic_refractive_index"] = float(
         normalized.get("synthetic_refractive_index", 1.33)
@@ -382,88 +520,401 @@ def _resolve_data_voxel_sizes_um(
     return float(xy_um), float(z_um)
 
 
-def _gaussian_psf_kernel(
-    *,
-    size_zyx: tuple[int, int, int],
-    sigma_zyx_px: tuple[float, float, float],
-) -> np.ndarray:
-    """Generate a normalized Gaussian PSF kernel.
+def _normalize_psf(psf_zyx: np.ndarray) -> np.ndarray:
+    """Normalize a PSF volume to non-negative unit-sum float32.
 
     Parameters
     ----------
-    size_zyx : tuple[int, int, int]
-        Output PSF shape in ``(z, y, x)`` order.
-    sigma_zyx_px : tuple[float, float, float]
-        Standard deviations in pixels for ``(z, y, x)``.
+    psf_zyx : numpy.ndarray
+        Candidate PSF volume in ``(z, y, x)`` order.
 
     Returns
     -------
     numpy.ndarray
-        Float32 normalized PSF kernel with sum ``1``.
+        Normalized float32 PSF volume with sum ``1`` when possible.
     """
-    z_size, y_size, x_size = size_zyx
-    z_sigma, y_sigma, x_sigma = sigma_zyx_px
-
-    z_axis = np.arange(z_size, dtype=np.float32) - (float(z_size - 1) / 2.0)
-    y_axis = np.arange(y_size, dtype=np.float32) - (float(y_size - 1) / 2.0)
-    x_axis = np.arange(x_size, dtype=np.float32) - (float(x_size - 1) / 2.0)
-    zz, yy, xx = np.meshgrid(z_axis, y_axis, x_axis, indexing="ij")
-
-    kernel = np.exp(
-        -0.5
-        * (
-            (zz / max(1e-6, z_sigma)) ** 2
-            + (yy / max(1e-6, y_sigma)) ** 2
-            + (xx / max(1e-6, x_sigma)) ** 2
-        )
-    ).astype(np.float32)
-    total = float(np.sum(kernel))
+    out = np.asarray(psf_zyx, dtype=np.float32)
+    out = np.maximum(out, 0.0).astype(np.float32, copy=False)
+    total = float(np.sum(out))
     if total <= 0:
-        return np.zeros(size_zyx, dtype=np.float32)
-    return kernel / total
+        return np.zeros_like(out, dtype=np.float32)
+    return (out / total).astype(np.float32, copy=False)
 
 
-def _synthetic_sigma_zyx_px(
+def _center_crop_zyx(
     *,
-    emission_nm: float,
-    numerical_aperture: float,
-    voxel_xy_um: float,
-    voxel_z_um: float,
-    refractive_index: float,
-) -> tuple[float, float, float]:
-    """Approximate synthetic PSF sigma values in pixel units.
+    volume_zyx: np.ndarray,
+    target_shape_zyx: tuple[int, int, int],
+) -> np.ndarray:
+    """Center-crop a 3D volume to a requested shape.
 
     Parameters
     ----------
-    emission_nm : float
-        Emission wavelength in nanometers.
-    numerical_aperture : float
-        Objective numerical aperture.
+    volume_zyx : numpy.ndarray
+        Source volume in ``(z, y, x)`` order.
+    target_shape_zyx : tuple[int, int, int]
+        Target shape in ``(z, y, x)`` order.
+
+    Returns
+    -------
+    numpy.ndarray
+        Cropped volume in ``(z, y, x)`` order.
+    """
+    source = np.asarray(volume_zyx)
+    z_target, y_target, x_target = (
+        int(target_shape_zyx[0]),
+        int(target_shape_zyx[1]),
+        int(target_shape_zyx[2]),
+    )
+    z_size, y_size, x_size = source.shape
+    z_start = max(0, int((z_size - z_target) // 2))
+    y_start = max(0, int((y_size - y_target) // 2))
+    x_start = max(0, int((x_size - x_target) // 2))
+    z_stop = min(z_size, z_start + z_target)
+    y_stop = min(y_size, y_start + y_target)
+    x_stop = min(x_size, x_start + x_target)
+    cropped = source[z_start:z_stop, y_start:y_stop, x_start:x_stop]
+    return np.asarray(cropped)
+
+
+def _vectorial_detection_psf(
+    *,
+    size_zyx: tuple[int, int, int],
+    voxel_xy_um: float,
+    voxel_z_um: float,
+    emission_nm: float,
+    numerical_aperture: float,
+    refractive_index: float,
+    confocal_mode: bool,
+) -> np.ndarray:
+    """Generate a vectorial detection PSF with PSFmodels.
+
+    Parameters
+    ----------
+    size_zyx : tuple[int, int, int]
+        Target PSF size in ``(z, y, x)`` order.
     voxel_xy_um : float
         Data XY pixel size in microns.
     voxel_z_um : float
         Data Z step size in microns.
+    emission_nm : float
+        Emission wavelength in nanometers.
+    numerical_aperture : float
+        Detection numerical aperture.
     refractive_index : float
-        Refractive index used for axial resolution approximation.
+        Refractive index used for specimen/immersion values.
+    confocal_mode : bool
+        Whether to use confocal PSF simulation.
 
     Returns
     -------
-    tuple[float, float, float]
-        ``(sigma_z_px, sigma_y_px, sigma_x_px)``.
+    numpy.ndarray
+        Detection PSF in ``(z, y, x)`` order.
+
+    Raises
+    ------
+    RuntimeError
+        If PSFmodels cannot be imported.
     """
+    try:
+        import psfmodels
+    except Exception as exc:  # pragma: no cover - environment-dependent dependency
+        raise RuntimeError(
+            "PSFmodels is unavailable. Install with `pip install clearex[decon]`."
+        ) from exc
+
+    z_size, y_size, x_size = size_zyx
+    nx = int(max(y_size, x_size))
     emission_um = float(emission_nm) / 1000.0
-    lateral_fwhm_um = 0.61 * emission_um / max(1e-6, float(numerical_aperture))
-    axial_fwhm_um = (
-        2.0
-        * float(refractive_index)
-        * emission_um
-        / max(1e-6, float(numerical_aperture) ** 2)
+    if confocal_mode:
+        psf = np.asarray(
+            psfmodels.confocal_psf(
+                z=int(z_size),
+                nx=nx,
+                dxy=float(voxel_xy_um),
+                dz=float(voxel_z_um),
+                NA=float(numerical_aperture),
+                ex_wvl=float(emission_um),
+                em_wvl=float(emission_um),
+                ns=float(refractive_index),
+                ni=float(refractive_index),
+                ni0=float(refractive_index),
+                normalize=True,
+                model="vectorial",
+            ),
+            dtype=np.float32,
+        )
+    else:
+        psf = np.asarray(
+            psfmodels.make_psf(
+                z=int(z_size),
+                nx=nx,
+                dxy=float(voxel_xy_um),
+                dz=float(voxel_z_um),
+                NA=float(numerical_aperture),
+                wvl=float(emission_um),
+                ns=float(refractive_index),
+                ni=float(refractive_index),
+                ni0=float(refractive_index),
+                normalize=True,
+                model="vectorial",
+            ),
+            dtype=np.float32,
+        )
+    cropped = _center_crop_zyx(volume_zyx=psf, target_shape_zyx=size_zyx)
+    return _normalize_psf(np.asarray(cropped, dtype=np.float32))
+
+
+def _render_psf_preview_png(
+    *,
+    combined_psf_zyx: np.ndarray,
+    detection_psf_zyx: np.ndarray,
+    illumination_psf_zyx: Optional[np.ndarray],
+    microscopy_mode: str,
+    channel_index: int,
+) -> bytes:
+    """Render a dark-themed PNG preview for synthetic PSF volumes.
+
+    Parameters
+    ----------
+    combined_psf_zyx : numpy.ndarray
+        Final PSF volume in ``(z, y, x)`` order.
+    detection_psf_zyx : numpy.ndarray
+        Detection PSF volume in ``(z, y, x)`` order.
+    illumination_psf_zyx : numpy.ndarray, optional
+        Illumination PSF volume for light-sheet mode.
+    microscopy_mode : str
+        Synthetic microscopy mode key.
+    channel_index : int
+        Channel index represented by this preview.
+
+    Returns
+    -------
+    bytes
+        PNG image bytes.
+    """
+    import matplotlib.pyplot as plt
+
+    combined = np.asarray(combined_psf_zyx, dtype=np.float32)
+    detection = np.asarray(detection_psf_zyx, dtype=np.float32)
+    illumination = (
+        np.asarray(illumination_psf_zyx, dtype=np.float32)
+        if illumination_psf_zyx is not None
+        else None
     )
-    lateral_sigma_um = lateral_fwhm_um / 2.355
-    axial_sigma_um = axial_fwhm_um / 2.355
-    sigma_z = max(0.5, axial_sigma_um / max(1e-6, voxel_z_um))
-    sigma_xy = max(0.5, lateral_sigma_um / max(1e-6, voxel_xy_um))
-    return (float(sigma_z), float(sigma_xy), float(sigma_xy))
+    z_mid = int(combined.shape[0] // 2)
+    y_mid = int(combined.shape[1] // 2)
+    x_mid = int(combined.shape[2] // 2)
+
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(8.0, 6.0),
+        facecolor="#0c1118",
+        constrained_layout=True,
+    )
+    for ax in axes.flat:
+        ax.set_facecolor("#111925")
+        for spine in ax.spines.values():
+            spine.set_color("#2a3442")
+        ax.tick_params(colors="#9ab0ca", labelsize=8)
+
+    axes[0, 0].imshow(combined[z_mid], cmap="magma")
+    axes[0, 0].set_title("Combined XY", color="#e6edf3", fontsize=10)
+    axes[0, 0].set_axis_off()
+
+    axes[0, 1].imshow(combined[:, y_mid, :], cmap="magma", aspect="auto")
+    axes[0, 1].set_title("Combined ZX", color="#e6edf3", fontsize=10)
+    axes[0, 1].set_axis_off()
+
+    axes[1, 0].imshow(detection[z_mid], cmap="viridis")
+    axes[1, 0].set_title("Detection XY", color="#e6edf3", fontsize=10)
+    axes[1, 0].set_axis_off()
+
+    if illumination is not None:
+        axes[1, 1].imshow(illumination[:, x_mid, :], cmap="cividis", aspect="auto")
+        axes[1, 1].set_title("Illumination ZY", color="#e6edf3", fontsize=10)
+        axes[1, 1].set_axis_off()
+    else:
+        z_axis = np.arange(combined.shape[0], dtype=np.float32)
+        axes[1, 1].plot(z_axis, combined[:, y_mid, x_mid], color="#9cc6ff", linewidth=2)
+        axes[1, 1].set_title("Axial Profile", color="#e6edf3", fontsize=10)
+        axes[1, 1].set_xlabel("z (px)", color="#9ab0ca", fontsize=8)
+        axes[1, 1].set_ylabel("intensity", color="#9ab0ca", fontsize=8)
+
+    fig.suptitle(
+        f"Synthetic PSF Preview | channel {channel_index} | {microscopy_mode}",
+        color="#f0f5ff",
+        fontsize=11,
+    )
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=140, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return buffer.getvalue()
+
+
+def _generate_synthetic_psf_artifacts(
+    *,
+    params: Mapping[str, Any],
+    channel_index: int,
+    voxel_xy_um: float,
+    voxel_z_um: float,
+) -> SyntheticPsfArtifacts:
+    """Generate synthetic PSF arrays and preview bytes for one channel.
+
+    Parameters
+    ----------
+    params : mapping[str, Any]
+        Normalized deconvolution parameters.
+    channel_index : int
+        Channel index.
+    voxel_xy_um : float
+        Source XY voxel size in microns.
+    voxel_z_um : float
+        Source Z voxel size in microns.
+
+    Returns
+    -------
+    SyntheticPsfArtifacts
+        Generated PSF arrays and preview payload.
+
+    Raises
+    ------
+    ValueError
+        If required synthetic parameters are missing.
+    """
+    emission_nm = float(
+        _broadcast_channel_value(
+            params["synthetic_emission_nm"],
+            channel_index=channel_index,
+            field_name="deconvolution synthetic_emission_nm",
+        )
+    )
+    detection_na = float(
+        _broadcast_channel_value(
+            params["synthetic_detection_numerical_aperture"],
+            channel_index=channel_index,
+            field_name="deconvolution synthetic_detection_numerical_aperture",
+        )
+    )
+    microscopy_mode = str(params.get("synthetic_microscopy_mode", "widefield"))
+    psf_shape = tuple(int(v) for v in params["synthetic_psf_size_zyx"])
+    refractive_index = float(params["synthetic_refractive_index"])
+    confocal_mode = microscopy_mode == "confocal"
+    detection_psf = _vectorial_detection_psf(
+        size_zyx=(psf_shape[0], psf_shape[1], psf_shape[2]),
+        voxel_xy_um=float(voxel_xy_um),
+        voxel_z_um=float(voxel_z_um),
+        emission_nm=float(emission_nm),
+        numerical_aperture=float(detection_na),
+        refractive_index=float(refractive_index),
+        confocal_mode=bool(confocal_mode),
+    )
+
+    illumination_psf: Optional[np.ndarray] = None
+    combined_psf = detection_psf
+    metadata: dict[str, Any] = {
+        "microscopy_mode": microscopy_mode,
+        "emission_nm": float(emission_nm),
+        "detection_numerical_aperture": float(detection_na),
+        "voxel_xy_um": float(voxel_xy_um),
+        "voxel_z_um": float(voxel_z_um),
+    }
+
+    if microscopy_mode == "light_sheet":
+        illumination_nm = float(
+            _broadcast_channel_value(
+                params["synthetic_illumination_wavelength_nm"],
+                channel_index=channel_index,
+                field_name="deconvolution synthetic_illumination_wavelength_nm",
+            )
+        )
+        illumination_na = float(
+            _broadcast_channel_value(
+                params["synthetic_illumination_numerical_aperture"],
+                channel_index=channel_index,
+                field_name="deconvolution synthetic_illumination_numerical_aperture",
+            )
+        )
+        # Generate illumination PSF with swapped z/y extent so transposition lands on
+        # canonical (z, y, x) with the long axis aligned to Y.
+        illumination_native = _vectorial_detection_psf(
+            size_zyx=(psf_shape[1], psf_shape[0], psf_shape[2]),
+            voxel_xy_um=float(voxel_xy_um),
+            voxel_z_um=float(voxel_z_um),
+            emission_nm=float(illumination_nm),
+            numerical_aperture=float(illumination_na),
+            refractive_index=float(refractive_index),
+            confocal_mode=False,
+        )
+        illumination_psf = np.transpose(illumination_native, (1, 0, 2))
+        illumination_psf = _normalize_psf(illumination_psf)
+        combined_psf = _normalize_psf(illumination_psf * detection_psf)
+        metadata["illumination_wavelength_nm"] = float(illumination_nm)
+        metadata["illumination_numerical_aperture"] = float(illumination_na)
+
+    preview_png = _render_psf_preview_png(
+        combined_psf_zyx=combined_psf,
+        detection_psf_zyx=detection_psf,
+        illumination_psf_zyx=illumination_psf,
+        microscopy_mode=microscopy_mode,
+        channel_index=int(channel_index),
+    )
+    return SyntheticPsfArtifacts(
+        combined_psf_zyx=np.asarray(combined_psf, dtype=np.float32),
+        detection_psf_zyx=np.asarray(detection_psf, dtype=np.float32),
+        illumination_psf_zyx=(
+            np.asarray(illumination_psf, dtype=np.float32)
+            if illumination_psf is not None
+            else None
+        ),
+        preview_png_bytes=preview_png,
+        metadata=metadata,
+    )
+
+
+def generate_synthetic_psf_preview(
+    *,
+    parameters: Mapping[str, Any],
+    channel_index: int = 0,
+) -> tuple[bytes, dict[str, Any]]:
+    """Generate a synthetic-PSF preview PNG from deconvolution parameters.
+
+    Parameters
+    ----------
+    parameters : mapping[str, Any]
+        Candidate deconvolution parameter mapping.
+    channel_index : int, default=0
+        Channel index to preview.
+
+    Returns
+    -------
+    tuple[bytes, dict[str, Any]]
+        ``(preview_png_bytes, metadata)``.
+
+    Raises
+    ------
+    ValueError
+        If parameters are incompatible with synthetic PSF mode.
+    """
+    normalized = _normalize_parameters(parameters)
+    if str(normalized.get("psf_mode", "measured")) != "synthetic":
+        raise ValueError(
+            "Synthetic preview is only available when psf_mode='synthetic'."
+        )
+    voxel_xy_um = float(normalized.get("data_xy_pixel_um", 0.0))
+    voxel_z_um = float(normalized.get("data_z_pixel_um", 0.0))
+    if voxel_xy_um <= 0 or voxel_z_um <= 0:
+        raise ValueError(
+            "Synthetic preview requires positive data_xy_pixel_um and data_z_pixel_um."
+        )
+    artifacts = _generate_synthetic_psf_artifacts(
+        params=normalized,
+        channel_index=int(channel_index),
+        voxel_xy_um=float(voxel_xy_um),
+        voxel_z_um=float(voxel_z_um),
+    )
+    return artifacts.preview_png_bytes, dict(artifacts.metadata)
 
 
 def _select_psf_for_channel(
@@ -473,6 +924,8 @@ def _select_psf_for_channel(
     voxel_xy_um: float,
     voxel_z_um: float,
     temp_dir: Path,
+    zarr_path: Union[str, Path],
+    synthetic_psf_components: Optional[Mapping[int, str]] = None,
 ) -> tuple[Path, float]:
     """Resolve or synthesize PSF path for one channel.
 
@@ -488,6 +941,10 @@ def _select_psf_for_channel(
         Input image Z voxel size.
     temp_dir : pathlib.Path
         Temporary directory used for synthetic PSF outputs.
+    zarr_path : str or pathlib.Path
+        Zarr store path used to load persisted synthetic PSF assets.
+    synthetic_psf_components : mapping[int, str], optional
+        Channel-to-component mapping for persisted synthetic PSFs.
 
     Returns
     -------
@@ -528,42 +985,125 @@ def _select_psf_for_channel(
         )
         return psf_path.resolve(), psf_z_um
 
-    emission_nm = float(
-        _broadcast_channel_value(
-            params["synthetic_emission_nm"],
-            channel_index=channel_index,
-            field_name="deconvolution synthetic_emission_nm",
+    psf_data: np.ndarray
+    if (
+        synthetic_psf_components is not None
+        and int(channel_index) in synthetic_psf_components
+    ):
+        component = str(synthetic_psf_components[int(channel_index)])
+        root = zarr.open_group(str(zarr_path), mode="r")
+        try:
+            psf_data = np.asarray(root[component], dtype=np.float32)
+        except KeyError:
+            artifacts = _generate_synthetic_psf_artifacts(
+                params=params,
+                channel_index=int(channel_index),
+                voxel_xy_um=float(voxel_xy_um),
+                voxel_z_um=float(voxel_z_um),
+            )
+            psf_data = artifacts.combined_psf_zyx
+    else:
+        artifacts = _generate_synthetic_psf_artifacts(
+            params=params,
+            channel_index=int(channel_index),
+            voxel_xy_um=float(voxel_xy_um),
+            voxel_z_um=float(voxel_z_um),
         )
-    )
-    _ = float(
-        _broadcast_channel_value(
-            params["synthetic_excitation_nm"],
-            channel_index=channel_index,
-            field_name="deconvolution synthetic_excitation_nm",
-        )
-    )
-    numerical_aperture = float(
-        _broadcast_channel_value(
-            params["synthetic_numerical_aperture"],
-            channel_index=channel_index,
-            field_name="deconvolution synthetic_numerical_aperture",
-        )
-    )
-    sigma_zyx = _synthetic_sigma_zyx_px(
-        emission_nm=emission_nm,
-        numerical_aperture=numerical_aperture,
-        voxel_xy_um=float(voxel_xy_um),
-        voxel_z_um=float(voxel_z_um),
-        refractive_index=float(params["synthetic_refractive_index"]),
-    )
-    psf_shape = tuple(int(v) for v in params["synthetic_psf_size_zyx"])
-    psf_data = _gaussian_psf_kernel(
-        size_zyx=(psf_shape[0], psf_shape[1], psf_shape[2]),
-        sigma_zyx_px=sigma_zyx,
-    )
+        psf_data = artifacts.combined_psf_zyx
     psf_path = temp_dir / f"synthetic_psf_ch{int(channel_index):02d}.tif"
     tifffile.imwrite(str(psf_path), psf_data, photometric="minisblack")
     return psf_path.resolve(), float(voxel_z_um)
+
+
+def _persist_synthetic_psf_assets(
+    *,
+    zarr_path: Union[str, Path],
+    latest_component: str,
+    params: Mapping[str, Any],
+    selected_channels: Sequence[int],
+    voxel_xy_um: float,
+    voxel_z_um: float,
+) -> dict[int, str]:
+    """Generate and persist synthetic PSF assets in the decon latest group.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Zarr analysis-store path.
+    latest_component : str
+        Decon latest group component path.
+    params : mapping[str, Any]
+        Normalized deconvolution parameters.
+    selected_channels : sequence[int]
+        Channels selected for deconvolution.
+    voxel_xy_um : float
+        Source XY voxel size in microns.
+    voxel_z_um : float
+        Source Z voxel size in microns.
+
+    Returns
+    -------
+    dict[int, str]
+        Mapping from channel index to persisted combined-PSF component path.
+    """
+    root = zarr.open_group(str(zarr_path), mode="a")
+    latest_group = root[latest_component]
+    if "synthetic_psf" in latest_group:
+        del latest_group["synthetic_psf"]
+    synthetic_group = latest_group.create_group("synthetic_psf")
+    synthetic_group.attrs.update(
+        {
+            "microscopy_mode": str(
+                params.get("synthetic_microscopy_mode", "widefield")
+            ),
+            "storage_policy": "latest_only",
+        }
+    )
+
+    components: dict[int, str] = {}
+    for channel_index in sorted({int(value) for value in selected_channels}):
+        artifacts = _generate_synthetic_psf_artifacts(
+            params=params,
+            channel_index=int(channel_index),
+            voxel_xy_um=float(voxel_xy_um),
+            voxel_z_um=float(voxel_z_um),
+        )
+        channel_group = synthetic_group.create_group(f"ch{int(channel_index):02d}")
+        channel_group.create_dataset(
+            name="combined_psf_zyx",
+            data=np.asarray(artifacts.combined_psf_zyx, dtype=np.float32),
+            overwrite=True,
+        )
+        channel_group.create_dataset(
+            name="detection_psf_zyx",
+            data=np.asarray(artifacts.detection_psf_zyx, dtype=np.float32),
+            overwrite=True,
+        )
+        if artifacts.illumination_psf_zyx is not None:
+            channel_group.create_dataset(
+                name="illumination_psf_zyx",
+                data=np.asarray(artifacts.illumination_psf_zyx, dtype=np.float32),
+                overwrite=True,
+            )
+        preview_bytes = np.frombuffer(artifacts.preview_png_bytes, dtype=np.uint8)
+        channel_group.create_dataset(
+            name="preview_png",
+            data=preview_bytes,
+            overwrite=True,
+        )
+        channel_group.attrs.update(
+            {
+                "channel_index": int(channel_index),
+                "metadata": {
+                    str(key): value for key, value in dict(artifacts.metadata).items()
+                },
+                "preview_format": "png",
+            }
+        )
+        components[int(channel_index)] = (
+            f"{latest_component}/synthetic_psf/ch{int(channel_index):02d}/combined_psf_zyx"
+        )
+    return components
 
 
 def _load_decon_output(path: Path) -> np.ndarray:
@@ -681,6 +1221,7 @@ def _run_deconvolution_for_volume(
     parameters: Mapping[str, Any],
     voxel_xy_um: float,
     voxel_z_um: float,
+    synthetic_psf_components: Optional[Mapping[int, str]] = None,
 ) -> int:
     """Run deconvolution for one canonical ``(t, p, c)`` volume.
 
@@ -704,6 +1245,8 @@ def _run_deconvolution_for_volume(
         Source XY voxel size in microns.
     voxel_z_um : float
         Source Z voxel size in microns.
+    synthetic_psf_components : mapping[int, str], optional
+        Optional channel-to-component mapping for persisted synthetic PSFs.
 
     Returns
     -------
@@ -734,6 +1277,8 @@ def _run_deconvolution_for_volume(
             voxel_xy_um=float(voxel_xy_um),
             voxel_z_um=float(voxel_z_um),
             temp_dir=temp_dir,
+            zarr_path=zarr_path,
+            synthetic_psf_components=synthetic_psf_components,
         )
         run_petakit_deconvolution(
             data_paths=[temp_dir],
@@ -952,6 +1497,19 @@ def run_deconvolution_analysis(
     if not selected_channels:
         selected_channels = list(range(c_count))
 
+    synthetic_psf_components: Optional[dict[int, str]] = None
+    if str(normalized.get("psf_mode", "measured")) == "synthetic":
+        _emit(12, "Generating vectorial synthetic PSF assets")
+        synthetic_psf_components = _persist_synthetic_psf_assets(
+            zarr_path=zarr_path,
+            latest_component=component,
+            params=normalized,
+            selected_channels=selected_channels,
+            voxel_xy_um=float(voxel_xy_um),
+            voxel_z_um=float(voxel_z_um),
+        )
+        _emit(14, "Stored synthetic PSFs and previews in data_store.zarr")
+
     tasks = [
         delayed(_run_deconvolution_for_volume)(
             zarr_path=str(zarr_path),
@@ -963,6 +1521,7 @@ def run_deconvolution_analysis(
             parameters=normalized,
             voxel_xy_um=float(voxel_xy_um),
             voxel_z_um=float(voxel_z_um),
+            synthetic_psf_components=synthetic_psf_components,
         )
         for t_index in range(t_count)
         for p_index in range(p_count)
@@ -981,6 +1540,11 @@ def run_deconvolution_analysis(
                 "source_component": source_component,
                 "output_chunks_tpczyx": list(output_chunks),
                 "psf_mode": str(normalized["psf_mode"]),
+                "synthetic_psf_components": (
+                    {str(key): value for key, value in synthetic_psf_components.items()}
+                    if synthetic_psf_components
+                    else {}
+                ),
             },
         )
         _emit(100, "No deconvolution tasks to run.")
@@ -1021,6 +1585,11 @@ def run_deconvolution_analysis(
             "psf_mode": str(normalized["psf_mode"]),
             "data_xy_pixel_um": float(voxel_xy_um),
             "data_z_pixel_um": float(voxel_z_um),
+            "synthetic_psf_components": (
+                {str(key): value for key, value in synthetic_psf_components.items()}
+                if synthetic_psf_components
+                else {}
+            ),
             "parameters": {str(key): value for key, value in normalized.items()},
         },
     )
