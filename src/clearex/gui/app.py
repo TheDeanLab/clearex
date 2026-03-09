@@ -84,12 +84,23 @@ from clearex.workflow import (
 import zarr
 
 try:
-    from PyQt6.QtCore import QEvent, QMimeData, QObject, QThread, Qt, pyqtSignal
+    from PyQt6.QtCore import (
+        QEvent,
+        QEventLoop,
+        QMimeData,
+        QObject,
+        QSize,
+        QThread,
+        Qt,
+        QTimer,
+        pyqtSignal,
+    )
     from PyQt6.QtGui import (
         QDragEnterEvent,
         QDragMoveEvent,
         QDropEvent,
         QImage,
+        QImageReader,
         QPixmap,
     )
     from PyQt6.QtWidgets import (
@@ -110,7 +121,9 @@ try:
         QPlainTextEdit,
         QProgressBar,
         QPushButton,
+        QSplashScreen,
         QScrollArea,
+        QSizePolicy,
         QSpinBox,
         QStackedWidget,
         QVBoxLayout,
@@ -124,6 +137,27 @@ except ImportError:
 
 class GuiUnavailableError(RuntimeError):
     """Raised when the PyQt GUI cannot be launched in this environment."""
+
+
+_GUI_ASSET_DIRECTORY = Path(__file__).resolve().parent
+_GUI_SPLASH_IMAGE = "ClearEx_full.png"
+_GUI_HEADER_IMAGE = "ClearEx_full_header.png"
+
+
+def _resolve_gui_asset_path(filename: str) -> Path:
+    """Resolve a GUI asset path in the package asset directory.
+
+    Parameters
+    ----------
+    filename : str
+        Asset filename.
+
+    Returns
+    -------
+    pathlib.Path
+        Resolved asset path.
+    """
+    return (_GUI_ASSET_DIRECTORY / filename).resolve()
 
 
 def _display_is_available() -> bool:
@@ -565,6 +599,157 @@ def _configure_dask_backend_client(
 
 
 if HAS_PYQT6:
+
+    def _load_branding_pixmap(
+        filename: str, *, max_decode_pixels: int = 24_000_000
+    ) -> Optional[QPixmap]:
+        """Load a GUI branding image from the packaged asset directory.
+
+        Parameters
+        ----------
+        filename : str
+            Asset filename.
+        max_decode_pixels : int, default=24_000_000
+            Maximum source pixel count decoded in memory. Larger images are
+            decoded through :class:`QImageReader` with an internal scaled size
+            to avoid high-memory image allocation failures.
+
+        Returns
+        -------
+        QPixmap, optional
+        Loaded pixmap when the file exists and can be decoded; otherwise
+            ``None``.
+        """
+        asset_path = _resolve_gui_asset_path(filename)
+        if not asset_path.exists():
+            return None
+        reader = QImageReader(str(asset_path))
+        source_size = reader.size()
+        required_limit_mb = 1024
+        if source_size.isValid():
+            pixel_count = int(source_size.width()) * int(source_size.height())
+            required_limit_mb = max(
+                512,
+                int(((pixel_count * 4) / (1024 * 1024)) + 32),
+            )
+            if pixel_count > max(1, int(max_decode_pixels)):
+                scale = (int(max_decode_pixels) / float(pixel_count)) ** 0.5
+                reader.setScaledSize(
+                    QSize(
+                        max(1, int(source_size.width() * scale)),
+                        max(1, int(source_size.height() * scale)),
+                    )
+                )
+        previous_limit_mb = int(QImageReader.allocationLimit())
+        next_limit_mb = max(previous_limit_mb, required_limit_mb)
+        if next_limit_mb != previous_limit_mb:
+            QImageReader.setAllocationLimit(next_limit_mb)
+        try:
+            image = reader.read()
+        finally:
+            if next_limit_mb != previous_limit_mb:
+                QImageReader.setAllocationLimit(previous_limit_mb)
+        if image.isNull():
+            return None
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            return None
+        return pixmap
+
+    def _create_scaled_branding_label(
+        *,
+        filename: str,
+        max_width: int,
+        max_height: int,
+        object_name: str,
+    ) -> Optional[QLabel]:
+        """Create a centered QLabel containing a smoothly scaled branding image.
+
+        Parameters
+        ----------
+        filename : str
+            Branding asset filename.
+        max_width : int
+            Maximum rendered label width in pixels.
+        max_height : int
+            Maximum rendered label height in pixels.
+        object_name : str
+            Qt object name for stylesheet targeting.
+
+        Returns
+        -------
+        QLabel, optional
+            Prepared image label, or ``None`` when the asset cannot be loaded.
+        """
+        pixmap = _load_branding_pixmap(filename)
+        if pixmap is None:
+            return None
+        scaled = pixmap.scaled(
+            max(1, int(max_width)),
+            max(1, int(max_height)),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        label = QLabel()
+        label.setObjectName(object_name)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        label.setPixmap(scaled)
+        label.setMinimumHeight(scaled.height())
+        label.setMaximumHeight(max_height)
+        return label
+
+    def _create_startup_splash() -> Optional[QSplashScreen]:
+        """Create startup splash screen widget from packaged branding image.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        QSplashScreen, optional
+            Configured splash screen or ``None`` when asset loading fails.
+        """
+        pixmap = _load_branding_pixmap(_GUI_SPLASH_IMAGE)
+        if pixmap is None:
+            return None
+        scaled = pixmap.scaled(
+            420,
+            420,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        splash = QSplashScreen(scaled)
+        splash.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        return splash
+
+    def _show_startup_splash(app: QApplication) -> None:
+        """Display startup splash image briefly before opening setup dialog.
+
+        Parameters
+        ----------
+        app : QApplication
+            Active Qt application instance.
+
+        Returns
+        -------
+        None
+            Splash is shown and dismissed in-place.
+        """
+        splash = _create_startup_splash()
+        if splash is None:
+            return
+        splash.show()
+        app.processEvents()
+        event_loop = QEventLoop()
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(event_loop.quit)
+        timer.start(800)
+        event_loop.exec()
+        splash.close()
+        app.processEvents()
 
     class ZarrSaveConfigDialog(QDialog):
         """Dialog for configuring analysis-store Zarr chunking and pyramid factors.
@@ -1819,12 +2004,14 @@ if HAS_PYQT6:
             header.setObjectName("headerCard")
             header_layout = QVBoxLayout(header)
             apply_stack_spacing(header_layout)
-            title = QLabel("ClearEx")
-            title.setObjectName("title")
-            subtitle = QLabel("Experiment Setup")
-            subtitle.setObjectName("subtitle")
-            header_layout.addWidget(title)
-            header_layout.addWidget(subtitle)
+            header_image = _create_scaled_branding_label(
+                filename=_GUI_HEADER_IMAGE,
+                max_width=840,
+                max_height=150,
+                object_name="brandHeaderImage",
+            )
+            if header_image is not None:
+                header_layout.addWidget(header_image)
             root.addWidget(header)
 
             data_group = QGroupBox("Navigate Experiment")
@@ -2057,13 +2244,15 @@ if HAS_PYQT6:
                     color: #d9e2f1;
                 }
                 #headerCard {
-                    background: qlineargradient(
-                        x1:0, y1:0, x2:1, y2:1,
-                        stop:0 #121a28, stop:1 #162538
-                    );
-                    border: 1px solid #2a3442;
+                    background-color: #f0f2ef;
+                    border: 1px solid #f0f2ef;
                     border-radius: 12px;
                     padding: 10px;
+                }
+                QLabel#brandHeaderImage {
+                    padding: 0;
+                    margin-bottom: 2px;
+                    background: transparent;
                 }
                 QLabel#title {
                     font-size: 24px;
@@ -2790,15 +2979,33 @@ if HAS_PYQT6:
             header.setObjectName("headerCard")
             header_layout = QVBoxLayout(header)
             apply_stack_spacing(header_layout)
+            header_image = _create_scaled_branding_label(
+                filename=_GUI_HEADER_IMAGE,
+                max_width=920,
+                max_height=160,
+                object_name="brandHeaderImage",
+            )
+            if header_image is not None:
+                header_layout.addWidget(header_image)
+            root.addWidget(header)
+
+            content_row = QHBoxLayout()
+            apply_stack_spacing(content_row)
+            root.addLayout(content_row, 1)
+
+            left_column = QVBoxLayout()
+            apply_stack_spacing(left_column)
+
             title = QLabel("Select Analysis Methods")
             title.setObjectName("title")
+            left_column.addWidget(title)
+
             subtitle = QLabel(
                 "Enable routines, configure each operation, and define execution sequence."
             )
             subtitle.setObjectName("subtitle")
-            header_layout.addWidget(title)
-            header_layout.addWidget(subtitle)
-            root.addWidget(header)
+            subtitle.setWordWrap(True)
+            left_column.addWidget(subtitle)
 
             store_row = QHBoxLayout()
             apply_row_spacing(store_row)
@@ -2812,11 +3019,7 @@ if HAS_PYQT6:
             )
             store_row.addWidget(label)
             store_row.addWidget(self._store_label, 1)
-            root.addLayout(store_row)
-
-            content_row = QHBoxLayout()
-            apply_stack_spacing(content_row)
-            root.addLayout(content_row, 1)
+            left_column.addLayout(store_row)
 
             analysis_group = QGroupBox("Analysis Selection")
             analysis_group.setMinimumWidth(430)
@@ -2868,7 +3071,8 @@ if HAS_PYQT6:
             analysis_hint.setWordWrap(True)
             analysis_layout.addWidget(analysis_hint)
             analysis_layout.addStretch(1)
-            content_row.addWidget(analysis_group, 1)
+            left_column.addWidget(analysis_group, 1)
+            content_row.addLayout(left_column, 1)
 
             parameters_group = QGroupBox("Operation Parameters")
             parameters_layout = QVBoxLayout(parameters_group)
@@ -4462,13 +4666,15 @@ if HAS_PYQT6:
                     font-size: 13px;
                 }
                 #headerCard {
-                    background: qlineargradient(
-                        x1:0, y1:0, x2:1, y2:1,
-                        stop:0 #121a28, stop:1 #162538
-                    );
-                    border: 1px solid #2a3442;
+                    background-color: #f0f2ef;
+                    border: 1px solid #f0f2ef;
                     border-radius: 12px;
                     padding: 10px;
+                }
+                QLabel#brandHeaderImage {
+                    padding: 0;
+                    margin-bottom: 2px;
+                    background: transparent;
                 }
                 QLabel#title {
                     font-size: 20px;
@@ -5009,6 +5215,8 @@ def launch_gui(
     owns_app = app is None
     if app is None:
         app = QApplication(sys.argv)
+
+    _show_startup_splash(app)
 
     setup_dialog = ClearExSetupDialog(initial=initial or WorkflowConfig())
     setup_result = setup_dialog.exec()
