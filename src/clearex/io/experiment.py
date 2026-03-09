@@ -2150,6 +2150,7 @@ def create_dask_client(
     processes: bool = False,
     memory_limit: Union[str, float] = "auto",
     local_directory: Optional[Union[str, Path]] = None,
+    dashboard_address: Optional[str] = ":0",
 ) -> "Client":
     """Create Dask distributed client (local default, cluster optional).
 
@@ -2168,6 +2169,9 @@ def create_dask_client(
         Memory limit per worker for local mode.
     local_directory : str or pathlib.Path, optional
         Worker local directory for spills/temp files.
+    dashboard_address : str, optional, default=":0"
+        Dashboard bind address for local mode. ``":0"`` requests an available
+        ephemeral port to avoid collisions when multiple local clusters run.
 
     Returns
     -------
@@ -2190,6 +2194,7 @@ def create_dask_client(
         processes=processes,
         memory_limit=memory_limit,
         local_directory=str(local_directory) if local_directory is not None else None,
+        dashboard_address=dashboard_address,
     )
     return Client(cluster)
 

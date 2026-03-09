@@ -86,6 +86,10 @@ _ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
     "visualization": "data",
 }
 
+_ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
+    {"deconvolution", "particle_detection"}
+)
+
 
 def _is_zarr_like_path(path: Path) -> bool:
     """Return whether a path represents a Zarr/N5 directory-style store name.
@@ -165,6 +169,27 @@ def _resolve_analysis_input_component(
     if source in _ANALYSIS_SOURCE_COMPONENT_PATHS:
         return _ANALYSIS_SOURCE_COMPONENT_PATHS[source]
     return source
+
+
+def _analysis_execution_requires_dask_client(
+    execution_sequence: tuple[str, ...]
+) -> bool:
+    """Return whether selected operations require a distributed Dask client.
+
+    Parameters
+    ----------
+    execution_sequence : tuple[str, ...]
+        Ordered analysis operations selected for execution.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one operation depends on a Dask client.
+    """
+    return any(
+        operation in _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT
+        for operation in execution_sequence
+    )
 
 
 def _zarr_component_exists(zarr_path: str, component: str) -> bool:
@@ -574,15 +599,20 @@ def _run_workflow(
     provenance_store_path: Optional[str] = None
 
     if workflow.file:
+        is_experiment_input = is_navigate_experiment_file(workflow.file)
         with ExitStack() as io_stack:
-            io_client = _configure_dask_backend(
-                workflow=workflow,
-                logger=logger,
-                exit_stack=io_stack,
-                workload="io",
+            io_client = (
+                _configure_dask_backend(
+                    workflow=workflow,
+                    logger=logger,
+                    exit_stack=io_stack,
+                    workload="io",
+                )
+                if is_experiment_input
+                else None
             )
 
-            if is_navigate_experiment_file(workflow.file):
+            if is_experiment_input:
                 experiment = load_navigate_experiment(workflow.file)
                 resolved_data_path = resolve_experiment_data_path(experiment)
                 input_path = str(resolved_data_path)
@@ -686,17 +716,6 @@ def _run_workflow(
         _emit_analysis_progress(5, "Loaded source data and metadata.")
 
     with ExitStack() as analysis_stack:
-        analysis_client = (
-            _configure_dask_backend(
-                workflow=workflow,
-                logger=logger,
-                exit_stack=analysis_stack,
-                workload="analysis",
-            )
-            if workflow.has_analysis_selection()
-            else None
-        )
-
         runtime_analysis_parameters = normalize_analysis_operation_parameters(
             workflow.analysis_parameters
         )
@@ -719,6 +738,17 @@ def _run_workflow(
             )
         else:
             _emit_analysis_progress(100, "No analysis operations selected.")
+
+        analysis_client = (
+            _configure_dask_backend(
+                workflow=workflow,
+                logger=logger,
+                exit_stack=analysis_stack,
+                workload="analysis",
+            )
+            if _analysis_execution_requires_dask_client(execution_sequence)
+            else None
+        )
 
         produced_components: Dict[str, str] = {"data": "data"}
         total_operations = max(1, len(execution_sequence))
