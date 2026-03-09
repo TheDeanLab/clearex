@@ -53,6 +53,7 @@ from clearex.io.provenance import (
     is_zarr_store_path,
     persist_run_provenance,
     register_latest_output_reference,
+    summarize_analysis_history,
 )
 from clearex.detect.pipeline import (
     run_particle_detection_analysis,
@@ -89,6 +90,14 @@ _ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
 _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
     {"deconvolution", "particle_detection"}
 )
+_ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
+    {"deconvolution", "particle_detection", "registration"}
+)
+_ANALYSIS_PROVENANCE_OUTPUT_COMPONENTS: Dict[str, str] = {
+    "deconvolution": "results/deconvolution/latest/data",
+    "particle_detection": "results/particle_detection/latest/detections",
+    "registration": "results/registration/latest/data",
+}
 
 
 def _is_zarr_like_path(path: Path) -> bool:
@@ -769,6 +778,85 @@ def _run_workflow(
             operation_parameters["input_source"] = resolved_source
             runtime_analysis_parameters[operation_name] = operation_parameters
 
+            force_rerun = bool(operation_parameters.get("force_rerun", False))
+            if (
+                operation_name in _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP
+                and provenance_store_path
+                and is_zarr_store_path(provenance_store_path)
+                and not force_rerun
+            ):
+                try:
+                    history = summarize_analysis_history(
+                        provenance_store_path,
+                        operation_name,
+                        parameters=operation_parameters,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not read provenance history for %s: %s",
+                        operation_name,
+                        exc,
+                    )
+                else:
+                    if bool(history.get("matches_parameters", False)):
+                        output_component = _ANALYSIS_PROVENANCE_OUTPUT_COMPONENTS.get(
+                            operation_name
+                        )
+                        output_available = True
+                        if output_component:
+                            output_available = _zarr_component_exists(
+                                provenance_store_path,
+                                output_component,
+                            )
+                        if output_available:
+                            matching_run_id = str(history.get("matching_run_id") or "")
+                            logger.info(
+                                "Skipping %s because a successful matching run "
+                                "already exists in provenance%s.",
+                                operation_name,
+                                (
+                                    f" (run_id={matching_run_id})"
+                                    if matching_run_id
+                                    else ""
+                                ),
+                            )
+                            if (
+                                operation_name in _ANALYSIS_SOURCE_COMPONENT_PATHS
+                                and operation_name
+                                != "particle_detection"
+                            ):
+                                produced_components[operation_name] = (
+                                    _ANALYSIS_SOURCE_COMPONENT_PATHS[operation_name]
+                                )
+                            step_records.append(
+                                {
+                                    "name": operation_name,
+                                    "parameters": {
+                                        **operation_parameters,
+                                        "status": "skipped",
+                                        "reason": "provenance_parameter_match",
+                                        "matching_run_id": (
+                                            matching_run_id or None
+                                        ),
+                                        "matching_ended_utc": history.get(
+                                            "matching_ended_utc"
+                                        ),
+                                    },
+                                }
+                            )
+                            _emit_analysis_progress(
+                                operation_end,
+                                f"{operation_name.replace('_', ' ').title()} skipped "
+                                "(matching provenance run).",
+                            )
+                            continue
+                        logger.info(
+                            "Matching provenance run found for %s, but latest output "
+                            "component '%s' is missing. Re-running operation.",
+                            operation_name,
+                            output_component,
+                        )
+
             if operation_name == "deconvolution":
                 decon_parameters = dict(operation_parameters)
                 if provenance_store_path and is_zarr_store_path(provenance_store_path):
@@ -989,19 +1077,43 @@ def _run_workflow(
                     "Running registration workflow (input=%s).",
                     resolved_source,
                 )
-                from clearex.registration import ImageRegistration
-
-                ImageRegistration()
-                step_records.append(
-                    {
-                        "name": "registration",
-                        "parameters": operation_parameters,
-                    }
-                )
-                _emit_analysis_progress(
-                    operation_end,
-                    "Registration workflow complete.",
-                )
+                if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    logger.warning(
+                        "Registration is enabled but is not yet integrated with "
+                        "canonical 6D store inputs. Skipping registration."
+                    )
+                    step_records.append(
+                        {
+                            "name": "registration",
+                            "parameters": {
+                                **operation_parameters,
+                                "status": "skipped",
+                                "reason": "not_integrated_with_canonical_store",
+                            },
+                        }
+                    )
+                    _emit_analysis_progress(
+                        operation_end,
+                        "Registration skipped (not yet integrated with canonical store).",
+                    )
+                else:
+                    logger.warning(
+                        "Registration requires a canonical Zarr/N5 data store."
+                    )
+                    step_records.append(
+                        {
+                            "name": "registration",
+                            "parameters": {
+                                **operation_parameters,
+                                "status": "skipped",
+                                "reason": "no_zarr_store",
+                            },
+                        }
+                    )
+                    _emit_analysis_progress(
+                        operation_end,
+                        "Registration skipped (no Zarr/N5 store).",
+                    )
                 continue
 
             if operation_name == "visualization":

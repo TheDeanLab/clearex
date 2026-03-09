@@ -13,6 +13,7 @@ import numpy as np
 
 # Local Imports
 import clearex.main as main_module
+from clearex.io.provenance import persist_run_provenance
 from clearex.io.read import ImageInfo
 from clearex.workflow import WorkflowConfig
 
@@ -79,6 +80,33 @@ def test_run_workflow_particle_detection_starts_analysis_dask_startup(
     main_module._run_workflow(workflow=workflow, logger=_test_logger("clearex.test.main.particle"))
 
     assert workloads == ["analysis"]
+
+
+def test_run_workflow_registration_skips_without_crashing(monkeypatch) -> None:
+    workloads: list[str] = []
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack
+        workloads.append(str(workload))
+        return object()
+
+    monkeypatch.setattr(
+        main_module,
+        "_configure_dask_backend",
+        _fake_configure_dask_backend,
+    )
+
+    workflow = WorkflowConfig(
+        file=None,
+        prefer_dask=True,
+        registration=True,
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.registration"),
+    )
+
+    assert workloads == []
 
 
 def test_run_workflow_non_experiment_file_skips_io_dask_startup(
@@ -168,3 +196,164 @@ def test_run_workflow_experiment_file_starts_io_dask_startup(
     main_module._run_workflow(workflow=workflow, logger=_test_logger("clearex.test.main.io_start"))
 
     assert workloads == ["io"]
+
+
+def test_run_workflow_skips_matching_provenance_analysis(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.create_dataset(
+        name="results/deconvolution/latest/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        deconvolution=True,
+        analysis_parameters={
+            "deconvolution": {
+                "input_source": "data",
+                "psf_mode": "measured",
+                "measured_psf_paths": ["/tmp/psf.tif"],
+                "measured_psf_xy_um": [0.1],
+                "measured_psf_z_um": [0.5],
+                "force_rerun": False,
+            }
+        },
+    )
+
+    persist_run_provenance(
+        zarr_path=store_path,
+        workflow=workflow,
+        image_info=ImageInfo(
+            path=store_path,
+            shape=(1, 1, 1, 2, 2, 2),
+            dtype=np.uint16,
+            axes=["t", "p", "c", "z", "y", "x"],
+        ),
+        steps=[{"name": "deconvolution", "parameters": {}}],
+        repo_root=tmp_path,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _should_not_run(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("deconvolution should have been skipped by provenance match")
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(main_module, "run_deconvolution_analysis", _should_not_run)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.skip_match"),
+    )
+
+
+def test_run_workflow_force_rerun_ignores_matching_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_force.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.create_dataset(
+        name="results/deconvolution/latest/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    baseline_workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        deconvolution=True,
+        analysis_parameters={
+            "deconvolution": {
+                "input_source": "data",
+                "psf_mode": "measured",
+                "measured_psf_paths": ["/tmp/psf.tif"],
+                "measured_psf_xy_um": [0.1],
+                "measured_psf_z_um": [0.5],
+                "force_rerun": False,
+            }
+        },
+    )
+    persist_run_provenance(
+        zarr_path=store_path,
+        workflow=baseline_workflow,
+        image_info=ImageInfo(
+            path=store_path,
+            shape=(1, 1, 1, 2, 2, 2),
+            dtype=np.uint16,
+            axes=["t", "p", "c", "z", "y", "x"],
+        ),
+        steps=[{"name": "deconvolution", "parameters": {}}],
+        repo_root=tmp_path,
+    )
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        deconvolution=True,
+        analysis_parameters={
+            "deconvolution": {
+                "input_source": "data",
+                "psf_mode": "measured",
+                "measured_psf_paths": ["/tmp/psf.tif"],
+                "measured_psf_xy_um": [0.1],
+                "measured_psf_z_um": [0.5],
+                "force_rerun": True,
+            }
+        },
+    )
+
+    called = {"value": False}
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _fake_deconvolution(*, zarr_path, parameters, client, progress_callback):
+        del zarr_path, parameters, client, progress_callback
+        called["value"] = True
+        return SimpleNamespace(
+            component="results/deconvolution/latest",
+            data_component="results/deconvolution/latest/data",
+            volumes_processed=1,
+            channel_count=1,
+            psf_mode="measured",
+            output_chunks_tpczyx=(1, 1, 1, 2, 2, 2),
+        )
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(main_module, "run_deconvolution_analysis", _fake_deconvolution)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.force_rerun"),
+    )
+
+    assert called["value"] is True

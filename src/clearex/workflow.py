@@ -64,6 +64,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
     "deconvolution": {
         "execution_order": 1,
         "input_source": "data",
+        "force_rerun": False,
         "chunk_basis": "3d",
         "detect_2d_per_slice": False,
         "use_map_overlap": False,
@@ -105,6 +106,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
     "particle_detection": {
         "execution_order": 2,
         "input_source": "data",
+        "force_rerun": False,
         "channel_index": 0,
         "chunk_basis": "3d",
         "detect_2d_per_slice": True,
@@ -125,6 +127,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
     "registration": {
         "execution_order": 3,
         "input_source": "data",
+        "force_rerun": False,
         "chunk_basis": "3d",
         "detect_2d_per_slice": False,
         "use_map_overlap": True,
@@ -212,6 +215,7 @@ def _normalize_common_operation_parameters(
     if execution_order < 1:
         raise ValueError(f"{operation_name} execution_order must be at least one.")
     normalized["execution_order"] = execution_order
+    normalized["force_rerun"] = bool(normalized.get("force_rerun", False))
 
     input_source = str(normalized.get("input_source", "data")).strip() or "data"
     normalized["input_source"] = input_source

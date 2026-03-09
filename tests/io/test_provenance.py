@@ -36,6 +36,7 @@ from clearex.io.provenance import (
     is_zarr_store_path,
     persist_run_provenance,
     store_latest_analysis_output,
+    summarize_analysis_history,
     verify_provenance_chain,
 )
 from clearex.io.read import ImageInfo
@@ -152,3 +153,109 @@ def test_store_latest_analysis_output_overwrites_previous_version(tmp_path: Path
     assert latest_ref["component"] == "results/deconvolution/latest"
     assert latest_ref["run_id"] == "run-b"
     assert latest_ref["storage_policy"] == "latest_only"
+
+
+def test_summarize_analysis_history_reports_matching_parameters(tmp_path: Path):
+    store_path = tmp_path / "history_test.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    parameters = {
+        "input_source": "data",
+        "execution_order": 1,
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 2.0,
+        "psf_mode": "measured",
+        "measured_psf_paths": ["/tmp/psf.tif"],
+        "measured_psf_xy_um": [0.1],
+        "measured_psf_z_um": [0.5],
+    }
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        deconvolution=True,
+        analysis_parameters={"deconvolution": parameters},
+    )
+    normalized_parameters = dict(workflow.analysis_parameters["deconvolution"])
+    image_info = ImageInfo(path=store_path, shape=(1, 1, 1, 2, 2, 2), dtype=np.uint16)
+    run_id = persist_run_provenance(
+        zarr_path=store_path,
+        workflow=workflow,
+        image_info=image_info,
+        steps=[
+            {
+                "name": "deconvolution",
+                "parameters": {
+                    "component": "results/deconvolution/latest",
+                },
+            }
+        ],
+        repo_root=tmp_path,
+    )
+
+    summary = summarize_analysis_history(
+        store_path,
+        "deconvolution",
+        parameters=normalized_parameters,
+    )
+    assert summary["has_successful_run"] is True
+    assert summary["matches_parameters"] is True
+    assert summary["matching_run_id"] == run_id
+    assert summary["latest_success_run_id"] == run_id
+
+
+def test_summarize_analysis_history_ignores_skipped_steps(tmp_path: Path):
+    store_path = tmp_path / "history_skip_test.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    parameters = {
+        "input_source": "data",
+        "execution_order": 2,
+        "force_rerun": False,
+    }
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        particle_detection=True,
+        analysis_parameters={"particle_detection": parameters},
+    )
+    normalized_parameters = dict(workflow.analysis_parameters["particle_detection"])
+    image_info = ImageInfo(path=store_path, shape=(1, 1, 1, 2, 2, 2), dtype=np.uint16)
+    _ = persist_run_provenance(
+        zarr_path=store_path,
+        workflow=workflow,
+        image_info=image_info,
+        steps=[
+            {
+                "name": "particle_detection",
+                "parameters": {
+                    "status": "skipped",
+                    "reason": "provenance_parameter_match",
+                },
+            }
+        ],
+        repo_root=tmp_path,
+    )
+
+    summary = summarize_analysis_history(
+        store_path,
+        "particle_detection",
+        parameters=normalized_parameters,
+    )
+    assert summary["has_successful_run"] is False
+    assert summary["matches_parameters"] is False

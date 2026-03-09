@@ -55,6 +55,7 @@ from clearex.io.experiment import (
     resolve_data_store_path,
     resolve_experiment_data_path,
 )
+from clearex.io.provenance import is_zarr_store_path, summarize_analysis_history
 from clearex.io.read import ImageInfo, ImageOpener
 from clearex.workflow import (
     DASK_BACKEND_LOCAL_CLUSTER,
@@ -2768,6 +2769,11 @@ if HAS_PYQT6:
             "registration",
             "visualization",
         )
+        _PROVENANCE_HISTORY_OPERATIONS: tuple[str, ...] = (
+            "deconvolution",
+            "particle_detection",
+            "registration",
+        )
         _OPERATION_LABELS: Dict[str, str] = {
             "deconvolution": "Deconvolution",
             "particle_detection": "Particle Detection",
@@ -2967,6 +2973,9 @@ if HAS_PYQT6:
             self._operation_order_spins: Dict[str, QSpinBox] = {}
             self._operation_config_buttons: Dict[str, QPushButton] = {}
             self._operation_input_combos: Dict[str, QComboBox] = {}
+            self._operation_force_rerun_checkboxes: Dict[str, QCheckBox] = {}
+            self._operation_history_labels: Dict[str, QLabel] = {}
+            self._operation_history_cache: Dict[str, Dict[str, Any]] = {}
             self._operation_panel_indices: Dict[str, int] = {}
             self._parameter_help_map: Dict[QObject, str] = {}
             self._active_config_operation: Optional[str] = None
@@ -3077,7 +3086,28 @@ if HAS_PYQT6:
                 row.addWidget(configure_button)
                 self._operation_config_buttons[operation_name] = configure_button
 
+                if operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
+                    force_rerun_checkbox = QCheckBox("Force rerun")
+                    force_rerun_checkbox.setVisible(False)
+                    force_rerun_checkbox.setEnabled(False)
+                    force_rerun_checkbox.setToolTip(
+                        "Run this routine even when a matching completed run exists "
+                        "in provenance."
+                    )
+                    row.addWidget(force_rerun_checkbox)
+                    self._operation_force_rerun_checkboxes[operation_name] = (
+                        force_rerun_checkbox
+                    )
+
                 analysis_layout.addLayout(row)
+
+                if operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
+                    history_label = QLabel("Provenance: no successful run recorded yet.")
+                    history_label.setObjectName("statusLabel")
+                    history_label.setWordWrap(True)
+                    history_label.setContentsMargins(24, 0, 0, 0)
+                    analysis_layout.addWidget(history_label)
+                    self._operation_history_labels[operation_name] = history_label
 
                 checkbox.toggled.connect(self._on_operation_selection_changed)
                 order_spin.valueChanged.connect(self._on_operation_order_changed)
@@ -3948,6 +3978,110 @@ if HAS_PYQT6:
                 combo.setEnabled(self._operation_checkboxes[operation_name].isChecked())
                 combo.blockSignals(False)
 
+        def _refresh_operation_provenance_statuses(self) -> None:
+            """Update per-operation provenance history labels and force-rerun controls.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                History labels and force-rerun visibility are updated in-place.
+            """
+            store_path = str(self._base_config.file or "").strip()
+            if not store_path or not is_zarr_store_path(store_path):
+                for operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
+                    history_label = self._operation_history_labels.get(operation_name)
+                    force_checkbox = self._operation_force_rerun_checkboxes.get(
+                        operation_name
+                    )
+                    if history_label is not None:
+                        history_label.setText(
+                            "Provenance: unavailable (current input is not a Zarr/N5 store)."
+                        )
+                    if force_checkbox is not None:
+                        force_checkbox.setVisible(False)
+                        force_checkbox.setChecked(False)
+                        force_checkbox.setEnabled(False)
+                return
+
+            for operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
+                history_label = self._operation_history_labels.get(operation_name)
+                force_checkbox = self._operation_force_rerun_checkboxes.get(
+                    operation_name
+                )
+                if history_label is None:
+                    continue
+
+                try:
+                    operation_params = self._collect_operation_parameters(operation_name)
+                    normalized = normalize_analysis_operation_parameters(
+                        {operation_name: operation_params}
+                    )
+                    compare_params = dict(
+                        normalized.get(operation_name, operation_params)
+                    )
+                    history = summarize_analysis_history(
+                        store_path,
+                        operation_name,
+                        parameters=compare_params,
+                    )
+                except Exception as exc:
+                    history = {
+                        "has_successful_run": False,
+                        "latest_success_run_id": None,
+                        "latest_success_ended_utc": None,
+                        "matches_parameters": False,
+                        "matching_run_id": None,
+                        "matching_ended_utc": None,
+                    }
+                    history_label.setText(f"Provenance: unavailable ({exc}).")
+                    if force_checkbox is not None:
+                        force_checkbox.setVisible(False)
+                        force_checkbox.setChecked(False)
+                        force_checkbox.setEnabled(False)
+                    continue
+
+                self._operation_history_cache[operation_name] = dict(history)
+                has_successful_run = bool(history.get("has_successful_run", False))
+                matches_parameters = bool(history.get("matches_parameters", False))
+                latest_run_id = str(history.get("latest_success_run_id") or "")
+                latest_ended = str(history.get("latest_success_ended_utc") or "")
+                matching_run_id = str(history.get("matching_run_id") or "")
+                matching_ended = str(history.get("matching_ended_utc") or "")
+
+                if not has_successful_run:
+                    history_label.setText("Provenance: no successful run recorded yet.")
+                elif matches_parameters:
+                    summary_bits = [f"run_id={matching_run_id}"] if matching_run_id else []
+                    if matching_ended:
+                        summary_bits.append(f"ended={matching_ended}")
+                    summary_text = ", ".join(summary_bits) if summary_bits else "latest run"
+                    history_label.setText(
+                        "Provenance: matching successful run exists "
+                        f"({summary_text}); routine will be skipped unless Force rerun is enabled."
+                    )
+                else:
+                    summary_bits = [f"run_id={latest_run_id}"] if latest_run_id else []
+                    if latest_ended:
+                        summary_bits.append(f"ended={latest_ended}")
+                    summary_text = ", ".join(summary_bits) if summary_bits else "latest run"
+                    history_label.setText(
+                        "Provenance: successful run exists with different parameters "
+                        f"({summary_text})."
+                    )
+
+                if force_checkbox is not None:
+                    force_checkbox.setVisible(has_successful_run)
+                    if not has_successful_run:
+                        force_checkbox.setChecked(False)
+                    force_checkbox.setEnabled(
+                        has_successful_run
+                        and self._operation_checkboxes[operation_name].isChecked()
+                    )
+
         def _set_status(self, text: str) -> None:
             """Update the analysis status label text.
 
@@ -3997,6 +4131,16 @@ if HAS_PYQT6:
                 self._operation_order_spins[operation_name].setEnabled(enabled)
                 self._operation_config_buttons[operation_name].setEnabled(enabled)
                 self._operation_input_combos[operation_name].setEnabled(enabled)
+                force_checkbox = self._operation_force_rerun_checkboxes.get(
+                    operation_name
+                )
+                if force_checkbox is not None:
+                    has_success = bool(
+                        self._operation_history_cache.get(operation_name, {}).get(
+                            "has_successful_run", False
+                        )
+                    )
+                    force_checkbox.setEnabled(enabled and has_success)
 
             self._refresh_input_source_options()
             self._set_deconvolution_parameter_enabled_state()
@@ -4393,8 +4537,6 @@ if HAS_PYQT6:
                 "registration": bool(initial.registration),
                 "visualization": bool(initial.visualization),
             }
-            if not any(checkbox_defaults.values()):
-                checkbox_defaults["particle_detection"] = True
 
             for idx, operation_name in enumerate(self._OPERATION_KEYS):
                 operation_params = dict(
@@ -4409,6 +4551,13 @@ if HAS_PYQT6:
                 self._operation_order_spins[operation_name].setValue(
                     int(operation_params.get("execution_order", idx + 1))
                 )
+                force_checkbox = self._operation_force_rerun_checkboxes.get(
+                    operation_name
+                )
+                if force_checkbox is not None:
+                    force_checkbox.setChecked(
+                        bool(operation_params.get("force_rerun", False))
+                    )
 
             self._refresh_input_source_options()
             for operation_name in self._OPERATION_KEYS:
@@ -4436,7 +4585,7 @@ if HAS_PYQT6:
             position_count = 1
             store_xy_um: Optional[float] = None
             store_z_um: Optional[float] = None
-            if initial.file and str(initial.file).lower().endswith((".zarr", ".n5")):
+            if initial.file and is_zarr_store_path(initial.file):
                 try:
                     root = zarr.open_group(str(initial.file), mode="r")
                     if "data" in root and len(tuple(root["data"].shape)) == 6:
@@ -4660,6 +4809,7 @@ if HAS_PYQT6:
             )
             self._set_visualization_position_selector_state()
 
+            self._refresh_operation_provenance_statuses()
             self._on_operation_selection_changed()
             if self._operation_panel_stack is not None:
                 self._operation_panel_stack.setCurrentIndex(0)
@@ -5062,6 +5212,10 @@ if HAS_PYQT6:
             defaults["input_source"] = (
                 str(combo_value).strip() if combo_value is not None else "data"
             ) or "data"
+            force_checkbox = self._operation_force_rerun_checkboxes.get(operation_name)
+            defaults["force_rerun"] = (
+                bool(force_checkbox.isChecked()) if force_checkbox is not None else False
+            )
             if operation_name == "deconvolution":
                 defaults.update(self._collect_deconvolution_parameters())
             elif operation_name == "particle_detection":
@@ -5082,6 +5236,7 @@ if HAS_PYQT6:
             None
                 Stores selected workflow and accepts this dialog.
             """
+            self._refresh_operation_provenance_statuses()
             selected_flags = {
                 operation_name: self._operation_checkboxes[operation_name].isChecked()
                 for operation_name in self._OPERATION_KEYS
@@ -5279,10 +5434,47 @@ def launch_gui(
                 )
                 if not completed:
                     continue
+                current = _reset_analysis_selection_for_next_run(current)
 
     if owns_app:
         app.quit()
     return selected
+
+
+def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> WorkflowConfig:
+    """Return a workflow copy with analysis selections reset for next GUI pass.
+
+    Parameters
+    ----------
+    workflow : WorkflowConfig
+        Most-recently executed workflow configuration.
+
+    Returns
+    -------
+    WorkflowConfig
+        Updated workflow with all analysis flags disabled and ``force_rerun``
+        reset to ``False`` for provenance-aware operations.
+    """
+    analysis_parameters = normalize_analysis_operation_parameters(
+        workflow.analysis_parameters
+    )
+    for operation_name in ("deconvolution", "particle_detection", "registration"):
+        params = dict(analysis_parameters.get(operation_name, {}))
+        params["force_rerun"] = False
+        analysis_parameters[operation_name] = params
+
+    return WorkflowConfig(
+        file=workflow.file,
+        prefer_dask=workflow.prefer_dask,
+        dask_backend=workflow.dask_backend,
+        chunks=workflow.chunks,
+        deconvolution=False,
+        particle_detection=False,
+        registration=False,
+        visualization=False,
+        zarr_save=workflow.zarr_save,
+        analysis_parameters=analysis_parameters,
+    )
 
 
 def run_workflow_with_progress(

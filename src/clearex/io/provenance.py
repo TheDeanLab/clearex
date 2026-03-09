@@ -58,6 +58,9 @@ from clearex.workflow import (
 )
 
 ArrayLike = Union[np.ndarray, da.Array]
+_PROVENANCE_PARAMETER_COMPARE_EXCLUDE_KEYS = frozenset(
+    {"execution_order", "force_rerun"}
+)
 
 
 def is_zarr_store_path(path: Union[str, Path]) -> bool:
@@ -387,6 +390,203 @@ def _default_outputs(workflow: WorkflowConfig) -> Dict[str, Any]:
             "storage_policy": "latest_only",
         }
     return outputs
+
+
+def _analysis_parameters_from_run_record(
+    record: Mapping[str, Any],
+    *,
+    analysis_name: str,
+) -> Optional[Dict[str, Any]]:
+    """Extract per-analysis parameter mapping from one run record.
+
+    Parameters
+    ----------
+    record : mapping[str, Any]
+        Provenance run record payload.
+    analysis_name : str
+        Analysis operation name.
+
+    Returns
+    -------
+    dict[str, Any], optional
+        Analysis parameter mapping when present.
+    """
+    workflow = record.get("workflow")
+    if not isinstance(workflow, Mapping):
+        return None
+    analysis_parameters = workflow.get("analysis_parameters")
+    if not isinstance(analysis_parameters, Mapping):
+        return None
+    params = analysis_parameters.get(str(analysis_name))
+    if not isinstance(params, Mapping):
+        return None
+    return dict(params)
+
+
+def _comparison_parameters(parameters: Mapping[str, Any]) -> Dict[str, Any]:
+    """Prepare analysis parameters for provenance equality comparison.
+
+    Parameters
+    ----------
+    parameters : mapping[str, Any]
+        Candidate parameter mapping.
+
+    Returns
+    -------
+    dict[str, Any]
+        Comparison-safe parameter mapping with non-output-affecting controls removed.
+    """
+    return {
+        str(key): value
+        for key, value in dict(parameters).items()
+        if str(key) not in _PROVENANCE_PARAMETER_COMPARE_EXCLUDE_KEYS
+    }
+
+
+def _run_record_analysis_step_completed(
+    record: Mapping[str, Any],
+    *,
+    analysis_name: str,
+) -> bool:
+    """Return whether a run record completed a specific analysis operation.
+
+    Parameters
+    ----------
+    record : mapping[str, Any]
+        Provenance run record payload.
+    analysis_name : str
+        Analysis operation name.
+
+    Returns
+    -------
+    bool
+        ``True`` when run status is completed and the step is not skipped.
+    """
+    if str(record.get("status", "")).strip().lower() != "completed":
+        return False
+
+    normalized_name = _normalize_analysis_name(str(analysis_name))
+    steps = record.get("steps")
+    if not isinstance(steps, list):
+        return False
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        step_name = _normalize_analysis_name(str(step.get("name", "")))
+        if step_name != normalized_name:
+            continue
+        params = step.get("parameters")
+        if isinstance(params, Mapping):
+            if str(params.get("status", "")).strip().lower() == "skipped":
+                return False
+        return True
+    return False
+
+
+def summarize_analysis_history(
+    zarr_path: Union[str, Path],
+    analysis_name: str,
+    *,
+    parameters: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Summarize successful-run history for an analysis operation.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Path to a Zarr/N5 store.
+    analysis_name : str
+        Analysis operation name.
+    parameters : mapping[str, Any], optional
+        Candidate parameter mapping used to detect exact prior matches.
+
+    Returns
+    -------
+    dict[str, Any]
+        History summary with keys:
+        ``has_successful_run``, ``latest_success_run_id``,
+        ``latest_success_ended_utc``, ``matches_parameters``,
+        ``matching_run_id``, ``matching_ended_utc``.
+
+    Raises
+    ------
+    ValueError
+        If ``zarr_path`` is not a Zarr/N5 path.
+    """
+    if not is_zarr_store_path(zarr_path):
+        raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    provenance_group = root.get("provenance")
+    if provenance_group is None or "runs" not in provenance_group:
+        return {
+            "has_successful_run": False,
+            "latest_success_run_id": None,
+            "latest_success_ended_utc": None,
+            "matches_parameters": False,
+            "matching_run_id": None,
+            "matching_ended_utc": None,
+        }
+
+    runs_group = provenance_group["runs"]
+    run_entries: list[tuple[int, str, Dict[str, Any]]] = []
+    for run_id in runs_group.group_keys():
+        record = dict(runs_group[run_id].attrs.get("record", {}))
+        run_index = int(record.get("run_index", 0))
+        run_entries.append((run_index, str(run_id), record))
+    run_entries.sort(key=lambda item: item[0], reverse=True)
+
+    candidate_json: Optional[str] = None
+    if parameters is not None:
+        candidate_json = _canonical_json(
+            _to_jsonable(_comparison_parameters(dict(parameters)))
+        )
+
+    latest_success_run_id: Optional[str] = None
+    latest_success_ended_utc: Optional[str] = None
+    matching_run_id: Optional[str] = None
+    matching_ended_utc: Optional[str] = None
+
+    for _, run_id, record in run_entries:
+        if not _run_record_analysis_step_completed(
+            record,
+            analysis_name=analysis_name,
+        ):
+            continue
+
+        ended_utc = None
+        timestamps = record.get("timestamps")
+        if isinstance(timestamps, Mapping):
+            ended_value = timestamps.get("ended_utc")
+            if ended_value is not None:
+                ended_utc = str(ended_value)
+
+        if latest_success_run_id is None:
+            latest_success_run_id = str(run_id)
+            latest_success_ended_utc = ended_utc
+
+        if candidate_json is not None:
+            record_parameters = _analysis_parameters_from_run_record(
+                record,
+                analysis_name=analysis_name,
+            )
+            if record_parameters is not None:
+                record_json = _canonical_json(
+                    _to_jsonable(_comparison_parameters(record_parameters))
+                )
+                if record_json == candidate_json:
+                    matching_run_id = str(run_id)
+                    matching_ended_utc = ended_utc
+                    break
+
+    return {
+        "has_successful_run": latest_success_run_id is not None,
+        "latest_success_run_id": latest_success_run_id,
+        "latest_success_ended_utc": latest_success_ended_utc,
+        "matches_parameters": matching_run_id is not None,
+        "matching_run_id": matching_run_id,
+        "matching_ended_utc": matching_ended_utc,
+    }
 
 
 def register_latest_output_reference(
