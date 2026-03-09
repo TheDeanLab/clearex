@@ -110,6 +110,7 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
         assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 2
         assert cfg.analysis_parameters["particle_detection"]["input_source"] == "data"
+        assert cfg.analysis_parameters["visualization"]["show_all_positions"] is False
         assert cfg.analysis_parameters["visualization"]["position_index"] == 0
         assert cfg.analysis_parameters["visualization"]["use_multiscale"] is True
 
@@ -223,6 +224,7 @@ class TestWorkflowConfig:
         cfg = WorkflowConfig(
             analysis_parameters={
                 "visualization": {
+                    "show_all_positions": 1,
                     "position_index": "3",
                     "use_multiscale": 0,
                     "overlay_particle_detections": 1,
@@ -231,6 +233,7 @@ class TestWorkflowConfig:
             }
         )
         params = cfg.analysis_parameters["visualization"]
+        assert params["show_all_positions"] is True
         assert params["position_index"] == 3
         assert params["use_multiscale"] is False
         assert params["overlay_particle_detections"] is True
@@ -328,6 +331,7 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     )
     assert normalized["deconvolution"]["execution_order"] == 1
     assert normalized["visualization"]["input_source"] == "data"
+    assert normalized["visualization"]["show_all_positions"] is False
     assert normalized["visualization"]["use_multiscale"] is True
 
 

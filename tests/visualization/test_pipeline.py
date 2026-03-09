@@ -74,18 +74,26 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
         zarr_path,
         source_components,
         source_component,
-        position_index,
-        points,
-        point_properties,
+        selected_positions,
+        points_by_position,
+        point_properties_by_position,
+        position_affines_tczyx,
         axis_labels,
         scale_tczyx,
         image_metadata,
         points_metadata,
     ) -> None:
-        del zarr_path, source_component, point_properties
+        del zarr_path, source_component, point_properties_by_position
         captured["source_components"] = tuple(source_components)
-        captured["position_index"] = int(position_index)
-        captured["points"] = np.asarray(points, dtype=np.float32)
+        captured["selected_positions"] = tuple(int(value) for value in selected_positions)
+        captured["points_by_position"] = {
+            int(key): np.asarray(value, dtype=np.float32)
+            for key, value in dict(points_by_position).items()
+        }
+        captured["position_affines_tczyx"] = {
+            int(key): np.asarray(value, dtype=np.float64)
+            for key, value in dict(position_affines_tczyx).items()
+        }
         captured["axis_labels"] = tuple(axis_labels)
         captured["scale_tczyx"] = tuple(float(value) for value in scale_tczyx)
         captured["image_metadata"] = dict(image_metadata)
@@ -111,29 +119,38 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     assert summary.source_component == "data"
     assert summary.source_components == ("data", "data_pyramid/level_1")
     assert summary.position_index == 1
+    assert summary.selected_positions == (1,)
+    assert summary.show_all_positions is False
     assert summary.overlay_points_count == 1
     assert summary.launch_mode == "in_process"
     assert summary.viewer_pid is None
 
     assert captured["source_components"] == ("data", "data_pyramid/level_1")
-    assert captured["position_index"] == 1
-    points = np.asarray(captured["points"], dtype=np.float32)
+    assert captured["selected_positions"] == (1,)
+    points = np.asarray(captured["points_by_position"][1], dtype=np.float32)
     assert points.shape == (1, 5)
     assert np.allclose(points[0], np.asarray([1, 0, 2, 1, 0], dtype=np.float32))
+    affine = np.asarray(captured["position_affines_tczyx"][1], dtype=np.float64)
+    assert np.allclose(affine, np.eye(6, dtype=np.float64))
     assert captured["axis_labels"] == ("t", "c", "z", "y", "x")
     assert captured["scale_tczyx"] == (2.0, 1.0, 3.0, 4.0, 5.0)
     image_metadata = dict(captured["image_metadata"])
     assert image_metadata["source_component"] == "data"
     assert image_metadata["position_index"] == 1
+    assert image_metadata["selected_positions"] == [1]
+    assert image_metadata["show_all_positions"] is False
     assert image_metadata["source_data_path"] == "/tmp/input.ome.tif"
     assert image_metadata["multiscale_levels"][0]["component"] == "data"
     points_metadata = dict(captured["points_metadata"])
     assert points_metadata["overlay_points_count"] == 1
+    assert points_metadata["selected_positions"] == [1]
     assert points_metadata["coordinate_axes_tczyx"] == ["t", "c", "z", "y", "x"]
 
     output_root = zarr.open_group(str(store_path), mode="r")
     latest_attrs = dict(output_root["results"]["visualization"]["latest"].attrs)
     assert latest_attrs["position_index"] == 1
+    assert latest_attrs["selected_positions"] == [1]
+    assert latest_attrs["show_all_positions"] is False
     assert latest_attrs["launch_mode"] == "in_process"
     assert latest_attrs["overlay_points_count"] == 1
     assert latest_attrs["source_components"] == ["data", "data_pyramid/level_1"]
@@ -183,6 +200,9 @@ def test_run_visualization_analysis_subprocess_launch(
 
     assert summary.launch_mode == "subprocess"
     assert summary.viewer_pid == 43210
+    assert summary.position_index == 0
+    assert summary.selected_positions == (0,)
+    assert summary.show_all_positions is False
     assert captured["zarr_path"] == str(store_path)
     assert dict(captured["parameters"])["launch_mode"] == "in_process"
 
@@ -263,9 +283,10 @@ def test_run_visualization_analysis_uses_experiment_spacing_when_available(
         zarr_path,
         source_components,
         source_component,
-        position_index,
-        points,
-        point_properties,
+        selected_positions,
+        points_by_position,
+        point_properties_by_position,
+        position_affines_tczyx,
         axis_labels,
         scale_tczyx,
         image_metadata,
@@ -274,9 +295,10 @@ def test_run_visualization_analysis_uses_experiment_spacing_when_available(
         del zarr_path
         del source_components
         del source_component
-        del position_index
-        del points
-        del point_properties
+        del selected_positions
+        del points_by_position
+        del point_properties_by_position
+        del position_affines_tczyx
         del axis_labels
         del points_metadata
         captured["scale_tczyx"] = tuple(float(value) for value in scale_tczyx)
@@ -302,3 +324,123 @@ def test_run_visualization_analysis_uses_experiment_spacing_when_available(
     source_experiment_metadata = image_metadata.get("source_experiment_metadata")
     assert isinstance(source_experiment_metadata, dict)
     assert source_experiment_metadata["MicroscopeState"]["step_size"] == 1.5
+
+
+def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    experiment_path = tmp_path / "experiment.yml"
+    experiment_payload = {
+        "Saving": {
+            "save_directory": str(tmp_path),
+            "file_type": "TIFF",
+        },
+        "CameraParameters": {
+            "img_x_pixels": 8,
+            "img_y_pixels": 8,
+        },
+        "MicroscopeState": {
+            "timepoints": 1,
+            "number_z_steps": 2,
+            "channels": {
+                "channel_1": {
+                    "is_selected": True,
+                }
+            },
+        },
+    }
+    experiment_path.write_text(json.dumps(experiment_payload))
+    (tmp_path / "multi_positions.yml").write_text(
+        json.dumps(
+            [
+                ["X", "Y", "Z", "THETA", "F"],
+                [0, 0, 0, 0, 0],
+                [10, 20, 30, 15, 0],
+            ]
+        )
+    )
+
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 2, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.attrs.update({"source_experiment": str(experiment_path)})
+    root["data"].attrs.update({"scale_tpczyx": [1.0, 1.0, 1.0, 2.0, 3.0, 4.0]})
+
+    captured: dict[str, object] = {}
+
+    def _fake_launch_napari_viewer(
+        *,
+        zarr_path,
+        source_components,
+        source_component,
+        selected_positions,
+        points_by_position,
+        point_properties_by_position,
+        position_affines_tczyx,
+        axis_labels,
+        scale_tczyx,
+        image_metadata,
+        points_metadata,
+    ) -> None:
+        del zarr_path
+        del source_components
+        del source_component
+        del points_by_position
+        del point_properties_by_position
+        del axis_labels
+        del scale_tczyx
+        del points_metadata
+        captured["selected_positions"] = tuple(int(value) for value in selected_positions)
+        captured["position_affines_tczyx"] = {
+            int(key): np.asarray(value, dtype=np.float64)
+            for key, value in dict(position_affines_tczyx).items()
+        }
+        captured["image_metadata"] = dict(image_metadata)
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_launch_napari_viewer",
+        _fake_launch_napari_viewer,
+    )
+
+    summary = run_visualization_analysis(
+        zarr_path=store_path,
+        parameters={
+            "show_all_positions": True,
+            "overlay_particle_detections": False,
+            "launch_mode": "in_process",
+        },
+    )
+
+    assert summary.position_index == 0
+    assert summary.selected_positions == (0, 1)
+    assert summary.show_all_positions is True
+    assert summary.overlay_points_count == 0
+    assert captured["selected_positions"] == (0, 1)
+
+    affines = dict(captured["position_affines_tczyx"])
+    assert np.allclose(np.asarray(affines[0]), np.eye(6, dtype=np.float64))
+    affine_1 = np.asarray(affines[1], dtype=np.float64)
+    theta = np.deg2rad(15.0)
+    assert np.isclose(affine_1[2, 2], np.cos(theta))
+    assert np.isclose(affine_1[2, 3], np.sin(theta))
+    assert np.isclose(affine_1[3, 2], -np.sin(theta))
+    assert np.isclose(affine_1[3, 3], np.cos(theta))
+    assert np.isclose(affine_1[2, 5], 30.0 * 2.0)
+    assert np.isclose(affine_1[3, 5], 20.0 * 3.0)
+    assert np.isclose(affine_1[4, 5], 10.0 * 4.0)
+
+    image_metadata = dict(captured["image_metadata"])
+    assert image_metadata["selected_positions"] == [0, 1]
+    assert image_metadata["show_all_positions"] is True
+
+    latest_attrs = dict(zarr.open_group(str(store_path), mode="r")["results"]["visualization"]["latest"].attrs)
+    assert latest_attrs["position_index"] == 0
+    assert latest_attrs["selected_positions"] == [0, 1]
+    assert latest_attrs["show_all_positions"] is True

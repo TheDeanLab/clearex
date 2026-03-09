@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -66,7 +67,13 @@ class VisualizationSummary:
     source_components : tuple[str, ...]
         Ordered source levels used for multiscale rendering.
     position_index : int
-        Selected position index from the ``p`` axis.
+        Reference position index from the ``p`` axis. When
+        ``show_all_positions`` is ``False`` this is the single selected
+        position. When ``True`` this is the first rendered position.
+    selected_positions : tuple[int, ...]
+        Rendered position indices from the ``p`` axis.
+    show_all_positions : bool
+        Whether all positions were rendered in one napari scene.
     overlay_points_count : int
         Number of particle points overlaid in the viewer.
     launch_mode : str
@@ -79,6 +86,8 @@ class VisualizationSummary:
     source_component: str
     source_components: tuple[str, ...]
     position_index: int
+    selected_positions: tuple[int, ...]
+    show_all_positions: bool
     overlay_points_count: int
     launch_mode: str
     viewer_pid: Optional[int]
@@ -603,6 +612,9 @@ def _normalize_visualization_parameters(
         str(normalized.get("input_source", "data")).strip() or "data"
     )
     normalized["execution_order"] = max(1, int(normalized.get("execution_order", 1)))
+    normalized["show_all_positions"] = bool(
+        normalized.get("show_all_positions", False)
+    )
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
     normalized["overlay_particle_detections"] = bool(
@@ -713,6 +725,240 @@ def _resolve_multiscale_components(
     return tuple(unique) if unique else (source_component,)
 
 
+def _safe_float(value: Any, *, default: float = 0.0) -> float:
+    """Parse a finite float value with fallback.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate value to parse.
+    default : float, default=0.0
+        Fallback value used when parsing fails.
+
+    Returns
+    -------
+    float
+        Parsed finite float value, or ``default`` when unavailable.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not np.isfinite(parsed):
+        return float(default)
+    return float(parsed)
+
+
+def _looks_like_multiposition_header(row: Any) -> bool:
+    """Return whether a row resembles a Navigate multiposition header.
+
+    Parameters
+    ----------
+    row : Any
+        Candidate row value.
+
+    Returns
+    -------
+    bool
+        ``True`` when row contains at least ``X``, ``Y``, and ``Z`` labels.
+    """
+    if not isinstance(row, (list, tuple)) or not row:
+        return False
+    labels = {str(value).strip().upper() for value in row}
+    return {"X", "Y", "Z"}.issubset(labels)
+
+
+def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
+    """Parse stage coordinates from a ``multi_positions.yml`` payload.
+
+    Parameters
+    ----------
+    payload : Any
+        Parsed sidecar payload. Expected shape is a list of rows.
+
+    Returns
+    -------
+    list[dict[str, float]]
+        Parsed rows with ``x``, ``y``, ``z``, and ``theta`` values.
+    """
+    if not isinstance(payload, list):
+        return []
+
+    rows = list(payload)
+    header_index: dict[str, int] = {}
+    if rows and _looks_like_multiposition_header(rows[0]):
+        header_row = rows.pop(0)
+        if isinstance(header_row, (list, tuple)):
+            for idx, value in enumerate(header_row):
+                header_index[str(value).strip().upper()] = int(idx)
+
+    parsed_rows: list[dict[str, float]] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            continue
+
+        def _value(field: str, fallback_index: int) -> float:
+            index = header_index.get(field, fallback_index)
+            if index < 0 or index >= len(row):
+                return 0.0
+            return _safe_float(row[index], default=0.0)
+
+        parsed_rows.append(
+            {
+                "x": _value("X", 0),
+                "y": _value("Y", 1),
+                "z": _value("Z", 2),
+                "theta": _value("THETA", 3),
+            }
+        )
+    return parsed_rows
+
+
+def _load_multiposition_stage_rows(
+    root_attrs: Mapping[str, Any],
+) -> list[dict[str, float]]:
+    """Load multiposition stage rows from sidecar metadata when available.
+
+    Parameters
+    ----------
+    root_attrs : mapping[str, Any]
+        Root Zarr attributes.
+
+    Returns
+    -------
+    list[dict[str, float]]
+        Parsed stage rows from ``multi_positions.yml`` or fallback metadata.
+        Returns an empty list when stage metadata cannot be resolved.
+    """
+    source_experiment = root_attrs.get("source_experiment")
+    if not isinstance(source_experiment, str):
+        return []
+
+    experiment_path = Path(source_experiment).expanduser()
+    if not experiment_path.exists():
+        return []
+
+    sidecar_path = experiment_path.parent / "multi_positions.yml"
+    if sidecar_path.exists():
+        try:
+            text = sidecar_path.read_text()
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                try:
+                    import yaml  # type: ignore[import-not-found]
+
+                    payload = yaml.safe_load(text)
+                except Exception:
+                    payload = None
+            parsed = _parse_multiposition_stage_rows(payload)
+            if parsed:
+                return parsed
+        except Exception:
+            pass
+
+    try:
+        experiment = load_navigate_experiment(experiment_path)
+    except Exception:
+        return []
+    return _parse_multiposition_stage_rows(experiment.raw.get("MultiPositions"))
+
+
+def _build_position_affine_tczyx(
+    *,
+    delta_x: float,
+    delta_y: float,
+    delta_z: float,
+    delta_theta_deg: float,
+    scale_tczyx: Sequence[float],
+) -> np.ndarray:
+    """Build a 5D napari affine matrix for one position offset.
+
+    Parameters
+    ----------
+    delta_x : float
+        Stage X translation delta relative to reference position.
+    delta_y : float
+        Stage Y translation delta relative to reference position.
+    delta_z : float
+        Stage Z translation delta relative to reference position.
+    delta_theta_deg : float
+        Stage rotation delta (degrees) around sample X axis.
+    scale_tczyx : sequence of float
+        Effective napari layer scale in ``(t, c, z, y, x)`` order.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(6, 6)`` homogeneous affine matrix for ``(t, c, z, y, x)`` data.
+    """
+    affine = np.eye(6, dtype=np.float64)
+    theta_rad = math.radians(float(delta_theta_deg))
+    cos_theta = math.cos(theta_rad)
+    sin_theta = math.sin(theta_rad)
+
+    # Rotate sample around X by rotating the Z/Y plane in TCZYX coordinates.
+    affine[2, 2] = cos_theta
+    affine[2, 3] = sin_theta
+    affine[3, 2] = -sin_theta
+    affine[3, 3] = cos_theta
+
+    scale_z = max(1e-12, float(scale_tczyx[2]))
+    scale_y = max(1e-12, float(scale_tczyx[3]))
+    scale_x = max(1e-12, float(scale_tczyx[4]))
+
+    # Convert stage-coordinate offsets into world-space units used by napari.
+    affine[2, 5] = float(delta_z) * scale_z
+    affine[3, 5] = float(delta_y) * scale_y
+    affine[4, 5] = float(delta_x) * scale_x
+    return affine
+
+
+def _resolve_position_affines_tczyx(
+    *,
+    root_attrs: Mapping[str, Any],
+    selected_positions: Sequence[int],
+    scale_tczyx: Sequence[float],
+) -> tuple[dict[int, np.ndarray], list[dict[str, float]]]:
+    """Resolve per-position affines for napari rendering.
+
+    Parameters
+    ----------
+    root_attrs : mapping[str, Any]
+        Root Zarr attributes.
+    selected_positions : sequence of int
+        Position indices selected for visualization.
+    scale_tczyx : sequence of float
+        Effective napari layer scale in ``(t, c, z, y, x)`` order.
+
+    Returns
+    -------
+    tuple[dict[int, numpy.ndarray], list[dict[str, float]]]
+        Mapping of position index to affine matrix and parsed stage rows.
+    """
+    affines: dict[int, np.ndarray] = {
+        int(index): np.eye(6, dtype=np.float64) for index in selected_positions
+    }
+    stage_rows = _load_multiposition_stage_rows(root_attrs)
+    if not stage_rows:
+        return affines, []
+
+    reference = stage_rows[0]
+    for position_index in selected_positions:
+        idx = int(position_index)
+        if idx < 0 or idx >= len(stage_rows):
+            continue
+        row = stage_rows[idx]
+        affines[idx] = _build_position_affine_tczyx(
+            delta_x=float(row["x"] - reference["x"]),
+            delta_y=float(row["y"] - reference["y"]),
+            delta_z=float(row["z"] - reference["z"]),
+            delta_theta_deg=float(row["theta"] - reference["theta"]),
+            scale_tczyx=scale_tczyx,
+        )
+    return affines, stage_rows
+
+
 def _load_particle_overlay_points(
     *,
     root: zarr.hierarchy.Group,
@@ -816,9 +1062,10 @@ def _launch_napari_viewer(
     zarr_path: Union[str, Path],
     source_components: Sequence[str],
     source_component: str,
-    position_index: int,
-    points: np.ndarray,
-    point_properties: Mapping[str, np.ndarray],
+    selected_positions: Sequence[int],
+    points_by_position: Mapping[int, np.ndarray],
+    point_properties_by_position: Mapping[int, Mapping[str, np.ndarray]],
+    position_affines_tczyx: Mapping[int, np.ndarray],
     axis_labels: Sequence[str],
     scale_tczyx: Sequence[float],
     image_metadata: Mapping[str, Any],
@@ -834,12 +1081,14 @@ def _launch_napari_viewer(
         Ordered source component paths for multiscale rendering.
     source_component : str
         Base source component path used for naming.
-    position_index : int
-        Position index selected from the ``p`` axis.
-    points : numpy.ndarray
-        Overlay points in ``(t, c, z, y, x)`` order.
-    point_properties : mapping[str, numpy.ndarray]
-        Optional per-point property arrays.
+    selected_positions : sequence of int
+        Position indices selected from the ``p`` axis.
+    points_by_position : mapping[int, numpy.ndarray]
+        Overlay points keyed by position index in ``(t, c, z, y, x)`` order.
+    point_properties_by_position : mapping[int, mapping[str, numpy.ndarray]]
+        Optional point-property mappings keyed by position index.
+    position_affines_tczyx : mapping[int, numpy.ndarray]
+        Per-position affine matrices in homogeneous ``(6, 6)`` form.
     axis_labels : sequence of str
         Axis labels in ``(t, c, z, y, x)`` order.
     scale_tczyx : sequence of float
@@ -861,17 +1110,6 @@ def _launch_napari_viewer(
     """
     import napari
 
-    level_arrays = [
-        da.from_zarr(str(zarr_path), component=component)[:, position_index, :, :, :, :]
-        for component in source_components
-    ]
-    image_data: Any
-    is_multiscale = len(level_arrays) > 1
-    if is_multiscale:
-        image_data = level_arrays
-    else:
-        image_data = level_arrays[0]
-
     scale = tuple(float(value) for value in scale_tczyx)
     viewer = napari.Viewer(ndisplay=3, show=True)
     try:
@@ -879,20 +1117,63 @@ def _launch_napari_viewer(
     except Exception:
         pass
 
-    viewer.add_image(
-        image_data,
-        multiscale=is_multiscale,
-        name=f"{source_component} (p={position_index})",
-        scale=scale,
-        metadata={str(key): value for key, value in image_metadata.items()},
-    )
-    if points.shape[0] > 0:
+    selected = tuple(int(index) for index in selected_positions)
+    multi_position = len(selected) > 1
+    for position_index in selected:
+        level_arrays = [
+            da.from_zarr(str(zarr_path), component=component)[
+                :, position_index, :, :, :, :
+            ]
+            for component in source_components
+        ]
+        image_data: Any
+        is_multiscale = len(level_arrays) > 1
+        if is_multiscale:
+            image_data = level_arrays
+        else:
+            image_data = level_arrays[0]
+
+        image_layer_metadata = dict(image_metadata)
+        image_layer_metadata["position_index"] = int(position_index)
+        affine = np.asarray(
+            position_affines_tczyx.get(position_index, np.eye(6, dtype=np.float64)),
+            dtype=np.float64,
+        )
+
+        viewer.add_image(
+            image_data,
+            multiscale=is_multiscale,
+            name=f"{source_component} (p={position_index})",
+            scale=scale,
+            affine=affine,
+            metadata={str(key): value for key, value in image_layer_metadata.items()},
+        )
+
+        points = np.asarray(
+            points_by_position.get(
+                position_index,
+                np.empty((0, 5), dtype=np.float32),
+            ),
+            dtype=np.float32,
+        )
+        if points.shape[0] <= 0:
+            continue
+
+        point_properties = point_properties_by_position.get(position_index, {})
+        points_layer_metadata = dict(points_metadata)
+        points_layer_metadata["position_index"] = int(position_index)
+        layer_name = (
+            f"Particle Detections (p={position_index})"
+            if multi_position
+            else "Particle Detections"
+        )
         viewer.add_points(
             points.astype(np.float32, copy=False),
-            name="Particle Detections",
+            name=layer_name,
             properties={str(k): np.asarray(v) for k, v in point_properties.items()},
             scale=scale,
-            metadata={str(key): value for key, value in points_metadata.items()},
+            affine=affine,
+            metadata={str(key): value for key, value in points_layer_metadata.items()},
             size=7.0,
             face_color="transparent",
             border_color="yellow",
@@ -907,6 +1188,8 @@ def _save_visualization_metadata(
     source_component: str,
     source_components: Sequence[str],
     position_index: int,
+    selected_positions: Sequence[int],
+    show_all_positions: bool,
     parameters: Mapping[str, Any],
     overlay_points_count: int,
     launch_mode: str,
@@ -924,7 +1207,11 @@ def _save_visualization_metadata(
     source_components : sequence of str
         Ordered source levels used for multiscale loading.
     position_index : int
-        Selected ``p``-axis index.
+        Reference ``p``-axis index.
+    selected_positions : sequence of int
+        Rendered position indices.
+    show_all_positions : bool
+        Whether all positions were rendered.
     parameters : mapping[str, Any]
         Effective visualization parameters.
     overlay_points_count : int
@@ -953,6 +1240,8 @@ def _save_visualization_metadata(
         "source_component": str(source_component),
         "source_components": [str(item) for item in source_components],
         "position_index": int(position_index),
+        "selected_positions": [int(value) for value in selected_positions],
+        "show_all_positions": bool(show_all_positions),
         "overlay_points_count": int(overlay_points_count),
         "launch_mode": str(launch_mode),
         "parameters": {str(k): v for k, v in dict(parameters).items()},
@@ -1020,32 +1309,85 @@ def run_visualization_analysis(
 
     source_array = root[source_component]
     source_shape = tuple(int(value) for value in source_array.shape)
-    position_index = int(normalized["position_index"])
-    if position_index >= int(source_shape[1]):
-        raise ValueError(
-            f"visualization position_index={position_index} is out of bounds "
-            f"for position axis size {source_shape[1]}."
-        )
+    position_count = int(source_shape[1])
+    show_all_positions = bool(normalized.get("show_all_positions", False))
+    if show_all_positions:
+        selected_positions: tuple[int, ...] = tuple(range(position_count))
+    else:
+        position_index = int(normalized["position_index"])
+        if position_index >= position_count:
+            raise ValueError(
+                f"visualization position_index={position_index} is out of bounds "
+                f"for position axis size {source_shape[1]}."
+            )
+        selected_positions = (position_index,)
+    reference_position_index = int(selected_positions[0])
 
-    overlay_points = np.empty((0, 5), dtype=np.float32)
-    overlay_properties: Dict[str, np.ndarray] = {}
+    points_by_position: Dict[int, np.ndarray] = {}
+    point_properties_by_position: Dict[int, Dict[str, np.ndarray]] = {}
     if bool(normalized.get("overlay_particle_detections", True)):
-        overlay_points, overlay_properties = _load_particle_overlay_points(
-            root=root,
-            detection_component=str(normalized["particle_detection_component"]),
-            position_index=position_index,
+        for position_index in selected_positions:
+            overlay_points, overlay_properties = _load_particle_overlay_points(
+                root=root,
+                detection_component=str(normalized["particle_detection_component"]),
+                position_index=int(position_index),
+            )
+            points_by_position[int(position_index)] = overlay_points
+            point_properties_by_position[int(position_index)] = overlay_properties
+    total_overlay_points = int(
+        sum(
+            int(np.asarray(points).shape[0])
+            for points in points_by_position.values()
         )
+    )
+    point_property_names = tuple(
+        sorted(
+            {
+                str(name)
+                for properties in point_properties_by_position.values()
+                for name in properties.keys()
+            }
+        )
+    )
 
     napari_payload = _build_napari_layer_payload(
         zarr_path=zarr_path,
         root=root,
         source_component=source_component,
         source_components=source_components,
-        position_index=position_index,
+        position_index=reference_position_index,
         parameters=normalized,
-        overlay_points_count=int(overlay_points.shape[0]),
-        point_property_names=tuple(str(name) for name in overlay_properties.keys()),
+        overlay_points_count=total_overlay_points,
+        point_property_names=point_property_names,
     )
+    position_affines_tczyx, stage_rows = _resolve_position_affines_tczyx(
+        root_attrs=dict(root.attrs),
+        selected_positions=selected_positions,
+        scale_tczyx=napari_payload.scale_tczyx,
+    )
+    napari_payload.image_metadata["position_index"] = int(reference_position_index)
+    napari_payload.image_metadata["selected_positions"] = [
+        int(value) for value in selected_positions
+    ]
+    napari_payload.image_metadata["show_all_positions"] = bool(show_all_positions)
+    napari_payload.image_metadata["position_affines_tczyx"] = {
+        str(index): np.asarray(matrix, dtype=np.float64).tolist()
+        for index, matrix in position_affines_tczyx.items()
+    }
+    napari_payload.image_metadata["stage_positions_xyztheta"] = [
+        {
+            "x": float(row["x"]),
+            "y": float(row["y"]),
+            "z": float(row["z"]),
+            "theta": float(row["theta"]),
+        }
+        for row in stage_rows
+    ]
+    napari_payload.points_metadata["position_index"] = int(reference_position_index)
+    napari_payload.points_metadata["selected_positions"] = [
+        int(value) for value in selected_positions
+    ]
+    napari_payload.points_metadata["show_all_positions"] = bool(show_all_positions)
 
     _emit(20, "Preparing napari visualization layers")
     effective_launch_mode = _resolve_effective_launch_mode(
@@ -1067,9 +1409,10 @@ def run_visualization_analysis(
             zarr_path=zarr_path,
             source_components=source_components,
             source_component=source_component,
-            position_index=position_index,
-            points=overlay_points,
-            point_properties=overlay_properties,
+            selected_positions=selected_positions,
+            points_by_position=points_by_position,
+            point_properties_by_position=point_properties_by_position,
+            position_affines_tczyx=position_affines_tczyx,
             axis_labels=napari_payload.axis_labels_tczyx,
             scale_tczyx=napari_payload.scale_tczyx,
             image_metadata=napari_payload.image_metadata,
@@ -1081,9 +1424,11 @@ def run_visualization_analysis(
         zarr_path=zarr_path,
         source_component=source_component,
         source_components=source_components,
-        position_index=position_index,
+        position_index=reference_position_index,
+        selected_positions=selected_positions,
+        show_all_positions=show_all_positions,
         parameters=normalized,
-        overlay_points_count=int(overlay_points.shape[0]),
+        overlay_points_count=total_overlay_points,
         launch_mode=effective_launch_mode,
         viewer_pid=viewer_pid,
         run_id=run_id,
@@ -1093,8 +1438,10 @@ def run_visualization_analysis(
         component=component,
         source_component=source_component,
         source_components=tuple(str(item) for item in source_components),
-        position_index=position_index,
-        overlay_points_count=int(overlay_points.shape[0]),
+        position_index=reference_position_index,
+        selected_positions=tuple(int(value) for value in selected_positions),
+        show_all_positions=bool(show_all_positions),
+        overlay_points_count=total_overlay_points,
         launch_mode=effective_launch_mode,
         viewer_pid=viewer_pid,
     )

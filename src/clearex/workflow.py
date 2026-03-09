@@ -139,6 +139,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "use_map_overlap": False,
         "overlap_zyx": [0, 0, 0],
         "memory_overhead_factor": 1.0,
+        "show_all_positions": False,
         "position_index": 0,
         "use_multiscale": True,
         "overlay_particle_detections": True,
@@ -593,6 +594,9 @@ def _normalize_visualization_parameters(
         If launch mode is unsupported.
     """
     normalized = _normalize_common_operation_parameters("visualization", params)
+    normalized["show_all_positions"] = bool(
+        normalized.get("show_all_positions", False)
+    )
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
     normalized["overlay_particle_detections"] = bool(

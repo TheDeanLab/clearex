@@ -2701,6 +2701,10 @@ if HAS_PYQT6:
                 "Position index selects which multiposition volume is rendered in napari. "
                 "Single-position datasets should remain at 0."
             ),
+            "show_all_positions": (
+                "Render every position in the acquisition using stage transforms "
+                "from multi_positions.yml."
+            ),
             "use_multiscale": (
                 "When enabled, napari loads pyramid levels as a multiscale image "
                 "for faster navigation across zoom levels."
@@ -2931,6 +2935,9 @@ if HAS_PYQT6:
             )
             self._particle_remove_close_checkbox.toggled.connect(
                 self._set_particle_parameter_enabled_state
+            )
+            self._visualization_show_all_positions_checkbox.toggled.connect(
+                self._set_visualization_position_selector_state
             )
 
         def _build_no_selection_panel(self) -> QWidget:
@@ -3467,9 +3474,25 @@ if HAS_PYQT6:
             None
                 Widgets are created and attached in-place.
             """
+            self._visualization_show_all_positions_checkbox = QCheckBox(
+                "Show all positions"
+            )
+            form.addRow(
+                "Multi-position",
+                self._visualization_show_all_positions_checkbox,
+            )
+            self._register_parameter_hint(
+                self._visualization_show_all_positions_checkbox,
+                self._PARAMETER_HINTS["show_all_positions"],
+            )
+
             self._visualization_position_spin = QSpinBox()
             self._visualization_position_spin.setRange(0, 0)
-            form.addRow("Position index", self._visualization_position_spin)
+            self._visualization_position_label = QLabel("Position index")
+            form.addRow(
+                self._visualization_position_label,
+                self._visualization_position_spin,
+            )
             self._register_parameter_hint(
                 self._visualization_position_spin,
                 self._PARAMETER_HINTS["position_index"],
@@ -4072,11 +4095,41 @@ if HAS_PYQT6:
             visualization_enabled = self._operation_checkboxes[
                 "visualization"
             ].isChecked()
-            self._visualization_position_spin.setEnabled(visualization_enabled)
+            self._visualization_show_all_positions_checkbox.setEnabled(
+                visualization_enabled
+            )
+            show_all_positions = bool(
+                self._visualization_show_all_positions_checkbox.isChecked()
+            )
+            self._visualization_position_spin.setEnabled(
+                visualization_enabled and not show_all_positions
+            )
+            self._visualization_position_label.setEnabled(
+                visualization_enabled and not show_all_positions
+            )
             self._visualization_multiscale_checkbox.setEnabled(visualization_enabled)
             self._visualization_overlay_points_checkbox.setEnabled(
                 visualization_enabled
             )
+            self._set_visualization_position_selector_state()
+
+        def _set_visualization_position_selector_state(self) -> None:
+            """Show/hide position-index controls for multi-position rendering.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Position-index widget visibility is updated in-place.
+            """
+            show_all_positions = bool(
+                self._visualization_show_all_positions_checkbox.isChecked()
+            )
+            self._visualization_position_label.setVisible(not show_all_positions)
+            self._visualization_position_spin.setVisible(not show_all_positions)
 
         def _hydrate(self, initial: WorkflowConfig) -> None:
             """Populate analysis selections from initial workflow values.
@@ -4360,6 +4413,9 @@ if HAS_PYQT6:
             self._particle_min_distance_spin.setValue(
                 float(particle_params.get("min_distance_sigma", 10.0))
             )
+            self._visualization_show_all_positions_checkbox.setChecked(
+                bool(visualization_params.get("show_all_positions", False))
+            )
             self._visualization_position_spin.setValue(
                 max(
                     0,
@@ -4375,6 +4431,7 @@ if HAS_PYQT6:
             self._visualization_overlay_points_checkbox.setChecked(
                 bool(visualization_params.get("overlay_particle_detections", True))
             )
+            self._set_visualization_position_selector_state()
 
             self._on_operation_selection_changed()
             if self._operation_panel_stack is not None:
@@ -4733,6 +4790,9 @@ if HAS_PYQT6:
                 "overlap_zyx": [0, 0, 0],
                 "memory_overhead_factor": float(
                     self._visualization_defaults.get("memory_overhead_factor", 1.0)
+                ),
+                "show_all_positions": bool(
+                    self._visualization_show_all_positions_checkbox.isChecked()
                 ),
                 "position_index": int(self._visualization_position_spin.value()),
                 "use_multiscale": bool(
