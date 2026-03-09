@@ -121,6 +121,7 @@ autodoc_mock_imports = [
 numpydoc_show_class_members = False
 numpydoc_class_members_toctree = False
 numpydoc_xref_param_type = True
+napoleon_use_ivar = True
 
 copybutton_prompt_text = r">>> |\.\.\. "
 copybutton_prompt_is_regexp = True
