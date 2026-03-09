@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
 import json
 import re
 import warnings
+import xml.etree.ElementTree as ET
 
 # Third Party Imports
 import dask
@@ -437,6 +438,315 @@ def _open_source_as_dask(
         return source_array, None, meta
 
     raise ValueError(f"Unsupported source format for ingestion: {source_path}")
+
+
+def _parse_navigate_bdv_setup_index_map(
+    source_path: Path,
+) -> Optional[dict[int, tuple[int, int]]]:
+    """Parse Navigate BDV XML setup metadata into position/channel indices.
+
+    Parameters
+    ----------
+    source_path : pathlib.Path
+        Source BDV data path (``.h5``/``.hdf5``/``.hdf`` or ``.n5``).
+
+    Returns
+    -------
+    dict[int, tuple[int, int]], optional
+        Mapping from setup index to ``(position_index, channel_index)``.
+        Returns ``None`` when companion XML metadata is unavailable or
+        incompatible.
+
+    Raises
+    ------
+    None
+        Parsing is best-effort and falls back to ``None``.
+    """
+    suffix = source_path.suffix.lower()
+    if suffix not in {".h5", ".hdf5", ".hdf", ".n5"}:
+        return None
+
+    xml_path = source_path.with_suffix(".xml")
+    if not xml_path.exists():
+        return None
+
+    try:
+        root = ET.fromstring(xml_path.read_text())
+    except Exception:
+        return None
+
+    image_loader = root.find("SequenceDescription/ImageLoader")
+    if image_loader is None:
+        return None
+    image_format = str(image_loader.attrib.get("format", "")).strip().lower()
+
+    if suffix in {".h5", ".hdf5", ".hdf"} and image_format != "bdv.hdf5":
+        return None
+    if suffix == ".n5" and image_format != "bdv.n5":
+        return None
+
+    raw_entries: list[tuple[int, int, int]] = []
+    for view_setup in root.findall("SequenceDescription/ViewSetups/ViewSetup"):
+        setup_text = view_setup.findtext("id")
+        channel_text = view_setup.findtext("attributes/channel")
+        tile_text = view_setup.findtext("attributes/tile")
+        if setup_text is None or channel_text is None or tile_text is None:
+            continue
+        try:
+            setup_index = int(setup_text)
+            channel_index = int(channel_text)
+            tile_index = int(tile_text)
+        except ValueError:
+            continue
+        raw_entries.append((setup_index, channel_index, tile_index))
+
+    if not raw_entries:
+        return None
+
+    channel_values = sorted({entry[1] for entry in raw_entries})
+    tile_values = sorted({entry[2] for entry in raw_entries})
+    channel_lookup = {value: idx for idx, value in enumerate(channel_values)}
+    tile_lookup = {value: idx for idx, value in enumerate(tile_values)}
+
+    return {
+        int(setup_index): (
+            int(tile_lookup[tile_index]),
+            int(channel_lookup[channel_index]),
+        )
+        for setup_index, channel_index, tile_index in raw_entries
+    }
+
+
+def _open_navigate_bdv_collection_as_dask(
+    *,
+    experiment: "NavigateExperiment",
+    source_path: Path,
+    exit_stack: ExitStack,
+) -> Optional[tuple[da.Array, AxesSpec, dict[str, Any]]]:
+    """Open Navigate BDV H5/N5 acquisitions as stacked ``(t, p, c, ...)``.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    source_path : pathlib.Path
+        Source acquisition path.
+    exit_stack : contextlib.ExitStack
+        Exit stack for file-handle lifecycle management.
+
+    Returns
+    -------
+    tuple, optional
+        ``(source_array, source_axes, metadata)`` for BDV collection mode,
+        or ``None`` when the source does not match BDV collection patterns.
+
+    Raises
+    ------
+    ValueError
+        If indexed source arrays have inconsistent shape/axes or contain
+        missing position/channel combinations.
+    """
+    suffix = source_path.suffix.lower()
+    is_h5 = suffix in {".h5", ".hdf5", ".hdf"}
+    is_n5 = suffix == ".n5" and _is_zarr_like_path(source_path)
+    if not is_h5 and not is_n5:
+        return None
+
+    setup_map = _parse_navigate_bdv_setup_index_map(source_path)
+    inferred_positions = max(1, int(experiment.multiposition_count))
+
+    arrays_by_index: dict[tuple[int, int, int], da.Array] = {}
+    base_axes: AxesSpec = None
+    base_shape: Optional[tuple[int, ...]] = None
+
+    if is_h5:
+        h5_file = exit_stack.enter_context(h5py.File(str(source_path), mode="r"))
+        entries: list[tuple[int, int, h5py.Dataset]] = []
+
+        def _collect_h5_entries(name: str, obj: Any) -> None:
+            if not isinstance(obj, h5py.Dataset):
+                return
+            match = re.match(r"^t(\d+)/s(\d+)/(\d+)/cells$", name)
+            if match is None:
+                return
+            if int(match.group(3)) != 0:
+                return
+            entries.append((int(match.group(1)), int(match.group(2)), obj))
+
+        h5_file.visititems(_collect_h5_entries)
+        if len(entries) <= 1:
+            return None
+
+        for time_index, setup_index, dataset in sorted(
+            entries, key=lambda item: (item[0], item[1])
+        ):
+            if setup_map is not None and setup_index not in setup_map:
+                continue
+            if setup_map is not None:
+                position_index, channel_index = setup_map[setup_index]
+            else:
+                channel_index = int(setup_index // inferred_positions)
+                position_index = int(setup_index % inferred_positions)
+
+            key = (int(time_index), int(position_index), int(channel_index))
+            if key in arrays_by_index:
+                continue
+
+            raw_axes = (
+                dataset.attrs.get("axes")
+                or dataset.attrs.get("dimension_order")
+                or dataset.attrs.get("DimensionOrder")
+                or dataset.attrs.get("DIMENSION_LABELS")
+            )
+            source_axes = _normalize_axes_descriptor(
+                raw_axes, ndim=len(tuple(dataset.shape))
+            )
+            source_array = da.from_array(
+                dataset,
+                chunks=dataset.chunks
+                or tuple(min(128, int(size)) for size in dataset.shape),
+                lock=True,
+            )
+            normalized_axes = tuple(
+                source_axes or _infer_source_axes(tuple(source_array.shape), experiment)
+            )
+            if any(axis in {"t", "p", "c"} for axis in normalized_axes):
+                return None
+            source_shape = tuple(int(size) for size in source_array.shape)
+            if base_axes is None:
+                base_axes = normalized_axes
+                base_shape = source_shape
+            else:
+                if normalized_axes != base_axes:
+                    raise ValueError(
+                        "Navigate BDV H5 collection has inconsistent source axes: "
+                        f"expected {base_axes}, got {normalized_axes} at "
+                        f"t={time_index}, setup={setup_index}."
+                    )
+                if source_shape != base_shape:
+                    raise ValueError(
+                        "Navigate BDV H5 collection has inconsistent source shapes: "
+                        f"expected {base_shape}, got {source_shape} at "
+                        f"t={time_index}, setup={setup_index}."
+                    )
+            arrays_by_index[key] = source_array
+    else:
+        root = zarr.open_group(str(source_path), mode="r")
+        group_attrs = dict(getattr(root, "attrs", {}))
+        entries: list[tuple[int, int, str, AxesSpec]] = []
+
+        def _walk(group_node: Any, prefix: str = "") -> None:
+            for key in sorted(group_node.array_keys()):
+                component = f"{prefix}{key}"
+                match = re.match(r"^setup(\d+)/timepoint(\d+)/s(\d+)$", component)
+                if match is None or int(match.group(3)) != 0:
+                    continue
+                array = group_node[key]
+                entries.append(
+                    (
+                        int(match.group(2)),
+                        int(match.group(1)),
+                        component,
+                        _extract_zarr_axes(array, group_attrs),
+                    )
+                )
+            for key in sorted(group_node.group_keys()):
+                _walk(group_node[key], f"{prefix}{key}/")
+
+        _walk(root)
+        if len(entries) <= 1:
+            return None
+
+        for time_index, setup_index, component, source_axes in sorted(
+            entries, key=lambda item: (item[0], item[1], item[2])
+        ):
+            if setup_map is not None and setup_index not in setup_map:
+                continue
+            if setup_map is not None:
+                position_index, channel_index = setup_map[setup_index]
+            else:
+                channel_index = int(setup_index // inferred_positions)
+                position_index = int(setup_index % inferred_positions)
+
+            key = (int(time_index), int(position_index), int(channel_index))
+            if key in arrays_by_index:
+                continue
+
+            source_array = da.from_zarr(str(source_path), component=component)
+            normalized_axes = tuple(
+                source_axes or _infer_source_axes(tuple(source_array.shape), experiment)
+            )
+            if any(axis in {"t", "p", "c"} for axis in normalized_axes):
+                return None
+            source_shape = tuple(int(size) for size in source_array.shape)
+            if base_axes is None:
+                base_axes = normalized_axes
+                base_shape = source_shape
+            else:
+                if normalized_axes != base_axes:
+                    raise ValueError(
+                        "Navigate BDV N5 collection has inconsistent source axes: "
+                        f"expected {base_axes}, got {normalized_axes} at "
+                        f"t={time_index}, setup={setup_index}."
+                    )
+                if source_shape != base_shape:
+                    raise ValueError(
+                        "Navigate BDV N5 collection has inconsistent source shapes: "
+                        f"expected {base_shape}, got {source_shape} at "
+                        f"t={time_index}, setup={setup_index}."
+                    )
+            arrays_by_index[key] = source_array
+
+    if len(arrays_by_index) <= 1:
+        return None
+
+    time_indices = sorted({int(key[0]) for key in arrays_by_index})
+    position_indices = sorted({int(key[1]) for key in arrays_by_index})
+    channel_indices = sorted({int(key[2]) for key in arrays_by_index})
+
+    missing: list[tuple[int, int, int]] = []
+    stacked_by_time: list[da.Array] = []
+    for time_index in time_indices:
+        stacked_by_position: list[da.Array] = []
+        for position_index in position_indices:
+            stacked_by_channel: list[da.Array] = []
+            for channel_index in channel_indices:
+                key = (time_index, position_index, channel_index)
+                array = arrays_by_index.get(key)
+                if array is None:
+                    missing.append(key)
+                    continue
+                stacked_by_channel.append(array)
+            if missing:
+                continue
+            stacked_by_position.append(da.stack(stacked_by_channel, axis=0))
+        if missing:
+            continue
+        stacked_by_time.append(da.stack(stacked_by_position, axis=0))
+
+    if missing:
+        preview = ", ".join(
+            f"(t={time_idx}, p={position_idx}, c={channel_idx})"
+            for time_idx, position_idx, channel_idx in missing[:8]
+        )
+        raise ValueError(
+            "Navigate BDV collection is missing expected position/channel "
+            f"combinations: {preview}."
+        )
+
+    source_array = da.stack(stacked_by_time, axis=0)
+    source_axes = ("t", "p", "c", *(base_axes or ()))
+    metadata: dict[str, Any] = {
+        "source_path": str(source_path),
+        "source_file_count": int(len(arrays_by_index)),
+        "source_collection_time_indices": [int(value) for value in time_indices],
+        "source_collection_position_indices": [
+            int(value) for value in position_indices
+        ],
+        "source_collection_channel_indices": [int(value) for value in channel_indices],
+        "source_collection_type": "bdv_h5" if is_h5 else "bdv_n5",
+    }
+    return source_array, source_axes, metadata
 
 
 def _parse_navigate_tiff_indices(path: Path) -> tuple[int, int, int]:
@@ -1245,6 +1555,12 @@ def materialize_experiment_data_store(
             experiment=experiment,
             exit_stack=exit_stack,
         )
+        if source_payload is None:
+            source_payload = _open_navigate_bdv_collection_as_dask(
+                experiment=experiment,
+                source_path=source_resolved,
+                exit_stack=exit_stack,
+            )
         if source_payload is not None:
             source_array, source_axes, source_meta = source_payload
         else:

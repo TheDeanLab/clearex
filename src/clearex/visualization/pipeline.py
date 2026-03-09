@@ -907,10 +907,11 @@ def _build_position_affine_tczyx(
     scale_y = max(1e-12, float(scale_tczyx[3]))
     scale_x = max(1e-12, float(scale_tczyx[4]))
 
-    # Convert stage-coordinate offsets into world-space units used by napari.
-    affine[2, 5] = float(delta_z) * scale_z
-    affine[3, 5] = float(delta_y) * scale_y
-    affine[4, 5] = float(delta_x) * scale_x
+    # Stage coordinates are reported in microns. Napari applies ``scale`` as
+    # a separate transform, so translate in index-space voxels here.
+    affine[2, 5] = float(delta_z) / scale_z
+    affine[3, 5] = float(delta_y) / scale_y
+    affine[4, 5] = float(delta_x) / scale_x
     return affine
 
 

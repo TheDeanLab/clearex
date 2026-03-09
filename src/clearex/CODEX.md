@@ -29,6 +29,8 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Local Dask dashboard binding now defaults to an ephemeral port (`dashboard_address=":0"`) to avoid recurring `8787` conflicts.
 - Navigate TIFF ingestion now stacks `Position*/CH*` collections into canonical
   `(t, p, c, z, y, x)` data instead of materializing only the first TIFF file.
+- Navigate BDV `H5`/`N5` ingestion now stacks setup collections using companion
+  XML `ViewSetup` metadata so channels/positions are preserved across formats.
 
 ## Sequencing and Inputs
 

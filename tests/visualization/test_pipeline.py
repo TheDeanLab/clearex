@@ -432,9 +432,9 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
     assert np.isclose(affine_1[2, 3], np.sin(theta))
     assert np.isclose(affine_1[3, 2], -np.sin(theta))
     assert np.isclose(affine_1[3, 3], np.cos(theta))
-    assert np.isclose(affine_1[2, 5], 30.0 * 2.0)
-    assert np.isclose(affine_1[3, 5], 20.0 * 3.0)
-    assert np.isclose(affine_1[4, 5], 10.0 * 4.0)
+    assert np.isclose(affine_1[2, 5], 30.0 / 2.0)
+    assert np.isclose(affine_1[3, 5], 20.0 / 3.0)
+    assert np.isclose(affine_1[4, 5], 10.0 / 4.0)
 
     image_metadata = dict(captured["image_metadata"])
     assert image_metadata["selected_positions"] == [0, 1]

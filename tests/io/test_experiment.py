@@ -29,6 +29,7 @@ from pathlib import Path
 import json
 
 # Third Party Imports
+import h5py
 import numpy as np
 import tifffile
 import zarr
@@ -85,6 +86,57 @@ def _write_multipositions_sidecar(path: Path, count: int) -> None:
     for idx in range(count):
         rows.append([float(idx), float(idx), float(idx), 0.0, 0.0, "NaN", "NaN"])
     path.write_text(json.dumps(rows, indent=2))
+
+
+def _write_bdv_xml(
+    path: Path,
+    *,
+    loader_format: str,
+    data_file_name: str,
+    setup_channel_tile: dict[int, tuple[int, int]],
+) -> None:
+    loader_key = "hdf5" if loader_format == "bdv.hdf5" else "n5"
+    setup_blocks = []
+    for setup_index in sorted(setup_channel_tile):
+        channel_index, tile_index = setup_channel_tile[setup_index]
+        setup_blocks.append(
+            f"""
+      <ViewSetup>
+        <id>{setup_index}</id>
+        <name>{setup_index}</name>
+        <size>4 3 2</size>
+        <voxelSize>
+          <unit>um</unit>
+          <size>1.0 1.0 1.0</size>
+        </voxelSize>
+        <attributes>
+          <illumination>0</illumination>
+          <channel>{channel_index}</channel>
+          <tile>{tile_index}</tile>
+          <angle>0</angle>
+        </attributes>
+      </ViewSetup>
+""".rstrip()
+        )
+
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<SpimData version="0.2">
+  <BasePath type="relative">.</BasePath>
+  <SequenceDescription>
+    <ImageLoader format="{loader_format}">
+      <{loader_key} type="relative">{data_file_name}</{loader_key}>
+    </ImageLoader>
+    <ViewSetups>
+{chr(10).join(setup_blocks)}
+    </ViewSetups>
+    <Timepoints type="range">
+      <first>0</first>
+      <last>0</last>
+    </Timepoints>
+  </SequenceDescription>
+</SpimData>
+"""
+    path.write_text(xml)
 
 
 def test_is_navigate_experiment_file():
@@ -402,3 +454,165 @@ def test_materialize_experiment_data_store_stacks_tiff_positions_and_channels(
                 loaded,
                 expected_blocks[(position_index, channel_index)],
             )
+
+
+def test_materialize_experiment_data_store_stacks_bdv_h5_setups(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="H5",
+        is_multiposition=True,
+    )
+    _write_multipositions_sidecar(tmp_path / "multi_positions.yml", count=2)
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.h5"
+    expected_blocks = {
+        (0, 0): np.full((2, 3, 4), fill_value=10, dtype=np.uint16),
+        (1, 0): np.full((2, 3, 4), fill_value=20, dtype=np.uint16),
+        (0, 1): np.full((2, 3, 4), fill_value=30, dtype=np.uint16),
+        (1, 1): np.full((2, 3, 4), fill_value=40, dtype=np.uint16),
+    }
+    with h5py.File(str(source_path), mode="w") as handle:
+        handle.create_dataset(
+            "t00000/s00/0/cells",
+            data=expected_blocks[(0, 0)],
+            chunks=(1, 3, 4),
+        )
+        handle.create_dataset(
+            "t00000/s01/0/cells",
+            data=expected_blocks[(1, 0)],
+            chunks=(1, 3, 4),
+        )
+        handle.create_dataset(
+            "t00000/s02/0/cells",
+            data=expected_blocks[(0, 1)],
+            chunks=(1, 3, 4),
+        )
+        handle.create_dataset(
+            "t00000/s03/0/cells",
+            data=expected_blocks[(1, 1)],
+            chunks=(1, 3, 4),
+        )
+        # Ensure extra setup groups not listed in XML are ignored.
+        handle.create_dataset(
+            "t00000/s99/0/cells",
+            data=np.zeros((2, 3, 4), dtype=np.uint16),
+            chunks=(1, 3, 4),
+        )
+
+    _write_bdv_xml(
+        tmp_path / "CH00_000000.xml",
+        loader_format="bdv.hdf5",
+        data_file_name=source_path.name,
+        setup_channel_tile={
+            0: (0, 0),
+            1: (0, 1),
+            2: (1, 0),
+            3: (1, 1),
+        },
+    )
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert tuple(root["data"].shape) == (1, 2, 2, 2, 3, 4)
+    assert root.attrs["source_data_path"] == str(source_path.resolve())
+
+    for position_index in range(2):
+        for channel_index in range(2):
+            loaded = np.array(
+                root["data"][0, position_index, channel_index, :, :, :]
+            )
+            assert np.array_equal(loaded, expected_blocks[(position_index, channel_index)])
+
+
+def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="N5",
+        is_multiposition=True,
+    )
+    _write_multipositions_sidecar(tmp_path / "multi_positions.yml", count=2)
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.n5"
+    source_root = zarr.open_group(str(source_path), mode="w")
+    expected_blocks = {
+        (0, 0): np.full((2, 3, 4), fill_value=11, dtype=np.uint16),
+        (1, 0): np.full((2, 3, 4), fill_value=21, dtype=np.uint16),
+        (0, 1): np.full((2, 3, 4), fill_value=31, dtype=np.uint16),
+        (1, 1): np.full((2, 3, 4), fill_value=41, dtype=np.uint16),
+    }
+    source_root.create_dataset(
+        "setup0/timepoint0/s0",
+        data=expected_blocks[(0, 0)],
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+    source_root.create_dataset(
+        "setup1/timepoint0/s0",
+        data=expected_blocks[(1, 0)],
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+    source_root.create_dataset(
+        "setup2/timepoint0/s0",
+        data=expected_blocks[(0, 1)],
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+    source_root.create_dataset(
+        "setup3/timepoint0/s0",
+        data=expected_blocks[(1, 1)],
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+    source_root.create_dataset(
+        "setup99/timepoint0/s0",
+        data=np.zeros((2, 3, 4), dtype=np.uint16),
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+
+    _write_bdv_xml(
+        tmp_path / "CH00_000000.xml",
+        loader_format="bdv.n5",
+        data_file_name=source_path.name,
+        setup_channel_tile={
+            0: (0, 0),
+            1: (0, 1),
+            2: (1, 0),
+            3: (1, 1),
+        },
+    )
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert tuple(root["data"].shape) == (1, 2, 2, 2, 3, 4)
+    assert root.attrs["source_data_path"] == str(source_path.resolve())
+
+    for position_index in range(2):
+        for channel_index in range(2):
+            loaded = np.array(
+                root["data"][0, position_index, channel_index, :, :, :]
+            )
+            assert np.array_equal(loaded, expected_blocks[(position_index, channel_index)])
