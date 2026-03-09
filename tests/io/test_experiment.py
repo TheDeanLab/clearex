@@ -379,7 +379,7 @@ def test_materialize_experiment_data_store_stacks_tiff_positions_and_channels(
             )
             expected_blocks[(position_index, channel_index)] = block
             path = position_dir / f"CH{channel_index:02d}_000000.tiff"
-            tifffile.imwrite(str(path), block)
+            tifffile.imwrite(str(path), block, metadata={"axes": "ZYX"})
 
     resolved = resolve_experiment_data_path(experiment)
     materialized = materialize_experiment_data_store(

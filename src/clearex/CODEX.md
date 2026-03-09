@@ -27,6 +27,8 @@ This directory contains the runtime orchestration surface for ClearEx.
   - Analysis backend starts only when selected operations need a client (`deconvolution`, `particle_detection`).
 - Visualization-only workflows should not create extra LocalCluster instances.
 - Local Dask dashboard binding now defaults to an ephemeral port (`dashboard_address=":0"`) to avoid recurring `8787` conflicts.
+- Navigate TIFF ingestion now stacks `Position*/CH*` collections into canonical
+  `(t, p, c, z, y, x)` data instead of materializing only the first TIFF file.
 
 ## Sequencing and Inputs
 

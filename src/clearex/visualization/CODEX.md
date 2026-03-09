@@ -11,6 +11,9 @@ This folder owns napari-facing visualization workflows.
 
 - Visualization reads canonical 6D arrays in `(t, p, c, z, y, x)` order.
 - Default source is `data`.
+- Multiposition/channel rendering is only as complete as canonical `data`
+  materialization. For Navigate TIFF inputs, verify ingestion stacked
+  `Position*/CH*` files (otherwise visualization will only show one `p/c` slot).
 - Multiscale defaults to enabled and resolves levels from:
   - `data.attrs["pyramid_levels"]`, and
   - root attrs `data_pyramid_levels` for canonical base data.
