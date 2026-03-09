@@ -10,7 +10,7 @@ The examples below use the UT Southwestern BioHPC layout (with `/project` and `/
 
 ClearEx uses:
 
-- **Python 3.12**
+- **Python 3.12 or 3.13** (`>=3.12,<3.14`)
 - **uv** as the package manager and virtual environment tool
 - A number of scientific Python libraries (Dask, Zarr, SimpleITK, etc.)
 - **PyPetaKit5D**, which installs and uses the **MATLAB Runtime** (~5 GB download)

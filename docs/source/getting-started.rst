@@ -4,12 +4,40 @@ Getting Started
 Installation
 ------------
 
-Install ClearEx in editable mode with documentation dependencies:
+ClearEx supports Python ``3.12`` and ``3.13`` (project constraint: ``>=3.12,<3.14``).
+Using ``uv`` with an explicit Python version avoids accidental ``3.14`` installs.
+
+macOS
+^^^^^
 
 .. code-block:: bash
 
-   uv venv
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   uv python install 3.13
+   uv venv --python 3.13
    source .venv/bin/activate
+   uv pip install -e ".[docs]"
+
+Linux
+^^^^^
+
+.. code-block:: bash
+
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   uv python install 3.13
+   uv venv --python 3.13
+   source .venv/bin/activate
+   uv pip install -e ".[docs]"
+
+Windows (PowerShell)
+^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: powershell
+
+   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+   uv python install 3.13
+   uv venv --python 3.13
+   .venv\Scripts\Activate.ps1
    uv pip install -e ".[docs]"
 
 If you also need development and test tooling:

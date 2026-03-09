@@ -22,7 +22,7 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
 ## Installation
 
 ### Requirements
-- Python `>=3.12`
+- Python `>=3.12,<3.14` (use Python `3.12` or `3.13`)
 - macOS/Linux/Windows supported by Python stack
 - For GUI usage: display server + `PyQt6` (installed in base dependencies)
 
@@ -30,15 +30,23 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
 Install `uv`:
 
 ```bash
+# macOS / Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
 ```
 
-Then install ClearEx from this repository root:
+```powershell
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+uv --version
+```
+
+#### macOS / Linux
 
 ```bash
-# Create and activate a virtual environment
-uv venv
+# Ensure a supported Python version is installed and used
+uv python install 3.13
+uv venv --python 3.13
 source .venv/bin/activate
 
 # Install ClearEx (editable install)
@@ -51,16 +59,58 @@ uv pip install -e ".[docs]"       # docs build stack
 uv pip install -e ".[dev,docs,decon]"
 ```
 
+#### Windows (PowerShell)
+
+```powershell
+# Ensure a supported Python version is installed and used
+uv python install 3.13
+uv venv --python 3.13
+.venv\Scripts\Activate.ps1
+
+# Install ClearEx (editable install)
+uv pip install -e .
+
+# Optional extras
+uv pip install -e ".[decon]"
+uv pip install -e ".[dev]"
+uv pip install -e ".[docs]"
+uv pip install -e ".[dev,docs,decon]"
+```
+
 Alternative repo-aware install with lockfile:
 
 ```bash
-uv sync
+uv sync --python 3.13
+```
+
+If you previously created `.venv` with Python `3.14`, remove it and recreate:
+
+```bash
+# macOS / Linux
+rm -rf .venv
+uv venv --python 3.13
+```
+
+```powershell
+# Windows (PowerShell)
+Remove-Item -Recurse -Force .venv
+uv venv --python 3.13
 ```
 
 ### Install with pip (alternative)
+#### macOS / Linux
+
 ```bash
-python -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
+pip install -e .
+```
+
+#### Windows
+
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -e .
 ```
 

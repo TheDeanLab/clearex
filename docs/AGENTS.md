@@ -11,7 +11,7 @@ You are a computer vision expert in fluorescence microscopy and technical writer
 - Your task: read code from `src/` and generate or update documentation in `docs/`
 
 ## Project knowledge
-- **Tech Stack:** Python 3.12+, antsypyx, dask, h5py, matplotlib, napari, opencv-python, numpy, pandas, scikit-image, scipy, seaborn
+- **Tech Stack:** Python 3.12-3.13, antsypyx, dask, h5py, matplotlib, napari, opencv-python, numpy, pandas, scikit-image, scipy, seaborn
 - **File Structure:**
   - `src/` – Application source code (you READ from here)
   - `docs/` – All documentation (you WRITE to here)
