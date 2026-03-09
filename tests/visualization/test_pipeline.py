@@ -591,6 +591,10 @@ def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
     assert first_image_kwargs["opacity"] == 0.9
     assert second_image_kwargs["opacity"] == 0.9
     assert tuple(first_image_kwargs["contrast_limits"]) == (0.0, 1.0)
+    first_affine = np.asarray(first_image_kwargs["affine"], dtype=np.float64)
+    second_affine = np.asarray(second_image_kwargs["affine"], dtype=np.float64)
+    assert np.allclose(first_affine, np.eye(6, dtype=np.float64))
+    assert np.allclose(second_affine, np.eye(6, dtype=np.float64))
 
     assert len(viewer.points_calls) == 1
     _, points_kwargs = viewer.points_calls[0]

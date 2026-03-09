@@ -1403,8 +1403,6 @@ def _launch_napari_viewer(
                 ]
 
             channel_affine = np.asarray(affine_base, dtype=np.float64).copy()
-            if channel_affine.shape == (6, 6):
-                channel_affine[1, 5] += float(channel_index)
 
             contrast_limits = _percentile_contrast_limits(
                 image_data[-1] if is_multiscale else image_data

@@ -38,6 +38,8 @@ This folder owns napari-facing visualization workflows.
   - metadata dictionaries with source/store/pyramid details.
 - Image channel rendering defaults in napari:
   - separate image layers per channel (`c` sliced as singleton per layer),
+  - no synthetic channel-axis affine offsets (avoids napari status-thread
+    out-of-bounds lookups when the cursor axis position changes),
   - `blending="additive"` and `rendering="attenuated_mip"`,
   - per-channel contrast limits from `1st/95th` percentiles,
   - colormap order starts with `green`, `magenta`, `bop orange`, then high-contrast additions (`cyan`, `yellow`, `blue`, ...),
