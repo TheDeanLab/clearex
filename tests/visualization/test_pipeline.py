@@ -6,6 +6,7 @@ from __future__ import annotations
 # Standard Library Imports
 import json
 from pathlib import Path
+import sys
 
 # Third Party Imports
 import numpy as np
@@ -326,6 +327,65 @@ def test_run_visualization_analysis_uses_experiment_spacing_when_available(
     assert source_experiment_metadata["MicroscopeState"]["step_size"] == 1.5
 
 
+def test_run_visualization_analysis_prefers_voxel_size_um_attrs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.attrs.update({"voxel_size_um_zyx": [2.5, 3.5, 4.5]})
+
+    captured: dict[str, object] = {}
+
+    def _fake_launch_napari_viewer(
+        *,
+        zarr_path,
+        source_components,
+        source_component,
+        selected_positions,
+        points_by_position,
+        point_properties_by_position,
+        position_affines_tczyx,
+        axis_labels,
+        scale_tczyx,
+        image_metadata,
+        points_metadata,
+    ) -> None:
+        del zarr_path
+        del source_components
+        del source_component
+        del selected_positions
+        del points_by_position
+        del point_properties_by_position
+        del position_affines_tczyx
+        del axis_labels
+        del image_metadata
+        del points_metadata
+        captured["scale_tczyx"] = tuple(float(value) for value in scale_tczyx)
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_launch_napari_viewer",
+        _fake_launch_napari_viewer,
+    )
+
+    run_visualization_analysis(
+        zarr_path=store_path,
+        parameters={
+            "launch_mode": "in_process",
+            "overlay_particle_detections": False,
+        },
+    )
+
+    assert captured["scale_tczyx"] == (1.0, 1.0, 2.5, 3.5, 4.5)
+
+
 def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -432,9 +492,9 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
     assert np.isclose(affine_1[2, 3], np.sin(theta))
     assert np.isclose(affine_1[3, 2], -np.sin(theta))
     assert np.isclose(affine_1[3, 3], np.cos(theta))
-    assert np.isclose(affine_1[2, 5], 30.0 / 2.0)
-    assert np.isclose(affine_1[3, 5], 20.0 / 3.0)
-    assert np.isclose(affine_1[4, 5], 10.0 / 4.0)
+    assert np.isclose(affine_1[2, 5], 30.0)
+    assert np.isclose(affine_1[3, 5], 20.0)
+    assert np.isclose(affine_1[4, 5], 10.0)
 
     image_metadata = dict(captured["image_metadata"])
     assert image_metadata["selected_positions"] == [0, 1]
@@ -444,3 +504,76 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
     assert latest_attrs["position_index"] == 0
     assert latest_attrs["selected_positions"] == [0, 1]
     assert latest_attrs["show_all_positions"] is True
+
+
+def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = np.zeros((1, 1, 2, 3, 4, 5), dtype=np.uint16)
+
+    def _fake_from_zarr(_path: str, *, component: str):
+        assert component == "data"
+        return source
+
+    monkeypatch.setattr(visualization_pipeline.da, "from_zarr", _fake_from_zarr)
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.ndim = 2
+            self.axis_labels = ("0", "1")
+
+    class _FakeViewer:
+        def __init__(self, *, ndisplay: int, show: bool) -> None:
+            del ndisplay, show
+            self.dims = _FakeDims()
+            self.image_data: object | None = None
+            self.image_kwargs: dict[str, object] = {}
+
+        def add_image(self, data, **kwargs):
+            self.image_data = data
+            self.image_kwargs = dict(kwargs)
+            if isinstance(data, list) and data:
+                ndim = int(np.asarray(data[0]).ndim)
+            else:
+                ndim = int(np.asarray(data).ndim)
+            self.dims.ndim = ndim
+            return None
+
+        def add_points(self, *_args, **_kwargs):
+            return None
+
+    class _FakeNapari:
+        def __init__(self) -> None:
+            self.viewer: _FakeViewer | None = None
+            self.run_called = False
+
+        def Viewer(self, *, ndisplay: int, show: bool):
+            self.viewer = _FakeViewer(ndisplay=ndisplay, show=show)
+            return self.viewer
+
+        def run(self) -> None:
+            self.run_called = True
+
+    fake_napari = _FakeNapari()
+    monkeypatch.setitem(sys.modules, "napari", fake_napari)
+
+    visualization_pipeline._launch_napari_viewer(
+        zarr_path=tmp_path / "analysis_store.zarr",
+        source_components=("data",),
+        source_component="data",
+        selected_positions=(0,),
+        points_by_position={},
+        point_properties_by_position={},
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        axis_labels=("t", "c", "z", "y", "x"),
+        scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        image_metadata={},
+        points_metadata={},
+    )
+
+    viewer = fake_napari.viewer
+    assert viewer is not None
+    assert fake_napari.run_called is True
+    assert viewer.dims.axis_labels == ("t", "c", "z", "y", "x")
+    assert viewer.image_data is not None
+    assert np.asarray(viewer.image_data).shape == (1, 2, 3, 4, 5)

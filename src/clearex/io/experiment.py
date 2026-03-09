@@ -2052,6 +2052,96 @@ def _safe_optional_float(value: Any) -> Optional[float]:
         return None
 
 
+def _parse_zoom_factor(value: Any) -> Optional[float]:
+    """Parse microscope zoom factor from Navigate metadata values.
+
+    Parameters
+    ----------
+    value : Any
+        Raw zoom value (for example ``"0.63x"`` or ``0.63``).
+
+    Returns
+    -------
+    float, optional
+        Parsed positive zoom factor, or ``None`` when unavailable.
+
+    Raises
+    ------
+    None
+        Invalid values are handled internally and return ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        if np.isfinite(parsed) and parsed > 0:
+            return float(parsed)
+        return None
+
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    match = re.search(r"([0-9]*\.?[0-9]+)", text)
+    if match is None:
+        return None
+    try:
+        parsed = float(match.group(1))
+    except ValueError:
+        return None
+    if not np.isfinite(parsed) or parsed <= 0:
+        return None
+    return float(parsed)
+
+
+def _parse_binning_xy(value: Any) -> tuple[float, float]:
+    """Parse camera binning value into positive ``(x, y)`` factors.
+
+    Parameters
+    ----------
+    value : Any
+        Raw binning descriptor (for example ``"2x2"`` or ``[2, 2]``).
+
+    Returns
+    -------
+    tuple[float, float]
+        Parsed binning factors. Defaults to ``(1.0, 1.0)`` when unavailable.
+
+    Raises
+    ------
+    None
+        Invalid values are handled internally and return defaults.
+    """
+    if value is None:
+        return 1.0, 1.0
+    if isinstance(value, (tuple, list)) and len(value) >= 2:
+        try:
+            bx = float(value[0])
+            by = float(value[1])
+        except (TypeError, ValueError):
+            return 1.0, 1.0
+        if bx > 0 and by > 0 and np.isfinite(bx) and np.isfinite(by):
+            return float(bx), float(by)
+        return 1.0, 1.0
+
+    text = str(value).strip().lower().replace(" ", "")
+    if not text:
+        return 1.0, 1.0
+    match = re.match(r"([0-9]*\.?[0-9]+)[x,]([0-9]*\.?[0-9]+)$", text)
+    if match is None:
+        parsed = _safe_optional_float(text)
+        if parsed is None or parsed <= 0:
+            return 1.0, 1.0
+        return float(parsed), float(parsed)
+    try:
+        bx = float(match.group(1))
+        by = float(match.group(2))
+    except ValueError:
+        return 1.0, 1.0
+    if bx <= 0 or by <= 0 or not np.isfinite(bx) or not np.isfinite(by):
+        return 1.0, 1.0
+    return float(bx), float(by)
+
+
 def _camera_profile_mapping(
     *,
     camera: Dict[str, Any],
@@ -2080,6 +2170,7 @@ def _infer_xy_pixel_size_um(
     *,
     camera: Dict[str, Any],
     microscope_name: Optional[str],
+    microscope_state: Optional[Dict[str, Any]] = None,
 ) -> Optional[float]:
     """Infer sample-space XY pixel size in microns.
 
@@ -2089,6 +2180,8 @@ def _infer_xy_pixel_size_um(
         ``CameraParameters`` mapping from experiment metadata.
     microscope_name : str, optional
         Active microscope profile name.
+    microscope_state : dict[str, Any], optional
+        ``MicroscopeState`` mapping used for zoom inference.
 
     Returns
     -------
@@ -2099,7 +2192,8 @@ def _infer_xy_pixel_size_um(
     -----
     This uses profile-specific values when available. Preferred estimate is
     ``fov_x / img_x_pixels`` (or ``fov_y / img_y_pixels``). If unavailable,
-    ``pixel_size`` is used as a fallback.
+    fallback uses ``pixel_size / zoom`` adjusted by camera binning. Finally,
+    ``pixel_size`` is used when zoom is missing.
     """
     profile = _camera_profile_mapping(
         camera=camera,
@@ -2116,6 +2210,15 @@ def _infer_xy_pixel_size_um(
         return float(fov_y / img_y)
 
     pixel_size = _safe_optional_float(profile.get("pixel_size"))
+    zoom = _parse_zoom_factor(
+        (microscope_state or {}).get("zoom") if microscope_state else None
+    )
+    binning_x, binning_y = _parse_binning_xy(
+        profile.get("binning", camera.get("binning"))
+    )
+    if pixel_size is not None and pixel_size > 0 and zoom is not None:
+        return float(pixel_size / zoom * ((binning_x + binning_y) / 2.0))
+
     if pixel_size is not None and pixel_size > 0:
         return float(pixel_size)
     return None
@@ -2209,6 +2312,7 @@ def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
     xy_pixel_size_um = _infer_xy_pixel_size_um(
         camera=camera,
         microscope_name=microscope_name,
+        microscope_state=state,
     )
     z_step_um = _safe_optional_float(state.get("step_size"))
 

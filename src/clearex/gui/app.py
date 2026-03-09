@@ -99,6 +99,7 @@ try:
         QDragEnterEvent,
         QDragMoveEvent,
         QDropEvent,
+        QIcon,
         QImage,
         QImageReader,
         QPixmap,
@@ -142,6 +143,7 @@ class GuiUnavailableError(RuntimeError):
 _GUI_ASSET_DIRECTORY = Path(__file__).resolve().parent
 _GUI_SPLASH_IMAGE = "ClearEx_full.png"
 _GUI_HEADER_IMAGE = "ClearEx_full_header.png"
+_GUI_APP_ICON = "icon.png"
 
 
 def _resolve_gui_asset_path(filename: str) -> Path:
@@ -599,6 +601,27 @@ def _configure_dask_backend_client(
 
 
 if HAS_PYQT6:
+
+    def _apply_application_icon(app: QApplication) -> None:
+        """Apply packaged app icon for window manager and task switcher display.
+
+        Parameters
+        ----------
+        app : QApplication
+            Active Qt application instance.
+
+        Returns
+        -------
+        None
+            Application icon is updated in-place when the packaged icon exists.
+        """
+        icon_path = _resolve_gui_asset_path(_GUI_APP_ICON)
+        if not icon_path.exists():
+            return
+        icon = QIcon(str(icon_path))
+        if icon.isNull():
+            return
+        app.setWindowIcon(icon)
 
     def _load_branding_pixmap(
         filename: str, *, max_decode_pixels: int = 24_000_000
@@ -5215,6 +5238,7 @@ def launch_gui(
     owns_app = app is None
     if app is None:
         app = QApplication(sys.argv)
+    _apply_application_icon(app)
 
     _show_startup_splash(app)
 
@@ -5299,6 +5323,7 @@ def run_workflow_with_progress(
     owns_app = app is None
     if app is None:
         app = QApplication(sys.argv)
+    _apply_application_icon(app)
 
     progress_dialog = AnalysisExecutionProgressDialog(parent=None)
     failure_messages: list[str] = []

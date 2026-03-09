@@ -300,6 +300,42 @@ def test_load_uses_multi_positions_sidecar_when_multiposition_enabled(tmp_path: 
     assert experiment.multiposition_count == 24
 
 
+def test_load_infers_xy_pixel_size_from_zoom_and_binning(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    payload = {
+        "Saving": {
+            "save_directory": str(tmp_path),
+            "file_type": "TIFF",
+        },
+        "MicroscopeState": {
+            "microscope_name": "Mesoscale",
+            "zoom": "0.5x",
+            "timepoints": 1,
+            "number_z_steps": 2,
+            "channels": {
+                "channel_1": {"is_selected": True},
+            },
+        },
+        "CameraParameters": {
+            "img_x_pixels": 16,
+            "img_y_pixels": 8,
+            "Mesoscale": {
+                "img_x_pixels": 16,
+                "img_y_pixels": 8,
+                "binning": "2x2",
+                "pixel_size": 6.5,
+            },
+        },
+        "MultiPositions": [[0, 0, 0]],
+    }
+    experiment_path.write_text(json.dumps(payload, indent=2))
+
+    experiment = load_navigate_experiment(experiment_path)
+
+    assert experiment.xy_pixel_size_um is not None
+    assert np.isclose(experiment.xy_pixel_size_um, 26.0)
+
+
 def test_resolve_data_store_path_uses_experiment_directory_for_non_zarr(tmp_path: Path):
     experiment_dir = tmp_path / "metadata"
     experiment_dir.mkdir(parents=True, exist_ok=True)

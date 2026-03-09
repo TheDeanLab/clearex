@@ -32,8 +32,8 @@ This folder owns napari-facing visualization workflows.
   - matched `scale` values for aligned physical/index coordinates,
   - metadata dictionaries with source/store/pyramid details.
 - Scale resolution precedence is:
-  1. explicit Zarr attrs (for example `scale_tpczyx`, `scale_tczyx`, `voxel_size_*`),
-  2. `source_experiment` metadata (`timepoint_interval`, `step_size`, camera `pixel_size`),
+  1. explicit Zarr attrs (for example `scale_tpczyx`, `scale_tczyx`, `voxel_size_um_zyx`, `voxel_size_*`),
+  2. `source_experiment` metadata (`timepoint_interval`, `step_size`, camera profile `fov_* / img_*`, then `pixel_size / zoom` with binning fallback),
   3. fallback to `(1, 1, 1, 1, 1)`.
 
 ## Multiposition Affine Contract
@@ -45,7 +45,7 @@ This folder owns napari-facing visualization workflows.
 - Parsed stage rows use fields `X`, `Y`, `Z`, and `THETA` (`F` is ignored for visualization transforms).
 - Per-position napari affine uses homogeneous `6x6` matrix in `(t, c, z, y, x)` coordinates:
   - `THETA` rotates the `z/y` plane (sample rotation around x axis).
-  - stage coordinates are in microns and translations are converted to voxel-index offsets by dividing by effective `scale_tczyx` (`um / (um/voxel)`).
+  - stage coordinates are in microns and affine translations are applied directly in world-space microns.
 - Persisted visualization metadata includes:
   - `selected_positions`,
   - `show_all_positions`,

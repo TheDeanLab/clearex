@@ -31,6 +31,8 @@ This directory contains the runtime orchestration surface for ClearEx.
   `(t, p, c, z, y, x)` data instead of materializing only the first TIFF file.
 - Navigate BDV `H5`/`N5` ingestion now stacks setup collections using companion
   XML `ViewSetup` metadata so channels/positions are preserved across formats.
+- Napari multiposition affine translations are now treated in world-space
+  microns, with scale preferring stored `voxel_size_um_zyx` attrs.
 
 ## Sequencing and Inputs
 

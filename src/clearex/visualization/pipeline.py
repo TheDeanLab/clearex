@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -289,6 +290,7 @@ def _extract_scale_tczyx_from_attrs(
         "voxel_size_tpczyx",
         "pixel_size_tpczyx",
         "physical_pixel_size_tpczyx",
+        "voxel_size_um_zyx",
         "voxel_size_zyx",
         "pixel_size_zyx",
         "physical_pixel_size_zyx",
@@ -318,6 +320,94 @@ def _extract_scale_tczyx_from_attrs(
                     )
                 )
     return None
+
+
+def _parse_zoom_factor(value: Any) -> Optional[float]:
+    """Parse microscope zoom factor from Navigate metadata values.
+
+    Parameters
+    ----------
+    value : Any
+        Raw zoom value (for example ``"0.63x"`` or ``0.63``).
+
+    Returns
+    -------
+    float, optional
+        Parsed positive zoom factor, or ``None`` when unavailable.
+
+    Raises
+    ------
+    None
+        Invalid values are handled internally and return ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        return parsed if np.isfinite(parsed) and parsed > 0 else None
+
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    match = re.search(r"([0-9]*\.?[0-9]+)", text)
+    if match is None:
+        return None
+    try:
+        parsed = float(match.group(1))
+    except ValueError:
+        return None
+    if not np.isfinite(parsed) or parsed <= 0:
+        return None
+    return float(parsed)
+
+
+def _parse_binning_xy(value: Any) -> tuple[float, float]:
+    """Parse camera binning into ``(x, y)`` factors.
+
+    Parameters
+    ----------
+    value : Any
+        Raw binning descriptor (for example ``"2x2"``, ``[2, 2]``).
+
+    Returns
+    -------
+    tuple[float, float]
+        Positive ``(x, y)`` binning factors. Defaults to ``(1.0, 1.0)``.
+
+    Raises
+    ------
+    None
+        Invalid values are handled internally and return defaults.
+    """
+    if value is None:
+        return 1.0, 1.0
+    if isinstance(value, (tuple, list)) and len(value) >= 2:
+        try:
+            bx = float(value[0])
+            by = float(value[1])
+        except (TypeError, ValueError):
+            return 1.0, 1.0
+        if bx > 0 and by > 0 and np.isfinite(bx) and np.isfinite(by):
+            return float(bx), float(by)
+        return 1.0, 1.0
+
+    text = str(value).strip().lower().replace(" ", "")
+    if not text:
+        return 1.0, 1.0
+    match = re.match(r"([0-9]*\.?[0-9]+)[x,]([0-9]*\.?[0-9]+)$", text)
+    if match is None:
+        parsed = _first_positive_float((text,))
+        if parsed is None:
+            return 1.0, 1.0
+        return float(parsed), float(parsed)
+    try:
+        bx = float(match.group(1))
+        by = float(match.group(2))
+    except ValueError:
+        return 1.0, 1.0
+    if bx <= 0 or by <= 0 or not np.isfinite(bx) or not np.isfinite(by):
+        return 1.0, 1.0
+    return float(bx), float(by)
 
 
 def _load_source_experiment_raw(
@@ -396,10 +486,46 @@ def _extract_scale_tczyx_from_navigate_raw(
         microscope_camera if isinstance(microscope_camera, Mapping) else {}
     )
 
+    profile_mapping: Mapping[str, Any]
+    if microscope_camera_mapping:
+        profile_mapping = microscope_camera_mapping
+    else:
+        profile_mapping = camera_mapping
+
+    fov_x = _first_positive_float((profile_mapping.get("fov_x"),))
+    fov_y = _first_positive_float((profile_mapping.get("fov_y"),))
+    img_x = _first_positive_float(
+        (profile_mapping.get("img_x_pixels"), profile_mapping.get("x_pixels"))
+    )
+    img_y = _first_positive_float(
+        (profile_mapping.get("img_y_pixels"), profile_mapping.get("y_pixels"))
+    )
+    lateral_from_fov = _first_positive_float(
+        (
+            (fov_x / img_x) if fov_x is not None and img_x is not None and img_x > 0 else None,
+            (fov_y / img_y) if fov_y is not None and img_y is not None and img_y > 0 else None,
+        )
+    )
+
+    pixel_size = _first_positive_float(
+        (
+            profile_mapping.get("pixel_size"),
+            camera_mapping.get("pixel_size"),
+        )
+    )
+    zoom = _parse_zoom_factor(state_mapping.get("zoom"))
+    binning_x, binning_y = _parse_binning_xy(
+        profile_mapping.get("binning") or camera_mapping.get("binning")
+    )
+    lateral_from_pixel_zoom = None
+    if pixel_size is not None and zoom is not None:
+        lateral_from_pixel_zoom = float(pixel_size / zoom * ((binning_x + binning_y) / 2.0))
+
     lateral_size = _first_positive_float(
         (
-            microscope_camera_mapping.get("pixel_size"),
-            camera_mapping.get("pixel_size"),
+            lateral_from_fov,
+            lateral_from_pixel_zoom,
+            pixel_size,
         )
     )
     axial_size = _first_positive_float((state_mapping.get("step_size"),))
@@ -903,15 +1029,13 @@ def _build_position_affine_tczyx(
     affine[3, 2] = -sin_theta
     affine[3, 3] = cos_theta
 
-    scale_z = max(1e-12, float(scale_tczyx[2]))
-    scale_y = max(1e-12, float(scale_tczyx[3]))
-    scale_x = max(1e-12, float(scale_tczyx[4]))
+    del scale_tczyx
 
-    # Stage coordinates are reported in microns. Napari applies ``scale`` as
-    # a separate transform, so translate in index-space voxels here.
-    affine[2, 5] = float(delta_z) / scale_z
-    affine[3, 5] = float(delta_y) / scale_y
-    affine[4, 5] = float(delta_x) / scale_x
+    # Stage coordinates are reported in microns. Napari affine translation is
+    # interpreted in world units, so pass micron offsets directly.
+    affine[2, 5] = float(delta_z)
+    affine[3, 5] = float(delta_y)
+    affine[4, 5] = float(delta_x)
     return affine
 
 
@@ -1113,10 +1237,8 @@ def _launch_napari_viewer(
 
     scale = tuple(float(value) for value in scale_tczyx)
     viewer = napari.Viewer(ndisplay=3, show=True)
-    try:
-        viewer.dims.axis_labels = tuple(str(label) for label in axis_labels)
-    except Exception:
-        pass
+    axis_labels_tuple = tuple(str(label) for label in axis_labels)
+    axis_labels_applied = False
 
     selected = tuple(int(index) for index in selected_positions)
     multi_position = len(selected) > 1
@@ -1149,6 +1271,13 @@ def _launch_napari_viewer(
             affine=affine,
             metadata={str(key): value for key, value in image_layer_metadata.items()},
         )
+        if not axis_labels_applied:
+            try:
+                if int(viewer.dims.ndim) == len(axis_labels_tuple):
+                    viewer.dims.axis_labels = axis_labels_tuple
+                    axis_labels_applied = True
+            except Exception:
+                pass
 
         points = np.asarray(
             points_by_position.get(
