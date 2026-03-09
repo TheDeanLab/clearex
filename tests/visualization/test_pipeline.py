@@ -526,12 +526,11 @@ def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
         def __init__(self, *, ndisplay: int, show: bool) -> None:
             del ndisplay, show
             self.dims = _FakeDims()
-            self.image_data: object | None = None
-            self.image_kwargs: dict[str, object] = {}
+            self.image_calls: list[tuple[object, dict[str, object]]] = []
+            self.points_calls: list[tuple[object, dict[str, object]]] = []
 
         def add_image(self, data, **kwargs):
-            self.image_data = data
-            self.image_kwargs = dict(kwargs)
+            self.image_calls.append((data, dict(kwargs)))
             if isinstance(data, list) and data:
                 ndim = int(np.asarray(data[0]).ndim)
             else:
@@ -539,7 +538,8 @@ def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
             self.dims.ndim = ndim
             return None
 
-        def add_points(self, *_args, **_kwargs):
+        def add_points(self, data, **kwargs):
+            self.points_calls.append((data, dict(kwargs)))
             return None
 
     class _FakeNapari:
@@ -562,7 +562,9 @@ def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
         source_components=("data",),
         source_component="data",
         selected_positions=(0,),
-        points_by_position={},
+        points_by_position={
+            0: np.asarray([[0, 0, 1, 2, 3]], dtype=np.float32),
+        },
         point_properties_by_position={},
         position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
         axis_labels=("t", "c", "z", "y", "x"),
@@ -575,5 +577,92 @@ def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
     assert viewer is not None
     assert fake_napari.run_called is True
     assert viewer.dims.axis_labels == ("t", "c", "z", "y", "x")
-    assert viewer.image_data is not None
-    assert np.asarray(viewer.image_data).shape == (1, 2, 3, 4, 5)
+    assert len(viewer.image_calls) == 2
+
+    first_image_data, first_image_kwargs = viewer.image_calls[0]
+    second_image_data, second_image_kwargs = viewer.image_calls[1]
+    assert np.asarray(first_image_data).shape == (1, 1, 3, 4, 5)
+    assert np.asarray(second_image_data).shape == (1, 1, 3, 4, 5)
+
+    assert first_image_kwargs["colormap"] == "green"
+    assert second_image_kwargs["colormap"] == "magenta"
+    assert first_image_kwargs["blending"] == "additive"
+    assert first_image_kwargs["rendering"] == "attenuated_mip"
+    assert first_image_kwargs["opacity"] == 0.9
+    assert second_image_kwargs["opacity"] == 0.9
+    assert tuple(first_image_kwargs["contrast_limits"]) == (0.0, 1.0)
+
+    assert len(viewer.points_calls) == 1
+    _, points_kwargs = viewer.points_calls[0]
+    assert points_kwargs["border_color"] == "white"
+    assert points_kwargs["opacity"] == 0.5
+    assert points_kwargs["blending"] == "translucent"
+
+
+def test_launch_napari_viewer_three_channels_use_requested_default_colormaps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = np.zeros((1, 1, 3, 2, 2, 2), dtype=np.uint16)
+
+    def _fake_from_zarr(_path: str, *, component: str):
+        assert component == "data"
+        return source
+
+    monkeypatch.setattr(visualization_pipeline.da, "from_zarr", _fake_from_zarr)
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.ndim = 2
+            self.axis_labels = ("0", "1")
+
+    class _FakeViewer:
+        def __init__(self, *, ndisplay: int, show: bool) -> None:
+            del ndisplay, show
+            self.dims = _FakeDims()
+            self.image_calls: list[dict[str, object]] = []
+
+        def add_image(self, data, **kwargs):
+            del data
+            self.image_calls.append(dict(kwargs))
+            self.dims.ndim = 5
+            return None
+
+        def add_points(self, *_args, **_kwargs):
+            return None
+
+    class _FakeNapari:
+        def __init__(self) -> None:
+            self.viewer: _FakeViewer | None = None
+
+        def Viewer(self, *, ndisplay: int, show: bool):
+            self.viewer = _FakeViewer(ndisplay=ndisplay, show=show)
+            return self.viewer
+
+        def run(self) -> None:
+            return None
+
+    fake_napari = _FakeNapari()
+    monkeypatch.setitem(sys.modules, "napari", fake_napari)
+
+    visualization_pipeline._launch_napari_viewer(
+        zarr_path=tmp_path / "analysis_store.zarr",
+        source_components=("data",),
+        source_component="data",
+        selected_positions=(0,),
+        points_by_position={},
+        point_properties_by_position={},
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        axis_labels=("t", "c", "z", "y", "x"),
+        scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        image_metadata={},
+        points_metadata={},
+    )
+
+    viewer = fake_napari.viewer
+    assert viewer is not None
+    assert [kwargs["colormap"] for kwargs in viewer.image_calls] == [
+        "green",
+        "magenta",
+        "bop orange",
+    ]
+    assert all(float(kwargs["opacity"]) == 0.8 for kwargs in viewer.image_calls)

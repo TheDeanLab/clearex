@@ -1235,6 +1235,137 @@ def _launch_napari_viewer(
     """
     import napari
 
+    def _channel_colormap_cycle(channel_count: int) -> tuple[str, ...]:
+        """Return deterministic channel colormaps for visualization layers.
+
+        Parameters
+        ----------
+        channel_count : int
+            Number of channels to color.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Colormap names, one per channel.
+        """
+        if channel_count <= 0:
+            return tuple()
+        base = ("green", "magenta", "bop orange")
+        extras = (
+            "cyan",
+            "yellow",
+            "blue",
+            "red",
+            "gray",
+            "turquoise",
+            "hotpink",
+        )
+        palette: list[str] = []
+        for index in range(channel_count):
+            if index < len(base):
+                palette.append(base[index])
+            else:
+                extra_index = (index - len(base)) % len(extras)
+                palette.append(extras[extra_index])
+        return tuple(palette)
+
+    def _default_channel_opacity(channel_count: int) -> float:
+        """Return default per-layer opacity based on channel count.
+
+        Parameters
+        ----------
+        channel_count : int
+            Number of channels being rendered.
+
+        Returns
+        -------
+        float
+            Layer opacity in ``[0.55, 1.0]``.
+        """
+        if channel_count <= 1:
+            return 1.0
+        return float(max(0.55, 1.0 - (0.1 * (channel_count - 1))))
+
+    def _percentile_contrast_limits(
+        data: Any,
+        *,
+        low_percentile: float = 1.0,
+        high_percentile: float = 95.0,
+        target_sample_size: int = 500_000,
+    ) -> tuple[float, float]:
+        """Estimate robust contrast limits from data percentiles.
+
+        Parameters
+        ----------
+        data : Any
+            Image-like array.
+        low_percentile : float, default=1.0
+            Lower percentile.
+        high_percentile : float, default=95.0
+            Upper percentile.
+        target_sample_size : int, default=500_000
+            Approximate number of sampled voxels used for percentile estimation.
+
+        Returns
+        -------
+        tuple[float, float]
+            ``(min, max)`` contrast limits.
+        """
+        if isinstance(data, da.Array):
+            array = data
+        else:
+            array = np.asarray(data)
+
+        shape = tuple(int(value) for value in getattr(array, "shape", tuple()))
+        if not shape or int(np.prod(shape, dtype=np.int64)) <= 0:
+            return 0.0, 1.0
+
+        sampled = array
+        total_size = int(np.prod(shape, dtype=np.int64))
+        if total_size > int(target_sample_size):
+            stride = int(
+                max(
+                    1,
+                    math.ceil((total_size / float(target_sample_size)) ** (1.0 / len(shape))),
+                )
+            )
+            sampled = sampled[tuple(slice(None, None, stride) for _ in shape)]
+
+        low_value: float
+        high_value: float
+        try:
+            if isinstance(sampled, da.Array):
+                percentiles = da.percentile(
+                    sampled.reshape(-1),
+                    [float(low_percentile), float(high_percentile)],
+                ).compute()
+            else:
+                percentiles = np.percentile(
+                    np.asarray(sampled).reshape(-1),
+                    [float(low_percentile), float(high_percentile)],
+                )
+            low_value = float(percentiles[0])
+            high_value = float(percentiles[1])
+        except Exception:
+            try:
+                if isinstance(sampled, da.Array):
+                    minimum, maximum = da.compute(sampled.min(), sampled.max())
+                else:
+                    minimum = np.min(np.asarray(sampled))
+                    maximum = np.max(np.asarray(sampled))
+                low_value = float(minimum)
+                high_value = float(maximum)
+            except Exception:
+                return 0.0, 1.0
+
+        if not np.isfinite(low_value):
+            low_value = 0.0
+        if not np.isfinite(high_value):
+            high_value = low_value + 1.0
+        if high_value <= low_value:
+            high_value = low_value + 1.0
+        return float(low_value), float(high_value)
+
     scale = tuple(float(value) for value in scale_tczyx)
     viewer = napari.Viewer(ndisplay=3, show=True)
     axis_labels_tuple = tuple(str(label) for label in axis_labels)
@@ -1251,33 +1382,72 @@ def _launch_napari_viewer(
         ]
         image_data: Any
         is_multiscale = len(level_arrays) > 1
-        if is_multiscale:
-            image_data = level_arrays
-        else:
-            image_data = level_arrays[0]
+        channel_count = int(level_arrays[0].shape[1]) if level_arrays else 1
+        channel_count = max(1, channel_count)
+        colormaps = _channel_colormap_cycle(channel_count)
+        channel_opacity = _default_channel_opacity(channel_count)
 
-        image_layer_metadata = dict(image_metadata)
-        image_layer_metadata["position_index"] = int(position_index)
-        affine = np.asarray(
+        affine_base = np.asarray(
             position_affines_tczyx.get(position_index, np.eye(6, dtype=np.float64)),
             dtype=np.float64,
         )
+        for channel_index in range(channel_count):
+            if is_multiscale:
+                image_data = [
+                    level[:, channel_index : channel_index + 1, :, :, :]
+                    for level in level_arrays
+                ]
+            else:
+                image_data = level_arrays[0][
+                    :, channel_index : channel_index + 1, :, :, :
+                ]
 
-        viewer.add_image(
-            image_data,
-            multiscale=is_multiscale,
-            name=f"{source_component} (p={position_index})",
-            scale=scale,
-            affine=affine,
-            metadata={str(key): value for key, value in image_layer_metadata.items()},
-        )
-        if not axis_labels_applied:
-            try:
-                if int(viewer.dims.ndim) == len(axis_labels_tuple):
-                    viewer.dims.axis_labels = axis_labels_tuple
-                    axis_labels_applied = True
-            except Exception:
-                pass
+            channel_affine = np.asarray(affine_base, dtype=np.float64).copy()
+            if channel_affine.shape == (6, 6):
+                channel_affine[1, 5] += float(channel_index)
+
+            contrast_limits = _percentile_contrast_limits(
+                image_data[-1] if is_multiscale else image_data
+            )
+            image_layer_metadata = dict(image_metadata)
+            image_layer_metadata["position_index"] = int(position_index)
+            image_layer_metadata["channel_index"] = int(channel_index)
+            image_layer_metadata["channel_colormap"] = str(colormaps[channel_index])
+            image_layer_metadata["contrast_limits"] = [
+                float(contrast_limits[0]),
+                float(contrast_limits[1]),
+            ]
+            layer_name = (
+                f"{source_component} (p={position_index}, c={channel_index})"
+                if channel_count > 1
+                else f"{source_component} (p={position_index})"
+            )
+
+            viewer.add_image(
+                image_data,
+                multiscale=is_multiscale,
+                name=layer_name,
+                scale=scale,
+                affine=channel_affine,
+                metadata={
+                    str(key): value for key, value in image_layer_metadata.items()
+                },
+                colormap=str(colormaps[channel_index]),
+                opacity=float(channel_opacity),
+                blending="additive",
+                rendering="attenuated_mip",
+                contrast_limits=(
+                    float(contrast_limits[0]),
+                    float(contrast_limits[1]),
+                ),
+            )
+            if not axis_labels_applied:
+                try:
+                    if int(viewer.dims.ndim) == len(axis_labels_tuple):
+                        viewer.dims.axis_labels = axis_labels_tuple
+                        axis_labels_applied = True
+                except Exception:
+                    pass
 
         points = np.asarray(
             points_by_position.get(
@@ -1302,12 +1472,14 @@ def _launch_napari_viewer(
             name=layer_name,
             properties={str(k): np.asarray(v) for k, v in point_properties.items()},
             scale=scale,
-            affine=affine,
+            affine=affine_base,
             metadata={str(key): value for key, value in points_layer_metadata.items()},
             size=7.0,
+            opacity=0.5,
             face_color="transparent",
-            border_color="yellow",
+            border_color="white",
             border_width=0.2,
+            blending="translucent",
         )
     napari.run()
 

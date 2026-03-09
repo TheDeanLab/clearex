@@ -23,6 +23,11 @@ This folder owns napari-facing visualization workflows.
 - Particle overlays are read from `results/particle_detection/latest/detections` by default.
 - Overlay points are emitted in napari coordinate order `(t, c, z, y, x)`.
 - Position filtering is applied when detection tables include `(t, p, c, z, y, x, ...)`.
+- Detection layer defaults:
+  - `border_color="white"`,
+  - `opacity=0.5`,
+  - `blending="translucent"`,
+  - transparent faces.
 
 ## Napari Metadata Contract
 
@@ -31,6 +36,12 @@ This folder owns napari-facing visualization workflows.
   - axis labels `(t, c, z, y, x)`,
   - matched `scale` values for aligned physical/index coordinates,
   - metadata dictionaries with source/store/pyramid details.
+- Image channel rendering defaults in napari:
+  - separate image layers per channel (`c` sliced as singleton per layer),
+  - `blending="additive"` and `rendering="attenuated_mip"`,
+  - per-channel contrast limits from `1st/95th` percentiles,
+  - colormap order starts with `green`, `magenta`, `bop orange`, then high-contrast additions (`cyan`, `yellow`, `blue`, ...),
+  - channel opacity decreases with channel count (1: `1.0`, 2: `0.9`, 3: `0.8`, floor `0.55`).
 - Scale resolution precedence is:
   1. explicit Zarr attrs (for example `scale_tpczyx`, `scale_tczyx`, `voxel_size_um_zyx`, `voxel_size_*`),
   2. `source_experiment` metadata (`timepoint_interval`, `step_size`, camera profile `fov_* / img_*`, then `pixel_size / zoom` with binning fallback),
