@@ -439,6 +439,182 @@ def _open_source_as_dask(
     raise ValueError(f"Unsupported source format for ingestion: {source_path}")
 
 
+def _parse_navigate_tiff_indices(path: Path) -> tuple[int, int, int]:
+    """Parse ``(time, position, channel)`` indices from a Navigate TIFF path.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        TIFF file path from a Navigate acquisition directory.
+
+    Returns
+    -------
+    tuple[int, int, int]
+        Parsed index tuple in ``(t, p, c)`` order. Missing values default to
+        ``0``.
+
+    Raises
+    ------
+    None
+        Parsing is best-effort and falls back to ``0`` for missing indices.
+    """
+    stem = path.stem
+
+    position_index = 0
+    for part in reversed(path.parts):
+        match = re.fullmatch(r"Position(\d+)", part, flags=re.IGNORECASE)
+        if match is not None:
+            position_index = int(match.group(1))
+            break
+    else:
+        match = re.search(r"(?:^|[_-])P(\d+)(?:[_-]|$)", stem, flags=re.IGNORECASE)
+        if match is not None:
+            position_index = int(match.group(1))
+
+    channel_index = 0
+    match = re.search(r"CH(\d+)", stem, flags=re.IGNORECASE)
+    if match is None:
+        match = re.search(r"(?:^|[_-])C(\d+)(?:[_-]|$)", stem, flags=re.IGNORECASE)
+    if match is not None:
+        channel_index = int(match.group(1))
+
+    time_index = 0
+    match = re.search(r"CH\d+_(\d+)", stem, flags=re.IGNORECASE)
+    if match is None:
+        match = re.search(r"(?:^|[_-])T(\d+)(?:[_-]|$)", stem, flags=re.IGNORECASE)
+    if match is not None:
+        time_index = int(match.group(1))
+
+    return time_index, position_index, channel_index
+
+
+def _open_navigate_tiff_collection_as_dask(
+    *,
+    experiment: "NavigateExperiment",
+    exit_stack: ExitStack,
+) -> Optional[tuple[da.Array, AxesSpec, dict[str, Any]]]:
+    """Open Navigate TIFF acquisitions as one Dask array over ``(t, p, c)``.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    exit_stack : contextlib.ExitStack
+        Exit stack passed through to source-open helpers.
+
+    Returns
+    -------
+    tuple, optional
+        ``(source_array, source_axes, metadata)`` for collection-based TIFF
+        ingestion, or ``None`` when the layout is not a multi-file
+        position/channel collection.
+
+    Raises
+    ------
+    ValueError
+        If the TIFF collection has incompatible array shapes/axes or missing
+        position-channel combinations.
+    """
+    if _normalize_file_type(experiment.file_type) != "TIFF":
+        return None
+
+    candidates = [
+        path.resolve()
+        for path in find_experiment_data_candidates(experiment)
+        if path.suffix.lower() in {".tif", ".tiff"}
+    ]
+    if len(candidates) <= 1:
+        return None
+
+    indexed_paths: dict[tuple[int, int, int], Path] = {}
+    for path in candidates:
+        key = _parse_navigate_tiff_indices(path)
+        indexed_paths.setdefault(key, path)
+
+    if len(indexed_paths) <= 1:
+        return None
+
+    time_indices = sorted({int(key[0]) for key in indexed_paths})
+    position_indices = sorted({int(key[1]) for key in indexed_paths})
+    channel_indices = sorted({int(key[2]) for key in indexed_paths})
+
+    arrays_by_index: dict[tuple[int, int, int], da.Array] = {}
+    base_axes: AxesSpec = None
+    base_shape: Optional[tuple[int, ...]] = None
+    for key in sorted(indexed_paths):
+        source_array, source_axes, _ = _open_source_as_dask(
+            indexed_paths[key],
+            exit_stack=exit_stack,
+        )
+        normalized_axes = tuple(
+            source_axes or _infer_source_axes(tuple(source_array.shape), experiment)
+        )
+        if any(axis in {"t", "p", "c"} for axis in normalized_axes):
+            return None
+
+        source_shape = tuple(int(size) for size in source_array.shape)
+        if base_axes is None:
+            base_axes = normalized_axes
+            base_shape = source_shape
+        else:
+            if normalized_axes != base_axes:
+                raise ValueError(
+                    "Navigate TIFF collection has inconsistent source axes: "
+                    f"expected {base_axes}, got {normalized_axes} at "
+                    f"{indexed_paths[key]}."
+                )
+            if source_shape != base_shape:
+                raise ValueError(
+                    "Navigate TIFF collection has inconsistent source shapes: "
+                    f"expected {base_shape}, got {source_shape} at "
+                    f"{indexed_paths[key]}."
+                )
+        arrays_by_index[key] = source_array
+
+    missing: list[tuple[int, int, int]] = []
+    stacked_by_time: list[da.Array] = []
+    for time_index in time_indices:
+        stacked_by_position: list[da.Array] = []
+        for position_index in position_indices:
+            stacked_by_channel: list[da.Array] = []
+            for channel_index in channel_indices:
+                key = (time_index, position_index, channel_index)
+                array = arrays_by_index.get(key)
+                if array is None:
+                    missing.append(key)
+                    continue
+                stacked_by_channel.append(array)
+            if missing:
+                continue
+            stacked_by_position.append(da.stack(stacked_by_channel, axis=0))
+        if missing:
+            continue
+        stacked_by_time.append(da.stack(stacked_by_position, axis=0))
+
+    if missing:
+        preview = ", ".join(
+            f"(t={time_idx}, p={position_idx}, c={channel_idx})"
+            for time_idx, position_idx, channel_idx in missing[:8]
+        )
+        raise ValueError(
+            "Navigate TIFF collection is missing expected position/channel "
+            f"combinations: {preview}."
+        )
+
+    source_array = da.stack(stacked_by_time, axis=0)
+    source_axes = ("t", "p", "c", *(base_axes or ()))
+    metadata: dict[str, Any] = {
+        "source_path": str(experiment.save_directory),
+        "source_file_count": int(len(indexed_paths)),
+        "source_collection_time_indices": [int(value) for value in time_indices],
+        "source_collection_position_indices": [
+            int(value) for value in position_indices
+        ],
+        "source_collection_channel_indices": [int(value) for value in channel_indices],
+    }
+    return source_array, source_axes, metadata
+
+
 def _format_axes_for_image_info(axes: AxesSpec) -> Optional[str]:
     """Format normalized axis tokens as an uppercase axis string.
 
@@ -1065,10 +1241,17 @@ def materialize_experiment_data_store(
     _emit_progress(5, "Opening source data")
 
     with ExitStack() as exit_stack:
-        source_array, source_axes, source_meta = _open_source_as_dask(
-            source_resolved,
+        source_payload = _open_navigate_tiff_collection_as_dask(
+            experiment=experiment,
             exit_stack=exit_stack,
         )
+        if source_payload is not None:
+            source_array, source_axes, source_meta = source_payload
+        else:
+            source_array, source_axes, source_meta = _open_source_as_dask(
+                source_resolved,
+                exit_stack=exit_stack,
+            )
         _emit_progress(20, "Loaded source metadata")
         source_shape = tuple(int(size) for size in source_array.shape)
         source_dtype = np.dtype(source_array.dtype)
@@ -1164,6 +1347,7 @@ def materialize_experiment_data_store(
 
     root = zarr.open_group(str(store_path), mode="a")
     source_axes_attr = list(source_axes) if source_axes is not None else None
+    source_metadata_path = str(source_meta.get("source_path", source_resolved))
     voxel_size_um_zyx = None
     if (
         experiment.z_step_um is not None
@@ -1178,7 +1362,7 @@ def materialize_experiment_data_store(
         ]
     root["data"].attrs.update(
         {
-            "source_path": str(source_resolved),
+            "source_path": source_metadata_path,
             "source_axes": source_axes_attr,
             "voxel_size_um_zyx": voxel_size_um_zyx,
         }
@@ -1187,15 +1371,19 @@ def materialize_experiment_data_store(
         root["data"].attrs["source_component"] = source_component
     root.attrs.update(
         {
-            "source_data_path": str(source_resolved),
+            "source_data_path": source_metadata_path,
             "source_data_axes": source_axes_attr,
             "source_data_component": source_component,
             "voxel_size_um_zyx": voxel_size_um_zyx,
         }
     )
 
+    source_image_path = Path(source_metadata_path).expanduser()
+    if not source_image_path.is_absolute():
+        source_image_path = source_resolved
+
     source_image_info = ImageInfo(
-        path=source_resolved,
+        path=source_image_path,
         shape=source_shape,
         dtype=source_dtype,
         axes=_format_axes_for_image_info(source_axes),

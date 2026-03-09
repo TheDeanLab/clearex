@@ -21,6 +21,12 @@ This folder contains ingestion, CLI, logging, and provenance logic.
 - Prefer chunk-parallel, non-overlapping writes.
 - Preserve metadata required for downstream analysis/provenance.
 
+## Dask Client Defaults
+
+- `create_dask_client(...)` local-mode startup now defaults to `dashboard_address=":0"`.
+- This avoids noisy `Port 8787 is already in use` warnings when multiple local clusters are started over time.
+- Callers can still override `dashboard_address` explicitly when fixed dashboard ports are required.
+
 ## Provenance Rules
 
 - Provenance is append-only.

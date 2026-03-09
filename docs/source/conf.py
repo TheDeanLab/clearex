@@ -4,15 +4,13 @@ from __future__ import annotations
 
 # Standard Library Imports
 from importlib.metadata import PackageNotFoundError, version as package_version
-from pathlib import Path
+import datetime
+import os
 import sys
 import types
 
 
-ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+sys.path.insert(0, os.path.abspath("../../src"))
 
 
 def _install_ants_stub() -> None:
@@ -54,8 +52,10 @@ def _install_ants_stub() -> None:
 _install_ants_stub()
 
 
+year = datetime.datetime.now().year
 project = "ClearEx"
-author = "The Dean Lab, UT Southwestern Medical Center"
+copyright = f"{year}, Dean Lab, UT Southwestern Medical Center"
+author = "Dean Lab, UT Southwestern Medical Center"
 
 try:
     release = package_version("clearex")
@@ -65,16 +65,26 @@ version = ".".join(release.split(".")[:3])
 
 
 extensions = [
-    "myst_parser",
-    "numpydoc",
+    "sphinx.ext.duration",
+    "sphinx.ext.doctest",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
-    "sphinx.ext.intersphinx",
+    "sphinx.ext.githubpages",
+    "sphinx.ext.napoleon",
+    "sphinx.ext.coverage",
+    "sphinx_toolbox.collapse",
+    "sphinx.ext.autosectionlabel",
     "sphinx.ext.todo",
-    "sphinx.ext.viewcode",
+    "numpydoc",
     "sphinx_copybutton",
+    "sphinx_issues",
     "sphinx_design",
 ]
+
+autosectionlabel_prefix_document = True
+
+# The suffix of source filenames.
+source_suffix = ".rst"
 
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
@@ -112,32 +122,14 @@ numpydoc_show_class_members = False
 numpydoc_class_members_toctree = False
 numpydoc_xref_param_type = True
 
-myst_heading_anchors = 3
-myst_enable_extensions = [
-    "attrs_inline",
-    "colon_fence",
-    "deflist",
-    "fieldlist",
-]
-
 copybutton_prompt_text = r">>> |\.\.\. "
 copybutton_prompt_is_regexp = True
 
-intersphinx_mapping = {
-    "python": ("https://docs.python.org/3", None),
-    "dask": ("https://docs.dask.org/en/stable/", None),
-    "numpy": ("https://numpy.org/doc/stable/", None),
-    "scipy": ("https://docs.scipy.org/doc/scipy/", None),
-    "zarr": ("https://zarr.readthedocs.io/en/stable/", None),
-    "napari": ("https://napari.org/stable/", None),
-}
-
 todo_include_todos = False
+issues_github_path = "TheDeanLab/clearex"
 
-html_theme = "pydata_sphinx_theme"
+html_theme = "sphinx_rtd_theme"
+html_logo = "_static/clearex_header_logo.png"
 html_title = f"{project} {release} Documentation"
 html_static_path = ["_static"]
-html_theme_options = {
-    "navigation_with_keys": True,
-    "show_toc_level": 2,
-}
+html_show_sphinx = False

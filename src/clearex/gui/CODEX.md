@@ -29,11 +29,24 @@ This folder owns the PyQt6 UX in `app.py`.
 ## Theme Requirements
 
 - Keep styling consistent with the dark theme.
-- Do not introduce white backgrounds or black text in controls/popups.
+- Keep controls/popups/content cards in the dark theme; avoid introducing new light surfaces there.
+- Exception: top branding header cards intentionally use a light tint (`#f0f2ef`) to match the header image background.
 - Explicitly style dropdown list views:
   - `QComboBox QAbstractItemView`
   - selected background and selected text colors
 - Keep parameter cards, help panels, and popups visually aligned with title/label palette.
+
+## Branding Assets and Layout
+
+- Branding assets live in `src/clearex/gui/`:
+  - `ClearEx_full.png` (startup splash)
+  - `ClearEx_full_header.png` (header banner)
+- Use the shared branding helpers in `app.py`:
+  - `_load_branding_pixmap(...)` (QImageReader-based load path for very large source files)
+  - `_create_scaled_branding_label(...)`
+  - `_show_startup_splash(...)`
+- Setup dialog header is image-only (remove duplicate `"ClearEx"` / `"Experiment Setup"` text labels).
+- Analysis dialog title/subtitle lives in the left column above the `Data store` row (not in the top header card).
 
 ## Spacing System
 

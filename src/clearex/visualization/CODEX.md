@@ -33,6 +33,22 @@ This folder owns napari-facing visualization workflows.
   2. `source_experiment` metadata (`timepoint_interval`, `step_size`, camera `pixel_size`),
   3. fallback to `(1, 1, 1, 1, 1)`.
 
+## Multiposition Affine Contract
+
+- Visualization supports:
+  - single-position mode (`show_all_positions=False`, use `position_index`), and
+  - multiposition mode (`show_all_positions=True`, render all positions).
+- Stage coordinates are resolved from `multi_positions.yml` adjacent to `source_experiment` when available (fallback: `MultiPositions` in experiment metadata).
+- Parsed stage rows use fields `X`, `Y`, `Z`, and `THETA` (`F` is ignored for visualization transforms).
+- Per-position napari affine uses homogeneous `6x6` matrix in `(t, c, z, y, x)` coordinates:
+  - `THETA` rotates the `z/y` plane (sample rotation around x axis).
+  - translations are applied from stage deltas and scaled by effective `scale_tczyx`.
+- Persisted visualization metadata includes:
+  - `selected_positions`,
+  - `show_all_positions`,
+  - `position_affines_tczyx`,
+  - `stage_positions_xyztheta`.
+
 ## GUI/Threading Contract
 
 - GUI analysis execution runs in a worker thread.

@@ -30,6 +30,7 @@ import json
 
 # Third Party Imports
 import numpy as np
+import tifffile
 import zarr
 
 # Local Imports
@@ -352,3 +353,52 @@ def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_pa
     assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
     assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
     assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
+
+
+def test_materialize_experiment_data_store_stacks_tiff_positions_and_channels(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="TIFF",
+        is_multiposition=True,
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    expected_blocks: dict[tuple[int, int], np.ndarray] = {}
+    for position_index in range(3):
+        position_dir = tmp_path / f"Position{position_index}"
+        position_dir.mkdir(parents=True, exist_ok=True)
+        for channel_index in range(2):
+            block = np.full(
+                (2, 3, 4),
+                fill_value=(position_index * 10 + channel_index),
+                dtype=np.uint16,
+            )
+            expected_blocks[(position_index, channel_index)] = block
+            path = position_dir / f"CH{channel_index:02d}_000000.tiff"
+            tifffile.imwrite(str(path), block)
+
+    resolved = resolve_experiment_data_path(experiment)
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=resolved,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert tuple(root["data"].shape) == (1, 3, 2, 2, 3, 4)
+    assert root.attrs["source_data_path"] == str(tmp_path.resolve())
+
+    for position_index in range(3):
+        for channel_index in range(2):
+            loaded = np.array(
+                root["data"][0, position_index, channel_index, :, :, :]
+            )
+            assert np.array_equal(
+                loaded,
+                expected_blocks[(position_index, channel_index)],
+            )
