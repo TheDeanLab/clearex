@@ -38,6 +38,7 @@ import zarr
 from clearex.io.experiment import (
     default_analysis_store_path,
     find_experiment_data_candidates,
+    has_canonical_data_component,
     initialize_analysis_store,
     is_navigate_experiment_file,
     load_navigate_experiment,
@@ -492,6 +493,36 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
     assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
     assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
     assert not (experiment_path.parent / "data_store.zarr").exists()
+
+
+def test_has_canonical_data_component_detects_ready_store(tmp_path: Path):
+    store_path = tmp_path / "ready_store.n5"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        "data",
+        shape=(1, 2, 3, 4, 5, 6),
+        chunks=(1, 1, 1, 2, 3, 3),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root["data"].attrs["axes"] = ["t", "p", "c", "z", "y", "x"]
+
+    assert has_canonical_data_component(store_path) is True
+
+
+def test_has_canonical_data_component_rejects_noncanonical_store(tmp_path: Path):
+    store_path = tmp_path / "raw_source.n5"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        "data",
+        shape=(2, 3, 4),
+        chunks=(1, 3, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root["data"].attrs["axes"] = ["z", "y", "x"]
+
+    assert has_canonical_data_component(store_path) is False
 
 
 def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_path: Path):

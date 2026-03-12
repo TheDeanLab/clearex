@@ -52,6 +52,7 @@ from clearex.io.experiment import (
     ExperimentDataResolutionError,
     NavigateExperiment,
     create_dask_client,
+    has_canonical_data_component,
     is_navigate_experiment_file,
     load_navigate_experiment,
     materialize_experiment_data_store,
@@ -2924,12 +2925,17 @@ if HAS_PYQT6:
             source_data_path = self._loaded_source_data_path
             target_store = resolve_data_store_path(experiment, source_data_path)
 
-            if target_store.exists():
+            if target_store.exists() and has_canonical_data_component(target_store):
                 self._set_status(
                     "Found existing data store. Opening analysis selection."
                 )
                 self._accept_with_store_path(target_store)
                 return
+            if target_store.exists():
+                self._set_status(
+                    "Existing store found, but canonical 6D data is missing or "
+                    "incompatible. Rebuilding canonical store."
+                )
 
             progress_dialog = MaterializationProgressDialog(parent=self)
             failure_payload: dict[str, str] = {}

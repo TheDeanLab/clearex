@@ -84,6 +84,48 @@ def _is_zarr_like_path(path: Path) -> bool:
     return path.is_dir() and path.suffix.lower() in {".zarr", ".n5"}
 
 
+def has_canonical_data_component(zarr_path: Union[str, Path]) -> bool:
+    """Return whether a store contains canonical 6D analysis data.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Candidate Zarr/N5 store path.
+
+    Returns
+    -------
+    bool
+        ``True`` when the store exposes a ``data`` array in canonical
+        ``(t, p, c, z, y, x)`` form. If axis metadata is present, it must
+        also normalize to that same canonical order.
+
+    Notes
+    -----
+    This helper is intentionally conservative and returns ``False`` for any
+    unreadable, missing, or malformed ``data`` component.
+    """
+    try:
+        root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r")
+    except Exception:
+        return False
+
+    if "data" not in root:
+        return False
+
+    data = root["data"]
+    if not hasattr(data, "shape"):
+        return False
+
+    shape = tuple(int(size) for size in tuple(data.shape))
+    if len(shape) != 6 or any(size <= 0 for size in shape):
+        return False
+
+    axes = _extract_zarr_axes(data, dict(getattr(root, "attrs", {})))
+    if axes is not None and axes != ("t", "p", "c", "z", "y", "x"):
+        return False
+    return True
+
+
 def _normalize_axis_token(token: Any) -> Optional[str]:
     """Normalize a single axis descriptor into canonical one-letter form.
 
