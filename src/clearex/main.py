@@ -61,6 +61,9 @@ from clearex.detect.pipeline import (
 from clearex.deconvolution.pipeline import (
     run_deconvolution_analysis,
 )
+from clearex.flatfield.pipeline import (
+    run_flatfield_analysis,
+)
 from clearex.visualization.pipeline import (
     run_visualization_analysis,
 )
@@ -82,21 +85,28 @@ from clearex.workflow import (
 
 _ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
     "data": "data",
+    "flatfield": "results/flatfield/latest/data",
     "deconvolution": "results/deconvolution/latest/data",
     "registration": "results/registration/latest/data",
     "visualization": "data",
 }
 
 _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
-    {"deconvolution", "particle_detection"}
+    {"flatfield", "deconvolution", "particle_detection"}
 )
 _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
-    {"deconvolution", "particle_detection", "registration"}
+    {"flatfield", "deconvolution", "particle_detection", "registration"}
 )
-_ANALYSIS_PROVENANCE_OUTPUT_COMPONENTS: Dict[str, str] = {
-    "deconvolution": "results/deconvolution/latest/data",
-    "particle_detection": "results/particle_detection/latest/detections",
-    "registration": "results/registration/latest/data",
+_ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
+    "flatfield": (
+        "results/flatfield/latest/data",
+        "results/flatfield/latest/flatfield_pcyx",
+        "results/flatfield/latest/darkfield_pcyx",
+        "results/flatfield/latest/baseline_pctz",
+    ),
+    "deconvolution": ("results/deconvolution/latest/data",),
+    "particle_detection": ("results/particle_detection/latest/detections",),
+    "registration": ("results/registration/latest/data",),
 }
 
 
@@ -270,6 +280,7 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         file=args.file,
         prefer_dask=args.dask,
         chunks=parse_chunks(args.chunks),
+        flatfield=args.flatfield,
         deconvolution=args.deconvolution,
         particle_detection=args.particle_detection,
         registration=args.registration,
@@ -729,6 +740,7 @@ def _run_workflow(
             workflow.analysis_parameters
         )
         execution_sequence = resolve_analysis_execution_sequence(
+            flatfield=workflow.flatfield,
             deconvolution=workflow.deconvolution,
             particle_detection=workflow.particle_detection,
             registration=workflow.registration,
@@ -799,15 +811,16 @@ def _run_workflow(
                     )
                 else:
                     if bool(history.get("matches_parameters", False)):
-                        output_component = _ANALYSIS_PROVENANCE_OUTPUT_COMPONENTS.get(
+                        required_components = _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS.get(
                             operation_name
                         )
-                        output_available = True
-                        if output_component:
-                            output_available = _zarr_component_exists(
-                                provenance_store_path,
-                                output_component,
-                            )
+                        missing_components: list[str] = []
+                        for component in required_components or ():
+                            if _zarr_component_exists(provenance_store_path, component):
+                                continue
+                            else:
+                                missing_components.append(component)
+                        output_available = not missing_components
                         if output_available:
                             matching_run_id = str(history.get("matching_run_id") or "")
                             logger.info(
@@ -851,11 +864,141 @@ def _run_workflow(
                             )
                             continue
                         logger.info(
-                            "Matching provenance run found for %s, but latest output "
-                            "component '%s' is missing. Re-running operation.",
+                            "Matching provenance run found for %s, but required output "
+                            "components are missing (%s). Re-running operation.",
                             operation_name,
-                            output_component,
+                            ", ".join(missing_components)
+                            if missing_components
+                            else "none",
                         )
+
+            if operation_name == "flatfield":
+                flatfield_parameters = dict(operation_parameters)
+                if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if not _zarr_component_exists(
+                        provenance_store_path,
+                        str(flatfield_parameters.get("input_source", "data")),
+                    ):
+                        logger.warning(
+                            "Requested flatfield input component '%s' was not found. "
+                            "Falling back to 'data'.",
+                            flatfield_parameters.get("input_source", "data"),
+                        )
+                        flatfield_parameters["input_source"] = "data"
+                        runtime_analysis_parameters["flatfield"] = dict(
+                            flatfield_parameters
+                        )
+
+                    progress_state = {"last_percent": -5}
+
+                    def _flatfield_progress(percent: int, message: str) -> None:
+                        """Throttle flatfield progress logs.
+
+                        Parameters
+                        ----------
+                        percent : int
+                            Progress percent.
+                        message : str
+                            Progress message.
+
+                        Returns
+                        -------
+                        None
+                            Logger side effects only.
+                        """
+                        last_percent = int(progress_state["last_percent"])
+                        if percent >= 100 or percent - last_percent >= 5:
+                            progress_state["last_percent"] = int(percent)
+                            logger.info(f"[flatfield] {int(percent)}% - {message}")
+                        mapped = operation_start + int(
+                            (max(0, min(100, int(percent))) / 100)
+                            * max(1, operation_end - operation_start)
+                        )
+                        _emit_analysis_progress(
+                            mapped,
+                            f"flatfield: {message}",
+                        )
+
+                    summary = run_flatfield_analysis(
+                        zarr_path=provenance_store_path,
+                        parameters=flatfield_parameters,
+                        client=analysis_client,
+                        progress_callback=_flatfield_progress,
+                    )
+                    flatfield_source_component = str(
+                        getattr(
+                            summary,
+                            "source_component",
+                            flatfield_parameters.get("input_source", "data"),
+                        )
+                    )
+                    flatfield_basicpy_version = getattr(
+                        summary,
+                        "basicpy_version",
+                        None,
+                    )
+                    produced_components["flatfield"] = summary.data_component
+                    output_records["flatfield"] = {
+                        "component": summary.component,
+                        "data_component": summary.data_component,
+                        "flatfield_component": summary.flatfield_component,
+                        "darkfield_component": summary.darkfield_component,
+                        "baseline_component": summary.baseline_component,
+                        "source_component": flatfield_source_component,
+                        "profile_count": summary.profile_count,
+                        "transformed_volumes": summary.transformed_volumes,
+                        "output_chunks_tpczyx": list(summary.output_chunks_tpczyx),
+                        "output_dtype": summary.output_dtype,
+                        "basicpy_version": flatfield_basicpy_version,
+                        "storage_policy": "latest_only",
+                    }
+                    logger.info(
+                        "Flatfield correction completed: "
+                        f"profiles={summary.profile_count}, "
+                        f"transformed_volumes={summary.transformed_volumes}, "
+                        f"component={summary.component}."
+                    )
+                    step_records.append(
+                        {
+                            "name": "flatfield",
+                            "parameters": {
+                                **flatfield_parameters,
+                                "component": summary.component,
+                                "data_component": summary.data_component,
+                                "flatfield_component": summary.flatfield_component,
+                                "darkfield_component": summary.darkfield_component,
+                                "baseline_component": summary.baseline_component,
+                                "source_component": flatfield_source_component,
+                                "profile_count": summary.profile_count,
+                                "transformed_volumes": summary.transformed_volumes,
+                                "output_dtype": summary.output_dtype,
+                                "basicpy_version": flatfield_basicpy_version,
+                            },
+                        }
+                    )
+                    _emit_analysis_progress(
+                        operation_end,
+                        "Flatfield correction complete.",
+                    )
+                else:
+                    logger.warning(
+                        "Flatfield correction requires a canonical Zarr/N5 data store."
+                    )
+                    step_records.append(
+                        {
+                            "name": "flatfield",
+                            "parameters": {
+                                **flatfield_parameters,
+                                "status": "skipped",
+                                "reason": "no_zarr_store",
+                            },
+                        }
+                    )
+                    _emit_analysis_progress(
+                        operation_end,
+                        "Flatfield correction skipped (no Zarr/N5 store).",
+                    )
+                continue
 
             if operation_name == "deconvolution":
                 decon_parameters = dict(operation_parameters)
@@ -1233,6 +1376,7 @@ def _run_workflow(
             prefer_dask=workflow.prefer_dask,
             dask_backend=workflow.dask_backend,
             chunks=workflow.chunks,
+            flatfield=workflow.flatfield,
             deconvolution=workflow.deconvolution,
             particle_detection=workflow.particle_detection,
             registration=workflow.registration,
@@ -1256,50 +1400,20 @@ def _run_workflow(
                 f"with run_id={run_id}."
             )
 
-            deconvolution_output = output_records.get("deconvolution")
-            if deconvolution_output:
+            for analysis_name, metadata in output_records.items():
                 try:
                     root = zarr.open_group(str(provenance_store_path), mode="a")
-                    root["results"]["deconvolution"]["latest"].attrs["run_id"] = run_id
+                    component = str(metadata.get("component", "")).strip()
+                    if component:
+                        root[component].attrs["run_id"] = run_id
                 except Exception:
                     pass
                 register_latest_output_reference(
                     zarr_path=provenance_store_path,
-                    analysis_name="deconvolution",
-                    component=str(deconvolution_output["component"]),
+                    analysis_name=analysis_name,
+                    component=str(metadata["component"]),
                     run_id=run_id,
-                    metadata=deconvolution_output,
-                )
-
-            particle_output = output_records.get("particle_detection")
-            if particle_output:
-                try:
-                    root = zarr.open_group(str(provenance_store_path), mode="a")
-                    root["results"]["particle_detection"]["latest"].attrs["run_id"] = (
-                        run_id
-                    )
-                except Exception:
-                    pass
-                register_latest_output_reference(
-                    zarr_path=provenance_store_path,
-                    analysis_name="particle_detection",
-                    component=str(particle_output["component"]),
-                    run_id=run_id,
-                    metadata=particle_output,
-                )
-            visualization_output = output_records.get("visualization")
-            if visualization_output:
-                try:
-                    root = zarr.open_group(str(provenance_store_path), mode="a")
-                    root["results"]["visualization"]["latest"].attrs["run_id"] = run_id
-                except Exception:
-                    pass
-                register_latest_output_reference(
-                    zarr_path=provenance_store_path,
-                    analysis_name="visualization",
-                    component=str(visualization_output["component"]),
-                    run_id=run_id,
-                    metadata=visualization_output,
+                    metadata=metadata,
                 )
         except Exception as exc:
             logger.warning(

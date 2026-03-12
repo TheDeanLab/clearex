@@ -2669,6 +2669,7 @@ if HAS_PYQT6:
                 prefer_dask=True,
                 dask_backend=self._dask_backend_config,
                 chunks=self._chunks,
+                flatfield=False,
                 deconvolution=False,
                 particle_detection=False,
                 registration=False,
@@ -2764,23 +2765,27 @@ if HAS_PYQT6:
         """Second-step GUI dialog for selecting and sequencing analysis operations."""
 
         _OPERATION_KEYS: tuple[str, ...] = (
+            "flatfield",
             "deconvolution",
             "particle_detection",
             "registration",
             "visualization",
         )
         _PROVENANCE_HISTORY_OPERATIONS: tuple[str, ...] = (
+            "flatfield",
             "deconvolution",
             "particle_detection",
             "registration",
         )
         _OPERATION_LABELS: Dict[str, str] = {
+            "flatfield": "Flatfield Correction",
             "deconvolution": "Deconvolution",
             "particle_detection": "Particle Detection",
             "registration": "Registration",
             "visualization": "Visualization",
         }
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
+            "flatfield": "results/flatfield/latest/data",
             "deconvolution": "results/deconvolution/latest/data",
             "registration": "results/registration/latest/data",
         }
@@ -2788,6 +2793,20 @@ if HAS_PYQT6:
             "input_source": (
                 "Input source controls which dataset this operation reads from. "
                 "Use raw data, or choose an upstream operation output."
+            ),
+            "get_darkfield": (
+                "Estimate and remove a darkfield component in addition to the "
+                "flatfield profile."
+            ),
+            "smoothness_flatfield": (
+                "Controls the flatfield smoothness regularization passed to BaSiCPy."
+            ),
+            "working_size": (
+                "Downsample size used by BaSiCPy during profile fitting. Larger "
+                "values use more detail but increase runtime and memory."
+            ),
+            "is_timelapse": (
+                "Apply BaSiCPy baseline subtraction for time-varying illumination."
             ),
             "psf_mode": (
                 "Choose whether to use measured PSFs from files or generate synthetic "
@@ -2959,6 +2978,7 @@ if HAS_PYQT6:
             )
 
             self._operation_defaults = default_analysis_operation_parameters()
+            self._flatfield_defaults = dict(self._operation_defaults.get("flatfield", {}))
             self._decon_defaults = dict(
                 self._operation_defaults.get("deconvolution", {})
             )
@@ -3187,6 +3207,9 @@ if HAS_PYQT6:
             self._decon_large_file_checkbox.toggled.connect(
                 self._set_deconvolution_parameter_enabled_state
             )
+            self._flatfield_use_overlap_checkbox.toggled.connect(
+                self._set_flatfield_parameter_enabled_state
+            )
             self._particle_use_overlap_checkbox.toggled.connect(
                 self._set_particle_parameter_enabled_state
             )
@@ -3263,6 +3286,8 @@ if HAS_PYQT6:
 
             if operation_name == "deconvolution":
                 self._build_deconvolution_parameter_rows(form)
+            elif operation_name == "flatfield":
+                self._build_flatfield_parameter_rows(form)
             elif operation_name == "particle_detection":
                 self._build_particle_parameter_rows(form)
             elif operation_name == "visualization":
@@ -3312,6 +3337,88 @@ if HAS_PYQT6:
             apply_form_spacing(section_form)
             section_layout.addLayout(section_form)
             return section, section_form
+
+        def _build_flatfield_parameter_rows(self, form: QFormLayout) -> None:
+            """Add flatfield-correction parameter controls to a form.
+
+            Parameters
+            ----------
+            form : QFormLayout
+                Form receiving flatfield widgets.
+
+            Returns
+            -------
+            None
+                Widgets are created and stored on ``self``.
+            """
+            self._flatfield_darkfield_checkbox = QCheckBox(
+                "Estimate darkfield profile"
+            )
+            form.addRow("", self._flatfield_darkfield_checkbox)
+            self._register_parameter_hint(
+                self._flatfield_darkfield_checkbox,
+                self._PARAMETER_HINTS["get_darkfield"],
+            )
+
+            self._flatfield_smoothness_spin = QDoubleSpinBox()
+            self._flatfield_smoothness_spin.setRange(0.0, 100.0)
+            self._flatfield_smoothness_spin.setDecimals(3)
+            self._flatfield_smoothness_spin.setSingleStep(0.1)
+            form.addRow("Smoothness", self._flatfield_smoothness_spin)
+            self._register_parameter_hint(
+                self._flatfield_smoothness_spin,
+                self._PARAMETER_HINTS["smoothness_flatfield"],
+            )
+
+            self._flatfield_working_size_spin = QSpinBox()
+            self._flatfield_working_size_spin.setRange(1, 4096)
+            form.addRow("Working size", self._flatfield_working_size_spin)
+            self._register_parameter_hint(
+                self._flatfield_working_size_spin,
+                self._PARAMETER_HINTS["working_size"],
+            )
+
+            self._flatfield_timelapse_checkbox = QCheckBox(
+                "Apply timelapse baseline correction"
+            )
+            form.addRow("", self._flatfield_timelapse_checkbox)
+            self._register_parameter_hint(
+                self._flatfield_timelapse_checkbox,
+                self._PARAMETER_HINTS["is_timelapse"],
+            )
+
+            self._flatfield_use_overlap_checkbox = QCheckBox(
+                "Use map_overlap margins"
+            )
+            form.addRow("", self._flatfield_use_overlap_checkbox)
+            self._register_parameter_hint(
+                self._flatfield_use_overlap_checkbox,
+                self._PARAMETER_HINTS["use_map_overlap"],
+            )
+
+            self._flatfield_overlap_z_spin = QSpinBox()
+            self._flatfield_overlap_z_spin.setRange(0, 4096)
+            form.addRow("Overlap Z", self._flatfield_overlap_z_spin)
+            self._register_parameter_hint(
+                self._flatfield_overlap_z_spin,
+                self._PARAMETER_HINTS["overlap_zyx"],
+            )
+
+            self._flatfield_overlap_y_spin = QSpinBox()
+            self._flatfield_overlap_y_spin.setRange(0, 4096)
+            form.addRow("Overlap Y", self._flatfield_overlap_y_spin)
+            self._register_parameter_hint(
+                self._flatfield_overlap_y_spin,
+                self._PARAMETER_HINTS["overlap_zyx"],
+            )
+
+            self._flatfield_overlap_x_spin = QSpinBox()
+            self._flatfield_overlap_x_spin.setRange(0, 4096)
+            form.addRow("Overlap X", self._flatfield_overlap_x_spin)
+            self._register_parameter_hint(
+                self._flatfield_overlap_x_spin,
+                self._PARAMETER_HINTS["overlap_zyx"],
+            )
 
         def _build_deconvolution_parameter_rows(self, form: QFormLayout) -> None:
             """Add deconvolution parameter controls to a form.
@@ -4143,6 +4250,7 @@ if HAS_PYQT6:
                     force_checkbox.setEnabled(enabled and has_success)
 
             self._refresh_input_source_options()
+            self._set_flatfield_parameter_enabled_state()
             self._set_deconvolution_parameter_enabled_state()
             self._set_particle_parameter_enabled_state()
             self._set_visualization_parameter_enabled_state()
@@ -4451,6 +4559,37 @@ if HAS_PYQT6:
             self._particle_overlap_x_spin.setEnabled(overlap_enabled)
             self._particle_min_distance_spin.setEnabled(close_enabled)
 
+        def _set_flatfield_parameter_enabled_state(self) -> None:
+            """Enable/disable flatfield widgets based on selection and overlap mode.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widget enabled states are updated in-place.
+            """
+            flatfield_enabled = self._operation_checkboxes["flatfield"].isChecked()
+            overlap_enabled = (
+                flatfield_enabled and self._flatfield_use_overlap_checkbox.isChecked()
+            )
+
+            widgets = (
+                self._flatfield_darkfield_checkbox,
+                self._flatfield_smoothness_spin,
+                self._flatfield_working_size_spin,
+                self._flatfield_timelapse_checkbox,
+                self._flatfield_use_overlap_checkbox,
+            )
+            for widget in widgets:
+                widget.setEnabled(flatfield_enabled)
+
+            self._flatfield_overlap_z_spin.setEnabled(overlap_enabled)
+            self._flatfield_overlap_y_spin.setEnabled(overlap_enabled)
+            self._flatfield_overlap_x_spin.setEnabled(overlap_enabled)
+
         def _set_visualization_parameter_enabled_state(self) -> None:
             """Enable/disable visualization widgets based on operation selection.
 
@@ -4518,6 +4657,9 @@ if HAS_PYQT6:
             normalized_parameters = normalize_analysis_operation_parameters(
                 initial.analysis_parameters
             )
+            flatfield_params = dict(
+                normalized_parameters.get("flatfield", self._flatfield_defaults)
+            )
             decon_params = dict(
                 normalized_parameters.get("deconvolution", self._decon_defaults)
             )
@@ -4532,6 +4674,7 @@ if HAS_PYQT6:
                 self._store_label.setText(initial.file or "n/a")
 
             checkbox_defaults = {
+                "flatfield": bool(initial.flatfield),
                 "deconvolution": bool(initial.deconvolution),
                 "particle_detection": bool(initial.particle_detection),
                 "registration": bool(initial.registration),
@@ -4621,6 +4764,31 @@ if HAS_PYQT6:
                     store_z_um = None
             self._visualization_position_spin.setMaximum(position_count - 1)
             self._particle_channel_spin.setMaximum(channel_count - 1)
+
+            self._flatfield_darkfield_checkbox.setChecked(
+                bool(flatfield_params.get("get_darkfield", True))
+            )
+            self._flatfield_smoothness_spin.setValue(
+                float(flatfield_params.get("smoothness_flatfield", 1.0))
+            )
+            self._flatfield_working_size_spin.setValue(
+                max(1, int(flatfield_params.get("working_size", 128)))
+            )
+            self._flatfield_timelapse_checkbox.setChecked(
+                bool(flatfield_params.get("is_timelapse", False))
+            )
+            self._flatfield_use_overlap_checkbox.setChecked(
+                bool(flatfield_params.get("use_map_overlap", True))
+            )
+            flatfield_overlap_zyx = flatfield_params.get("overlap_zyx", [0, 32, 32])
+            if (
+                not isinstance(flatfield_overlap_zyx, (tuple, list))
+                or len(flatfield_overlap_zyx) != 3
+            ):
+                flatfield_overlap_zyx = [0, 32, 32]
+            self._flatfield_overlap_z_spin.setValue(int(flatfield_overlap_zyx[0]))
+            self._flatfield_overlap_y_spin.setValue(int(flatfield_overlap_zyx[1]))
+            self._flatfield_overlap_x_spin.setValue(int(flatfield_overlap_zyx[2]))
 
             decon_mode = str(decon_params.get("psf_mode", "measured")).strip().lower()
             decon_mode_index = self._decon_psf_mode_combo.findData(decon_mode)
@@ -5107,6 +5275,44 @@ if HAS_PYQT6:
                 "gpu_config_file": str(self._decon_defaults.get("gpu_config_file", "")),
             }
 
+        def _collect_flatfield_parameters(self) -> Dict[str, Any]:
+            """Collect flatfield-correction parameter values from widgets.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, Any]
+                Flatfield-correction parameter mapping.
+            """
+            return {
+                "chunk_basis": "3d",
+                "detect_2d_per_slice": False,
+                "use_map_overlap": bool(
+                    self._flatfield_use_overlap_checkbox.isChecked()
+                ),
+                "overlap_zyx": [
+                    int(self._flatfield_overlap_z_spin.value()),
+                    int(self._flatfield_overlap_y_spin.value()),
+                    int(self._flatfield_overlap_x_spin.value()),
+                ],
+                "memory_overhead_factor": float(
+                    self._flatfield_defaults.get("memory_overhead_factor", 2.0)
+                ),
+                "get_darkfield": bool(
+                    self._flatfield_darkfield_checkbox.isChecked()
+                ),
+                "smoothness_flatfield": float(
+                    self._flatfield_smoothness_spin.value()
+                ),
+                "working_size": int(self._flatfield_working_size_spin.value()),
+                "is_timelapse": bool(
+                    self._flatfield_timelapse_checkbox.isChecked()
+                ),
+            }
+
         def _collect_particle_parameters(self) -> Dict[str, Any]:
             """Collect particle-detection parameter values from widgets.
 
@@ -5216,7 +5422,9 @@ if HAS_PYQT6:
             defaults["force_rerun"] = (
                 bool(force_checkbox.isChecked()) if force_checkbox is not None else False
             )
-            if operation_name == "deconvolution":
+            if operation_name == "flatfield":
+                defaults.update(self._collect_flatfield_parameters())
+            elif operation_name == "deconvolution":
                 defaults.update(self._collect_deconvolution_parameters())
             elif operation_name == "particle_detection":
                 defaults.update(self._collect_particle_parameters())
@@ -5336,6 +5544,7 @@ if HAS_PYQT6:
                 prefer_dask=self._base_config.prefer_dask,
                 dask_backend=self._base_config.dask_backend,
                 chunks=self._base_config.chunks,
+                flatfield=selected_flags["flatfield"],
                 deconvolution=selected_flags["deconvolution"],
                 particle_detection=selected_flags["particle_detection"],
                 registration=selected_flags["registration"],
@@ -5458,7 +5667,12 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
     analysis_parameters = normalize_analysis_operation_parameters(
         workflow.analysis_parameters
     )
-    for operation_name in ("deconvolution", "particle_detection", "registration"):
+    for operation_name in (
+        "flatfield",
+        "deconvolution",
+        "particle_detection",
+        "registration",
+    ):
         params = dict(analysis_parameters.get(operation_name, {}))
         params["force_rerun"] = False
         analysis_parameters[operation_name] = params
@@ -5468,6 +5682,7 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         prefer_dask=workflow.prefer_dask,
         dask_backend=workflow.dask_backend,
         chunks=workflow.chunks,
+        flatfield=False,
         deconvolution=False,
         particle_detection=False,
         registration=False,

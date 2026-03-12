@@ -44,6 +44,7 @@ def test_gui_boolean_switches():
 def test_analysis_flags_are_parsed():
     args = create_parser().parse_args(
         [
+            "--flatfield",
             "--deconvolution",
             "--particle-detection",
             "--registration",
@@ -52,6 +53,7 @@ def test_analysis_flags_are_parsed():
             "--no-dask",
         ]
     )
+    assert args.flatfield is True
     assert args.deconvolution is True
     assert args.particle_detection is True
     assert args.registration is True

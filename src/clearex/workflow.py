@@ -44,6 +44,7 @@ PTCZYX_AXES = ("p", "t", "c", "z", "y", "x")
 TPCZYX_AXES = ("t", "p", "c", "z", "y", "x")
 _PTCZYX_TO_TPCZYX_INDICES = (1, 0, 2, 3, 4, 5)
 ANALYSIS_OPERATION_ORDER = (
+    "flatfield",
     "deconvolution",
     "particle_detection",
     "registration",
@@ -61,8 +62,22 @@ DEFAULT_ZARR_PYRAMID_PTCZYX: ZarrPyramidAxisSpec = (
 )
 
 DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
-    "deconvolution": {
+    "flatfield": {
         "execution_order": 1,
+        "input_source": "data",
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": True,
+        "overlap_zyx": [0, 32, 32],
+        "memory_overhead_factor": 2.0,
+        "get_darkfield": True,
+        "smoothness_flatfield": 1.0,
+        "working_size": 128,
+        "is_timelapse": False,
+    },
+    "deconvolution": {
+        "execution_order": 2,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -104,7 +119,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "gpu_config_file": "",
     },
     "particle_detection": {
-        "execution_order": 2,
+        "execution_order": 3,
         "input_source": "data",
         "force_rerun": False,
         "channel_index": 0,
@@ -125,7 +140,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "min_distance_sigma": 10.0,
     },
     "registration": {
-        "execution_order": 3,
+        "execution_order": 4,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -135,7 +150,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "memory_overhead_factor": 2.5,
     },
     "visualization": {
-        "execution_order": 4,
+        "execution_order": 5,
         "input_source": "data",
         "chunk_basis": "2d",
         "detect_2d_per_slice": True,
@@ -530,6 +545,40 @@ def _normalize_deconvolution_parameters(
     return normalized
 
 
+def _normalize_flatfield_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize flatfield-correction runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate flatfield parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized flatfield parameter mapping.
+
+    Raises
+    ------
+    ValueError
+        If required values are invalid.
+    """
+    normalized = _normalize_common_operation_parameters("flatfield", params)
+    normalized["get_darkfield"] = bool(normalized.get("get_darkfield", True))
+    normalized["is_timelapse"] = bool(normalized.get("is_timelapse", False))
+    normalized["smoothness_flatfield"] = float(
+        normalized.get("smoothness_flatfield", 1.0)
+    )
+    if normalized["smoothness_flatfield"] <= 0:
+        raise ValueError("flatfield smoothness_flatfield must be greater than zero.")
+    normalized["working_size"] = int(normalized.get("working_size", 128))
+    if normalized["working_size"] <= 0:
+        raise ValueError("flatfield working_size must be greater than zero.")
+    return normalized
+
+
 def _normalize_particle_detection_parameters(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -658,7 +707,11 @@ def normalize_analysis_operation_parameters(
     for operation_name in ANALYSIS_OPERATION_ORDER:
         if operation_name not in merged:
             continue
-        if operation_name == "deconvolution":
+        if operation_name == "flatfield":
+            merged[operation_name] = _normalize_flatfield_parameters(
+                merged[operation_name]
+            )
+        elif operation_name == "deconvolution":
             merged[operation_name] = _normalize_deconvolution_parameters(
                 merged[operation_name]
             )
@@ -680,6 +733,7 @@ def normalize_analysis_operation_parameters(
 
 def selected_analysis_operations(
     *,
+    flatfield: bool,
     deconvolution: bool,
     particle_detection: bool,
     registration: bool,
@@ -689,6 +743,8 @@ def selected_analysis_operations(
 
     Parameters
     ----------
+    flatfield : bool
+        Whether flatfield correction is enabled.
     deconvolution : bool
         Whether deconvolution is enabled.
     particle_detection : bool
@@ -704,6 +760,8 @@ def selected_analysis_operations(
         Selected operations in canonical declaration order.
     """
     selected: list[str] = []
+    if flatfield:
+        selected.append("flatfield")
     if deconvolution:
         selected.append("deconvolution")
     if particle_detection:
@@ -717,6 +775,7 @@ def selected_analysis_operations(
 
 def resolve_analysis_execution_sequence(
     *,
+    flatfield: bool,
     deconvolution: bool,
     particle_detection: bool,
     registration: bool,
@@ -727,6 +786,8 @@ def resolve_analysis_execution_sequence(
 
     Parameters
     ----------
+    flatfield : bool
+        Whether flatfield correction is enabled.
     deconvolution : bool
         Whether deconvolution is enabled.
     particle_detection : bool
@@ -747,6 +808,7 @@ def resolve_analysis_execution_sequence(
     """
     normalized = normalize_analysis_operation_parameters(analysis_parameters)
     selected = selected_analysis_operations(
+        flatfield=flatfield,
         deconvolution=deconvolution,
         particle_detection=particle_detection,
         registration=registration,
@@ -1713,6 +1775,8 @@ class WorkflowConfig:
         Backend orchestration mode and runtime settings for Dask execution.
     chunks : int or tuple of int, optional
         Chunking configuration used for Dask reads.
+    flatfield : bool
+        Flag indicating whether flatfield-correction workflow should run.
     deconvolution : bool
         Flag indicating whether deconvolution workflow should run.
     particle_detection : bool
@@ -1731,6 +1795,7 @@ class WorkflowConfig:
     prefer_dask: bool = True
     dask_backend: DaskBackendConfig = field(default_factory=DaskBackendConfig)
     chunks: ChunkSpec = None
+    flatfield: bool = False
     deconvolution: bool = False
     particle_detection: bool = False
     registration: bool = False
@@ -1771,6 +1836,7 @@ class WorkflowConfig:
         """
         return any(
             (
+                self.flatfield,
                 self.deconvolution,
                 self.particle_detection,
                 self.registration,

@@ -32,6 +32,7 @@
 from . import context
 from . import file_operations
 from . import filter
+from . import flatfield
 from . import fit
 from . import io
 from . import plot
@@ -45,6 +46,7 @@ __all__ = [
     "context",
     "file_operations",
     "filter",
+    "flatfield",
     "fit",
     "io",
     "plot",

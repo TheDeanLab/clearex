@@ -106,13 +106,43 @@ class TestWorkflowConfig:
         assert cfg.zarr_save.chunks_ptczyx == DEFAULT_ZARR_CHUNKS_PTCZYX
         assert cfg.zarr_save.pyramid_ptczyx == DEFAULT_ZARR_PYRAMID_PTCZYX
         assert cfg.dask_backend.mode == DASK_BACKEND_LOCAL_CLUSTER
+        assert "flatfield" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["flatfield"]["execution_order"] == 1
+        assert cfg.analysis_parameters["flatfield"]["get_darkfield"] is True
         assert "particle_detection" in cfg.analysis_parameters
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
-        assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 2
+        assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 3
         assert cfg.analysis_parameters["particle_detection"]["input_source"] == "data"
         assert cfg.analysis_parameters["visualization"]["show_all_positions"] is False
         assert cfg.analysis_parameters["visualization"]["position_index"] == 0
         assert cfg.analysis_parameters["visualization"]["use_multiscale"] is True
+
+    def test_normalizes_flatfield_analysis_parameters(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "flatfield": {
+                    "get_darkfield": 0,
+                    "smoothness_flatfield": "2.5",
+                    "working_size": "192",
+                    "is_timelapse": 1,
+                    "overlap_zyx": [4, 8, 16],
+                    "input_source": "deconvolution",
+                }
+            }
+        )
+        params = cfg.analysis_parameters["flatfield"]
+        assert params["get_darkfield"] is False
+        assert params["smoothness_flatfield"] == 2.5
+        assert params["working_size"] == 192
+        assert params["is_timelapse"] is True
+        assert params["overlap_zyx"] == [4, 8, 16]
+        assert params["input_source"] == "deconvolution"
+
+    def test_rejects_invalid_flatfield_working_size(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={"flatfield": {"working_size": 0}}
+            )
 
     def test_normalizes_particle_analysis_parameters(self):
         cfg = WorkflowConfig(
@@ -329,7 +359,8 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
             "memory_overhead_factor"
         ]
     )
-    assert normalized["deconvolution"]["execution_order"] == 1
+    assert normalized["deconvolution"]["execution_order"] == 2
+    assert normalized["flatfield"]["execution_order"] == 1
     assert normalized["visualization"]["input_source"] == "data"
     assert normalized["visualization"]["show_all_positions"] is False
     assert normalized["visualization"]["use_multiscale"] is True
@@ -337,21 +368,29 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
 
 def test_resolve_analysis_execution_sequence_uses_execution_order():
     sequence = resolve_analysis_execution_sequence(
+        flatfield=True,
         deconvolution=True,
         particle_detection=True,
         registration=True,
         visualization=False,
         analysis_parameters={
+            "flatfield": {"execution_order": 4},
             "deconvolution": {"execution_order": 2},
             "particle_detection": {"execution_order": 3},
             "registration": {"execution_order": 1},
         },
     )
-    assert sequence == ("registration", "deconvolution", "particle_detection")
+    assert sequence == (
+        "registration",
+        "deconvolution",
+        "particle_detection",
+        "flatfield",
+    )
 
 
 def test_analysis_operation_order_contains_expected_keys():
     assert ANALYSIS_OPERATION_ORDER == (
+        "flatfield",
         "deconvolution",
         "particle_detection",
         "registration",

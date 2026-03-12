@@ -319,6 +319,8 @@ def _selected_analyses(workflow: WorkflowConfig) -> list[str]:
         Ordered list of selected analyses.
     """
     selected: list[str] = []
+    if workflow.flatfield:
+        selected.append("flatfield")
     if workflow.deconvolution:
         selected.append("deconvolution")
     if workflow.particle_detection:
@@ -830,6 +832,7 @@ def persist_run_provenance(
         "zarr_pyramid_ptczyx": format_zarr_pyramid_ptczyx(
             workflow.zarr_save.pyramid_ptczyx
         ),
+        "flatfield": workflow.flatfield,
         "deconvolution": workflow.deconvolution,
         "particle_detection": workflow.particle_detection,
         "registration": workflow.registration,

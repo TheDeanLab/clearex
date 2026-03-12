@@ -129,6 +129,14 @@ def create_parser() -> argparse.ArgumentParser:
     input_args = parser.add_argument_group("Input Arguments")
 
     input_args.add_argument(
+        "--flatfield",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Run flatfield-correction workflow",
+    )
+
+    input_args.add_argument(
         "--deconvolution",
         required=False,
         default=False,

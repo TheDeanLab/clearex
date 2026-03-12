@@ -82,6 +82,31 @@ def test_run_workflow_particle_detection_starts_analysis_dask_startup(
     assert workloads == ["analysis"]
 
 
+def test_run_workflow_flatfield_starts_analysis_dask_startup(
+    monkeypatch,
+) -> None:
+    workloads: list[str] = []
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack
+        workloads.append(str(workload))
+        return object()
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+
+    workflow = WorkflowConfig(
+        file=None,
+        prefer_dask=True,
+        flatfield=True,
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.flatfield"),
+    )
+
+    assert workloads == ["analysis"]
+
+
 def test_run_workflow_registration_skips_without_crashing(monkeypatch) -> None:
     workloads: list[str] = []
 
@@ -357,3 +382,123 @@ def test_run_workflow_force_rerun_ignores_matching_provenance(
     )
 
     assert called["value"] is True
+
+
+def test_run_workflow_chains_flatfield_output_to_visualization(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_flatfield.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _fake_flatfield(*, zarr_path, parameters, client, progress_callback):
+        del parameters, client, progress_callback
+        fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
+        latest = fake_root.require_group("results").require_group("flatfield").require_group(
+            "latest"
+        )
+        latest.create_dataset(
+            name="data",
+            shape=(1, 1, 1, 2, 2, 2),
+            chunks=(1, 1, 1, 2, 2, 2),
+            dtype="float32",
+            overwrite=True,
+        )
+        latest.create_dataset(
+            name="flatfield_pcyx",
+            shape=(1, 1, 2, 2),
+            chunks=(1, 1, 2, 2),
+            dtype="float32",
+            overwrite=True,
+        )
+        latest.create_dataset(
+            name="darkfield_pcyx",
+            shape=(1, 1, 2, 2),
+            chunks=(1, 1, 2, 2),
+            dtype="float32",
+            overwrite=True,
+        )
+        latest.create_dataset(
+            name="baseline_pctz",
+            shape=(1, 1, 1, 2),
+            chunks=(1, 1, 1, 2),
+            dtype="float32",
+            overwrite=True,
+        )
+        return SimpleNamespace(
+            component="results/flatfield/latest",
+            data_component="results/flatfield/latest/data",
+            flatfield_component="results/flatfield/latest/flatfield_pcyx",
+            darkfield_component="results/flatfield/latest/darkfield_pcyx",
+            baseline_component="results/flatfield/latest/baseline_pctz",
+            profile_count=1,
+            transformed_volumes=1,
+            output_chunks_tpczyx=(1, 1, 1, 2, 2, 2),
+            output_dtype="float32",
+        )
+
+    captured: dict[str, object] = {}
+
+    def _fake_visualization(*, zarr_path, parameters, progress_callback):
+        del zarr_path, progress_callback
+        captured["input_source"] = str(parameters["input_source"])
+        fake_root = main_module.zarr.open_group(str(store_path), mode="a")
+        latest = (
+            fake_root.require_group("results")
+            .require_group("visualization")
+            .require_group("latest")
+        )
+        latest.attrs["source_component"] = str(parameters["input_source"])
+        return SimpleNamespace(
+            component="results/visualization/latest",
+            source_component=str(parameters["input_source"]),
+            source_components=(str(parameters["input_source"]),),
+            position_index=0,
+            overlay_points_count=0,
+            launch_mode="in_process",
+            viewer_pid=None,
+        )
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(main_module, "run_flatfield_analysis", _fake_flatfield)
+    monkeypatch.setattr(main_module, "run_visualization_analysis", _fake_visualization)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        flatfield=True,
+        visualization=True,
+        analysis_parameters={
+            "flatfield": {
+                "execution_order": 1,
+                "input_source": "data",
+            },
+            "visualization": {
+                "execution_order": 2,
+                "input_source": "flatfield",
+            },
+        },
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.flatfield_chain"),
+    )
+
+    assert captured["input_source"] == "results/flatfield/latest/data"
+    latest_ref = dict(
+        main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
+            "latest_outputs"
+        ]["flatfield"].attrs
+    )
+    assert latest_ref["component"] == "results/flatfield/latest"
