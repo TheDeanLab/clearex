@@ -71,7 +71,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "use_map_overlap": True,
         "overlap_zyx": [0, 32, 32],
         "memory_overhead_factor": 2.0,
-        "get_darkfield": True,
+        "get_darkfield": False,
         "smoothness_flatfield": 1.0,
         "working_size": 128,
         "is_timelapse": False,
@@ -566,7 +566,7 @@ def _normalize_flatfield_parameters(
         If required values are invalid.
     """
     normalized = _normalize_common_operation_parameters("flatfield", params)
-    normalized["get_darkfield"] = bool(normalized.get("get_darkfield", True))
+    normalized["get_darkfield"] = bool(normalized.get("get_darkfield", False))
     normalized["is_timelapse"] = bool(normalized.get("is_timelapse", False))
     normalized["smoothness_flatfield"] = float(
         normalized.get("smoothness_flatfield", 1.0)

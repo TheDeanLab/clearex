@@ -104,3 +104,60 @@ def test_run_flatfield_analysis_writes_latest_results(
         output_root["provenance"]["latest_outputs"]["flatfield"].attrs["component"]
         == "results/flatfield/latest"
     )
+
+
+def test_run_flatfield_analysis_defaults_darkfield_off(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        data=np.arange(1 * 1 * 1 * 2 * 2 * 2, dtype=np.uint16).reshape((1, 1, 1, 2, 2, 2)),
+        chunks=(1, 1, 1, 2, 2, 2),
+        overwrite=True,
+    )
+
+    seen_get_darkfield: list[bool] = []
+
+    class _FakeBaSiC:
+        def __init__(
+            self,
+            *,
+            fitting_mode,
+            get_darkfield,
+            smoothness_flatfield,
+            working_size,
+            device,
+        ) -> None:
+            del fitting_mode, smoothness_flatfield, working_size, device
+            seen_get_darkfield.append(bool(get_darkfield))
+            self.flatfield = np.empty((0, 0), dtype=np.float32)
+            self.darkfield = np.empty((0, 0), dtype=np.float32)
+            self.baseline = np.empty((0,), dtype=np.float32)
+
+        def fit(self, images, skip_shape_warning=False) -> None:
+            del skip_shape_warning
+            self.flatfield = np.ones(images.shape[1:], dtype=np.float32)
+            self.darkfield = np.zeros(images.shape[1:], dtype=np.float32)
+            self.baseline = np.zeros(images.shape[0], dtype=np.float32)
+
+    monkeypatch.setattr(flatfield_pipeline, "_load_basic_class", lambda: _FakeBaSiC)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "smoothness_flatfield": 1.0,
+                "working_size": 128,
+                "use_map_overlap": False,
+                "is_timelapse": False,
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    assert seen_get_darkfield == [False]

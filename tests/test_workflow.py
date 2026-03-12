@@ -108,7 +108,7 @@ class TestWorkflowConfig:
         assert cfg.dask_backend.mode == DASK_BACKEND_LOCAL_CLUSTER
         assert "flatfield" in cfg.analysis_parameters
         assert cfg.analysis_parameters["flatfield"]["execution_order"] == 1
-        assert cfg.analysis_parameters["flatfield"]["get_darkfield"] is True
+        assert cfg.analysis_parameters["flatfield"]["get_darkfield"] is False
         assert "particle_detection" in cfg.analysis_parameters
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
         assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 3

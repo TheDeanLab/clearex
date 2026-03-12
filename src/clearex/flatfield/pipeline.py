@@ -212,7 +212,7 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     )
     if normalized["memory_overhead_factor"] <= 0:
         raise ValueError("flatfield memory_overhead_factor must be greater than zero.")
-    normalized["get_darkfield"] = bool(normalized.get("get_darkfield", True))
+    normalized["get_darkfield"] = bool(normalized.get("get_darkfield", False))
     normalized["smoothness_flatfield"] = float(
         normalized.get("smoothness_flatfield", 1.0)
     )
@@ -592,7 +592,7 @@ def _fit_profile(
     basic_class = _load_basic_class()
     basic = basic_class(
         fitting_mode="approximate",
-        get_darkfield=bool(parameters.get("get_darkfield", True)),
+        get_darkfield=bool(parameters.get("get_darkfield", False)),
         smoothness_flatfield=float(parameters.get("smoothness_flatfield", 1.0)),
         working_size=int(parameters.get("working_size", 128)),
         device="cpu",
@@ -671,11 +671,13 @@ def _transform_region(
     zarr_path: str,
     source_component: str,
     output_data_component: str,
+    flatfield_component: str,
+    darkfield_component: str,
+    baseline_component: str,
+    position_index: int,
+    channel_index: int,
     read_region: RegionBounds,
     core_region: RegionBounds,
-    flatfield_yx: Float32Array,
-    darkfield_yx: Float32Array,
-    baseline_tz: Float32Array,
     is_timelapse: bool,
 ) -> int:
     """Apply flatfield correction for one chunk region and write the core.
@@ -688,16 +690,20 @@ def _transform_region(
         Source data component path.
     output_data_component : str
         Corrected output data component path.
+    flatfield_component : str
+        Flatfield artifact component path.
+    darkfield_component : str
+        Darkfield artifact component path.
+    baseline_component : str
+        Baseline artifact component path.
+    position_index : int
+        Position index on the ``p`` axis.
+    channel_index : int
+        Channel index on the ``c`` axis.
     read_region : RegionBounds
         Expanded read bounds including overlap halo.
     core_region : RegionBounds
         Non-overlapping write bounds.
-    flatfield_yx : numpy.ndarray
-        Fitted flatfield image in ``(y, x)`` order.
-    darkfield_yx : numpy.ndarray
-        Fitted darkfield image in ``(y, x)`` order.
-    baseline_tz : numpy.ndarray
-        Fitted baseline in ``(t, z)`` order.
     is_timelapse : bool
         Whether baseline subtraction should be applied.
 
@@ -715,11 +721,24 @@ def _transform_region(
     y_start, y_stop = int(read_region[4][0]), int(read_region[4][1])
     x_start, x_stop = int(read_region[5][0]), int(read_region[5][1])
     denominator = np.maximum(
-        np.asarray(flatfield_yx[y_start:y_stop, x_start:x_stop], dtype=np.float32),
+        np.asarray(
+            root[flatfield_component][
+                position_index,
+                channel_index,
+                y_start:y_stop,
+                x_start:x_stop,
+            ],
+            dtype=np.float32,
+        ),
         np.float32(1e-6),
     )
     darkfield = np.asarray(
-        darkfield_yx[y_start:y_stop, x_start:x_stop],
+        root[darkfield_component][
+            position_index,
+            channel_index,
+            y_start:y_stop,
+            x_start:x_stop,
+        ],
         dtype=np.float32,
     )
     corrected = (chunk - darkfield[None, None, None, None, :, :]) / denominator[
@@ -733,7 +752,9 @@ def _transform_region(
 
     if is_timelapse:
         baseline = np.asarray(
-            baseline_tz[
+            root[baseline_component][
+                position_index,
+                channel_index,
                 read_region[0][0] : read_region[0][1],
                 read_region[3][0] : read_region[3][1],
             ],
@@ -868,10 +889,6 @@ def run_flatfield_analysis(
         )
     _emit(40, f"Persisted {len(profile_results)} fitted flatfield profiles")
 
-    profile_map = {
-        (int(item.position_index), int(item.channel_index)): item
-        for item in profile_results
-    }
     y_bounds = _axis_chunk_bounds(shape_tpczyx[4], output_chunks[4])
     x_bounds = _axis_chunk_bounds(shape_tpczyx[5], output_chunks[5])
     transform_tasks = []
@@ -882,7 +899,6 @@ def run_flatfield_analysis(
         y_bounds,
         x_bounds,
     ):
-        profile = profile_map[(int(p_index), int(c_index))]
         core_region: RegionBounds = (
             (int(t_index), int(t_index) + 1),
             (int(p_index), int(p_index) + 1),
@@ -896,6 +912,11 @@ def run_flatfield_analysis(
                 zarr_path=str(zarr_path),
                 source_component=source_component,
                 output_data_component=data_component,
+                flatfield_component=flatfield_component,
+                darkfield_component=darkfield_component,
+                baseline_component=baseline_component,
+                position_index=int(p_index),
+                channel_index=int(c_index),
                 read_region=_expand_region_with_overlap(
                     core_region,
                     shape_tpczyx=shape_tpczyx,
@@ -903,9 +924,6 @@ def run_flatfield_analysis(
                     use_overlap=bool(normalized["use_map_overlap"]),
                 ),
                 core_region=core_region,
-                flatfield_yx=profile.flatfield_yx,
-                darkfield_yx=profile.darkfield_yx,
-                baseline_tz=profile.baseline_tz,
                 is_timelapse=bool(normalized["is_timelapse"]),
             )
         )

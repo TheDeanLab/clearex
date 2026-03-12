@@ -2897,7 +2897,7 @@ if HAS_PYQT6:
             ),
             "get_darkfield": (
                 "Estimate and remove a darkfield component in addition to the "
-                "flatfield profile."
+                "flatfield profile. BaSiCPy warns this can be unstable on some datasets."
             ),
             "smoothness_flatfield": (
                 "Controls the flatfield smoothness regularization passed to BaSiCPy."
@@ -4867,7 +4867,7 @@ if HAS_PYQT6:
             self._particle_channel_spin.setMaximum(channel_count - 1)
 
             self._flatfield_darkfield_checkbox.setChecked(
-                bool(flatfield_params.get("get_darkfield", True))
+                bool(flatfield_params.get("get_darkfield", False))
             )
             self._flatfield_smoothness_spin.setValue(
                 float(flatfield_params.get("smoothness_flatfield", 1.0))
