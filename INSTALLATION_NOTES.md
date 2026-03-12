@@ -10,10 +10,15 @@ The examples below use the UT Southwestern BioHPC layout (with `/project` and `/
 
 ClearEx uses:
 
-- **Python 3.12 or 3.13** (`>=3.12,<3.14`)
+- **Python 3.12** (`>=3.12,<3.13`)
 - **uv** as the package manager and virtual environment tool
 - A number of scientific Python libraries (Dask, Zarr, SimpleITK, etc.)
 - **PyPetaKit5D**, which installs and uses the **MATLAB Runtime** (~5 GB download)
+
+Python `3.13` is intentionally not supported right now. Flatfield correction
+depends on BaSiCPy, and BaSiCPy currently pins `scipy<1.13`. On Linux clusters,
+SciPy `1.12.x` typically falls back to a source build under Python `3.13`,
+which then requires a working OpenBLAS toolchain on the node.
 
 Because of this, there are a few important rules:
 

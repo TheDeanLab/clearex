@@ -10,7 +10,9 @@ readme = "README.md"
 license = { file = "LICENSE.md" }
 version = "0.1.1"
 
-requires-python = ">=3.12,<3.14"
+# BaSiCPy currently depends on scipy<1.13, and SciPy 1.12 does not publish
+# Python 3.13 wheels. Restrict ClearEx to Python 3.12 until that stack moves.
+requires-python = ">=3.12,<3.13"
 
 dependencies = [
     "antspyx",

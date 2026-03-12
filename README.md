@@ -22,9 +22,13 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
 ## Installation
 
 ### Requirements
-- Python `>=3.12,<3.14` (use Python `3.12` or `3.13`)
+- Python `>=3.12,<3.13` (use Python `3.12`)
 - macOS/Linux/Windows supported by Python stack
 - For GUI usage: display server + `PyQt6` (installed in base dependencies)
+
+Flatfield correction depends on BaSiCPy, which currently pins `scipy<1.13`.
+SciPy `1.12.x` does not publish Python `3.13` wheels, so Python `3.13`
+installations may fall back to unsupported source builds on Linux clusters.
 
 ### Recommended: install with `uv`
 Install `uv`:
@@ -45,8 +49,8 @@ uv --version
 
 ```bash
 # Ensure a supported Python version is installed and used
-uv python install 3.13
-uv venv --python 3.13
+uv python install 3.12
+uv venv --python 3.12
 source .venv/bin/activate
 
 # Install ClearEx (editable install)
@@ -63,8 +67,8 @@ uv pip install -e ".[dev,docs,decon]"
 
 ```powershell
 # Ensure a supported Python version is installed and used
-uv python install 3.13
-uv venv --python 3.13
+uv python install 3.12
+uv venv --python 3.12
 .venv\Scripts\Activate.ps1
 
 # Install ClearEx (editable install)
@@ -80,28 +84,28 @@ uv pip install -e ".[dev,docs,decon]"
 Alternative repo-aware install with lockfile:
 
 ```bash
-uv sync --python 3.13
+uv sync --python 3.12
 ```
 
-If you previously created `.venv` with Python `3.14`, remove it and recreate:
+If you previously created `.venv` with Python `3.13` or `3.14`, remove it and recreate:
 
 ```bash
 # macOS / Linux
 rm -rf .venv
-uv venv --python 3.13
+uv venv --python 3.12
 ```
 
 ```powershell
 # Windows (PowerShell)
 Remove-Item -Recurse -Force .venv
-uv venv --python 3.13
+uv venv --python 3.12
 ```
 
 ### Install with pip (alternative)
 #### macOS / Linux
 
 ```bash
-python3.13 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
@@ -109,7 +113,7 @@ pip install -e .
 #### Windows
 
 ```powershell
-py -3.13 -m venv .venv
+py -3.12 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e .
 ```
