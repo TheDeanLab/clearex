@@ -26,6 +26,8 @@
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+import math
+import os
 from typing import Any, Dict, Literal, Optional, Sequence, Tuple, Union
 
 
@@ -1676,6 +1678,324 @@ class DaskBackendConfig:
             valid_modes = ", ".join(DASK_BACKEND_MODE_LABELS.keys())
             raise ValueError(f"Dask backend mode must be one of: {valid_modes}.")
         object.__setattr__(self, "mode", mode)
+
+
+@dataclass(frozen=True)
+class LocalClusterRecommendation:
+    """Recommended LocalCluster settings derived from host and data context.
+
+    Attributes
+    ----------
+    config : LocalClusterConfig
+        Recommended LocalCluster configuration.
+    detected_cpu_count : int
+        Effective CPU count detected for the current process.
+    detected_memory_bytes : int
+        Effective memory budget detected for the current process.
+    estimated_chunk_bytes : int
+        Estimated bytes per canonical chunk using the configured save chunks.
+    estimated_dataset_bytes : int, optional
+        Estimated canonical dataset size in bytes when shape metadata is known.
+    estimated_chunk_count : int, optional
+        Estimated number of canonical chunks when shape metadata is known.
+    """
+
+    config: LocalClusterConfig
+    detected_cpu_count: int
+    detected_memory_bytes: int
+    estimated_chunk_bytes: int
+    estimated_dataset_bytes: Optional[int]
+    estimated_chunk_count: Optional[int]
+
+
+def _detect_local_cpu_count() -> int:
+    """Return the effective CPU count for local scheduling decisions.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int
+        CPU count respecting process affinity when available.
+    """
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return max(1, len(os.sched_getaffinity(0)))
+        except Exception:
+            pass
+    return max(1, int(os.cpu_count() or 1))
+
+
+def _detect_cgroup_memory_limit_bytes() -> Optional[int]:
+    """Return Linux cgroup memory limit when one is enforced.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int, optional
+        Positive cgroup limit in bytes when detectable, otherwise ``None``.
+    """
+    candidates = (
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    )
+    for path in candidates:
+        try:
+            raw = open(path, "r", encoding="utf-8").read().strip()
+        except Exception:
+            continue
+        if not raw or raw.lower() == "max":
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value <= 0 or value >= (1 << 60):
+            continue
+        return value
+    return None
+
+
+def _detect_local_memory_bytes() -> int:
+    """Return effective memory budget for local scheduling heuristics.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int
+        Effective memory bytes, constrained by cgroups when detectable.
+    """
+    physical_total: Optional[int] = None
+    try:
+        import psutil
+
+        physical_total = int(psutil.virtual_memory().total)
+    except Exception:
+        physical_total = None
+
+    if physical_total is None and os.name == "nt":
+        try:
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_uint32),
+                    ("dwMemoryLoad", ctypes.c_uint32),
+                    ("ullTotalPhys", ctypes.c_uint64),
+                    ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64),
+                    ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64),
+                    ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                physical_total = int(status.ullTotalPhys)
+        except Exception:
+            physical_total = None
+
+    if physical_total is None and hasattr(os, "sysconf"):
+        try:
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            phys_pages = int(os.sysconf("SC_PHYS_PAGES"))
+            if page_size > 0 and phys_pages > 0:
+                physical_total = page_size * phys_pages
+        except Exception:
+            physical_total = None
+
+    if physical_total is None or physical_total <= 0:
+        physical_total = 8 << 30
+
+    cgroup_limit = _detect_cgroup_memory_limit_bytes()
+    if cgroup_limit is not None:
+        return max(1 << 30, min(int(physical_total), int(cgroup_limit)))
+    return max(1 << 30, int(physical_total))
+
+
+def _format_binary_size(num_bytes: int) -> str:
+    """Format byte counts in binary units for GUI display.
+
+    Parameters
+    ----------
+    num_bytes : int
+        Byte count.
+
+    Returns
+    -------
+    str
+        Human-readable binary-size string.
+    """
+    value = max(1, int(num_bytes))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            if unit == "B":
+                return f"{value}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{value:.1f}TiB"
+
+
+def _format_worker_memory_limit(num_bytes: int) -> str:
+    """Format worker memory limits in Dask-friendly units.
+
+    Parameters
+    ----------
+    num_bytes : int
+        Byte count to format.
+
+    Returns
+    -------
+    str
+        Dask-friendly memory-limit string.
+    """
+    rounded = max(512 << 20, (int(num_bytes) // (256 << 20)) * (256 << 20))
+    gib = 1 << 30
+    mib = 1 << 20
+    if rounded % gib == 0:
+        return f"{rounded // gib}GiB"
+    return f"{rounded // mib}MiB"
+
+
+def recommend_local_cluster_config(
+    *,
+    shape_tpczyx: Optional[Tuple[int, int, int, int, int, int]] = None,
+    chunks_tpczyx: Optional[Tuple[int, int, int, int, int, int]] = None,
+    dtype_itemsize: Optional[int] = None,
+    cpu_count: Optional[int] = None,
+    memory_bytes: Optional[int] = None,
+) -> LocalClusterRecommendation:
+    """Recommend LocalCluster settings from host and data characteristics.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int], optional
+        Canonical dataset shape in ``(t, p, c, z, y, x)`` order.
+    chunks_tpczyx : tuple[int, int, int, int, int, int], optional
+        Canonical chunk shape in ``(t, p, c, z, y, x)`` order.
+    dtype_itemsize : int, optional
+        Bytes per voxel. Defaults to ``2`` when unknown.
+    cpu_count : int, optional
+        Explicit effective CPU count for deterministic testing.
+    memory_bytes : int, optional
+        Explicit effective memory budget in bytes for deterministic testing.
+
+    Returns
+    -------
+    LocalClusterRecommendation
+        Recommended LocalCluster configuration plus sizing diagnostics.
+    """
+    detected_cpus = max(1, int(cpu_count or _detect_local_cpu_count()))
+    detected_memory = max(1 << 30, int(memory_bytes or _detect_local_memory_bytes()))
+    itemsize = max(1, int(dtype_itemsize or 2))
+    effective_chunks = tuple(int(v) for v in (chunks_tpczyx or (1, 1, 1, 256, 256, 256)))
+    estimated_chunk_bytes = max(1, math.prod(effective_chunks) * itemsize)
+    estimated_dataset_bytes: Optional[int] = None
+    estimated_chunk_count: Optional[int] = None
+
+    if shape_tpczyx is not None:
+        effective_shape = tuple(int(v) for v in shape_tpczyx)
+        estimated_dataset_bytes = max(1, math.prod(effective_shape) * itemsize)
+        chunk_counts = [
+            max(1, math.ceil(int(dim) / max(1, int(chunk))))
+            for dim, chunk in zip(effective_shape, effective_chunks, strict=False)
+        ]
+        estimated_chunk_count = max(1, math.prod(chunk_counts))
+
+    reserve_bytes = min(
+        max(4 << 30, detected_memory // 5),
+        max(1 << 30, detected_memory // 3),
+    )
+    usable_bytes = max(1 << 30, detected_memory - reserve_bytes)
+
+    threads_per_worker = 1
+    if detected_cpus >= 8 and estimated_chunk_bytes < (512 << 20):
+        threads_per_worker = 2
+
+    max_workers_by_cpu = max(1, detected_cpus // threads_per_worker)
+    min_bytes_per_worker = max(2 << 30, estimated_chunk_bytes * 6)
+    max_workers_by_memory = max(1, usable_bytes // min_bytes_per_worker)
+
+    recommended_workers = min(max_workers_by_cpu, max_workers_by_memory, 8)
+    if estimated_chunk_count is not None:
+        recommended_workers = min(recommended_workers, estimated_chunk_count)
+    recommended_workers = max(1, int(recommended_workers))
+
+    if recommended_workers == 1:
+        threads_per_worker = max(
+            1,
+            min(
+                detected_cpus,
+                2 if estimated_chunk_bytes >= (512 << 20) else 4,
+            ),
+        )
+
+    if recommended_workers * threads_per_worker > detected_cpus:
+        threads_per_worker = max(1, detected_cpus // recommended_workers)
+
+    worker_memory_bytes = max(
+        min_bytes_per_worker,
+        usable_bytes // max(1, recommended_workers),
+    )
+    config = LocalClusterConfig(
+        n_workers=int(recommended_workers),
+        threads_per_worker=int(threads_per_worker),
+        memory_limit=_format_worker_memory_limit(worker_memory_bytes),
+    )
+    return LocalClusterRecommendation(
+        config=config,
+        detected_cpu_count=int(detected_cpus),
+        detected_memory_bytes=int(detected_memory),
+        estimated_chunk_bytes=int(estimated_chunk_bytes),
+        estimated_dataset_bytes=(
+            None if estimated_dataset_bytes is None else int(estimated_dataset_bytes)
+        ),
+        estimated_chunk_count=(
+            None if estimated_chunk_count is None else int(estimated_chunk_count)
+        ),
+    )
+
+
+def format_local_cluster_recommendation_summary(
+    recommendation: LocalClusterRecommendation,
+) -> str:
+    """Format a human-readable summary of local-cluster recommendations.
+
+    Parameters
+    ----------
+    recommendation : LocalClusterRecommendation
+        Recommendation payload to summarize.
+
+    Returns
+    -------
+    str
+        Concise operator-facing summary string.
+    """
+    config = recommendation.config
+    parts = [
+        f"Detected {recommendation.detected_cpu_count} CPUs",
+        f"{_format_binary_size(recommendation.detected_memory_bytes)} memory",
+        f"~{_format_binary_size(recommendation.estimated_chunk_bytes)} per chunk",
+        f"recommend {config.n_workers} worker(s)",
+        f"{config.threads_per_worker} thread(s)/worker",
+        f"{config.memory_limit} memory/worker",
+    ]
+    if recommendation.estimated_dataset_bytes is not None:
+        parts.insert(
+            3,
+            f"~{_format_binary_size(recommendation.estimated_dataset_bytes)} dataset",
+        )
+    return " | ".join(parts)
 
 
 def dask_backend_to_dict(config: DaskBackendConfig) -> Dict[str, Any]:

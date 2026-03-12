@@ -53,6 +53,7 @@ from clearex.io.experiment import (
     NavigateExperiment,
     create_dask_client,
     has_canonical_data_component,
+    infer_zyx_shape,
     is_navigate_experiment_file,
     load_navigate_experiment,
     materialize_experiment_data_store,
@@ -70,6 +71,7 @@ from clearex.workflow import (
     DEFAULT_ZARR_PYRAMID_PTCZYX,
     DEFAULT_SLURM_CLUSTER_JOB_EXTRA_DIRECTIVES,
     DaskBackendConfig,
+    LocalClusterRecommendation,
     LocalClusterConfig,
     PTCZYX_AXES,
     SlurmClusterConfig,
@@ -78,11 +80,13 @@ from clearex.workflow import (
     ZarrSaveConfig,
     default_analysis_operation_parameters,
     format_dask_backend_summary,
+    format_local_cluster_recommendation_summary,
     format_pyramid_levels,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
     normalize_analysis_operation_parameters,
     parse_pyramid_levels,
+    recommend_local_cluster_config,
 )
 
 # Third Party Imports
@@ -1105,6 +1109,13 @@ if HAS_PYQT6:
         def __init__(
             self,
             initial: DaskBackendConfig,
+            recommendation_shape_tpczyx: Optional[
+                Tuple[int, int, int, int, int, int]
+            ] = None,
+            recommendation_chunks_tpczyx: Optional[
+                Tuple[int, int, int, int, int, int]
+            ] = None,
+            recommendation_dtype_itemsize: Optional[int] = None,
             parent: Optional[QDialog] = None,
         ) -> None:
             """Initialize dialog controls and hydrate from initial config.
@@ -1127,6 +1138,12 @@ if HAS_PYQT6:
             self.setMinimumHeight(760)
             self.result_config: Optional[DaskBackendConfig] = None
             self._mode_index: Dict[str, int] = {}
+            self._recommendation_shape_tpczyx = recommendation_shape_tpczyx
+            self._recommendation_chunks_tpczyx = recommendation_chunks_tpczyx
+            self._recommendation_dtype_itemsize = recommendation_dtype_itemsize
+            self._latest_local_recommendation: Optional[
+                LocalClusterRecommendation
+            ] = None
 
             self._build_ui()
             self._hydrate(initial)
@@ -1250,6 +1267,17 @@ if HAS_PYQT6:
             local_dir_widget = QWidget()
             local_dir_widget.setLayout(local_dir_row)
             form.addRow("Local directory", local_dir_widget)
+
+            self._local_recommend_button = QPushButton("Recommend Settings")
+            self._local_recommend_button.clicked.connect(
+                self._on_recommend_local_cluster
+            )
+            form.addRow("", self._local_recommend_button)
+
+            self._local_recommendation_label = QLabel("")
+            self._local_recommendation_label.setWordWrap(True)
+            self._local_recommendation_label.setObjectName("metadataFieldValue")
+            form.addRow("", self._local_recommendation_label)
             return page
 
         def _build_slurm_runner_page(self) -> QWidget:
@@ -1479,6 +1507,7 @@ if HAS_PYQT6:
             self._local_threads_spin.setValue(local_cfg.threads_per_worker)
             self._local_memory_input.setText(local_cfg.memory_limit)
             self._local_directory_input.setText(local_cfg.local_directory or "")
+            self._update_local_recommendation_label()
 
             runner_cfg = initial.slurm_runner
             self._runner_scheduler_file_input.setText(runner_cfg.scheduler_file or "")
@@ -1522,6 +1551,67 @@ if HAS_PYQT6:
                 Form controls are reset in-place.
             """
             self._hydrate(DaskBackendConfig())
+
+        def _update_local_recommendation_label(
+            self,
+            recommendation: Optional[LocalClusterRecommendation] = None,
+        ) -> None:
+            """Update helper text for LocalCluster recommendations.
+
+            Parameters
+            ----------
+            recommendation : LocalClusterRecommendation, optional
+                Latest computed recommendation. When omitted, default guidance
+                text is shown.
+
+            Returns
+            -------
+            None
+                Label text is updated in-place.
+            """
+            if recommendation is not None:
+                self._latest_local_recommendation = recommendation
+            recommendation = self._latest_local_recommendation
+            if recommendation is None:
+                if self._recommendation_shape_tpczyx is None:
+                    self._local_recommendation_label.setText(
+                        "Recommend Settings uses detected CPUs/RAM and current "
+                        "chunk settings. Load metadata first for dataset-aware tuning."
+                    )
+                else:
+                    self._local_recommendation_label.setText(
+                        "Recommend Settings uses detected CPUs/RAM plus the "
+                        "current dataset and chunk configuration."
+                    )
+                return
+            self._local_recommendation_label.setText(
+                format_local_cluster_recommendation_summary(recommendation)
+            )
+
+        def _on_recommend_local_cluster(self) -> None:
+            """Populate LocalCluster fields from an automatic recommendation.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                LocalCluster inputs are updated in-place.
+            """
+            recommendation = recommend_local_cluster_config(
+                shape_tpczyx=self._recommendation_shape_tpczyx,
+                chunks_tpczyx=self._recommendation_chunks_tpczyx,
+                dtype_itemsize=self._recommendation_dtype_itemsize,
+            )
+            config = recommendation.config
+            self._local_workers_input.setText(
+                "" if config.n_workers is None else str(config.n_workers)
+            )
+            self._local_threads_spin.setValue(int(config.threads_per_worker))
+            self._local_memory_input.setText(str(config.memory_limit))
+            self._update_local_recommendation_label(recommendation)
 
         def _parse_optional_positive_int(
             self,
@@ -2106,6 +2196,7 @@ if HAS_PYQT6:
             self._chunks = initial.chunks
             self._loaded_experiment: Optional[NavigateExperiment] = None
             self._loaded_experiment_path: Optional[Path] = None
+            self._loaded_image_info: Optional[ImageInfo] = None
             self._loaded_source_data_path: Optional[Path] = None
             self._source_data_directory_override: Optional[Path] = None
             self._materialization_worker: Optional[DataStoreMaterializationWorker] = (
@@ -2323,6 +2414,9 @@ if HAS_PYQT6:
             """
             dialog = DaskBackendConfigDialog(
                 initial=self._dask_backend_config,
+                recommendation_shape_tpczyx=self._current_local_cluster_shape_tpczyx(),
+                recommendation_chunks_tpczyx=self._zarr_save_config.chunks_tpczyx(),
+                recommendation_dtype_itemsize=self._current_dtype_itemsize(),
                 parent=self,
             )
             result = dialog.exec()
@@ -2565,6 +2659,7 @@ if HAS_PYQT6:
             """
             self._loaded_experiment = None
             self._loaded_experiment_path = None
+            self._loaded_image_info = None
             self._loaded_source_data_path = None
             self._source_data_directory_override = None
 
@@ -2858,10 +2953,60 @@ if HAS_PYQT6:
 
             self._loaded_experiment = experiment
             self._loaded_experiment_path = experiment_path
+            self._loaded_image_info = info
             self._loaded_source_data_path = source_data_path
 
             target_store = resolve_data_store_path(experiment, source_data_path)
             self._set_status(f"Metadata loaded. Target store: {target_store}")
+
+        def _current_local_cluster_shape_tpczyx(
+            self,
+        ) -> Optional[Tuple[int, int, int, int, int, int]]:
+            """Return current canonical shape estimate for LocalCluster tuning.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            tuple[int, int, int, int, int, int], optional
+                Canonical ``(t, p, c, z, y, x)`` shape estimate when metadata
+                has been loaded.
+            """
+            if self._loaded_experiment is None:
+                return None
+            z_size, y_size, x_size = infer_zyx_shape(
+                self._loaded_experiment,
+                self._loaded_image_info,
+            )
+            return (
+                int(self._loaded_experiment.timepoints),
+                int(self._loaded_experiment.multiposition_count),
+                int(self._loaded_experiment.channel_count),
+                int(z_size),
+                int(y_size),
+                int(x_size),
+            )
+
+        def _current_dtype_itemsize(self) -> Optional[int]:
+            """Return source bytes-per-voxel for LocalCluster tuning.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            int, optional
+                Source dtype itemsize when metadata has been loaded.
+            """
+            if self._loaded_image_info is None or self._loaded_image_info.dtype is None:
+                return None
+            try:
+                return max(1, int(getattr(self._loaded_image_info.dtype, "itemsize")))
+            except Exception:
+                return None
 
         def _accept_with_store_path(self, store_path: Path) -> None:
             """Finalize setup dialog with prepared store path configuration.

@@ -42,6 +42,7 @@ from clearex.workflow import (
     ZarrSaveConfig,
     dask_backend_to_dict,
     format_dask_backend_summary,
+    format_local_cluster_recommendation_summary,
     format_chunks,
     format_pyramid_levels,
     format_zarr_chunks_ptczyx,
@@ -49,6 +50,7 @@ from clearex.workflow import (
     parse_chunks,
     parse_pyramid_levels,
     normalize_analysis_operation_parameters,
+    recommend_local_cluster_config,
     resolve_analysis_execution_sequence,
     to_tpczyx_chunks,
     to_tpczyx_pyramid,
@@ -347,6 +349,38 @@ class TestDaskBackendConfig:
     def test_reject_invalid_mode(self):
         with pytest.raises(ValueError):
             DaskBackendConfig(mode="invalid")  # type: ignore[arg-type]
+
+
+class TestLocalClusterRecommendation:
+    def test_recommendation_uses_dataset_and_chunk_sizes(self):
+        recommendation = recommend_local_cluster_config(
+            shape_tpczyx=(1, 1, 1, 512, 2048, 2048),
+            chunks_tpczyx=(1, 1, 1, 256, 256, 256),
+            dtype_itemsize=2,
+            cpu_count=16,
+            memory_bytes=64 << 30,
+        )
+
+        assert recommendation.config.n_workers == 8
+        assert recommendation.config.threads_per_worker == 2
+        assert recommendation.config.memory_limit == "6400MiB"
+        assert recommendation.estimated_chunk_count == 128
+        summary = format_local_cluster_recommendation_summary(recommendation)
+        assert "Detected 16 CPUs" in summary
+        assert "recommend 8 worker(s)" in summary
+
+    def test_recommendation_reduces_workers_for_large_chunks(self):
+        recommendation = recommend_local_cluster_config(
+            shape_tpczyx=(1, 1, 1, 1024, 2048, 2048),
+            chunks_tpczyx=(1, 1, 1, 512, 1024, 1024),
+            dtype_itemsize=2,
+            cpu_count=32,
+            memory_bytes=12 << 30,
+        )
+
+        assert recommendation.config.n_workers == 1
+        assert recommendation.config.threads_per_worker == 2
+        assert recommendation.config.memory_limit == "8GiB"
 
 
 def test_normalize_analysis_operation_parameters_returns_defaults():
