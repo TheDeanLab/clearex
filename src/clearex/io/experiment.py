@@ -31,9 +31,11 @@ from __future__ import annotations
 # Standard Library Imports
 from contextlib import ExitStack
 from dataclasses import dataclass
+from itertools import islice, product
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Optional, Union
 import json
+import math
 import re
 import warnings
 import xml.etree.ElementTree as ET
@@ -45,6 +47,7 @@ import h5py
 import numpy as np
 import tifffile
 import zarr
+from dask.delayed import delayed
 
 # Local Imports
 from clearex.io.read import ImageInfo
@@ -1215,6 +1218,235 @@ def _derive_pyramid_level_chunks(
     return _normalize_write_chunks(level_shape_tpczyx, requested_chunks)
 
 
+def _axis_chunk_bounds(size: int, chunk_size: int) -> list[tuple[int, int]]:
+    """Build contiguous chunk bounds for one axis.
+
+    Parameters
+    ----------
+    size : int
+        Axis length.
+    chunk_size : int
+        Chunk size for the axis.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Ordered ``(start, stop)`` bounds covering the full axis.
+    """
+    return [
+        (start, min(start + chunk_size, size))
+        for start in range(0, size, chunk_size)
+    ]
+
+
+def _iter_tpczyx_chunk_regions(
+    *,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    chunks_tpczyx: CanonicalShapeTpczyx,
+) -> Iterator[tuple[slice, slice, slice, slice, slice, slice]]:
+    """Build canonical chunk-aligned regions for one array.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Full canonical array shape.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Effective chunk shape.
+
+    Returns
+    -------
+    iterator of tuple[slice, ...]
+        Ordered canonical chunk-aligned region slices in ``(t, p, c, z, y, x)``
+        order.
+    """
+    axis_bounds = [
+        _axis_chunk_bounds(int(size), int(chunk))
+        for size, chunk in zip(shape_tpczyx, chunks_tpczyx, strict=False)
+    ]
+    for bounds in product(*axis_bounds):
+        yield (
+            slice(int(bounds[0][0]), int(bounds[0][1])),
+            slice(int(bounds[1][0]), int(bounds[1][1])),
+            slice(int(bounds[2][0]), int(bounds[2][1])),
+            slice(int(bounds[3][0]), int(bounds[3][1])),
+            slice(int(bounds[4][0]), int(bounds[4][1])),
+            slice(int(bounds[5][0]), int(bounds[5][1])),
+        )
+
+
+def _count_tpczyx_chunk_regions(
+    *,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    chunks_tpczyx: CanonicalShapeTpczyx,
+) -> int:
+    """Return the number of canonical chunk-aligned write regions.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Full canonical array shape.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Effective chunk shape.
+
+    Returns
+    -------
+    int
+        Number of chunk-aligned regions needed to cover the full array.
+    """
+    return int(
+        math.prod(
+            max(1, math.ceil(int(size) / max(1, int(chunk))))
+            for size, chunk in zip(shape_tpczyx, chunks_tpczyx, strict=False)
+        )
+    )
+
+
+def _estimate_write_batch_region_count(
+    *,
+    chunks_tpczyx: CanonicalShapeTpczyx,
+    dtype_itemsize: int,
+) -> int:
+    """Estimate how many chunk regions to submit per write batch.
+
+    Parameters
+    ----------
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Effective chunk shape in canonical order.
+    dtype_itemsize : int
+        Bytes per array element.
+
+    Returns
+    -------
+    int
+        Recommended number of chunk regions per submission batch.
+    """
+    chunk_bytes = max(1, math.prod(int(value) for value in chunks_tpczyx) * int(dtype_itemsize))
+    target_batch_bytes = 512 << 20
+    return max(1, min(64, target_batch_bytes // chunk_bytes))
+
+
+def _write_numpy_region(
+    block: np.ndarray,
+    *,
+    zarr_path: str,
+    component: str,
+    region: tuple[slice, slice, slice, slice, slice, slice],
+) -> int:
+    """Write one computed canonical block into a Zarr/N5 component.
+
+    Parameters
+    ----------
+    block : numpy.ndarray
+        Computed data block aligned with ``region``.
+    zarr_path : str
+        Target Zarr/N5 store path.
+    component : str
+        Target component path relative to the store root.
+    region : tuple[slice, slice, slice, slice, slice, slice]
+        Canonical write region in ``(t, p, c, z, y, x)`` order.
+
+    Returns
+    -------
+    int
+        Constant ``1`` for completion accounting.
+    """
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root[component][region] = np.asarray(block)
+    return 1
+
+
+def _write_dask_array_in_batches(
+    *,
+    array: da.Array,
+    store_path: Path,
+    component: str,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    chunks_tpczyx: CanonicalShapeTpczyx,
+    dtype_itemsize: int,
+    client: Optional["Client"] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_start: int = 0,
+    progress_end: int = 100,
+    progress_label: str = "Writing data",
+) -> None:
+    """Write a canonical Dask array to Zarr/N5 using bounded region batches.
+
+    Parameters
+    ----------
+    array : dask.array.Array
+        Canonical source array in ``(t, p, c, z, y, x)`` order.
+    store_path : pathlib.Path
+        Target Zarr/N5 store path.
+    component : str
+        Target component path.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Full output shape.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Effective output chunk shape.
+    dtype_itemsize : int
+        Bytes per array element.
+    client : dask.distributed.Client, optional
+        Active Dask client for distributed execution.
+    progress_callback : callable, optional
+        Optional callback invoked as ``callback(percent, message)``.
+    progress_start : int, default=0
+        Start percentage for write progress.
+    progress_end : int, default=100
+        End percentage for write progress.
+    progress_label : str, default="Writing data"
+        Human-readable stage label.
+
+    Returns
+    -------
+    None
+        Side-effect writes only.
+    """
+    total_regions = _count_tpczyx_chunk_regions(
+        shape_tpczyx=shape_tpczyx,
+        chunks_tpczyx=chunks_tpczyx,
+    )
+    if total_regions == 0:
+        return
+
+    batch_region_count = _estimate_write_batch_region_count(
+        chunks_tpczyx=chunks_tpczyx,
+        dtype_itemsize=dtype_itemsize,
+    )
+    total_batches = max(1, math.ceil(total_regions / batch_region_count))
+    completed_regions = 0
+    region_iter = _iter_tpczyx_chunk_regions(
+        shape_tpczyx=shape_tpczyx,
+        chunks_tpczyx=chunks_tpczyx,
+    )
+
+    for batch_index in range(1, total_batches + 1):
+        batch_regions = list(islice(region_iter, batch_region_count))
+        if not batch_regions:
+            break
+        batch_tasks = [
+            delayed(_write_numpy_region)(
+                array[region],
+                zarr_path=str(store_path),
+                component=component,
+                region=region,
+            )
+            for region in batch_regions
+        ]
+        _compute_dask_graph(batch_tasks, client=client)
+        completed_regions += len(batch_regions)
+        if progress_callback is not None:
+            progress = int(
+                progress_start
+                + (completed_regions / total_regions)
+                * max(0, progress_end - progress_start)
+            )
+            progress_callback(
+                progress,
+                f"{progress_label}: batch {batch_index}/{total_batches} "
+                f"({completed_regions}/{total_regions} regions)",
+            )
+
+
 def _materialize_data_pyramid(
     *,
     store_path: Path,
@@ -1271,6 +1503,7 @@ def _materialize_data_pyramid(
     root = zarr.open_group(str(store_path), mode="a")
     if "data" not in root:
         raise ValueError(f"Expected canonical data array at {store_path}/data.")
+    base_dtype = np.dtype(root["data"].dtype)
 
     if "data_pyramid" in root:
         del root["data_pyramid"]
@@ -1330,12 +1563,16 @@ def _materialize_data_pyramid(
             f"Writing pyramid level {level_index}/{total_downsample_levels} "
             f"(factors={absolute_factors})"
         )
+        level_progress_start = progress_start + int(
+            ((level_index - 1) / total_downsample_levels)
+            * max(0, progress_end - progress_start)
+        )
+        level_progress_end = progress_start + int(
+            (level_index / total_downsample_levels)
+            * max(0, progress_end - progress_start)
+        )
         if progress_callback is not None:
-            progress = progress_start + int(
-                ((level_index - 1) / total_downsample_levels)
-                * max(0, progress_end - progress_start)
-            )
-            progress_callback(progress, message)
+            progress_callback(level_progress_start, message)
 
         source_array = da.from_zarr(str(store_path), component=source_component)
         downsampled = _downsample_tpczyx_by_stride(source_array, downsample_factors)
@@ -1351,14 +1588,27 @@ def _materialize_data_pyramid(
             downsampled = downsampled.rechunk(level_chunks)
 
         component = f"data_pyramid/level_{level_index}"
-        write_graph = da.to_zarr(
-            downsampled,
-            url=str(store_path),
-            component=component,
+        root = zarr.open_group(str(store_path), mode="a")
+        root.create_dataset(
+            name=component,
+            shape=level_shape,
+            chunks=level_chunks,
+            dtype=base_dtype.name,
             overwrite=True,
-            compute=False,
         )
-        _compute_dask_graph(write_graph, client=client)
+        _write_dask_array_in_batches(
+            array=downsampled,
+            store_path=store_path,
+            component=component,
+            shape_tpczyx=level_shape,
+            chunks_tpczyx=level_chunks,
+            dtype_itemsize=int(base_dtype.itemsize),
+            client=client,
+            progress_callback=progress_callback,
+            progress_start=level_progress_start,
+            progress_end=level_progress_end,
+            progress_label=f"Writing pyramid level {level_index}/{total_downsample_levels}",
+        )
 
         root = zarr.open_group(str(store_path), mode="a")
         root[component].attrs.update(
@@ -1631,7 +1881,7 @@ def materialize_experiment_data_store(
         )
         with dask.config.set({"array.rechunk.method": "tasks"}):
             canonical = canonical.rechunk(normalized_chunks)
-        _emit_progress(45, "Preparing chunked write graph")
+        _emit_progress(45, "Preparing chunk-batched canonical writes")
 
         should_stage_same_component = (
             store_path == source_resolved and source_component == "data"
@@ -1641,15 +1891,26 @@ def materialize_experiment_data_store(
             root = zarr.open_group(str(store_path), mode="a")
             if temp_component in root:
                 del root[temp_component]
-            write_graph = da.to_zarr(
-                canonical,
-                url=str(store_path),
-                component=temp_component,
+            root.create_dataset(
+                name=temp_component,
+                shape=canonical_shape,
+                chunks=normalized_chunks,
+                dtype=source_dtype.name,
                 overwrite=True,
-                compute=False,
             )
-            _emit_progress(55, "Writing staged data to existing store")
-            _compute_dask_graph(write_graph, client=write_client)
+            _write_dask_array_in_batches(
+                array=canonical,
+                store_path=store_path,
+                component=temp_component,
+                shape_tpczyx=canonical_shape,
+                chunks_tpczyx=normalized_chunks,
+                dtype_itemsize=int(source_dtype.itemsize),
+                client=write_client,
+                progress_callback=progress_callback,
+                progress_start=55,
+                progress_end=82,
+                progress_label="Writing staged canonical data",
+            )
             _emit_progress(82, "Swapping staged data into canonical component")
             if "data" in root:
                 del root["data"]
@@ -1683,22 +1944,26 @@ def materialize_experiment_data_store(
                 dtype=source_dtype.name,
                 shape_tpczyx=canonical_shape,
             )
-            root = zarr.open_group(str(store_path), mode="a")
-            write_graph = da.store(
-                canonical,
-                root["data"],
-                lock=False,
-                compute=False,
+            _write_dask_array_in_batches(
+                array=canonical,
+                store_path=store_path,
+                component="data",
+                shape_tpczyx=canonical_shape,
+                chunks_tpczyx=normalized_chunks,
+                dtype_itemsize=int(source_dtype.itemsize),
+                client=write_client,
+                progress_callback=progress_callback,
+                progress_start=55,
+                progress_end=70,
+                progress_label="Writing canonical data",
             )
-            _emit_progress(55, "Writing canonical data")
-            _compute_dask_graph(write_graph, client=write_client)
             _materialize_data_pyramid(
                 store_path=store_path,
                 base_chunks_tpczyx=normalized_chunks,
                 pyramid_factors=pyramid_factors,
                 client=client,
                 progress_callback=progress_callback,
-                progress_start=60,
+                progress_start=72,
                 progress_end=96,
             )
             _emit_progress(97, "Finalizing store metadata")

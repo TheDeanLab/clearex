@@ -35,6 +35,7 @@ import tifffile
 import zarr
 
 # Local Imports
+import clearex.io.experiment as experiment_module
 from clearex.io.experiment import (
     default_analysis_store_path,
     find_experiment_data_candidates,
@@ -458,6 +459,70 @@ def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(tmp_p
     assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
     assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
     assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
+    assert np.array_equal(
+        np.array(root["data_pyramid/level_1"][0, 0, 0, :, :, :]),
+        source_data[::2, ::2, ::2],
+    )
+
+
+def test_materialize_experiment_data_store_batches_chunk_writes(
+    tmp_path: Path, monkeypatch
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_path = tmp_path / "source.npy"
+    np.save(source_path, source_data)
+
+    compute_calls: list[object] = []
+    original_compute = experiment_module._compute_dask_graph
+
+    def _counting_compute(graph, *, client=None):
+        compute_calls.append(graph)
+        return original_compute(graph, client=client)
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_estimate_write_batch_region_count",
+        lambda **kwargs: 1,
+    )
+    monkeypatch.setattr(experiment_module, "_compute_dask_graph", _counting_compute)
+
+    materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 1, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    expected_store = (experiment_path.parent / "data_store.zarr").resolve()
+    root = zarr.open_group(str(expected_store), mode="r")
+    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert len(compute_calls) == 8
+
+
+def test_materialize_experiment_data_store_handles_multibatch_base_and_pyramid(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(5 * 17 * 17, dtype=np.uint16).reshape(5, 17, 17)
+    source_path = tmp_path / "source.npy"
+    np.save(source_path, source_data)
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 1, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
     assert np.array_equal(
         np.array(root["data_pyramid/level_1"][0, 0, 0, :, :, :]),
         source_data[::2, ::2, ::2],
