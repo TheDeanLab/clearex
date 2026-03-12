@@ -162,6 +162,85 @@ def test_load_and_resolve_experiment_data_path(tmp_path: Path):
     assert resolved.name == "CH00_000000.h5"
 
 
+def test_load_navigate_experiment_preserves_windows_absolute_save_directory(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    payload = {
+        "Saving": {
+            "save_directory": r"Z:\bioinformatics\Danuser_lab\Dean\acquisition_001",
+            "file_type": "N5",
+        },
+        "MicroscopeState": {
+            "timepoints": 1,
+            "number_z_steps": 2,
+            "channels": {"channel_1": {"is_selected": True, "laser": "488nm"}},
+        },
+        "CameraParameters": {"img_x_pixels": 8, "img_y_pixels": 8},
+    }
+    experiment_path.write_text(json.dumps(payload, indent=2))
+
+    experiment = load_navigate_experiment(experiment_path)
+
+    assert (
+        str(experiment.save_directory)
+        == r"Z:\bioinformatics\Danuser_lab\Dean\acquisition_001"
+    )
+
+
+def test_resolve_experiment_data_path_falls_back_to_experiment_directory(
+    tmp_path: Path,
+):
+    experiment_dir = tmp_path / "bundle"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    experiment_path = experiment_dir / "experiment.yml"
+    payload = {
+        "Saving": {
+            "save_directory": r"Z:\bioinformatics\Danuser_lab\Dean\acquisition_001",
+            "file_type": "N5",
+        },
+        "MicroscopeState": {
+            "timepoints": 1,
+            "number_z_steps": 2,
+            "channels": {"channel_1": {"is_selected": True, "laser": "488nm"}},
+        },
+        "CameraParameters": {"img_x_pixels": 8, "img_y_pixels": 8},
+    }
+    experiment_path.write_text(json.dumps(payload, indent=2))
+    local_store = experiment_dir / "CH00_000000.n5"
+    local_store.mkdir()
+
+    experiment = load_navigate_experiment(experiment_path)
+    resolved = resolve_experiment_data_path(experiment)
+
+    assert resolved == local_store.resolve()
+
+
+def test_resolve_experiment_data_path_uses_override_directory(tmp_path: Path):
+    experiment_dir = tmp_path / "bundle"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    experiment_path = experiment_dir / "experiment.yml"
+    missing_remote_dir = tmp_path / "remote_missing"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=missing_remote_dir,
+        file_type="N5",
+    )
+
+    override_dir = tmp_path / "override_data"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    override_store = override_dir / "CH00_000000.n5"
+    override_store.mkdir()
+
+    experiment = load_navigate_experiment(experiment_path)
+    resolved = resolve_experiment_data_path(
+        experiment,
+        search_directory=override_dir,
+    )
+
+    assert resolved == override_store.resolve()
+
+
 def test_initialize_analysis_store_creates_6d_layout(tmp_path: Path):
     experiment_path = tmp_path / "experiment.yml"
     _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="H5")

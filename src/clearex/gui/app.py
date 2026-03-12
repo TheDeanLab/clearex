@@ -47,6 +47,7 @@ from .spacing import (
     apply_window_root_spacing,
 )
 from clearex.io.experiment import (
+    ExperimentDataResolutionError,
     NavigateExperiment,
     create_dask_client,
     is_navigate_experiment_file,
@@ -2001,6 +2002,7 @@ if HAS_PYQT6:
             self._loaded_experiment: Optional[NavigateExperiment] = None
             self._loaded_experiment_path: Optional[Path] = None
             self._loaded_source_data_path: Optional[Path] = None
+            self._source_data_directory_override: Optional[Path] = None
             self._materialization_worker: Optional[DataStoreMaterializationWorker] = (
                 None
             )
@@ -2147,6 +2149,7 @@ if HAS_PYQT6:
 
             self._browse_file_button.clicked.connect(self._on_browse_file)
             self._load_button.clicked.connect(self._on_load_metadata)
+            self._path_input.textChanged.connect(self._on_experiment_path_changed)
             self._dask_backend_button.clicked.connect(self._on_edit_dask_backend)
             self._zarr_config_button.clicked.connect(self._on_edit_zarr_settings)
             self._cancel_button.clicked.connect(self.reject)
@@ -2438,13 +2441,42 @@ if HAS_PYQT6:
                 return False
 
             self._path_input.setText(str(experiment_path))
-            self._loaded_experiment = None
-            self._loaded_experiment_path = None
-            self._loaded_source_data_path = None
             self._set_status(
                 "Experiment path set from drag-and-drop. Click Load Metadata or Next."
             )
             return True
+
+        def _clear_loaded_experiment_context(self) -> None:
+            """Clear cached experiment metadata and source-path override.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Cached setup state is reset in-place.
+            """
+            self._loaded_experiment = None
+            self._loaded_experiment_path = None
+            self._loaded_source_data_path = None
+            self._source_data_directory_override = None
+
+        def _on_experiment_path_changed(self, _text: str) -> None:
+            """Reset cached experiment state when the selected path changes.
+
+            Parameters
+            ----------
+            _text : str
+                Current text content. Unused.
+
+            Returns
+            -------
+            None
+                Cached setup state is reset in-place.
+            """
+            self._clear_loaded_experiment_context()
 
         def eventFilter(self, watched: QObject, event: QEvent) -> bool:
             """Handle drag/drop events routed through the path input widget.
@@ -2558,6 +2590,64 @@ if HAS_PYQT6:
             if file_path:
                 self._path_input.setText(file_path)
 
+        def _prompt_for_source_data_directory(
+            self,
+            *,
+            experiment: NavigateExperiment,
+            error: ExperimentDataResolutionError,
+        ) -> Optional[Path]:
+            """Prompt for a replacement acquisition directory after lookup failure.
+
+            Parameters
+            ----------
+            experiment : NavigateExperiment
+                Parsed experiment metadata.
+            error : ExperimentDataResolutionError
+                Initial resolution failure details.
+
+            Returns
+            -------
+            pathlib.Path, optional
+                Resolved source data path when the user selected a valid
+                replacement directory, otherwise ``None``.
+            """
+            QMessageBox.warning(
+                self,
+                "Source Data Not Found",
+                "ClearEx could not locate the acquisition data from the "
+                "experiment metadata.\n\n"
+                f"{error}\n\n"
+                "Select the directory containing the moved acquisition data.",
+            )
+
+            start_directory = str(experiment.path.parent)
+            while True:
+                selected_directory = QFileDialog.getExistingDirectory(
+                    self,
+                    "Select Navigate Acquisition Directory",
+                    start_directory,
+                )
+                if not selected_directory:
+                    return None
+
+                override_directory = Path(selected_directory).expanduser().resolve()
+                try:
+                    source_data_path = resolve_experiment_data_path(
+                        experiment,
+                        search_directory=override_directory,
+                    )
+                except ExperimentDataResolutionError as inner_error:
+                    QMessageBox.warning(
+                        self,
+                        "Source Data Not Found",
+                        f"{inner_error}\n\nPlease choose a different directory.",
+                    )
+                    start_directory = str(override_directory)
+                    continue
+
+                self._source_data_directory_override = override_directory
+                return source_data_path
+
         def _load_experiment_context(
             self,
             *,
@@ -2598,7 +2688,18 @@ if HAS_PYQT6:
 
             experiment_path = selected_path.resolve()
             experiment = load_navigate_experiment(experiment_path)
-            source_data_path = resolve_experiment_data_path(experiment)
+            try:
+                source_data_path = resolve_experiment_data_path(
+                    experiment,
+                    search_directory=self._source_data_directory_override,
+                )
+            except ExperimentDataResolutionError as exc:
+                source_data_path = self._prompt_for_source_data_directory(
+                    experiment=experiment,
+                    error=exc,
+                )
+                if source_data_path is None:
+                    raise
             _, info = self._opener.open(
                 path=str(source_data_path),
                 prefer_dask=True,

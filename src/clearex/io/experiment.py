@@ -1843,6 +1843,143 @@ class NavigateExperiment:
         }
 
 
+class ExperimentDataResolutionError(FileNotFoundError):
+    """Raised when acquisition data cannot be located for an experiment.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata for the failed lookup.
+    searched_directories : tuple[pathlib.Path, ...]
+        Directories inspected for candidate acquisition data.
+    """
+
+    def __init__(
+        self,
+        *,
+        experiment: NavigateExperiment,
+        searched_directories: tuple[Path, ...],
+    ) -> None:
+        self.experiment = experiment
+        self.searched_directories = searched_directories
+        searched_lines = "\n".join(
+            f"- {directory}" for directory in searched_directories
+        )
+        super().__init__(
+            "No source data candidates found for "
+            f"file_type={experiment.file_type}.\n"
+            "Searched directories:\n"
+            f"{searched_lines}"
+        )
+
+
+def _looks_like_windows_absolute_path(path_text: str) -> bool:
+    """Return whether text appears to encode a Windows absolute path.
+
+    Parameters
+    ----------
+    path_text : str
+        Path text to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``path_text`` starts with a drive letter or UNC prefix.
+    """
+    normalized = str(path_text).strip()
+    return bool(re.match(r"^[A-Za-z]:[\\/]", normalized)) or normalized.startswith(
+        "\\\\"
+    )
+
+
+def _resolve_experiment_save_directory(path_text: Any, *, experiment_dir: Path) -> Path:
+    """Resolve the acquisition save directory recorded in experiment metadata.
+
+    Parameters
+    ----------
+    path_text : Any
+        Raw ``Saving.save_directory`` payload.
+    experiment_dir : pathlib.Path
+        Directory containing ``experiment.yml``.
+
+    Returns
+    -------
+    pathlib.Path
+        Resolved save-directory path. Windows absolute paths are preserved as
+        written when running on non-Windows platforms.
+    """
+    normalized = str(path_text or str(experiment_dir)).strip()
+    if not normalized:
+        return experiment_dir.resolve()
+
+    directory = Path(normalized).expanduser()
+    if directory.is_absolute():
+        return directory.resolve()
+    if _looks_like_windows_absolute_path(normalized):
+        return directory
+    return (experiment_dir / directory).resolve()
+
+
+def _search_directory_identity(path: Path) -> str:
+    """Return a deterministic identity string for a search directory.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Search-directory candidate.
+
+    Returns
+    -------
+    str
+        Normalized identity used for de-duplication.
+    """
+    text = str(path)
+    if _looks_like_windows_absolute_path(text):
+        return text.lower()
+    try:
+        return str(path.resolve())
+    except OSError:
+        return text
+
+
+def experiment_data_search_directories(
+    experiment: NavigateExperiment,
+    *,
+    search_directory: Optional[Union[str, Path]] = None,
+) -> list[Path]:
+    """Return ordered directories to inspect for acquisition data.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    search_directory : str or pathlib.Path, optional
+        Explicit user-selected override directory. This is searched first.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Ordered search roots with duplicates removed.
+    """
+    directories: list[Path] = []
+    if search_directory is not None:
+        override_path = Path(search_directory).expanduser().resolve()
+        directories.append(override_path)
+
+    directories.append(experiment.save_directory)
+    directories.append(experiment.path.parent.resolve())
+
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for directory in directories:
+        identity = _search_directory_identity(directory)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        ordered.append(directory)
+    return ordered
+
+
 def is_navigate_experiment_file(path: Union[str, Path]) -> bool:
     """Return whether a path is a Navigate experiment descriptor file.
 
@@ -2262,11 +2399,10 @@ def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
         else {}
     )
 
-    save_directory = Path(
-        saving.get("save_directory", str(experiment_path.parent))
-    ).expanduser()
-    if not save_directory.is_absolute():
-        save_directory = (experiment_path.parent / save_directory).resolve()
+    save_directory = _resolve_experiment_save_directory(
+        saving.get("save_directory", str(experiment_path.parent)),
+        experiment_dir=experiment_path.parent,
+    )
 
     selected_channels: list[NavigateChannel] = []
     channels_obj = state.get("channels", {})
@@ -2416,28 +2552,33 @@ def _is_mip_path(path: Path) -> bool:
     return any(part.upper() == "MIP" for part in path.parts)
 
 
-def find_experiment_data_candidates(experiment: NavigateExperiment) -> list[Path]:
-    """Find candidate acquisition data files/stores for an experiment.
+def _find_experiment_data_candidates_in_directory(
+    *,
+    base: Path,
+    file_type: str,
+) -> list[Path]:
+    """Find acquisition candidates within one directory root.
 
     Parameters
     ----------
-    experiment : NavigateExperiment
-        Parsed experiment metadata.
+    base : pathlib.Path
+        Directory root to inspect.
+    file_type : str
+        Normalized acquisition file type.
 
     Returns
     -------
     list[pathlib.Path]
-        Candidate paths sorted by deterministic preference.
+        Candidate paths found under ``base``.
     """
-    base = experiment.save_directory
-    file_type = _normalize_file_type(experiment.file_type)
+    if not base.exists() or not base.is_dir():
+        return []
 
     if file_type == "H5":
-        candidates = sorted(
+        return sorted(
             [p for p in base.glob("*") if p.suffix.lower() in {".h5", ".hdf5", ".hdf"}],
             key=_h5_sort_key,
         )
-        return candidates
 
     if file_type == "ZARR":
         return sorted([p for p in base.glob("*.zarr") if p.is_dir()])
@@ -2453,7 +2594,6 @@ def find_experiment_data_candidates(experiment: NavigateExperiment) -> list[Path
         primary = [p for p in all_tiffs if not _is_mip_path(p)]
         return primary or all_tiffs
 
-    # Fallback: search known formats in priority order.
     fallback_tiffs = sorted(
         [
             p
@@ -2468,7 +2608,7 @@ def find_experiment_data_candidates(experiment: NavigateExperiment) -> list[Path
             key=lambda p: str(p),
         )
 
-    fallback = [
+    return [
         *sorted([p for p in base.glob("*.zarr") if p.is_dir()]),
         *sorted([p for p in base.glob("*.n5") if p.is_dir()]),
         *sorted(
@@ -2477,16 +2617,61 @@ def find_experiment_data_candidates(experiment: NavigateExperiment) -> list[Path
         ),
         *fallback_tiffs,
     ]
-    return fallback
 
 
-def resolve_experiment_data_path(experiment: NavigateExperiment) -> Path:
+def find_experiment_data_candidates(
+    experiment: NavigateExperiment,
+    *,
+    search_directory: Optional[Union[str, Path]] = None,
+) -> list[Path]:
+    """Find candidate acquisition data files/stores for an experiment.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    search_directory : str or pathlib.Path, optional
+        Explicit user-selected override directory searched ahead of metadata
+        defaults.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Candidate paths sorted by deterministic preference.
+    """
+    file_type = _normalize_file_type(experiment.file_type)
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for directory in experiment_data_search_directories(
+        experiment,
+        search_directory=search_directory,
+    ):
+        for candidate in _find_experiment_data_candidates_in_directory(
+            base=directory,
+            file_type=file_type,
+        ):
+            identity = str(candidate.resolve())
+            if identity in seen:
+                continue
+            seen.add(identity)
+            candidates.append(candidate.resolve())
+    return candidates
+
+
+def resolve_experiment_data_path(
+    experiment: NavigateExperiment,
+    *,
+    search_directory: Optional[Union[str, Path]] = None,
+) -> Path:
     """Resolve primary acquisition data path from experiment metadata.
 
     Parameters
     ----------
     experiment : NavigateExperiment
         Parsed experiment metadata.
+    search_directory : str or pathlib.Path, optional
+        Explicit user-selected override directory searched ahead of metadata
+        defaults.
 
     Returns
     -------
@@ -2498,11 +2683,19 @@ def resolve_experiment_data_path(experiment: NavigateExperiment) -> Path:
     FileNotFoundError
         If no compatible source data can be found.
     """
-    candidates = find_experiment_data_candidates(experiment)
+    candidates = find_experiment_data_candidates(
+        experiment,
+        search_directory=search_directory,
+    )
     if not candidates:
-        raise FileNotFoundError(
-            f"No source data candidates found in {experiment.save_directory} "
-            f"for file_type={experiment.file_type}."
+        raise ExperimentDataResolutionError(
+            experiment=experiment,
+            searched_directories=tuple(
+                experiment_data_search_directories(
+                    experiment,
+                    search_directory=search_directory,
+                )
+            ),
         )
     return candidates[0]
 
