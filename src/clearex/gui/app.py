@@ -28,8 +28,10 @@ from __future__ import annotations
 
 # Standard Library Imports
 from contextlib import ExitStack
+import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -495,6 +497,98 @@ def _popup_dialog_stylesheet() -> str:
             background-color: #1f6cd8;
         }
     """
+
+
+def _active_log_file_path() -> Optional[Path]:
+    """Return the current root logger file destination when available.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    pathlib.Path, optional
+        Active log file path for the root logger, when a file handler exists.
+    """
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if not isinstance(handler, logging.FileHandler):
+            continue
+        base_filename = getattr(handler, "baseFilename", None)
+        if not base_filename:
+            continue
+        try:
+            return Path(str(base_filename)).expanduser().resolve()
+        except Exception:
+            return Path(str(base_filename))
+    return None
+
+
+def _show_themed_error_dialog(
+    parent: Optional["QWidget"],
+    title: str,
+    message: str,
+    *,
+    summary: Optional[str] = None,
+    details: Optional[str] = None,
+) -> None:
+    """Show a styled error dialog with optional traceback details.
+
+    Parameters
+    ----------
+    parent : QWidget, optional
+        Parent widget for the modal dialog.
+    title : str
+        Window title.
+    message : str
+        Primary error text shown to the operator.
+    summary : str, optional
+        Short exception summary displayed beneath the main message.
+    details : str, optional
+        Detailed traceback or diagnostic text exposed behind the standard
+        ``Show Details`` affordance.
+
+    Returns
+    -------
+    None
+        Modal dialog side effects only.
+    """
+    dialog = QMessageBox(parent)
+    dialog.setIcon(QMessageBox.Icon.Critical)
+    dialog.setWindowTitle(str(title))
+    dialog.setText(str(message))
+
+    informative_lines: list[str] = []
+    if summary:
+        informative_lines.append(str(summary))
+    log_path = _active_log_file_path()
+    if log_path is not None:
+        informative_lines.append(f"Log file: {log_path}")
+    if informative_lines:
+        dialog.setInformativeText("\n".join(informative_lines))
+    if details:
+        dialog.setDetailedText(str(details))
+
+    dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+    dialog.setStyleSheet(
+        _popup_dialog_stylesheet()
+        + """
+        QMessageBox {
+            background-color: #0c1118;
+            color: #e6edf3;
+        }
+        QTextEdit, QPlainTextEdit {
+            background-color: #0b1320;
+            border: 1px solid #2b3f58;
+            border-radius: 8px;
+            padding: 6px 8px;
+            color: #e6edf3;
+            selection-background-color: #2f81f7;
+        }
+        """
+    )
+    dialog.exec()
 
 
 def _configure_dask_backend_client(
@@ -1602,7 +1696,7 @@ if HAS_PYQT6:
 
         progress_changed = pyqtSignal(int, str)
         succeeded = pyqtSignal(str)
-        failed = pyqtSignal(str)
+        failed = pyqtSignal(str, str)
 
         def __init__(
             self,
@@ -1686,7 +1780,14 @@ if HAS_PYQT6:
                     )
                 self.succeeded.emit(str(result.store_path))
             except Exception as exc:
-                self.failed.emit(str(exc))
+                logging.getLogger(__name__).exception(
+                    "Canonical store materialization failed for %s.",
+                    self._source_data_path,
+                )
+                self.failed.emit(
+                    f"{type(exc).__name__}: {exc}",
+                    traceback.format_exc(),
+                )
 
     class MaterializationProgressDialog(QDialog):
         """Modal progress dialog for canonical store creation.
@@ -1808,7 +1909,7 @@ if HAS_PYQT6:
 
         progress_changed = pyqtSignal(int, str)
         succeeded = pyqtSignal()
-        failed = pyqtSignal(str)
+        failed = pyqtSignal(str, str)
 
         def __init__(
             self,
@@ -1872,7 +1973,10 @@ if HAS_PYQT6:
                 self._emit_progress(100, "Analysis workflow completed.")
                 self.succeeded.emit()
             except Exception as exc:
-                self.failed.emit(str(exc))
+                self.failed.emit(
+                    f"{type(exc).__name__}: {exc}",
+                    traceback.format_exc(),
+                )
 
     class AnalysisExecutionProgressDialog(QDialog):
         """Modal progress dialog for analysis execution.
@@ -2726,10 +2830,16 @@ if HAS_PYQT6:
                     )
                 )
             except Exception as exc:
-                QMessageBox.critical(
+                logging.getLogger(__name__).exception(
+                    "Failed to load experiment metadata from %s.",
+                    self._path_input.text().strip(),
+                )
+                _show_themed_error_dialog(
                     self,
                     "Metadata Load Failed",
-                    f"Failed to load experiment metadata.\n\n{exc}",
+                    "Failed to load experiment metadata.",
+                    summary=f"{type(exc).__name__}: {exc}",
+                    details=traceback.format_exc(),
                 )
                 self._set_status("Failed to load metadata.")
                 return
@@ -2822,7 +2932,7 @@ if HAS_PYQT6:
                 return
 
             progress_dialog = MaterializationProgressDialog(parent=self)
-            failure_messages: list[str] = []
+            failure_payload: dict[str, str] = {}
             success_paths: list[Path] = []
 
             worker = DataStoreMaterializationWorker(
@@ -2835,19 +2945,25 @@ if HAS_PYQT6:
             worker.progress_changed.connect(progress_dialog.update_progress)
             worker.succeeded.connect(lambda store: success_paths.append(Path(store)))
             worker.succeeded.connect(lambda _: progress_dialog.accept())
-            worker.failed.connect(lambda text: failure_messages.append(text))
-            worker.failed.connect(lambda _: progress_dialog.reject())
+            worker.failed.connect(
+                lambda summary, details: failure_payload.update(
+                    {"summary": str(summary), "details": str(details)}
+                )
+            )
+            worker.failed.connect(lambda *_: progress_dialog.reject())
 
             worker.start()
             progress_dialog.exec()
             worker.wait()
             self._materialization_worker = None
 
-            if failure_messages:
-                QMessageBox.critical(
+            if failure_payload:
+                _show_themed_error_dialog(
                     self,
                     "Store Creation Failed",
-                    f"Failed to create canonical data store.\n\n{failure_messages[0]}",
+                    "Failed to create canonical data store.",
+                    summary=failure_payload.get("summary"),
+                    details=failure_payload.get("details"),
                 )
                 self._set_status("Store creation failed.")
                 return
@@ -5834,7 +5950,7 @@ def run_workflow_with_progress(
     _apply_application_icon(app)
 
     progress_dialog = AnalysisExecutionProgressDialog(parent=None)
-    failure_messages: list[str] = []
+    failure_payload: dict[str, str] = {}
     completed = {"ok": False}
 
     worker = AnalysisExecutionWorker(
@@ -5844,18 +5960,24 @@ def run_workflow_with_progress(
     worker.progress_changed.connect(progress_dialog.update_progress)
     worker.succeeded.connect(lambda: completed.__setitem__("ok", True))
     worker.succeeded.connect(progress_dialog.accept)
-    worker.failed.connect(lambda text: failure_messages.append(str(text)))
-    worker.failed.connect(progress_dialog.reject)
+    worker.failed.connect(
+        lambda summary, details: failure_payload.update(
+            {"summary": str(summary), "details": str(details)}
+        )
+    )
+    worker.failed.connect(lambda *_: progress_dialog.reject())
 
     worker.start()
     progress_dialog.exec()
     worker.wait()
 
-    if failure_messages:
-        QMessageBox.critical(
+    if failure_payload:
+        _show_themed_error_dialog(
             progress_dialog,
             "Analysis Failed",
-            f"Analysis execution failed.\n\n{failure_messages[0]}",
+            "Analysis execution failed.",
+            summary=failure_payload.get("summary"),
+            details=failure_payload.get("details"),
         )
         if owns_app:
             app.quit()

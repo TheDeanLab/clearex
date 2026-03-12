@@ -773,602 +773,638 @@ def _run_workflow(
 
         produced_components: Dict[str, str] = {"data": "data"}
         total_operations = max(1, len(execution_sequence))
-        for operation_index, operation_name in enumerate(execution_sequence):
-            operation_start = 10 + int((operation_index / total_operations) * 85)
-            operation_end = 10 + int(((operation_index + 1) / total_operations) * 85)
-
-            operation_parameters = dict(
-                runtime_analysis_parameters.get(operation_name, {})
-            )
-            requested_source = (
-                str(operation_parameters.get("input_source", "data")).strip() or "data"
-            )
-            resolved_source = _resolve_analysis_input_component(
-                requested_source=requested_source,
-                produced_components=produced_components,
-            )
-            operation_parameters["input_source"] = resolved_source
-            runtime_analysis_parameters[operation_name] = operation_parameters
-
-            force_rerun = bool(operation_parameters.get("force_rerun", False))
-            if (
-                operation_name in _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP
-                and provenance_store_path
-                and is_zarr_store_path(provenance_store_path)
-                and not force_rerun
-            ):
-                try:
-                    history = summarize_analysis_history(
-                        provenance_store_path,
-                        operation_name,
-                        parameters=operation_parameters,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Could not read provenance history for %s: %s",
-                        operation_name,
-                        exc,
-                    )
-                else:
-                    if bool(history.get("matches_parameters", False)):
-                        required_components = _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS.get(
-                            operation_name
-                        )
-                        missing_components: list[str] = []
-                        for component in required_components or ():
-                            if _zarr_component_exists(provenance_store_path, component):
-                                continue
-                            else:
-                                missing_components.append(component)
-                        output_available = not missing_components
-                        if output_available:
-                            matching_run_id = str(history.get("matching_run_id") or "")
-                            logger.info(
-                                "Skipping %s because a successful matching run "
-                                "already exists in provenance%s.",
-                                operation_name,
-                                (
-                                    f" (run_id={matching_run_id})"
-                                    if matching_run_id
-                                    else ""
-                                ),
-                            )
-                            if (
-                                operation_name in _ANALYSIS_SOURCE_COMPONENT_PATHS
-                                and operation_name
-                                != "particle_detection"
-                            ):
-                                produced_components[operation_name] = (
-                                    _ANALYSIS_SOURCE_COMPONENT_PATHS[operation_name]
-                                )
-                            step_records.append(
-                                {
-                                    "name": operation_name,
-                                    "parameters": {
-                                        **operation_parameters,
-                                        "status": "skipped",
-                                        "reason": "provenance_parameter_match",
-                                        "matching_run_id": (
-                                            matching_run_id or None
-                                        ),
-                                        "matching_ended_utc": history.get(
-                                            "matching_ended_utc"
-                                        ),
-                                    },
-                                }
-                            )
-                            _emit_analysis_progress(
-                                operation_end,
-                                f"{operation_name.replace('_', ' ').title()} skipped "
-                                "(matching provenance run).",
-                            )
-                            continue
-                        logger.info(
-                            "Matching provenance run found for %s, but required output "
-                            "components are missing (%s). Re-running operation.",
-                            operation_name,
-                            ", ".join(missing_components)
-                            if missing_components
-                            else "none",
-                        )
-
-            if operation_name == "flatfield":
-                flatfield_parameters = dict(operation_parameters)
-                if provenance_store_path and is_zarr_store_path(provenance_store_path):
-                    if not _zarr_component_exists(
-                        provenance_store_path,
-                        str(flatfield_parameters.get("input_source", "data")),
-                    ):
-                        logger.warning(
-                            "Requested flatfield input component '%s' was not found. "
-                            "Falling back to 'data'.",
-                            flatfield_parameters.get("input_source", "data"),
-                        )
-                        flatfield_parameters["input_source"] = "data"
-                        runtime_analysis_parameters["flatfield"] = dict(
-                            flatfield_parameters
-                        )
-
-                    progress_state = {"last_percent": -5}
-
-                    def _flatfield_progress(percent: int, message: str) -> None:
-                        """Throttle flatfield progress logs.
-
-                        Parameters
-                        ----------
-                        percent : int
-                            Progress percent.
-                        message : str
-                            Progress message.
-
-                        Returns
-                        -------
-                        None
-                            Logger side effects only.
-                        """
-                        last_percent = int(progress_state["last_percent"])
-                        if percent >= 100 or percent - last_percent >= 5:
-                            progress_state["last_percent"] = int(percent)
-                            logger.info(f"[flatfield] {int(percent)}% - {message}")
-                        mapped = operation_start + int(
-                            (max(0, min(100, int(percent))) / 100)
-                            * max(1, operation_end - operation_start)
-                        )
-                        _emit_analysis_progress(
-                            mapped,
-                            f"flatfield: {message}",
-                        )
-
-                    summary = run_flatfield_analysis(
-                        zarr_path=provenance_store_path,
-                        parameters=flatfield_parameters,
-                        client=analysis_client,
-                        progress_callback=_flatfield_progress,
-                    )
-                    flatfield_source_component = str(
-                        getattr(
-                            summary,
-                            "source_component",
-                            flatfield_parameters.get("input_source", "data"),
-                        )
-                    )
-                    flatfield_basicpy_version = getattr(
-                        summary,
-                        "basicpy_version",
-                        None,
-                    )
-                    produced_components["flatfield"] = summary.data_component
-                    output_records["flatfield"] = {
-                        "component": summary.component,
-                        "data_component": summary.data_component,
-                        "flatfield_component": summary.flatfield_component,
-                        "darkfield_component": summary.darkfield_component,
-                        "baseline_component": summary.baseline_component,
-                        "source_component": flatfield_source_component,
-                        "profile_count": summary.profile_count,
-                        "transformed_volumes": summary.transformed_volumes,
-                        "output_chunks_tpczyx": list(summary.output_chunks_tpczyx),
-                        "output_dtype": summary.output_dtype,
-                        "basicpy_version": flatfield_basicpy_version,
-                        "storage_policy": "latest_only",
-                    }
-                    logger.info(
-                        "Flatfield correction completed: "
-                        f"profiles={summary.profile_count}, "
-                        f"transformed_volumes={summary.transformed_volumes}, "
-                        f"component={summary.component}."
-                    )
-                    step_records.append(
-                        {
-                            "name": "flatfield",
-                            "parameters": {
-                                **flatfield_parameters,
-                                "component": summary.component,
-                                "data_component": summary.data_component,
-                                "flatfield_component": summary.flatfield_component,
-                                "darkfield_component": summary.darkfield_component,
-                                "baseline_component": summary.baseline_component,
-                                "source_component": flatfield_source_component,
-                                "profile_count": summary.profile_count,
-                                "transformed_volumes": summary.transformed_volumes,
-                                "output_dtype": summary.output_dtype,
-                                "basicpy_version": flatfield_basicpy_version,
-                            },
-                        }
-                    )
-                    _emit_analysis_progress(
-                        operation_end,
-                        "Flatfield correction complete.",
-                    )
-                else:
-                    logger.warning(
-                        "Flatfield correction requires a canonical Zarr/N5 data store."
-                    )
-                    step_records.append(
-                        {
-                            "name": "flatfield",
-                            "parameters": {
-                                **flatfield_parameters,
-                                "status": "skipped",
-                                "reason": "no_zarr_store",
-                            },
-                        }
-                    )
-                    _emit_analysis_progress(
-                        operation_end,
-                        "Flatfield correction skipped (no Zarr/N5 store).",
-                    )
-                continue
-
-            if operation_name == "deconvolution":
-                decon_parameters = dict(operation_parameters)
-                if provenance_store_path and is_zarr_store_path(provenance_store_path):
-                    if not _zarr_component_exists(
-                        provenance_store_path,
-                        str(decon_parameters.get("input_source", "data")),
-                    ):
-                        logger.warning(
-                            "Requested deconvolution input component '%s' was not "
-                            "found. Falling back to 'data'.",
-                            decon_parameters.get("input_source", "data"),
-                        )
-                        decon_parameters["input_source"] = "data"
-                        runtime_analysis_parameters["deconvolution"] = dict(
-                            decon_parameters
-                        )
-
-                    progress_state = {"last_percent": -5}
-
-                    def _decon_progress(percent: int, message: str) -> None:
-                        """Throttle deconvolution progress logs.
-
-                        Parameters
-                        ----------
-                        percent : int
-                            Progress percent.
-                        message : str
-                            Progress message.
-
-                        Returns
-                        -------
-                        None
-                            Logger side effects only.
-                        """
-                        last_percent = int(progress_state["last_percent"])
-                        if percent >= 100 or percent - last_percent >= 5:
-                            progress_state["last_percent"] = int(percent)
-                            logger.info(f"[deconvolution] {int(percent)}% - {message}")
-                        mapped = operation_start + int(
-                            (max(0, min(100, int(percent))) / 100)
-                            * max(1, operation_end - operation_start)
-                        )
-                        _emit_analysis_progress(
-                            mapped,
-                            f"deconvolution: {message}",
-                        )
-
-                    summary = run_deconvolution_analysis(
-                        zarr_path=provenance_store_path,
-                        parameters=decon_parameters,
-                        client=analysis_client,
-                        progress_callback=_decon_progress,
-                    )
-                    produced_components["deconvolution"] = summary.data_component
-                    output_records["deconvolution"] = {
-                        "component": summary.component,
-                        "data_component": summary.data_component,
-                        "volumes_processed": summary.volumes_processed,
-                        "channel_count": summary.channel_count,
-                        "psf_mode": summary.psf_mode,
-                        "output_chunks_tpczyx": list(summary.output_chunks_tpczyx),
-                        "storage_policy": "latest_only",
-                    }
-                    logger.info(
-                        "Deconvolution completed: "
-                        f"volumes_processed={summary.volumes_processed}, "
-                        f"channels={summary.channel_count}, "
-                        f"psf_mode={summary.psf_mode}, "
-                        f"component={summary.component}."
-                    )
-                    step_records.append(
-                        {
-                            "name": "deconvolution",
-                            "parameters": {
-                                **decon_parameters,
-                                "component": summary.component,
-                                "data_component": summary.data_component,
-                                "volumes_processed": summary.volumes_processed,
-                                "channel_count": summary.channel_count,
-                                "psf_mode": summary.psf_mode,
-                            },
-                        }
-                    )
-                    _emit_analysis_progress(
-                        operation_end,
-                        "Deconvolution complete.",
-                    )
-                else:
-                    logger.warning(
-                        "Deconvolution requires a canonical Zarr/N5 data store."
-                    )
-                    step_records.append(
-                        {
-                            "name": "deconvolution",
-                            "parameters": {
-                                **decon_parameters,
-                                "status": "skipped",
-                                "reason": "no_zarr_store",
-                            },
-                        }
-                    )
-                    _emit_analysis_progress(
-                        operation_end,
-                        "Deconvolution skipped (no Zarr/N5 store).",
-                    )
-                continue
-
-            if operation_name == "particle_detection":
-                particle_parameters = dict(operation_parameters)
-                if provenance_store_path and is_zarr_store_path(provenance_store_path):
-                    if not _zarr_component_exists(
-                        provenance_store_path,
-                        str(particle_parameters.get("input_source", "data")),
-                    ):
-                        logger.warning(
-                            "Requested particle-detection input component '%s' was "
-                            "not found. Falling back to 'data'.",
-                            particle_parameters.get("input_source", "data"),
-                        )
-                        particle_parameters["input_source"] = "data"
-                        runtime_analysis_parameters["particle_detection"] = dict(
-                            particle_parameters
-                        )
-
-                    progress_state = {"last_percent": -5}
-
-                    def _particle_progress(percent: int, message: str) -> None:
-                        """Throttle particle-detection progress logs.
-
-                        Parameters
-                        ----------
-                        percent : int
-                            Progress percent.
-                        message : str
-                            Progress message.
-
-                        Returns
-                        -------
-                        None
-                            Logger side effects only.
-                        """
-                        last_percent = int(progress_state["last_percent"])
-                        if percent >= 100 or percent - last_percent >= 5:
-                            progress_state["last_percent"] = int(percent)
-                            logger.info(
-                                f"[particle_detection] {int(percent)}% - {message}"
-                            )
-                        mapped = operation_start + int(
-                            (max(0, min(100, int(percent))) / 100)
-                            * max(1, operation_end - operation_start)
-                        )
-                        _emit_analysis_progress(
-                            mapped,
-                            f"particle_detection: {message}",
-                        )
-
-                    summary = run_particle_detection_analysis(
-                        zarr_path=provenance_store_path,
-                        parameters=particle_parameters,
-                        client=analysis_client,
-                        progress_callback=_particle_progress,
-                    )
-                    output_records["particle_detection"] = {
-                        "component": summary.component,
-                        "detections": summary.detections,
-                        "chunks_processed": summary.chunks_processed,
-                        "channel_index": summary.channel_index,
-                        "storage_policy": "latest_only",
-                    }
-                    logger.info(
-                        "Particle detection completed: "
-                        f"detections={summary.detections}, "
-                        f"chunks_processed={summary.chunks_processed}, "
-                        f"channel={summary.channel_index}, "
-                        f"component={summary.component}."
-                    )
-                    step_records.append(
-                        {
-                            "name": "particle_detection",
-                            "parameters": {
-                                **particle_parameters,
-                                "detections": summary.detections,
-                                "chunks_processed": summary.chunks_processed,
-                                "component": summary.component,
-                            },
-                        }
-                    )
-                    _emit_analysis_progress(
-                        operation_end,
-                        "Particle detection complete.",
-                    )
-                else:
-                    logger.warning(
-                        "Particle detection requires a canonical Zarr/N5 data store."
-                    )
-                    step_records.append(
-                        {
-                            "name": "particle_detection",
-                            "parameters": {
-                                **particle_parameters,
-                                "status": "skipped",
-                                "reason": "no_zarr_store",
-                            },
-                        }
-                    )
-                    _emit_analysis_progress(
-                        operation_end,
-                        "Particle detection skipped (no Zarr/N5 store).",
-                    )
-                continue
-
-            if operation_name == "registration":
-                _emit_analysis_progress(
-                    operation_start,
-                    "Running registration workflow.",
+        current_operation_name: Optional[str] = None
+        current_requested_source = "data"
+        current_resolved_source = "data"
+        current_operation_parameters: Dict[str, Any] = {}
+        try:
+            for operation_index, operation_name in enumerate(execution_sequence):
+                current_operation_name = str(operation_name)
+                current_requested_source = "data"
+                current_resolved_source = "data"
+                current_operation_parameters = {}
+                operation_start = 10 + int((operation_index / total_operations) * 85)
+                operation_end = 10 + int(
+                    ((operation_index + 1) / total_operations) * 85
                 )
+
+                operation_parameters = dict(
+                    runtime_analysis_parameters.get(operation_name, {})
+                )
+                requested_source = (
+                    str(operation_parameters.get("input_source", "data")).strip()
+                    or "data"
+                )
+                resolved_source = _resolve_analysis_input_component(
+                    requested_source=requested_source,
+                    produced_components=produced_components,
+                )
+                operation_parameters["input_source"] = resolved_source
+                runtime_analysis_parameters[operation_name] = operation_parameters
+                current_requested_source = str(requested_source)
+                current_resolved_source = str(resolved_source)
+                current_operation_parameters = dict(operation_parameters)
                 logger.info(
-                    "Running registration workflow (input=%s).",
+                    "Starting %s analysis (requested_input=%s, resolved_input=%s, store=%s).",
+                    operation_name,
+                    requested_source,
                     resolved_source,
+                    provenance_store_path,
                 )
-                if provenance_store_path and is_zarr_store_path(provenance_store_path):
-                    logger.warning(
-                        "Registration is enabled but is not yet integrated with "
-                        "canonical 6D store inputs. Skipping registration."
-                    )
-                    step_records.append(
-                        {
-                            "name": "registration",
-                            "parameters": {
-                                **operation_parameters,
-                                "status": "skipped",
-                                "reason": "not_integrated_with_canonical_store",
-                            },
-                        }
-                    )
-                    _emit_analysis_progress(
-                        operation_end,
-                        "Registration skipped (not yet integrated with canonical store).",
-                    )
-                else:
-                    logger.warning(
-                        "Registration requires a canonical Zarr/N5 data store."
-                    )
-                    step_records.append(
-                        {
-                            "name": "registration",
-                            "parameters": {
-                                **operation_parameters,
-                                "status": "skipped",
-                                "reason": "no_zarr_store",
-                            },
-                        }
-                    )
-                    _emit_analysis_progress(
-                        operation_end,
-                        "Registration skipped (no Zarr/N5 store).",
-                    )
-                continue
 
-            if operation_name == "visualization":
-                visualization_parameters = dict(operation_parameters)
-                if provenance_store_path and is_zarr_store_path(provenance_store_path):
-                    if not _zarr_component_exists(
-                        provenance_store_path,
-                        str(visualization_parameters.get("input_source", "data")),
-                    ):
+                force_rerun = bool(operation_parameters.get("force_rerun", False))
+                if (
+                    operation_name in _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP
+                    and provenance_store_path
+                    and is_zarr_store_path(provenance_store_path)
+                    and not force_rerun
+                ):
+                    try:
+                        history = summarize_analysis_history(
+                            provenance_store_path,
+                            operation_name,
+                            parameters=operation_parameters,
+                        )
+                    except Exception as exc:
                         logger.warning(
-                            "Requested visualization input component '%s' was "
-                            "not found. Falling back to 'data'.",
-                            visualization_parameters.get("input_source", "data"),
-                        )
-                        visualization_parameters["input_source"] = "data"
-                        runtime_analysis_parameters["visualization"] = dict(
-                            visualization_parameters
-                        )
-
-                    def _visualization_progress(percent: int, message: str) -> None:
-                        """Map visualization progress into workflow-scale progress.
-
-                        Parameters
-                        ----------
-                        percent : int
-                            Visualization progress percent.
-                        message : str
-                            Progress status text.
-
-                        Returns
-                        -------
-                        None
-                            Logger and progress-callback side effects only.
-                        """
-                        mapped = operation_start + int(
-                            (max(0, min(100, int(percent))) / 100)
-                            * max(1, operation_end - operation_start)
-                        )
-                        logger.info(f"[visualization] {int(percent)}% - {message}")
-                        _emit_analysis_progress(
-                            mapped,
-                            f"visualization: {message}",
-                        )
-
-                    summary = run_visualization_analysis(
-                        zarr_path=provenance_store_path,
-                        parameters=visualization_parameters,
-                        progress_callback=_visualization_progress,
-                    )
-                    output_records["visualization"] = {
-                        "component": summary.component,
-                        "source_component": summary.source_component,
-                        "source_components": list(summary.source_components),
-                        "position_index": summary.position_index,
-                        "overlay_points_count": summary.overlay_points_count,
-                        "launch_mode": summary.launch_mode,
-                        "viewer_pid": summary.viewer_pid,
-                        "storage_policy": "latest_only",
-                    }
-                    logger.info(
-                        "Visualization workflow completed: "
-                        f"component={summary.component}, "
-                        f"source={summary.source_component}, "
-                        f"position={summary.position_index}, "
-                        f"multiscale_levels={len(summary.source_components)}, "
-                        f"overlay_points={summary.overlay_points_count}, "
-                        f"launch_mode={summary.launch_mode}."
-                    )
-                    step_records.append(
-                        {
-                            "name": "visualization",
-                            "parameters": {
-                                **visualization_parameters,
-                                "component": summary.component,
-                                "source_component": summary.source_component,
-                                "source_components": list(summary.source_components),
-                                "position_index": summary.position_index,
-                                "overlay_points_count": summary.overlay_points_count,
-                                "launch_mode": summary.launch_mode,
-                                "viewer_pid": summary.viewer_pid,
-                            },
-                        }
-                    )
-                    if summary.launch_mode == "subprocess":
-                        _emit_analysis_progress(
-                            operation_end,
-                            "Visualization launched in a separate napari process.",
+                            "Could not read provenance history for %s: %s",
+                            operation_name,
+                            exc,
                         )
                     else:
+                        if bool(history.get("matches_parameters", False)):
+                            required_components = _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS.get(
+                                operation_name
+                            )
+                            missing_components: list[str] = []
+                            for component in required_components or ():
+                                if _zarr_component_exists(
+                                    provenance_store_path, component
+                                ):
+                                    continue
+                                else:
+                                    missing_components.append(component)
+                            output_available = not missing_components
+                            if output_available:
+                                matching_run_id = str(
+                                    history.get("matching_run_id") or ""
+                                )
+                                logger.info(
+                                    "Skipping %s because a successful matching run "
+                                    "already exists in provenance%s.",
+                                    operation_name,
+                                    (
+                                        f" (run_id={matching_run_id})"
+                                        if matching_run_id
+                                        else ""
+                                    ),
+                                )
+                                if (
+                                    operation_name in _ANALYSIS_SOURCE_COMPONENT_PATHS
+                                    and operation_name != "particle_detection"
+                                ):
+                                    produced_components[operation_name] = (
+                                        _ANALYSIS_SOURCE_COMPONENT_PATHS[operation_name]
+                                    )
+                                step_records.append(
+                                    {
+                                        "name": operation_name,
+                                        "parameters": {
+                                            **operation_parameters,
+                                            "status": "skipped",
+                                            "reason": "provenance_parameter_match",
+                                            "matching_run_id": (
+                                                matching_run_id or None
+                                            ),
+                                            "matching_ended_utc": history.get(
+                                                "matching_ended_utc"
+                                            ),
+                                        },
+                                    }
+                                )
+                                _emit_analysis_progress(
+                                    operation_end,
+                                    f"{operation_name.replace('_', ' ').title()} skipped "
+                                    "(matching provenance run).",
+                                )
+                                continue
+                            logger.info(
+                                "Matching provenance run found for %s, but required output "
+                                "components are missing (%s). Re-running operation.",
+                                operation_name,
+                                ", ".join(missing_components)
+                                if missing_components
+                                else "none",
+                            )
+
+                if operation_name == "flatfield":
+                    flatfield_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                        if not _zarr_component_exists(
+                            provenance_store_path,
+                            str(flatfield_parameters.get("input_source", "data")),
+                        ):
+                            logger.warning(
+                                "Requested flatfield input component '%s' was not found. "
+                                "Falling back to 'data'.",
+                                flatfield_parameters.get("input_source", "data"),
+                            )
+                            flatfield_parameters["input_source"] = "data"
+                            runtime_analysis_parameters["flatfield"] = dict(
+                                flatfield_parameters
+                            )
+    
+                        progress_state = {"last_percent": -5}
+    
+                        def _flatfield_progress(percent: int, message: str) -> None:
+                            """Throttle flatfield progress logs.
+    
+                            Parameters
+                            ----------
+                            percent : int
+                                Progress percent.
+                            message : str
+                                Progress message.
+    
+                            Returns
+                            -------
+                            None
+                                Logger side effects only.
+                            """
+                            last_percent = int(progress_state["last_percent"])
+                            if percent >= 100 or percent - last_percent >= 5:
+                                progress_state["last_percent"] = int(percent)
+                                logger.info(f"[flatfield] {int(percent)}% - {message}")
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            _emit_analysis_progress(
+                                mapped,
+                                f"flatfield: {message}",
+                            )
+    
+                        summary = run_flatfield_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=flatfield_parameters,
+                            client=analysis_client,
+                            progress_callback=_flatfield_progress,
+                        )
+                        flatfield_source_component = str(
+                            getattr(
+                                summary,
+                                "source_component",
+                                flatfield_parameters.get("input_source", "data"),
+                            )
+                        )
+                        flatfield_basicpy_version = getattr(
+                            summary,
+                            "basicpy_version",
+                            None,
+                        )
+                        produced_components["flatfield"] = summary.data_component
+                        output_records["flatfield"] = {
+                            "component": summary.component,
+                            "data_component": summary.data_component,
+                            "flatfield_component": summary.flatfield_component,
+                            "darkfield_component": summary.darkfield_component,
+                            "baseline_component": summary.baseline_component,
+                            "source_component": flatfield_source_component,
+                            "profile_count": summary.profile_count,
+                            "transformed_volumes": summary.transformed_volumes,
+                            "output_chunks_tpczyx": list(summary.output_chunks_tpczyx),
+                            "output_dtype": summary.output_dtype,
+                            "basicpy_version": flatfield_basicpy_version,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Flatfield correction completed: "
+                            f"profiles={summary.profile_count}, "
+                            f"transformed_volumes={summary.transformed_volumes}, "
+                            f"component={summary.component}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "flatfield",
+                                "parameters": {
+                                    **flatfield_parameters,
+                                    "component": summary.component,
+                                    "data_component": summary.data_component,
+                                    "flatfield_component": summary.flatfield_component,
+                                    "darkfield_component": summary.darkfield_component,
+                                    "baseline_component": summary.baseline_component,
+                                    "source_component": flatfield_source_component,
+                                    "profile_count": summary.profile_count,
+                                    "transformed_volumes": summary.transformed_volumes,
+                                    "output_dtype": summary.output_dtype,
+                                    "basicpy_version": flatfield_basicpy_version,
+                                },
+                            }
+                        )
                         _emit_analysis_progress(
                             operation_end,
-                            "Visualization viewer closed; workflow continuing.",
+                            "Flatfield correction complete.",
                         )
-                else:
-                    logger.warning(
-                        "Visualization requires a canonical Zarr/N5 data store."
-                    )
-                    step_records.append(
-                        {
-                            "name": "visualization",
-                            "parameters": {
-                                **visualization_parameters,
-                                "status": "skipped",
-                                "reason": "no_zarr_store",
-                            },
+                    else:
+                        logger.warning(
+                            "Flatfield correction requires a canonical Zarr/N5 data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "flatfield",
+                                "parameters": {
+                                    **flatfield_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Flatfield correction skipped (no Zarr/N5 store).",
+                        )
+                    continue
+    
+                if operation_name == "deconvolution":
+                    decon_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                        if not _zarr_component_exists(
+                            provenance_store_path,
+                            str(decon_parameters.get("input_source", "data")),
+                        ):
+                            logger.warning(
+                                "Requested deconvolution input component '%s' was not "
+                                "found. Falling back to 'data'.",
+                                decon_parameters.get("input_source", "data"),
+                            )
+                            decon_parameters["input_source"] = "data"
+                            runtime_analysis_parameters["deconvolution"] = dict(
+                                decon_parameters
+                            )
+    
+                        progress_state = {"last_percent": -5}
+    
+                        def _decon_progress(percent: int, message: str) -> None:
+                            """Throttle deconvolution progress logs.
+    
+                            Parameters
+                            ----------
+                            percent : int
+                                Progress percent.
+                            message : str
+                                Progress message.
+    
+                            Returns
+                            -------
+                            None
+                                Logger side effects only.
+                            """
+                            last_percent = int(progress_state["last_percent"])
+                            if percent >= 100 or percent - last_percent >= 5:
+                                progress_state["last_percent"] = int(percent)
+                                logger.info(f"[deconvolution] {int(percent)}% - {message}")
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            _emit_analysis_progress(
+                                mapped,
+                                f"deconvolution: {message}",
+                            )
+    
+                        summary = run_deconvolution_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=decon_parameters,
+                            client=analysis_client,
+                            progress_callback=_decon_progress,
+                        )
+                        produced_components["deconvolution"] = summary.data_component
+                        output_records["deconvolution"] = {
+                            "component": summary.component,
+                            "data_component": summary.data_component,
+                            "volumes_processed": summary.volumes_processed,
+                            "channel_count": summary.channel_count,
+                            "psf_mode": summary.psf_mode,
+                            "output_chunks_tpczyx": list(summary.output_chunks_tpczyx),
+                            "storage_policy": "latest_only",
                         }
-                    )
+                        logger.info(
+                            "Deconvolution completed: "
+                            f"volumes_processed={summary.volumes_processed}, "
+                            f"channels={summary.channel_count}, "
+                            f"psf_mode={summary.psf_mode}, "
+                            f"component={summary.component}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "deconvolution",
+                                "parameters": {
+                                    **decon_parameters,
+                                    "component": summary.component,
+                                    "data_component": summary.data_component,
+                                    "volumes_processed": summary.volumes_processed,
+                                    "channel_count": summary.channel_count,
+                                    "psf_mode": summary.psf_mode,
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Deconvolution complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "Deconvolution requires a canonical Zarr/N5 data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "deconvolution",
+                                "parameters": {
+                                    **decon_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Deconvolution skipped (no Zarr/N5 store).",
+                        )
+                    continue
+    
+                if operation_name == "particle_detection":
+                    particle_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                        if not _zarr_component_exists(
+                            provenance_store_path,
+                            str(particle_parameters.get("input_source", "data")),
+                        ):
+                            logger.warning(
+                                "Requested particle-detection input component '%s' was "
+                                "not found. Falling back to 'data'.",
+                                particle_parameters.get("input_source", "data"),
+                            )
+                            particle_parameters["input_source"] = "data"
+                            runtime_analysis_parameters["particle_detection"] = dict(
+                                particle_parameters
+                            )
+    
+                        progress_state = {"last_percent": -5}
+    
+                        def _particle_progress(percent: int, message: str) -> None:
+                            """Throttle particle-detection progress logs.
+    
+                            Parameters
+                            ----------
+                            percent : int
+                                Progress percent.
+                            message : str
+                                Progress message.
+    
+                            Returns
+                            -------
+                            None
+                                Logger side effects only.
+                            """
+                            last_percent = int(progress_state["last_percent"])
+                            if percent >= 100 or percent - last_percent >= 5:
+                                progress_state["last_percent"] = int(percent)
+                                logger.info(
+                                    f"[particle_detection] {int(percent)}% - {message}"
+                                )
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            _emit_analysis_progress(
+                                mapped,
+                                f"particle_detection: {message}",
+                            )
+    
+                        summary = run_particle_detection_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=particle_parameters,
+                            client=analysis_client,
+                            progress_callback=_particle_progress,
+                        )
+                        output_records["particle_detection"] = {
+                            "component": summary.component,
+                            "detections": summary.detections,
+                            "chunks_processed": summary.chunks_processed,
+                            "channel_index": summary.channel_index,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Particle detection completed: "
+                            f"detections={summary.detections}, "
+                            f"chunks_processed={summary.chunks_processed}, "
+                            f"channel={summary.channel_index}, "
+                            f"component={summary.component}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "particle_detection",
+                                "parameters": {
+                                    **particle_parameters,
+                                    "detections": summary.detections,
+                                    "chunks_processed": summary.chunks_processed,
+                                    "component": summary.component,
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Particle detection complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "Particle detection requires a canonical Zarr/N5 data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "particle_detection",
+                                "parameters": {
+                                    **particle_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Particle detection skipped (no Zarr/N5 store).",
+                        )
+                    continue
+    
+                if operation_name == "registration":
                     _emit_analysis_progress(
-                        operation_end,
-                        "Visualization skipped (no Zarr/N5 store).",
+                        operation_start,
+                        "Running registration workflow.",
                     )
-                continue
+                    logger.info(
+                        "Running registration workflow (input=%s).",
+                        resolved_source,
+                    )
+                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                        logger.warning(
+                            "Registration is enabled but is not yet integrated with "
+                            "canonical 6D store inputs. Skipping registration."
+                        )
+                        step_records.append(
+                            {
+                                "name": "registration",
+                                "parameters": {
+                                    **operation_parameters,
+                                    "status": "skipped",
+                                    "reason": "not_integrated_with_canonical_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Registration skipped (not yet integrated with canonical store).",
+                        )
+                    else:
+                        logger.warning(
+                            "Registration requires a canonical Zarr/N5 data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "registration",
+                                "parameters": {
+                                    **operation_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Registration skipped (no Zarr/N5 store).",
+                        )
+                    continue
+    
+                if operation_name == "visualization":
+                    visualization_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                        if not _zarr_component_exists(
+                            provenance_store_path,
+                            str(visualization_parameters.get("input_source", "data")),
+                        ):
+                            logger.warning(
+                                "Requested visualization input component '%s' was "
+                                "not found. Falling back to 'data'.",
+                                visualization_parameters.get("input_source", "data"),
+                            )
+                            visualization_parameters["input_source"] = "data"
+                            runtime_analysis_parameters["visualization"] = dict(
+                                visualization_parameters
+                            )
+    
+                        def _visualization_progress(percent: int, message: str) -> None:
+                            """Map visualization progress into workflow-scale progress.
+    
+                            Parameters
+                            ----------
+                            percent : int
+                                Visualization progress percent.
+                            message : str
+                                Progress status text.
+    
+                            Returns
+                            -------
+                            None
+                                Logger and progress-callback side effects only.
+                            """
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            logger.info(f"[visualization] {int(percent)}% - {message}")
+                            _emit_analysis_progress(
+                                mapped,
+                                f"visualization: {message}",
+                            )
+    
+                        summary = run_visualization_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=visualization_parameters,
+                            progress_callback=_visualization_progress,
+                        )
+                        output_records["visualization"] = {
+                            "component": summary.component,
+                            "source_component": summary.source_component,
+                            "source_components": list(summary.source_components),
+                            "position_index": summary.position_index,
+                            "overlay_points_count": summary.overlay_points_count,
+                            "launch_mode": summary.launch_mode,
+                            "viewer_pid": summary.viewer_pid,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Visualization workflow completed: "
+                            f"component={summary.component}, "
+                            f"source={summary.source_component}, "
+                            f"position={summary.position_index}, "
+                            f"multiscale_levels={len(summary.source_components)}, "
+                            f"overlay_points={summary.overlay_points_count}, "
+                            f"launch_mode={summary.launch_mode}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "visualization",
+                                "parameters": {
+                                    **visualization_parameters,
+                                    "component": summary.component,
+                                    "source_component": summary.source_component,
+                                    "source_components": list(summary.source_components),
+                                    "position_index": summary.position_index,
+                                    "overlay_points_count": summary.overlay_points_count,
+                                    "launch_mode": summary.launch_mode,
+                                    "viewer_pid": summary.viewer_pid,
+                                },
+                            }
+                        )
+                        if summary.launch_mode == "subprocess":
+                            _emit_analysis_progress(
+                                operation_end,
+                                "Visualization launched in a separate napari process.",
+                            )
+                        else:
+                            _emit_analysis_progress(
+                                operation_end,
+                                "Visualization viewer closed; workflow continuing.",
+                            )
+                    else:
+                        logger.warning(
+                            "Visualization requires a canonical Zarr/N5 data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "visualization",
+                                "parameters": {
+                                    **visualization_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Visualization skipped (no Zarr/N5 store).",
+                        )
+                    continue
+        except Exception:
+            logger.exception(
+                "Analysis operation '%s' failed (store=%s, requested_input=%s, "
+                "resolved_input=%s, parameters=%s).",
+                current_operation_name,
+                provenance_store_path,
+                current_requested_source,
+                current_resolved_source,
+                current_operation_parameters,
+            )
+            raise
 
     if provenance_store_path and is_zarr_store_path(provenance_store_path):
         provenance_workflow = WorkflowConfig(

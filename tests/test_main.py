@@ -10,6 +10,7 @@ import logging
 
 # Third Party Imports
 import numpy as np
+import pytest
 
 # Local Imports
 import clearex.main as main_module
@@ -105,6 +106,54 @@ def test_run_workflow_flatfield_starts_analysis_dask_startup(
     )
 
     assert workloads == ["analysis"]
+
+
+def test_run_workflow_logs_operation_context_on_flatfield_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_failure.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return object()
+
+    def _boom(*, zarr_path, parameters, client, progress_callback):
+        del zarr_path, parameters, client, progress_callback
+        raise RuntimeError("linux boom")
+
+    captured_messages: list[str] = []
+    logger = _test_logger("clearex.test.main.flatfield_failure")
+
+    def _capture_exception(message: str, *args, **kwargs) -> None:
+        del kwargs
+        captured_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(main_module, "run_flatfield_analysis", _boom)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+    monkeypatch.setattr(logger, "exception", _capture_exception)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        flatfield=True,
+    )
+
+    with pytest.raises(RuntimeError, match="linux boom"):
+        main_module._run_workflow(workflow=workflow, logger=logger)
+
+    assert len(captured_messages) == 1
+    assert "Analysis operation 'flatfield' failed" in captured_messages[0]
+    assert str(store_path) in captured_messages[0]
+    assert "requested_input=data" in captured_messages[0]
 
 
 def test_run_workflow_registration_skips_without_crashing(monkeypatch) -> None:
