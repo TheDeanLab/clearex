@@ -31,6 +31,7 @@ from __future__ import annotations
 # Standard Library Imports
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from itertools import islice, product
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Optional, Union
@@ -70,6 +71,10 @@ ArrayLike = Union[np.ndarray, da.Array]
 AxesSpec = Optional[tuple[str, ...]]
 CanonicalShapeTpczyx = tuple[int, int, int, int, int, int]
 ProgressCallback = Callable[[int, str], None]
+IngestionProgressRecord = dict[str, Any]
+
+_INGESTION_PROGRESS_SCHEMA = "clearex.ingestion_progress.v1"
+_INGESTION_PROGRESS_ATTR = "ingestion_progress"
 
 
 def _is_zarr_like_path(path: Path) -> bool:
@@ -128,6 +133,415 @@ def has_canonical_data_component(zarr_path: Union[str, Path]) -> bool:
     if axes is not None and axes != ("t", "p", "c", "z", "y", "x"):
         return False
     return True
+
+
+def _utc_now_iso() -> str:
+    """Return current UTC timestamp in ISO-8601 format.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        Current UTC timestamp with timezone offset.
+
+    Raises
+    ------
+    None
+        This helper does not raise custom exceptions.
+    """
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _read_ingestion_progress_record(root: Any) -> Optional[IngestionProgressRecord]:
+    """Read ingestion progress metadata from a Zarr root group.
+
+    Parameters
+    ----------
+    root : Any
+        Opened root Zarr group.
+
+    Returns
+    -------
+    dict, optional
+        Parsed ingestion progress record when present and dictionary-shaped.
+        Returns ``None`` when progress metadata is missing or malformed.
+
+    Raises
+    ------
+    None
+        Invalid payloads are treated as absent metadata.
+    """
+    try:
+        payload = root.attrs.get(_INGESTION_PROGRESS_ATTR)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return dict(payload)
+
+
+def _write_ingestion_progress_record(
+    *,
+    store_path: Path,
+    record: IngestionProgressRecord,
+) -> None:
+    """Persist ingestion progress metadata to a Zarr root group.
+
+    Parameters
+    ----------
+    store_path : pathlib.Path
+        Target Zarr/N5 store path.
+    record : dict
+        Ingestion progress record payload.
+
+    Returns
+    -------
+    None
+        Side-effect writes only.
+
+    Raises
+    ------
+    TypeError
+        If ``record`` cannot be serialized to JSON-compatible metadata.
+
+    Notes
+    -----
+    Payload is round-tripped through JSON to guarantee metadata compatibility
+    across Zarr backends.
+    """
+    serialized = json.loads(json.dumps(record))
+    root = zarr.open_group(str(store_path), mode="a")
+    root.attrs[_INGESTION_PROGRESS_ATTR] = serialized
+
+
+def _resolve_expected_pyramid_level_factors(
+    *,
+    root: Any,
+    expected_pyramid_factors: Optional[
+        tuple[
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+        ]
+    ] = None,
+) -> Optional[tuple[CanonicalShapeTpczyx, ...]]:
+    """Resolve expected absolute pyramid factors for completeness checks.
+
+    Parameters
+    ----------
+    root : Any
+        Opened root Zarr group.
+    expected_pyramid_factors : tuple[tuple[int, ...], ...], optional
+        Explicit per-axis factors in ``(t, p, c, z, y, x)`` order.
+
+    Returns
+    -------
+    tuple[tuple[int, int, int, int, int, int], ...], optional
+        Normalized per-level absolute factors. Returns ``None`` when factors
+        are unavailable or malformed.
+
+    Raises
+    ------
+    None
+        Invalid factor metadata returns ``None``.
+    """
+    if expected_pyramid_factors is not None:
+        try:
+            return _normalize_pyramid_level_factors(expected_pyramid_factors)
+        except Exception:
+            return None
+
+    raw = root.attrs.get("resolution_pyramid_factors_tpczyx")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 6:
+        return None
+    try:
+        parsed = tuple(
+            tuple(int(value) for value in axis_levels)  # type: ignore[arg-type]
+            for axis_levels in raw
+        )
+    except Exception:
+        return None
+    try:
+        return _normalize_pyramid_level_factors(parsed)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+def _expected_pyramid_components(
+    level_factors: tuple[CanonicalShapeTpczyx, ...],
+) -> list[str]:
+    """Return canonical component paths implied by pyramid level factors.
+
+    Parameters
+    ----------
+    level_factors : tuple[tuple[int, int, int, int, int, int], ...]
+        Absolute factors per pyramid level, including base level.
+
+    Returns
+    -------
+    list[str]
+        Ordered component paths beginning with ``"data"``.
+
+    Raises
+    ------
+    None
+        This helper does not raise custom exceptions.
+    """
+    return ["data", *[f"data_pyramid/level_{idx}" for idx in range(1, len(level_factors))]]
+
+
+def _has_expected_pyramid_structure(
+    *,
+    root: Any,
+    level_factors: Optional[tuple[CanonicalShapeTpczyx, ...]],
+) -> bool:
+    """Validate that required pyramid arrays exist with compatible structure.
+
+    Parameters
+    ----------
+    root : Any
+        Opened root Zarr group.
+    level_factors : tuple[tuple[int, int, int, int, int, int], ...], optional
+        Expected absolute factors per level. When ``None``, only base ``data``
+        validation is enforced.
+
+    Returns
+    -------
+    bool
+        ``True`` when required levels exist and expose expected shape/chunks.
+
+    Raises
+    ------
+    None
+        Structural mismatches return ``False``.
+    """
+    if "data" not in root:
+        return False
+    data = root["data"]
+    if not hasattr(data, "shape") or not hasattr(data, "chunks"):
+        return False
+    try:
+        base_shape = _normalize_tpczyx_shape(tuple(int(v) for v in data.shape))
+    except Exception:
+        return False
+    if data.chunks is None:
+        return False
+    try:
+        base_chunks = _normalize_write_chunks(
+            shape_tpczyx=base_shape,
+            chunks=tuple(int(v) for v in data.chunks),
+        )
+    except Exception:
+        return False
+
+    if level_factors is None:
+        return True
+
+    expected_components = _expected_pyramid_components(level_factors)
+    configured_levels = root.attrs.get("data_pyramid_levels")
+    if isinstance(configured_levels, (list, tuple)):
+        configured_paths = [str(value) for value in configured_levels]
+        if configured_paths != expected_components:
+            return False
+
+    for level_index, factors in enumerate(level_factors[1:], start=1):
+        component = f"data_pyramid/level_{level_index}"
+        if component not in root:
+            return False
+        level_array = root[component]
+        if not hasattr(level_array, "shape") or not hasattr(level_array, "chunks"):
+            return False
+        if level_array.chunks is None:
+            return False
+
+        expected_shape: CanonicalShapeTpczyx = (
+            max(1, int(math.ceil(int(base_shape[0]) / int(factors[0])))),
+            max(1, int(math.ceil(int(base_shape[1]) / int(factors[1])))),
+            max(1, int(math.ceil(int(base_shape[2]) / int(factors[2])))),
+            max(1, int(math.ceil(int(base_shape[3]) / int(factors[3])))),
+            max(1, int(math.ceil(int(base_shape[4]) / int(factors[4])))),
+            max(1, int(math.ceil(int(base_shape[5]) / int(factors[5])))),
+        )
+        actual_shape = tuple(int(size) for size in level_array.shape)
+        if actual_shape != expected_shape:
+            return False
+        expected_chunks = _derive_pyramid_level_chunks(
+            base_chunks_tpczyx=base_chunks,
+            level_shape_tpczyx=expected_shape,
+            level_factors_tpczyx=factors,
+        )
+        actual_chunks = tuple(int(size) for size in level_array.chunks)
+        if actual_chunks != expected_chunks:
+            return False
+        raw_factors = level_array.attrs.get("downsample_factors_tpczyx")
+        if isinstance(raw_factors, (list, tuple)):
+            try:
+                attr_factors = tuple(int(value) for value in raw_factors)
+            except Exception:
+                return False
+            if attr_factors != tuple(int(value) for value in factors):
+                return False
+
+    return True
+
+
+def _ingestion_record_is_complete(
+    *,
+    record: IngestionProgressRecord,
+    required_components: list[str],
+) -> bool:
+    """Return whether progress metadata marks ingestion as complete.
+
+    Parameters
+    ----------
+    record : dict
+        Ingestion progress record payload.
+    required_components : list[str]
+        Required canonical components implied by expected configuration.
+
+    Returns
+    -------
+    bool
+        ``True`` when status is completed and tracked region counters indicate
+        full completion for base data and required pyramid levels.
+
+    Raises
+    ------
+    None
+        Malformed payloads return ``False``.
+    """
+    schema = str(record.get("schema", "")).strip()
+    if schema and schema != _INGESTION_PROGRESS_SCHEMA:
+        return False
+    status = str(record.get("status", "")).strip().lower()
+    if status != "completed":
+        return False
+
+    base_progress = record.get("base_progress", {})
+    if not isinstance(base_progress, dict):
+        return False
+    try:
+        base_total = int(base_progress.get("total_regions", 0))
+        base_completed = int(base_progress.get("completed_regions", -1))
+    except Exception:
+        return False
+    if base_total <= 0 or base_completed < base_total:
+        return False
+
+    pyramid_progress = record.get("pyramid_progress", {})
+    if not isinstance(pyramid_progress, dict):
+        pyramid_progress = {}
+    for component in required_components:
+        if component == "data":
+            continue
+        level_progress = pyramid_progress.get(component, {})
+        if not isinstance(level_progress, dict):
+            return False
+        try:
+            level_total = int(level_progress.get("total_regions", 0))
+            level_completed = int(level_progress.get("completed_regions", -1))
+        except Exception:
+            return False
+        if level_total <= 0 or level_completed < level_total:
+            return False
+
+    return True
+
+
+def has_complete_canonical_data_store(
+    zarr_path: Union[str, Path],
+    *,
+    expected_chunks_tpczyx: Optional[CanonicalShapeTpczyx] = None,
+    expected_pyramid_factors: Optional[
+        tuple[
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+        ]
+    ] = None,
+) -> bool:
+    """Return whether canonical ingestion is complete for a Zarr/N5 store.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Candidate Zarr/N5 store path.
+    expected_chunks_tpczyx : tuple[int, int, int, int, int, int], optional
+        Expected base-level chunking in canonical order.
+    expected_pyramid_factors : tuple[tuple[int, ...], ...], optional
+        Expected per-axis pyramid factors in canonical order.
+
+    Returns
+    -------
+    bool
+        ``True`` when base data is canonical, expected pyramid structure exists,
+        and ingestion progress metadata indicates a completed run.
+
+    Raises
+    ------
+    None
+        Unreadable or malformed stores return ``False``.
+
+    Notes
+    -----
+    Stores created before ingestion progress tracking existed are accepted when
+    structural validation succeeds and no progress record is present.
+    """
+    if not has_canonical_data_component(zarr_path):
+        return False
+    try:
+        root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r")
+    except Exception:
+        return False
+
+    data = root.get("data")
+    if data is None or not hasattr(data, "shape") or not hasattr(data, "chunks"):
+        return False
+    if data.chunks is None:
+        return False
+    try:
+        base_shape = _normalize_tpczyx_shape(tuple(int(size) for size in data.shape))
+    except Exception:
+        return False
+
+    if expected_chunks_tpczyx is not None:
+        try:
+            expected_chunks = _normalize_write_chunks(
+                shape_tpczyx=base_shape,
+                chunks=expected_chunks_tpczyx,
+            )
+        except Exception:
+            return False
+        actual_chunks = tuple(int(size) for size in data.chunks)
+        if actual_chunks != expected_chunks:
+            return False
+
+    level_factors = _resolve_expected_pyramid_level_factors(
+        root=root,
+        expected_pyramid_factors=expected_pyramid_factors,
+    )
+    if not _has_expected_pyramid_structure(root=root, level_factors=level_factors):
+        return False
+    required_components = (
+        _expected_pyramid_components(level_factors) if level_factors is not None else ["data"]
+    )
+
+    record = _read_ingestion_progress_record(root)
+    if record is None:
+        return True
+    return _ingestion_record_is_complete(
+        record=record,
+        required_components=required_components,
+    )
 
 
 def _normalize_axis_token(token: Any) -> Optional[str]:
@@ -1824,6 +2238,8 @@ def _write_dask_array_in_batches(
     progress_start: int = 0,
     progress_end: int = 100,
     progress_label: str = "Writing data",
+    start_region_index: int = 0,
+    batch_completed_callback: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """Write a canonical Dask array to Zarr/N5 using bounded region batches.
 
@@ -1851,6 +2267,13 @@ def _write_dask_array_in_batches(
         End percentage for write progress.
     progress_label : str, default="Writing data"
         Human-readable stage label.
+    start_region_index : int, default=0
+        Number of initial chunk regions to skip before writing. This enables
+        resumable writes from a prior interrupted run.
+    batch_completed_callback : callable, optional
+        Optional callback invoked as
+        ``batch_completed_callback(completed_regions, total_regions)`` after
+        each successful batch.
 
     Returns
     -------
@@ -1863,16 +2286,32 @@ def _write_dask_array_in_batches(
     )
     if total_regions == 0:
         return
+    start_region = max(0, min(int(start_region_index), int(total_regions)))
+    if start_region >= total_regions:
+        if progress_callback is not None:
+            progress_callback(
+                int(progress_end),
+                f"{progress_label}: resumed with all regions already complete "
+                f"({start_region}/{total_regions})",
+            )
+        if batch_completed_callback is not None:
+            batch_completed_callback(int(total_regions), int(total_regions))
+        return
 
     batch_region_count = _estimate_write_batch_region_count(
         chunks_tpczyx=chunks_tpczyx,
         dtype_itemsize=dtype_itemsize,
     )
-    total_batches = max(1, math.ceil(total_regions / batch_region_count))
-    completed_regions = 0
-    region_iter = _iter_tpczyx_chunk_regions(
+    remaining_regions = int(total_regions - start_region)
+    total_batches = max(1, math.ceil(remaining_regions / batch_region_count))
+    completed_regions = int(start_region)
+    region_iter = islice(
+        _iter_tpczyx_chunk_regions(
         shape_tpczyx=shape_tpczyx,
         chunks_tpczyx=chunks_tpczyx,
+        ),
+        int(start_region),
+        None,
     )
 
     for batch_index in range(1, total_batches + 1):
@@ -1901,6 +2340,8 @@ def _write_dask_array_in_batches(
                 f"{progress_label}: batch {batch_index}/{total_batches} "
                 f"({completed_regions}/{total_regions} regions)",
             )
+        if batch_completed_callback is not None:
+            batch_completed_callback(int(completed_regions), int(total_regions))
 
 
 def _write_dask_array_source_aligned_plane_batches(
@@ -1918,6 +2359,8 @@ def _write_dask_array_source_aligned_plane_batches(
     progress_label: str = "Writing data",
     worker_count: Optional[int] = None,
     worker_memory_limit_bytes: Optional[int] = None,
+    start_region_index: int = 0,
+    batch_completed_callback: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """Write canonical data using source-aligned full-frame z-batches.
 
@@ -1951,6 +2394,13 @@ def _write_dask_array_source_aligned_plane_batches(
     worker_memory_limit_bytes : int, optional
         Per-worker memory limit in bytes. When omitted, this is auto-detected
         from the provided client when possible.
+    start_region_index : int, default=0
+        Number of initial source-aligned regions to skip before writing. This
+        enables resumable writes from a prior interrupted run.
+    batch_completed_callback : callable, optional
+        Optional callback invoked as
+        ``batch_completed_callback(completed_regions, total_regions)`` after
+        each successful batch.
 
     Returns
     -------
@@ -1962,6 +2412,17 @@ def _write_dask_array_source_aligned_plane_batches(
         z_batch_depth=z_batch_depth,
     )
     if total_regions == 0:
+        return
+    start_region = max(0, min(int(start_region_index), int(total_regions)))
+    if start_region >= total_regions:
+        if progress_callback is not None:
+            progress_callback(
+                int(progress_end),
+                f"{progress_label}: resumed with all regions already complete "
+                f"({start_region}/{total_regions} regions; z_batch={z_batch_depth})",
+            )
+        if batch_completed_callback is not None:
+            batch_completed_callback(int(total_regions), int(total_regions))
         return
 
     detected_worker_count = worker_count
@@ -1980,11 +2441,16 @@ def _write_dask_array_source_aligned_plane_batches(
         worker_count=detected_worker_count,
         worker_memory_limit_bytes=detected_worker_memory_limit_bytes,
     )
-    total_batches = max(1, math.ceil(total_regions / regions_per_submission))
-    completed_regions = 0
-    region_iter = _iter_source_aligned_plane_regions(
-        shape_tpczyx=shape_tpczyx,
-        z_batch_depth=z_batch_depth,
+    remaining_regions = int(total_regions - start_region)
+    total_batches = max(1, math.ceil(remaining_regions / regions_per_submission))
+    completed_regions = int(start_region)
+    region_iter = islice(
+        _iter_source_aligned_plane_regions(
+            shape_tpczyx=shape_tpczyx,
+            z_batch_depth=z_batch_depth,
+        ),
+        int(start_region),
+        None,
     )
 
     for batch_index in range(1, total_batches + 1):
@@ -2013,6 +2479,336 @@ def _write_dask_array_source_aligned_plane_batches(
                 f"{progress_label}: batch {batch_index}/{total_batches} "
                 f"({completed_regions}/{total_regions} regions; z_batch={z_batch_depth})",
             )
+        if batch_completed_callback is not None:
+            batch_completed_callback(int(completed_regions), int(total_regions))
+
+
+def _component_matches_shape_and_chunks(
+    *,
+    root: Any,
+    component: str,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    chunks_tpczyx: CanonicalShapeTpczyx,
+) -> bool:
+    """Return whether a component exists with expected shape and chunks.
+
+    Parameters
+    ----------
+    root : Any
+        Opened root Zarr group.
+    component : str
+        Component path to validate.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Expected canonical shape.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Expected canonical chunk shape.
+
+    Returns
+    -------
+    bool
+        ``True`` when component exists and matches expected structure.
+
+    Raises
+    ------
+    None
+        Invalid or missing components return ``False``.
+    """
+    if component not in root:
+        return False
+    target = root[component]
+    if not hasattr(target, "shape") or not hasattr(target, "chunks"):
+        return False
+    if target.chunks is None:
+        return False
+    try:
+        actual_shape = tuple(int(size) for size in target.shape)
+        actual_chunks = tuple(int(size) for size in target.chunks)
+    except Exception:
+        return False
+    return actual_shape == tuple(int(v) for v in shape_tpczyx) and actual_chunks == tuple(
+        int(v) for v in chunks_tpczyx
+    )
+
+
+def _create_ingestion_progress_record(
+    *,
+    source_path: Path,
+    source_component: Optional[str],
+    target_component: str,
+    canonical_shape_tpczyx: CanonicalShapeTpczyx,
+    chunks_tpczyx: CanonicalShapeTpczyx,
+    level_factors_tpczyx: tuple[CanonicalShapeTpczyx, ...],
+    write_mode: str,
+    z_batch_depth: Optional[int],
+    base_total_regions: int,
+) -> IngestionProgressRecord:
+    """Create an initial ingestion progress record.
+
+    Parameters
+    ----------
+    source_path : pathlib.Path
+        Resolved source acquisition path.
+    source_component : str, optional
+        Source component path when reading from a Zarr/N5 store.
+    target_component : str
+        Destination component path for base canonical data writes.
+    canonical_shape_tpczyx : tuple[int, int, int, int, int, int]
+        Canonical output shape.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Effective canonical output chunks.
+    level_factors_tpczyx : tuple[tuple[int, int, int, int, int, int], ...]
+        Normalized absolute pyramid factors including base level.
+    write_mode : str
+        Base write mode identifier.
+    z_batch_depth : int, optional
+        Source-aligned z-batch depth when applicable.
+    base_total_regions : int
+        Total write regions for the base component.
+
+    Returns
+    -------
+    dict
+        Initialized in-progress record.
+
+    Raises
+    ------
+    None
+        This helper does not raise custom exceptions.
+    """
+    now = _utc_now_iso()
+    return {
+        "schema": _INGESTION_PROGRESS_SCHEMA,
+        "status": "in_progress",
+        "source_path": str(source_path),
+        "source_component": source_component,
+        "target_component": str(target_component),
+        "write_mode": str(write_mode),
+        "z_batch_depth": None if z_batch_depth is None else int(z_batch_depth),
+        "canonical_shape_tpczyx": [int(value) for value in canonical_shape_tpczyx],
+        "chunks_tpczyx": [int(value) for value in chunks_tpczyx],
+        "pyramid_factors_tpczyx": [
+            [int(value) for value in level] for level in level_factors_tpczyx
+        ],
+        "base_progress": {
+            "total_regions": int(base_total_regions),
+            "completed_regions": 0,
+        },
+        "pyramid_progress": {},
+        "swap_completed": False,
+        "started_utc": now,
+        "updated_utc": now,
+        "completed_utc": None,
+    }
+
+
+def _ingestion_progress_record_matches(
+    *,
+    record: IngestionProgressRecord,
+    source_path: Path,
+    source_component: Optional[str],
+    target_component: str,
+    canonical_shape_tpczyx: CanonicalShapeTpczyx,
+    chunks_tpczyx: CanonicalShapeTpczyx,
+    level_factors_tpczyx: tuple[CanonicalShapeTpczyx, ...],
+    write_mode: str,
+    z_batch_depth: Optional[int],
+) -> bool:
+    """Return whether a progress record matches current ingestion configuration.
+
+    Parameters
+    ----------
+    record : dict
+        Existing progress record.
+    source_path : pathlib.Path
+        Resolved source acquisition path.
+    source_component : str, optional
+        Source component path when reading from a store.
+    target_component : str
+        Destination component path for base writes.
+    canonical_shape_tpczyx : tuple[int, int, int, int, int, int]
+        Canonical output shape.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Effective canonical output chunks.
+    level_factors_tpczyx : tuple[tuple[int, int, int, int, int, int], ...]
+        Normalized absolute pyramid factors.
+    write_mode : str
+        Base write mode identifier.
+    z_batch_depth : int, optional
+        Source-aligned z-batch depth when applicable.
+
+    Returns
+    -------
+    bool
+        ``True`` when record configuration matches the active run.
+
+    Raises
+    ------
+    None
+        Malformed records return ``False``.
+    """
+    if str(record.get("schema", "")).strip() != _INGESTION_PROGRESS_SCHEMA:
+        return False
+    if str(record.get("status", "")).strip().lower() != "in_progress":
+        return False
+    if str(record.get("source_path", "")).strip() != str(source_path):
+        return False
+    record_source_component = record.get("source_component")
+    normalized_record_source_component = (
+        ""
+        if record_source_component is None
+        else str(record_source_component).strip()
+    )
+    normalized_source_component = (
+        "" if source_component is None else str(source_component).strip()
+    )
+    if normalized_record_source_component != normalized_source_component:
+        return False
+    if str(record.get("target_component", "")).strip() != str(target_component):
+        return False
+    if str(record.get("write_mode", "")).strip() != str(write_mode):
+        return False
+    try:
+        record_shape = tuple(int(value) for value in record.get("canonical_shape_tpczyx", []))
+        record_chunks = tuple(int(value) for value in record.get("chunks_tpczyx", []))
+        record_factors = tuple(
+            tuple(int(value) for value in level)
+            for level in record.get("pyramid_factors_tpczyx", [])
+        )
+    except Exception:
+        return False
+    if record_shape != tuple(int(value) for value in canonical_shape_tpczyx):
+        return False
+    if record_chunks != tuple(int(value) for value in chunks_tpczyx):
+        return False
+    if record_factors != tuple(
+        tuple(int(value) for value in level) for level in level_factors_tpczyx
+    ):
+        return False
+    record_z_batch = record.get("z_batch_depth")
+    if z_batch_depth is None:
+        return record_z_batch is None
+    try:
+        return int(record_z_batch) == int(z_batch_depth)
+    except Exception:
+        return False
+
+
+def _set_ingestion_base_progress(
+    *,
+    record: IngestionProgressRecord,
+    completed_regions: int,
+    total_regions: int,
+) -> None:
+    """Update base-component progress counters in an ingestion record.
+
+    Parameters
+    ----------
+    record : dict
+        Mutable ingestion record payload.
+    completed_regions : int
+        Number of base regions completed.
+    total_regions : int
+        Total number of base regions.
+
+    Returns
+    -------
+    None
+        Record is modified in place.
+
+    Raises
+    ------
+    None
+        This helper does not raise custom exceptions.
+    """
+    record["base_progress"] = {
+        "completed_regions": int(max(0, completed_regions)),
+        "total_regions": int(max(0, total_regions)),
+    }
+    record["updated_utc"] = _utc_now_iso()
+
+
+def _set_ingestion_level_progress(
+    *,
+    record: IngestionProgressRecord,
+    component: str,
+    completed_regions: int,
+    total_regions: int,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    chunks_tpczyx: CanonicalShapeTpczyx,
+    downsample_factors_tpczyx: CanonicalShapeTpczyx,
+    source_component: str,
+) -> None:
+    """Update one pyramid-level progress entry in an ingestion record.
+
+    Parameters
+    ----------
+    record : dict
+        Mutable ingestion record payload.
+    component : str
+        Pyramid component path (for example ``"data_pyramid/level_1"``).
+    completed_regions : int
+        Number of written regions for this level.
+    total_regions : int
+        Total number of regions for this level.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Level shape in canonical axis order.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Level chunk shape in canonical axis order.
+    downsample_factors_tpczyx : tuple[int, int, int, int, int, int]
+        Absolute level downsample factors.
+    source_component : str
+        Source component used to generate this level.
+
+    Returns
+    -------
+    None
+        Record is modified in place.
+
+    Raises
+    ------
+    None
+        This helper does not raise custom exceptions.
+    """
+    pyramid_progress = record.get("pyramid_progress")
+    if not isinstance(pyramid_progress, dict):
+        pyramid_progress = {}
+        record["pyramid_progress"] = pyramid_progress
+    pyramid_progress[str(component)] = {
+        "completed_regions": int(max(0, completed_regions)),
+        "total_regions": int(max(0, total_regions)),
+        "shape_tpczyx": [int(value) for value in shape_tpczyx],
+        "chunks_tpczyx": [int(value) for value in chunks_tpczyx],
+        "downsample_factors_tpczyx": [
+            int(value) for value in downsample_factors_tpczyx
+        ],
+        "source_component": str(source_component),
+    }
+    record["updated_utc"] = _utc_now_iso()
+
+
+def _mark_ingestion_completed(*, record: IngestionProgressRecord) -> None:
+    """Mark ingestion record status as completed.
+
+    Parameters
+    ----------
+    record : dict
+        Mutable ingestion record payload.
+
+    Returns
+    -------
+    None
+        Record is modified in place.
+
+    Raises
+    ------
+    None
+        This helper does not raise custom exceptions.
+    """
+    now = _utc_now_iso()
+    record["status"] = "completed"
+    record["swap_completed"] = True
+    record["updated_utc"] = now
+    record["completed_utc"] = now
 
 
 def _materialize_data_pyramid(
@@ -2031,6 +2827,22 @@ def _materialize_data_pyramid(
     progress_callback: Optional[ProgressCallback] = None,
     progress_start: int = 60,
     progress_end: int = 96,
+    start_regions_by_component: Optional[Dict[str, int]] = None,
+    preserve_existing: bool = False,
+    level_progress_callback: Optional[
+        Callable[
+            [
+                str,
+                int,
+                int,
+                CanonicalShapeTpczyx,
+                CanonicalShapeTpczyx,
+                CanonicalShapeTpczyx,
+                str,
+            ],
+            None,
+        ]
+    ] = None,
 ) -> list[str]:
     """Build and persist downsampled Zarr pyramid levels in canonical store.
 
@@ -2050,6 +2862,16 @@ def _materialize_data_pyramid(
         Start percentage for pyramid generation progress.
     progress_end : int, default=96
         End percentage for pyramid generation progress.
+    start_regions_by_component : dict[str, int], optional
+        Optional mapping of component path to completed-region count for
+        resumable level writes.
+    preserve_existing : bool, default=False
+        Whether to keep existing ``data_pyramid`` components and resume in
+        place when their structure matches expected shape/chunks.
+    level_progress_callback : callable, optional
+        Optional callback invoked as
+        ``callback(component, completed, total, shape, chunks, factors, source)``
+        after successful write batches.
 
     Returns
     -------
@@ -2073,9 +2895,10 @@ def _materialize_data_pyramid(
         raise ValueError(f"Expected canonical data array at {store_path}/data.")
     base_dtype = np.dtype(root["data"].dtype)
 
-    if "data_pyramid" in root:
+    if not preserve_existing and "data_pyramid" in root:
         del root["data_pyramid"]
     root.require_group("data_pyramid")
+    resume_offsets = dict(start_regions_by_component or {})
 
     base_shape = _normalize_tpczyx_shape(
         tuple(int(size) for size in root["data"].shape)
@@ -2157,13 +2980,48 @@ def _materialize_data_pyramid(
 
         component = f"data_pyramid/level_{level_index}"
         root = zarr.open_group(str(store_path), mode="a")
-        root.create_dataset(
-            name=component,
-            shape=level_shape,
-            chunks=level_chunks,
-            dtype=base_dtype.name,
-            overwrite=True,
+        level_total_regions = _count_tpczyx_chunk_regions(
+            shape_tpczyx=level_shape,
+            chunks_tpczyx=level_chunks,
         )
+        start_region_index = max(
+            0,
+            min(
+                int(resume_offsets.get(component, 0)),
+                int(level_total_regions),
+            ),
+        )
+        should_overwrite_level = True
+        if preserve_existing and _component_matches_shape_and_chunks(
+            root=root,
+            component=component,
+            shape_tpczyx=level_shape,
+            chunks_tpczyx=level_chunks,
+        ):
+            should_overwrite_level = False
+        if should_overwrite_level:
+            root.create_dataset(
+                name=component,
+                shape=level_shape,
+                chunks=level_chunks,
+                dtype=base_dtype.name,
+                overwrite=True,
+            )
+            start_region_index = 0
+
+        def _emit_level_progress(completed: int, total: int) -> None:
+            if level_progress_callback is None:
+                return
+            level_progress_callback(
+                component,
+                int(completed),
+                int(total),
+                level_shape,
+                level_chunks,
+                absolute_factors,
+                source_component,
+            )
+
         _write_dask_array_in_batches(
             array=downsampled,
             store_path=store_path,
@@ -2176,6 +3034,8 @@ def _materialize_data_pyramid(
             progress_start=level_progress_start,
             progress_end=level_progress_end,
             progress_label=f"Writing pyramid level {level_index}/{total_downsample_levels}",
+            start_region_index=start_region_index,
+            batch_completed_callback=_emit_level_progress,
         )
 
         root = zarr.open_group(str(store_path), mode="a")
@@ -2454,6 +3314,7 @@ def materialize_experiment_data_store(
             shape_tpczyx=canonical_shape,
             chunks=chunks,
         )
+        level_factors_tpczyx = _normalize_pyramid_level_factors(pyramid_factors)
         use_source_aligned_plane_writes = _should_use_source_aligned_plane_writes(
             array=canonical,
             shape_tpczyx=canonical_shape,
@@ -2477,12 +3338,46 @@ def materialize_experiment_data_store(
                 canonical = canonical.rechunk(normalized_chunks)
             _emit_progress(45, "Preparing chunk-batched canonical writes")
 
+        if has_complete_canonical_data_store(
+            store_path,
+            expected_chunks_tpczyx=normalized_chunks,
+            expected_pyramid_factors=pyramid_factors,
+        ):
+            _emit_progress(100, "Canonical data store is already complete")
+            data_root = zarr.open_group(str(store_path), mode="r")
+            data_chunks = tuple(int(value) for value in (data_root["data"].chunks or normalized_chunks))
+            return MaterializedDataStore(
+                source_path=source_resolved,
+                store_path=store_path,
+                source_component=source_component,
+                source_image_info=ImageInfo(
+                    path=source_resolved,
+                    shape=source_shape,
+                    dtype=source_dtype,
+                    axes=_format_axes_for_image_info(source_axes),
+                    metadata=dict(source_meta),
+                ),
+                data_image_info=ImageInfo(
+                    path=store_path,
+                    shape=canonical_shape,
+                    dtype=source_dtype,
+                    axes="TPCZYX",
+                    metadata={"component": "data"},
+                ),
+                chunks_tpczyx=_normalize_write_chunks(
+                    shape_tpczyx=canonical_shape,
+                    chunks=data_chunks,
+                ),
+            )
+
         def _write_canonical_component(
             *,
             component: str,
             progress_start: int,
             progress_end: int,
             progress_label: str,
+            start_region_index: int = 0,
+            batch_completed_callback: Optional[Callable[[int, int], None]] = None,
         ) -> None:
             """Write canonical base data to one target component.
 
@@ -2496,6 +3391,10 @@ def materialize_experiment_data_store(
                 Stage progress upper bound.
             progress_label : str
                 Human-readable progress prefix.
+            start_region_index : int, default=0
+                Number of initial base write regions to skip for resuming.
+            batch_completed_callback : callable, optional
+                Callback invoked after each successful batch.
 
             Returns
             -------
@@ -2520,6 +3419,8 @@ def materialize_experiment_data_store(
                     progress_label=progress_label,
                     worker_count=source_aligned_worker_count,
                     worker_memory_limit_bytes=source_aligned_worker_memory_limit_bytes,
+                    start_region_index=start_region_index,
+                    batch_completed_callback=batch_completed_callback,
                 )
                 return
             _write_dask_array_in_batches(
@@ -2534,14 +3435,129 @@ def materialize_experiment_data_store(
                 progress_start=progress_start,
                 progress_end=progress_end,
                 progress_label=progress_label,
+                start_region_index=start_region_index,
+                batch_completed_callback=batch_completed_callback,
+            )
+
+        write_mode = (
+            "source_aligned_plane_batches"
+            if use_source_aligned_plane_writes and source_aligned_z_batch_depth is not None
+            else "chunk_region_batches"
+        )
+        if write_mode == "source_aligned_plane_batches":
+            base_total_regions = _count_source_aligned_plane_regions(
+                shape_tpczyx=canonical_shape,
+                z_batch_depth=int(source_aligned_z_batch_depth or 1),
+            )
+        else:
+            base_total_regions = _count_tpczyx_chunk_regions(
+                shape_tpczyx=canonical_shape,
+                chunks_tpczyx=normalized_chunks,
             )
 
         should_stage_same_component = (
             store_path == source_resolved and source_component == "data"
         )
+        checkpoint_resume_supported = not should_stage_same_component
+        root = zarr.open_group(str(store_path), mode="a")
+        existing_progress_record = _read_ingestion_progress_record(root)
+        resume_from_checkpoint = False
+        base_start_region = 0
+        if (
+            checkpoint_resume_supported
+            and existing_progress_record is not None
+            and _ingestion_progress_record_matches(
+                record=existing_progress_record,
+                source_path=source_resolved,
+                source_component=source_component,
+                target_component="data",
+                canonical_shape_tpczyx=canonical_shape,
+                chunks_tpczyx=normalized_chunks,
+                level_factors_tpczyx=level_factors_tpczyx,
+                write_mode=write_mode,
+                z_batch_depth=source_aligned_z_batch_depth,
+            )
+            and _component_matches_shape_and_chunks(
+                root=root,
+                component="data",
+                shape_tpczyx=canonical_shape,
+                chunks_tpczyx=normalized_chunks,
+            )
+        ):
+            ingestion_record = dict(existing_progress_record)
+            base_progress = ingestion_record.get("base_progress", {})
+            if isinstance(base_progress, dict):
+                try:
+                    base_start_region = int(base_progress.get("completed_regions", 0))
+                except Exception:
+                    base_start_region = 0
+            base_start_region = max(
+                0,
+                min(int(base_start_region), int(base_total_regions)),
+            )
+            resume_from_checkpoint = True
+            _emit_progress(
+                50,
+                "Resuming canonical data writes "
+                f"({base_start_region}/{base_total_regions} regions complete)",
+            )
+        else:
+            ingestion_record = _create_ingestion_progress_record(
+                source_path=source_resolved,
+                source_component=source_component,
+                target_component="data",
+                canonical_shape_tpczyx=canonical_shape,
+                chunks_tpczyx=normalized_chunks,
+                level_factors_tpczyx=level_factors_tpczyx,
+                write_mode=write_mode,
+                z_batch_depth=source_aligned_z_batch_depth,
+                base_total_regions=int(base_total_regions),
+            )
+            _write_ingestion_progress_record(
+                store_path=store_path,
+                record=ingestion_record,
+            )
+
+        def _persist_base_progress(completed: int, total: int) -> None:
+            _set_ingestion_base_progress(
+                record=ingestion_record,
+                completed_regions=int(completed),
+                total_regions=int(total),
+            )
+            _write_ingestion_progress_record(
+                store_path=store_path,
+                record=ingestion_record,
+            )
+
+        def _persist_level_progress(
+            component: str,
+            completed: int,
+            total: int,
+            level_shape_tpczyx: CanonicalShapeTpczyx,
+            level_chunks_tpczyx: CanonicalShapeTpczyx,
+            downsample_factors_tpczyx: CanonicalShapeTpczyx,
+            level_source_component: str,
+        ) -> None:
+            _set_ingestion_level_progress(
+                record=ingestion_record,
+                component=component,
+                completed_regions=int(completed),
+                total_regions=int(total),
+                shape_tpczyx=level_shape_tpczyx,
+                chunks_tpczyx=level_chunks_tpczyx,
+                downsample_factors_tpczyx=downsample_factors_tpczyx,
+                source_component=level_source_component,
+            )
+            _write_ingestion_progress_record(
+                store_path=store_path,
+                record=ingestion_record,
+            )
+
         if should_stage_same_component:
+            # Resume is disabled for staged same-component rewrites.
+            resume_from_checkpoint = False
+            base_start_region = 0
             temp_component = "__clearex_tmp_data"
-            root = zarr.open_group(str(store_path), mode="a")
             if temp_component in root:
                 del root[temp_component]
             root.create_dataset(
@@ -2556,11 +3572,20 @@ def materialize_experiment_data_store(
                 progress_start=55,
                 progress_end=82,
                 progress_label="Writing staged canonical data",
+                start_region_index=0,
+                batch_completed_callback=_persist_base_progress,
             )
             _emit_progress(82, "Swapping staged data into canonical component")
             if "data" in root:
                 del root["data"]
             root.move(temp_component, "data")
+            ingestion_record["swap_completed"] = True
+            ingestion_record["updated_utc"] = _utc_now_iso()
+            _write_ingestion_progress_record(
+                store_path=store_path,
+                record=ingestion_record,
+            )
+
             initialize_analysis_store(
                 experiment=experiment,
                 zarr_path=store_path,
@@ -2578,13 +3603,15 @@ def materialize_experiment_data_store(
                 progress_callback=progress_callback,
                 progress_start=86,
                 progress_end=96,
+                preserve_existing=False,
+                level_progress_callback=_persist_level_progress,
             )
             _emit_progress(97, "Finalizing store metadata")
         else:
             initialize_analysis_store(
                 experiment=experiment,
                 zarr_path=store_path,
-                overwrite=True,
+                overwrite=not resume_from_checkpoint,
                 chunks=chunks,
                 pyramid_factors=pyramid_factors,
                 dtype=source_dtype.name,
@@ -2595,7 +3622,29 @@ def materialize_experiment_data_store(
                 progress_start=55,
                 progress_end=70,
                 progress_label="Writing canonical data",
+                start_region_index=base_start_region,
+                batch_completed_callback=_persist_base_progress,
             )
+            ingestion_record["swap_completed"] = True
+            ingestion_record["updated_utc"] = _utc_now_iso()
+            _write_ingestion_progress_record(
+                store_path=store_path,
+                record=ingestion_record,
+            )
+
+            start_regions_by_component: Dict[str, int] = {}
+            if resume_from_checkpoint:
+                pyramid_progress = ingestion_record.get("pyramid_progress", {})
+                if isinstance(pyramid_progress, dict):
+                    for component, payload in pyramid_progress.items():
+                        if not isinstance(payload, dict):
+                            continue
+                        try:
+                            completed = int(payload.get("completed_regions", 0))
+                        except Exception:
+                            continue
+                        start_regions_by_component[str(component)] = max(0, int(completed))
+
             _materialize_data_pyramid(
                 store_path=store_path,
                 base_chunks_tpczyx=normalized_chunks,
@@ -2604,8 +3653,17 @@ def materialize_experiment_data_store(
                 progress_callback=progress_callback,
                 progress_start=72,
                 progress_end=96,
+                start_regions_by_component=start_regions_by_component,
+                preserve_existing=resume_from_checkpoint,
+                level_progress_callback=_persist_level_progress,
             )
             _emit_progress(97, "Finalizing store metadata")
+
+        _mark_ingestion_completed(record=ingestion_record)
+        _write_ingestion_progress_record(
+            store_path=store_path,
+            record=ingestion_record,
+        )
 
     root = zarr.open_group(str(store_path), mode="a")
     source_axes_attr = list(source_axes) if source_axes is not None else None

@@ -32,6 +32,7 @@ import json
 import dask.array as da
 import h5py
 import numpy as np
+import pytest
 import tifffile
 import zarr
 
@@ -41,6 +42,7 @@ from clearex.io.experiment import (
     default_analysis_store_path,
     find_experiment_data_candidates,
     has_canonical_data_component,
+    has_complete_canonical_data_store,
     initialize_analysis_store,
     is_navigate_experiment_file,
     load_navigate_experiment,
@@ -504,6 +506,75 @@ def test_materialize_experiment_data_store_batches_chunk_writes(
     assert len(compute_calls) == 8
 
 
+def test_materialize_experiment_data_store_resumes_after_interrupted_base_write(
+    tmp_path: Path,
+    monkeypatch,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_path = tmp_path / "source.npy"
+    np.save(source_path, source_data)
+
+    original_compute = experiment_module._compute_dask_graph
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_estimate_write_batch_region_count",
+        lambda **kwargs: 1,
+    )
+
+    failing_call_count = {"value": 0}
+
+    def _failing_compute(graph, *, client=None):
+        failing_call_count["value"] += 1
+        if failing_call_count["value"] == 4:
+            raise RuntimeError("simulated interruption")
+        return original_compute(graph, client=client)
+
+    monkeypatch.setattr(experiment_module, "_compute_dask_graph", _failing_compute)
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        materialize_experiment_data_store(
+            experiment=experiment,
+            source_path=source_path,
+            chunks=(1, 1, 1, 1, 2, 2),
+            pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+        )
+
+    expected_store = (experiment_path.parent / "data_store.zarr").resolve()
+    root = zarr.open_group(str(expected_store), mode="r")
+    progress = dict(root.attrs["ingestion_progress"])
+    assert progress["status"] == "in_progress"
+    assert progress["base_progress"]["completed_regions"] == 3
+    assert progress["base_progress"]["total_regions"] == 8
+
+    resume_call_count = {"value": 0}
+
+    def _counting_compute(graph, *, client=None):
+        resume_call_count["value"] += 1
+        return original_compute(graph, client=client)
+
+    monkeypatch.setattr(experiment_module, "_compute_dask_graph", _counting_compute)
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 1, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    assert resume_call_count["value"] == 5
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    progress = dict(root.attrs["ingestion_progress"])
+    assert progress["status"] == "completed"
+    assert progress["base_progress"]["completed_regions"] == 8
+    assert progress["base_progress"]["total_regions"] == 8
+
+
 def test_materialize_experiment_data_store_handles_multibatch_base_and_pyramid(
     tmp_path: Path,
 ):
@@ -589,6 +660,72 @@ def test_has_canonical_data_component_rejects_noncanonical_store(tmp_path: Path)
     root["data"].attrs["axes"] = ["z", "y", "x"]
 
     assert has_canonical_data_component(store_path) is False
+
+
+def test_has_complete_canonical_data_store_rejects_missing_expected_pyramid(
+    tmp_path: Path,
+):
+    store_path = tmp_path / "incomplete_store.n5"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        "data",
+        shape=(1, 1, 1, 2, 4, 4),
+        chunks=(1, 1, 1, 1, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root["data"].attrs["axes"] = ["t", "p", "c", "z", "y", "x"]
+
+    assert (
+        has_complete_canonical_data_store(
+            store_path,
+            expected_chunks_tpczyx=(1, 1, 1, 1, 2, 2),
+            expected_pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
+        )
+        is False
+    )
+
+
+def test_has_complete_canonical_data_store_requires_completed_progress_record(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_path = tmp_path / "source.npy"
+    np.save(source_path, source_data)
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 1, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    assert (
+        has_complete_canonical_data_store(
+            materialized.store_path,
+            expected_chunks_tpczyx=(1, 1, 1, 1, 2, 2),
+            expected_pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+        )
+        is True
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="a")
+    progress = dict(root.attrs["ingestion_progress"])
+    progress["status"] = "in_progress"
+    root.attrs["ingestion_progress"] = progress
+
+    assert (
+        has_complete_canonical_data_store(
+            materialized.store_path,
+            expected_chunks_tpczyx=(1, 1, 1, 1, 2, 2),
+            expected_pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+        )
+        is False
+    )
 
 
 def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_path: Path):

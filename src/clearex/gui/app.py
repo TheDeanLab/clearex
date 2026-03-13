@@ -52,7 +52,7 @@ from clearex.io.experiment import (
     ExperimentDataResolutionError,
     NavigateExperiment,
     create_dask_client,
-    has_canonical_data_component,
+    has_complete_canonical_data_store,
     infer_zyx_shape,
     is_navigate_experiment_file,
     load_navigate_experiment,
@@ -3070,7 +3070,11 @@ if HAS_PYQT6:
             source_data_path = self._loaded_source_data_path
             target_store = resolve_data_store_path(experiment, source_data_path)
 
-            if target_store.exists() and has_canonical_data_component(target_store):
+            if target_store.exists() and has_complete_canonical_data_store(
+                target_store,
+                expected_chunks_tpczyx=self._zarr_save_config.chunks_tpczyx(),
+                expected_pyramid_factors=self._zarr_save_config.pyramid_tpczyx(),
+            ):
                 self._set_status(
                     "Found existing data store. Opening analysis selection."
                 )
