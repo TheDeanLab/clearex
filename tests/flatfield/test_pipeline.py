@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from clearex.flatfield.pipeline import run_flatfield_analysis
@@ -307,3 +308,218 @@ def test_run_flatfield_analysis_tiled_fit_blends_tiles(tmp_path: Path, monkeypat
     assert np.unique(flatfield).size > 4
     assert flatfield[1, 1] > 10.0
     assert flatfield[1, 1] < 14.0
+
+
+def test_run_flatfield_analysis_resumes_pending_transform_chunks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_resume_transform.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(2 * 1 * 1 * 1 * 4 * 4, dtype=np.uint16).reshape((2, 1, 1, 1, 4, 4))
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 1, 2, 2),
+        overwrite=True,
+    )
+
+    fit_calls = {"count": 0}
+
+    class _FakeBaSiC:
+        def __init__(
+            self,
+            *,
+            fitting_mode,
+            get_darkfield,
+            smoothness_flatfield,
+            working_size,
+            device,
+        ) -> None:
+            del fitting_mode, get_darkfield, smoothness_flatfield, working_size, device
+            self.flatfield = np.empty((0, 0), dtype=np.float32)
+            self.darkfield = np.empty((0, 0), dtype=np.float32)
+            self.baseline = np.empty((0,), dtype=np.float32)
+
+        def fit(self, images, skip_shape_warning=False) -> None:
+            del skip_shape_warning
+            fit_calls["count"] += 1
+            self.flatfield = np.full(images.shape[1:], 2.0, dtype=np.float32)
+            self.darkfield = np.zeros(images.shape[1:], dtype=np.float32)
+            self.baseline = np.zeros(images.shape[0], dtype=np.float32)
+
+    monkeypatch.setattr(flatfield_pipeline, "_load_basic_class", lambda: _FakeBaSiC)
+    original_transform = flatfield_pipeline._transform_region
+    failing_transform_calls = {"count": 0}
+
+    def _failing_transform(**kwargs):
+        failing_transform_calls["count"] += 1
+        if failing_transform_calls["count"] == 3:
+            raise RuntimeError("simulated transform interruption")
+        return original_transform(**kwargs)
+
+    monkeypatch.setattr(flatfield_pipeline, "_transform_region", _failing_transform)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        with pytest.raises(RuntimeError, match="simulated transform interruption"):
+            run_flatfield_analysis(
+                zarr_path=store_path,
+                parameters={
+                    "input_source": "data",
+                    "fit_mode": "tiled",
+                    "fit_tile_shape_yx": [2, 2],
+                    "blend_tiles": False,
+                    "smoothness_flatfield": 1.0,
+                    "working_size": 64,
+                    "use_map_overlap": True,
+                    "overlap_zyx": [0, 1, 1],
+                    "is_timelapse": False,
+                },
+                client=client,
+            )
+    finally:
+        client.close()
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    checkpoint = output_root["results"]["flatfield"]["latest"]["checkpoint"]
+    assert int(np.count_nonzero(np.asarray(checkpoint["fit_tile_done_pcyx"], dtype=bool))) == 4
+    assert int(np.count_nonzero(np.asarray(checkpoint["transform_done_tpcyx"], dtype=bool))) == 2
+    assert fit_calls["count"] == 4
+
+    resumed_transform_trace = tmp_path / "resumed_transform_calls.txt"
+
+    def _counting_transform(**kwargs):
+        with resumed_transform_trace.open("a", encoding="utf-8") as handle:
+            handle.write("1\n")
+        return original_transform(**kwargs)
+
+    monkeypatch.setattr(flatfield_pipeline, "_transform_region", _counting_transform)
+    fit_calls_before_resume = int(fit_calls["count"])
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "fit_mode": "tiled",
+                "fit_tile_shape_yx": [2, 2],
+                "blend_tiles": False,
+                "smoothness_flatfield": 1.0,
+                "working_size": 64,
+                "use_map_overlap": True,
+                "overlap_zyx": [0, 1, 1],
+                "is_timelapse": False,
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    resumed_root = zarr.open_group(str(store_path), mode="r")
+    resumed_latest = resumed_root["results"]["flatfield"]["latest"]
+    resumed_checkpoint = resumed_latest["checkpoint"]
+    assert fit_calls["count"] == fit_calls_before_resume
+    assert resumed_transform_trace.read_text(encoding="utf-8").count("\n") == 6
+    assert np.all(np.asarray(resumed_checkpoint["transform_done_tpcyx"], dtype=bool))
+    assert bool(resumed_latest.attrs["resumed_from_checkpoint"]) is True
+
+
+def test_run_flatfield_analysis_restarts_when_parameters_change(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_resume_parameters.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 1 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 1, 4, 4))
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 1, 2, 2),
+        overwrite=True,
+    )
+
+    fit_calls = {"count": 0}
+
+    class _FakeBaSiC:
+        def __init__(
+            self,
+            *,
+            fitting_mode,
+            get_darkfield,
+            smoothness_flatfield,
+            working_size,
+            device,
+        ) -> None:
+            del fitting_mode, get_darkfield, smoothness_flatfield, working_size, device
+            self.flatfield = np.empty((0, 0), dtype=np.float32)
+            self.darkfield = np.empty((0, 0), dtype=np.float32)
+            self.baseline = np.empty((0,), dtype=np.float32)
+
+        def fit(self, images, skip_shape_warning=False) -> None:
+            del skip_shape_warning
+            fit_calls["count"] += 1
+            self.flatfield = np.full(images.shape[1:], 2.0, dtype=np.float32)
+            self.darkfield = np.zeros(images.shape[1:], dtype=np.float32)
+            self.baseline = np.zeros(images.shape[0], dtype=np.float32)
+
+    monkeypatch.setattr(flatfield_pipeline, "_load_basic_class", lambda: _FakeBaSiC)
+
+    parameters = {
+        "input_source": "data",
+        "fit_mode": "tiled",
+        "fit_tile_shape_yx": [2, 2],
+        "blend_tiles": False,
+        "smoothness_flatfield": 1.0,
+        "working_size": 64,
+        "use_map_overlap": True,
+        "overlap_zyx": [0, 1, 1],
+        "is_timelapse": False,
+    }
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters=parameters,
+            client=client,
+        )
+    finally:
+        client.close()
+
+    first_run_fit_calls = int(fit_calls["count"])
+    assert first_run_fit_calls == 4
+    first_latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    first_fingerprint = str(first_latest.attrs["resume_parameter_fingerprint"])
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters=parameters,
+            client=client,
+        )
+    finally:
+        client.close()
+
+    second_latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    second_fingerprint = str(second_latest.attrs["resume_parameter_fingerprint"])
+    assert fit_calls["count"] == first_run_fit_calls
+    assert second_fingerprint == first_fingerprint
+    assert bool(second_latest.attrs["resumed_from_checkpoint"]) is True
+
+    changed_parameters = dict(parameters)
+    changed_parameters["smoothness_flatfield"] = 1.5
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters=changed_parameters,
+            client=client,
+        )
+    finally:
+        client.close()
+
+    third_latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    third_fingerprint = str(third_latest.attrs["resume_parameter_fingerprint"])
+    assert fit_calls["count"] == first_run_fit_calls + 4
+    assert third_fingerprint != first_fingerprint
+    assert bool(third_latest.attrs["resumed_from_checkpoint"]) is False

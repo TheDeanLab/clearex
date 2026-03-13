@@ -29,9 +29,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from itertools import product
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Union, cast
 
@@ -58,6 +61,8 @@ RegionBounds = tuple[
     tuple[int, int],
 ]
 SpatialBounds = tuple[tuple[int, int], tuple[int, int]]
+RESUME_SCHEMA_VERSION = "clearex.flatfield.resume.v1"
+CHECKPOINT_GROUP_NAME = "checkpoint"
 
 
 @dataclass(frozen=True)
@@ -95,6 +100,10 @@ class FlatfieldTileSpec:
         Position index on the ``p`` axis.
     channel_index : int
         Channel index on the ``c`` axis.
+    tile_y_index : int
+        Tile-grid row index in ``y``.
+    tile_x_index : int
+        Tile-grid column index in ``x``.
     y_core_bounds : tuple[int, int]
         Non-overlapping output bounds in ``y``.
     x_core_bounds : tuple[int, int]
@@ -107,6 +116,8 @@ class FlatfieldTileSpec:
 
     position_index: int
     channel_index: int
+    tile_y_index: int
+    tile_x_index: int
     y_core_bounds: tuple[int, int]
     x_core_bounds: tuple[int, int]
     y_read_bounds: tuple[int, int]
@@ -123,6 +134,10 @@ class FlatfieldTileFitResult:
         Position index on the ``p`` axis.
     channel_index : int
         Channel index on the ``c`` axis.
+    tile_y_index : int
+        Tile-grid row index in ``y``.
+    tile_x_index : int
+        Tile-grid column index in ``x``.
     y_bounds : tuple[int, int]
         Destination bounds in ``y`` for payload arrays.
     x_bounds : tuple[int, int]
@@ -142,6 +157,8 @@ class FlatfieldTileFitResult:
 
     position_index: int
     channel_index: int
+    tile_y_index: int
+    tile_x_index: int
     y_bounds: tuple[int, int]
     x_bounds: tuple[int, int]
     flatfield_payload_yx: Float32Array
@@ -191,6 +208,89 @@ class FlatfieldSummary:
     output_chunks_tpczyx: tuple[int, int, int, int, int, int]
     output_dtype: str
     basicpy_version: Optional[str]
+
+
+@dataclass(frozen=True)
+class FlatfieldTransformSpec:
+    """Transform-task specification for one corrected output chunk.
+
+    Attributes
+    ----------
+    t_index : int
+        Time index in ``t``.
+    p_index : int
+        Position index in ``p``.
+    c_index : int
+        Channel index in ``c``.
+    y_chunk_index : int
+        Y-axis chunk-grid index.
+    x_chunk_index : int
+        X-axis chunk-grid index.
+    read_region : RegionBounds
+        Expanded read region including overlap halo.
+    core_region : RegionBounds
+        Non-overlapping write region.
+    """
+
+    t_index: int
+    p_index: int
+    c_index: int
+    y_chunk_index: int
+    x_chunk_index: int
+    read_region: RegionBounds
+    core_region: RegionBounds
+
+
+@dataclass(frozen=True)
+class FlatfieldOutputLayout:
+    """Prepared output layout and checkpoint metadata for one run.
+
+    Attributes
+    ----------
+    component : str
+        Latest-group component path.
+    data_component : str
+        Corrected data component path.
+    flatfield_component : str
+        Flatfield artifact component path.
+    darkfield_component : str
+        Darkfield artifact component path.
+    baseline_component : str
+        Baseline artifact component path.
+    checkpoint_component : str
+        Resume-checkpoint group component path.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+    output_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Output chunk shape in canonical axis order.
+    fit_grid_yx : tuple[int, int]
+        Fit tile grid shape as ``(n_y_tiles, n_x_tiles)``.
+    transform_grid_yx : tuple[int, int]
+        Transform chunk grid shape as ``(n_y_chunks, n_x_chunks)``.
+    fit_mode : str
+        Effective fit mode.
+    blend_tiles_effective : bool
+        Whether blended tiled reduction is active.
+    parameter_fingerprint : str
+        Stable hash of effective flatfield parameters.
+    resumed : bool
+        Whether this run reuses an existing checkpoint.
+    """
+
+    component: str
+    data_component: str
+    flatfield_component: str
+    darkfield_component: str
+    baseline_component: str
+    checkpoint_component: str
+    shape_tpczyx: tuple[int, int, int, int, int, int]
+    output_chunks_tpczyx: tuple[int, int, int, int, int, int]
+    fit_grid_yx: tuple[int, int]
+    transform_grid_yx: tuple[int, int]
+    fit_mode: str
+    blend_tiles_effective: bool
+    parameter_fingerprint: str
+    resumed: bool
 
 
 def _basicpy_version() -> Optional[str]:
@@ -302,6 +402,174 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     normalized["fit_tile_shape_yx"] = fit_tile_shape_yx
     normalized["blend_tiles"] = bool(normalized.get("blend_tiles", False))
     return normalized
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC timestamp in ISO-8601 format.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        Current UTC timestamp.
+    """
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Recursively convert values into JSON-serializable primitives.
+
+    Parameters
+    ----------
+    value : Any
+        Value to normalize.
+
+    Returns
+    -------
+    Any
+        JSON-serializable representation.
+    """
+    if isinstance(value, Mapping):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _to_jsonable(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _resume_parameter_payload(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the deterministic parameter payload used for resume matching.
+
+    Parameters
+    ----------
+    parameters : mapping[str, Any]
+        Normalized flatfield parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-serializable payload excluding run-control flags.
+    """
+    payload = {
+        str(key): value
+        for key, value in dict(parameters).items()
+        if str(key) != "force_rerun"
+    }
+    return cast(dict[str, Any], _to_jsonable(payload))
+
+
+def _resume_parameter_fingerprint(payload: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the serialized payload and SHA256 digest for resume checks.
+
+    Parameters
+    ----------
+    payload : mapping[str, Any]
+        JSON-serializable parameter payload.
+
+    Returns
+    -------
+    tuple[str, str]
+        Canonical JSON string and hexadecimal digest.
+    """
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return serialized, digest
+
+
+def _fit_grid_shape(
+    *,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    fit_tile_shape_yx: tuple[int, int],
+) -> tuple[int, int]:
+    """Return the tile-grid shape for tiled flatfield fitting.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+    fit_tile_shape_yx : tuple[int, int]
+        Requested tile shape in ``(y, x)`` order.
+
+    Returns
+    -------
+    tuple[int, int]
+        Tile-grid shape as ``(n_y_tiles, n_x_tiles)``.
+    """
+    y_count = int(shape_tpczyx[4])
+    x_count = int(shape_tpczyx[5])
+    tile_y = max(1, min(int(fit_tile_shape_yx[0]), y_count))
+    tile_x = max(1, min(int(fit_tile_shape_yx[1]), x_count))
+    return (
+        len(_axis_chunk_bounds(y_count, tile_y)),
+        len(_axis_chunk_bounds(x_count, tile_x)),
+    )
+
+
+def _transform_grid_shape(
+    *,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    chunks_tpczyx: tuple[int, int, int, int, int, int],
+) -> tuple[int, int]:
+    """Return the transform chunk-grid shape in spatial axes.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Chunk shape in canonical axis order.
+
+    Returns
+    -------
+    tuple[int, int]
+        Transform grid shape as ``(n_y_chunks, n_x_chunks)``.
+    """
+    return (
+        len(_axis_chunk_bounds(int(shape_tpczyx[4]), int(chunks_tpczyx[4]))),
+        len(_axis_chunk_bounds(int(shape_tpczyx[5]), int(chunks_tpczyx[5]))),
+    )
+
+
+def _has_dataset(
+    group: zarr.Group,
+    *,
+    name: str,
+    shape: tuple[int, ...],
+    dtype: Any,
+) -> bool:
+    """Return whether a dataset exists with expected shape and dtype.
+
+    Parameters
+    ----------
+    group : zarr.Group
+        Parent group.
+    name : str
+        Dataset name.
+    shape : tuple[int, ...]
+        Expected dataset shape.
+    dtype : Any
+        Expected dtype.
+
+    Returns
+    -------
+    bool
+        ``True`` when the dataset exists and matches expectations.
+    """
+    candidate = group.get(name)
+    if candidate is None:
+        return False
+    if not isinstance(candidate, zarr.Array):
+        return False
+    candidate_shape = tuple(int(v) for v in candidate.shape)
+    if candidate_shape != tuple(int(v) for v in shape):
+        return False
+    return np.dtype(candidate.dtype) == np.dtype(dtype)
 
 
 def _axis_chunk_bounds(size: int, chunk_size: int) -> list[tuple[int, int]]:
@@ -618,14 +886,492 @@ def _copy_source_array_attrs(
     target_array.attrs.update(copied)
 
 
+def _checkpoint_dataset_specs(
+    *,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    fit_grid_yx: tuple[int, int],
+    transform_grid_yx: tuple[int, int],
+    fit_mode: str,
+    blend_tiles_effective: bool,
+) -> dict[str, tuple[tuple[int, ...], Any]]:
+    """Return expected checkpoint dataset specs for the current run setup.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+    fit_grid_yx : tuple[int, int]
+        Fit tile-grid shape in ``(n_y_tiles, n_x_tiles)`` order.
+    transform_grid_yx : tuple[int, int]
+        Transform chunk-grid shape in ``(n_y_chunks, n_x_chunks)`` order.
+    fit_mode : str
+        Effective fit mode.
+    blend_tiles_effective : bool
+        Whether blended tile reduction is enabled.
+
+    Returns
+    -------
+    dict[str, tuple[tuple[int, ...], Any]]
+        Mapping from checkpoint dataset name to ``(shape, dtype)``.
+    """
+    t_count, p_count, c_count, z_count, y_count, x_count = (
+        int(shape_tpczyx[0]),
+        int(shape_tpczyx[1]),
+        int(shape_tpczyx[2]),
+        int(shape_tpczyx[3]),
+        int(shape_tpczyx[4]),
+        int(shape_tpczyx[5]),
+    )
+    specs: dict[str, tuple[tuple[int, ...], Any]] = {
+        "fit_profile_done_pc": ((p_count, c_count), np.bool_),
+        "transform_done_tpcyx": (
+            (t_count, p_count, c_count, int(transform_grid_yx[0]), int(transform_grid_yx[1])),
+            np.bool_,
+        ),
+    }
+    if str(fit_mode) == "tiled":
+        specs.update(
+            {
+                "fit_tile_done_pcyx": (
+                    (p_count, c_count, int(fit_grid_yx[0]), int(fit_grid_yx[1])),
+                    np.bool_,
+                ),
+                "fit_baseline_sum_pctz": ((p_count, c_count, t_count, z_count), np.float32),
+                "fit_baseline_count_pc": ((p_count, c_count), np.uint32),
+            }
+        )
+        if bool(blend_tiles_effective):
+            specs.update(
+                {
+                    "fit_flatfield_sum_pcyx": ((p_count, c_count, y_count, x_count), np.float32),
+                    "fit_darkfield_sum_pcyx": ((p_count, c_count, y_count, x_count), np.float32),
+                    "fit_weight_sum_pcyx": ((p_count, c_count, y_count, x_count), np.float32),
+                }
+            )
+    return specs
+
+
+def _checkpoint_is_compatible(
+    *,
+    latest_group: zarr.Group,
+    source_component: str,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    chunks_tpczyx: tuple[int, int, int, int, int, int],
+    fit_grid_yx: tuple[int, int],
+    transform_grid_yx: tuple[int, int],
+    fit_mode: str,
+    blend_tiles_effective: bool,
+    parameter_fingerprint: str,
+) -> bool:
+    """Return whether an existing latest group can be resumed safely.
+
+    Parameters
+    ----------
+    latest_group : zarr.Group
+        Existing latest-output group.
+    source_component : str
+        Requested source component path.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Output chunk shape in canonical axis order.
+    fit_grid_yx : tuple[int, int]
+        Expected fit tile-grid shape.
+    transform_grid_yx : tuple[int, int]
+        Expected transform chunk-grid shape.
+    fit_mode : str
+        Effective fit mode.
+    blend_tiles_effective : bool
+        Whether blended tile reduction is enabled.
+    parameter_fingerprint : str
+        Expected parameter fingerprint.
+
+    Returns
+    -------
+    bool
+        ``True`` when checkpoint metadata and datasets are compatible.
+    """
+    p_count, c_count, t_count, z_count, y_count, x_count = (
+        int(shape_tpczyx[1]),
+        int(shape_tpczyx[2]),
+        int(shape_tpczyx[0]),
+        int(shape_tpczyx[3]),
+        int(shape_tpczyx[4]),
+        int(shape_tpczyx[5]),
+    )
+    if not _has_dataset(latest_group, name="data", shape=shape_tpczyx, dtype=np.float32):
+        return False
+    if tuple(int(v) for v in latest_group["data"].chunks) != tuple(int(v) for v in chunks_tpczyx):
+        return False
+    if not _has_dataset(
+        latest_group,
+        name="flatfield_pcyx",
+        shape=(p_count, c_count, y_count, x_count),
+        dtype=np.float32,
+    ):
+        return False
+    if not _has_dataset(
+        latest_group,
+        name="darkfield_pcyx",
+        shape=(p_count, c_count, y_count, x_count),
+        dtype=np.float32,
+    ):
+        return False
+    if not _has_dataset(
+        latest_group,
+        name="baseline_pctz",
+        shape=(p_count, c_count, t_count, z_count),
+        dtype=np.float32,
+    ):
+        return False
+
+    checkpoint_group = latest_group.get(CHECKPOINT_GROUP_NAME)
+    if checkpoint_group is None or not isinstance(checkpoint_group, zarr.Group):
+        return False
+
+    checkpoint_attrs = dict(checkpoint_group.attrs)
+    if str(checkpoint_attrs.get("schema_version", "")) != RESUME_SCHEMA_VERSION:
+        return False
+    if str(checkpoint_attrs.get("parameter_fingerprint", "")) != str(parameter_fingerprint):
+        return False
+    if str(checkpoint_attrs.get("source_component", "")) != str(source_component):
+        return False
+    if tuple(checkpoint_attrs.get("source_shape_tpczyx", [])) != tuple(shape_tpczyx):
+        return False
+    if tuple(checkpoint_attrs.get("source_chunks_tpczyx", [])) != tuple(chunks_tpczyx):
+        return False
+    if str(checkpoint_attrs.get("fit_mode", "")) != str(fit_mode):
+        return False
+    if tuple(checkpoint_attrs.get("fit_grid_yx", [])) != tuple(fit_grid_yx):
+        return False
+    if tuple(checkpoint_attrs.get("transform_grid_yx", [])) != tuple(transform_grid_yx):
+        return False
+    if bool(checkpoint_attrs.get("blend_tiles_effective", False)) != bool(
+        blend_tiles_effective
+    ):
+        return False
+
+    expected_specs = _checkpoint_dataset_specs(
+        shape_tpczyx=shape_tpczyx,
+        fit_grid_yx=fit_grid_yx,
+        transform_grid_yx=transform_grid_yx,
+        fit_mode=fit_mode,
+        blend_tiles_effective=blend_tiles_effective,
+    )
+    for name, (shape, dtype) in expected_specs.items():
+        if not _has_dataset(checkpoint_group, name=name, shape=shape, dtype=dtype):
+            return False
+    return True
+
+
+def _create_checkpoint_datasets(
+    *,
+    checkpoint_group: zarr.Group,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    chunks_tpczyx: tuple[int, int, int, int, int, int],
+    fit_grid_yx: tuple[int, int],
+    transform_grid_yx: tuple[int, int],
+    fit_mode: str,
+    blend_tiles_effective: bool,
+) -> None:
+    """Create fresh checkpoint datasets for resumable flatfield execution.
+
+    Parameters
+    ----------
+    checkpoint_group : zarr.Group
+        Checkpoint group under ``results/flatfield/latest``.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Output chunk shape in canonical axis order.
+    fit_grid_yx : tuple[int, int]
+        Fit tile-grid shape.
+    transform_grid_yx : tuple[int, int]
+        Transform chunk-grid shape.
+    fit_mode : str
+        Effective fit mode.
+    blend_tiles_effective : bool
+        Whether blended tile reduction is enabled.
+
+    Returns
+    -------
+    None
+        Datasets are created in-place.
+    """
+    p_count = int(shape_tpczyx[1])
+    c_count = int(shape_tpczyx[2])
+    t_count = int(shape_tpczyx[0])
+    z_count = int(shape_tpczyx[3])
+    y_count = int(shape_tpczyx[4])
+    x_count = int(shape_tpczyx[5])
+    y_chunk_count = int(transform_grid_yx[0])
+    x_chunk_count = int(transform_grid_yx[1])
+
+    checkpoint_group.create_dataset(
+        name="fit_profile_done_pc",
+        shape=(p_count, c_count),
+        chunks=(1, 1),
+        dtype=np.bool_,
+        overwrite=True,
+        fill_value=False,
+    )
+    checkpoint_group.create_dataset(
+        name="transform_done_tpcyx",
+        shape=(t_count, p_count, c_count, y_chunk_count, x_chunk_count),
+        chunks=(1, 1, 1, 1, 1),
+        dtype=np.bool_,
+        overwrite=True,
+        fill_value=False,
+    )
+
+    if str(fit_mode) != "tiled":
+        return
+
+    artifact_chunks_pcyx = (
+        1,
+        1,
+        max(1, min(int(chunks_tpczyx[4]), y_count)),
+        max(1, min(int(chunks_tpczyx[5]), x_count)),
+    )
+    checkpoint_group.create_dataset(
+        name="fit_tile_done_pcyx",
+        shape=(p_count, c_count, int(fit_grid_yx[0]), int(fit_grid_yx[1])),
+        chunks=(1, 1, 1, 1),
+        dtype=np.bool_,
+        overwrite=True,
+        fill_value=False,
+    )
+    checkpoint_group.create_dataset(
+        name="fit_baseline_sum_pctz",
+        shape=(p_count, c_count, t_count, z_count),
+        chunks=(1, 1, 1, max(1, min(z_count, int(chunks_tpczyx[3])))),
+        dtype=np.float32,
+        overwrite=True,
+        fill_value=np.float32(0.0),
+    )
+    checkpoint_group.create_dataset(
+        name="fit_baseline_count_pc",
+        shape=(p_count, c_count),
+        chunks=(1, 1),
+        dtype=np.uint32,
+        overwrite=True,
+        fill_value=np.uint32(0),
+    )
+
+    if not bool(blend_tiles_effective):
+        return
+
+    checkpoint_group.create_dataset(
+        name="fit_flatfield_sum_pcyx",
+        shape=(p_count, c_count, y_count, x_count),
+        chunks=artifact_chunks_pcyx,
+        dtype=np.float32,
+        overwrite=True,
+        fill_value=np.float32(0.0),
+    )
+    checkpoint_group.create_dataset(
+        name="fit_darkfield_sum_pcyx",
+        shape=(p_count, c_count, y_count, x_count),
+        chunks=artifact_chunks_pcyx,
+        dtype=np.float32,
+        overwrite=True,
+        fill_value=np.float32(0.0),
+    )
+    checkpoint_group.create_dataset(
+        name="fit_weight_sum_pcyx",
+        shape=(p_count, c_count, y_count, x_count),
+        chunks=artifact_chunks_pcyx,
+        dtype=np.float32,
+        overwrite=True,
+        fill_value=np.float32(0.0),
+    )
+
+
+def _initialize_latest_flatfield_group(
+    *,
+    root: zarr.Group,
+    source_component: str,
+    parameters: Mapping[str, Any],
+    parameter_payload: Mapping[str, Any],
+    parameter_json: str,
+    parameter_fingerprint: str,
+    basicpy_version: Optional[str],
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    chunks_tpczyx: tuple[int, int, int, int, int, int],
+    fit_mode: str,
+    fit_grid_yx: tuple[int, int],
+    transform_grid_yx: tuple[int, int],
+    blend_tiles_effective: bool,
+) -> zarr.Group:
+    """Initialize a fresh ``results/flatfield/latest`` output and checkpoint tree.
+
+    Parameters
+    ----------
+    root : zarr.Group
+        Open Zarr root in append mode.
+    source_component : str
+        Source component path.
+    parameters : mapping[str, Any]
+        Normalized run parameters.
+    parameter_payload : mapping[str, Any]
+        JSON-serializable parameter payload used for resume matching.
+    parameter_json : str
+        Canonical serialized payload.
+    parameter_fingerprint : str
+        SHA256 digest of ``parameter_json``.
+    basicpy_version : str, optional
+        Installed BaSiCPy version when available.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+    chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Output chunk shape in canonical axis order.
+    fit_mode : str
+        Effective fit mode.
+    fit_grid_yx : tuple[int, int]
+        Fit tile-grid shape.
+    transform_grid_yx : tuple[int, int]
+        Transform chunk-grid shape.
+    blend_tiles_effective : bool
+        Whether blended tiled reduction is enabled.
+
+    Returns
+    -------
+    zarr.Group
+        Newly created latest group.
+    """
+    results_group = root.require_group("results")
+    flatfield_group = results_group.require_group("flatfield")
+    if "latest" in flatfield_group:
+        del flatfield_group["latest"]
+    latest_group = flatfield_group.create_group("latest")
+
+    data_array = latest_group.create_dataset(
+        name="data",
+        shape=shape_tpczyx,
+        chunks=chunks_tpczyx,
+        dtype=np.float32,
+        overwrite=True,
+    )
+    _copy_source_array_attrs(
+        root=root,
+        source_component=source_component,
+        target_array=data_array,
+        output_chunks=chunks_tpczyx,
+    )
+
+    artifact_chunks_pcyx = (
+        1,
+        1,
+        max(1, min(int(chunks_tpczyx[4]), int(shape_tpczyx[4]))),
+        max(1, min(int(chunks_tpczyx[5]), int(shape_tpczyx[5]))),
+    )
+    latest_group.create_dataset(
+        name="flatfield_pcyx",
+        shape=(
+            int(shape_tpczyx[1]),
+            int(shape_tpczyx[2]),
+            int(shape_tpczyx[4]),
+            int(shape_tpczyx[5]),
+        ),
+        chunks=artifact_chunks_pcyx,
+        dtype=np.float32,
+        overwrite=True,
+    )
+    latest_group.create_dataset(
+        name="darkfield_pcyx",
+        shape=(
+            int(shape_tpczyx[1]),
+            int(shape_tpczyx[2]),
+            int(shape_tpczyx[4]),
+            int(shape_tpczyx[5]),
+        ),
+        chunks=artifact_chunks_pcyx,
+        dtype=np.float32,
+        overwrite=True,
+    )
+    latest_group.create_dataset(
+        name="baseline_pctz",
+        shape=(
+            int(shape_tpczyx[1]),
+            int(shape_tpczyx[2]),
+            int(shape_tpczyx[0]),
+            int(shape_tpczyx[3]),
+        ),
+        chunks=(
+            1,
+            1,
+            1,
+            max(1, min(int(shape_tpczyx[3]), int(chunks_tpczyx[3]))),
+        ),
+        dtype=np.float32,
+        overwrite=True,
+    )
+
+    latest_group.attrs.update(
+        {
+            "storage_policy": "latest_only",
+            "run_id": None,
+            "source_component": str(source_component),
+            "data_component": "results/flatfield/latest/data",
+            "flatfield_component": "results/flatfield/latest/flatfield_pcyx",
+            "darkfield_component": "results/flatfield/latest/darkfield_pcyx",
+            "baseline_component": "results/flatfield/latest/baseline_pctz",
+            "parameters": _to_jsonable(dict(parameters)),
+            "resume_parameters": dict(parameter_payload),
+            "resume_parameters_json": str(parameter_json),
+            "resume_parameter_fingerprint": str(parameter_fingerprint),
+            "output_dtype": "float32",
+            "output_chunks_tpczyx": [int(v) for v in chunks_tpczyx],
+            "basicpy_version": basicpy_version,
+            "resume_schema_version": RESUME_SCHEMA_VERSION,
+            "updated_utc": _utc_now_iso(),
+        }
+    )
+
+    checkpoint_group = latest_group.require_group(CHECKPOINT_GROUP_NAME)
+    _create_checkpoint_datasets(
+        checkpoint_group=checkpoint_group,
+        shape_tpczyx=shape_tpczyx,
+        chunks_tpczyx=chunks_tpczyx,
+        fit_grid_yx=fit_grid_yx,
+        transform_grid_yx=transform_grid_yx,
+        fit_mode=fit_mode,
+        blend_tiles_effective=blend_tiles_effective,
+    )
+    checkpoint_group.attrs.update(
+        {
+            "schema_version": RESUME_SCHEMA_VERSION,
+            "source_component": str(source_component),
+            "source_shape_tpczyx": [int(v) for v in shape_tpczyx],
+            "source_chunks_tpczyx": [int(v) for v in chunks_tpczyx],
+            "fit_mode": str(fit_mode),
+            "fit_grid_yx": [int(v) for v in fit_grid_yx],
+            "transform_grid_yx": [int(v) for v in transform_grid_yx],
+            "blend_tiles_effective": bool(blend_tiles_effective),
+            "parameter_payload": dict(parameter_payload),
+            "parameter_json": str(parameter_json),
+            "parameter_fingerprint": str(parameter_fingerprint),
+            "fit_stage_status": "pending",
+            "fit_outputs_materialized": False,
+            "transform_stage_status": "pending",
+            "run_status": "running",
+            "created_utc": _utc_now_iso(),
+            "updated_utc": _utc_now_iso(),
+            "completed_utc": None,
+            "last_error": None,
+        }
+    )
+    return latest_group
+
+
 def _prepare_output_arrays(
     *,
     zarr_path: Union[str, Path],
     source_component: str,
     parameters: Mapping[str, Any],
     basicpy_version: Optional[str],
-) -> tuple[str, str, str, str, str, tuple[int, int, int, int, int, int], tuple[int, int, int, int, int, int]]:
-    """Prepare latest flatfield output datasets in the Zarr store.
+) -> FlatfieldOutputLayout:
+    """Prepare or resume latest flatfield output datasets in the Zarr store.
 
     Parameters
     ----------
@@ -640,9 +1386,8 @@ def _prepare_output_arrays(
 
     Returns
     -------
-    tuple[str, str, str, str, str, tuple[int, ...], tuple[int, ...]]
-        Component paths for latest group, data, flatfield, darkfield, baseline,
-        followed by source shape and output chunks in ``(t, p, c, z, y, x)`` order.
+    FlatfieldOutputLayout
+        Output component metadata and resume context.
 
     Raises
     ------
@@ -651,110 +1396,118 @@ def _prepare_output_arrays(
     """
     root = zarr.open_group(str(zarr_path), mode="a")
     source = root[source_component]
-    shape = tuple(int(v) for v in source.shape)
-    chunks = tuple(int(v) for v in source.chunks)
-    if len(shape) != 6 or len(chunks) != 6:
+    shape_tpczyx = tuple(int(v) for v in source.shape)
+    chunks_tpczyx = tuple(int(v) for v in source.chunks)
+    if len(shape_tpczyx) != 6 or len(chunks_tpczyx) != 6:
         raise ValueError(
             "Flatfield correction requires canonical 6D data (t,p,c,z,y,x). "
             f"Input component '{source_component}' is incompatible."
         )
 
-    results_group = root.require_group("results")
-    flatfield_group = results_group.require_group("flatfield")
-    if "latest" in flatfield_group:
-        del flatfield_group["latest"]
-    latest_group = flatfield_group.create_group("latest")
+    fit_mode = str(parameters.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    fit_tile_shape_yx = cast(
+        tuple[int, int],
+        parameters.get("fit_tile_shape_yx", (256, 256)),
+    )
+    fit_grid_yx = _fit_grid_shape(
+        shape_tpczyx=shape_tpczyx,
+        fit_tile_shape_yx=(int(fit_tile_shape_yx[0]), int(fit_tile_shape_yx[1])),
+    )
+    transform_grid_yx = _transform_grid_shape(
+        shape_tpczyx=shape_tpczyx,
+        chunks_tpczyx=chunks_tpczyx,
+    )
+    blend_tiles_effective = bool(
+        parameters.get("blend_tiles", False) and parameters.get("use_map_overlap", True)
+    )
+    parameter_payload = _resume_parameter_payload(parameters)
+    parameter_json, parameter_fingerprint = _resume_parameter_fingerprint(parameter_payload)
 
+    component = "results/flatfield/latest"
     data_component = "results/flatfield/latest/data"
     flatfield_component = "results/flatfield/latest/flatfield_pcyx"
     darkfield_component = "results/flatfield/latest/darkfield_pcyx"
     baseline_component = "results/flatfield/latest/baseline_pctz"
+    checkpoint_component = "results/flatfield/latest/checkpoint"
 
-    data_array = latest_group.create_dataset(
-        name="data",
-        shape=shape,
-        chunks=chunks,
-        dtype=np.float32,
-        overwrite=True,
-    )
-    _copy_source_array_attrs(
-        root=root,
-        source_component=source_component,
-        target_array=data_array,
-        output_chunks=chunks,
-    )
+    results_group = root.require_group("results")
+    flatfield_group = results_group.require_group("flatfield")
+    latest_group = flatfield_group.get("latest")
+    should_resume = False
+    if (
+        latest_group is not None
+        and isinstance(latest_group, zarr.Group)
+        and not bool(parameters.get("force_rerun", False))
+    ):
+        should_resume = _checkpoint_is_compatible(
+            latest_group=latest_group,
+            source_component=source_component,
+            shape_tpczyx=shape_tpczyx,
+            chunks_tpczyx=chunks_tpczyx,
+            fit_grid_yx=fit_grid_yx,
+            transform_grid_yx=transform_grid_yx,
+            fit_mode=fit_mode,
+            blend_tiles_effective=blend_tiles_effective,
+            parameter_fingerprint=parameter_fingerprint,
+        )
 
-    artifact_chunks_pcyx = (
-        1,
-        1,
-        max(1, min(chunks[4], shape[4])),
-        max(1, min(chunks[5], shape[5])),
-    )
-    latest_group.create_dataset(
-        name="flatfield_pcyx",
-        shape=(shape[1], shape[2], shape[4], shape[5]),
-        chunks=artifact_chunks_pcyx,
-        dtype=np.float32,
-        overwrite=True,
-    )
-    latest_group.create_dataset(
-        name="darkfield_pcyx",
-        shape=(shape[1], shape[2], shape[4], shape[5]),
-        chunks=artifact_chunks_pcyx,
-        dtype=np.float32,
-        overwrite=True,
-    )
-    latest_group.create_dataset(
-        name="baseline_pctz",
-        shape=(shape[1], shape[2], shape[0], shape[3]),
-        chunks=(
-            1,
-            1,
-            1,
-            max(1, min(shape[3], chunks[3])),
-        ),
-        dtype=np.float32,
-        overwrite=True,
-    )
+    if not should_resume:
+        latest_group = _initialize_latest_flatfield_group(
+            root=root,
+            source_component=source_component,
+            parameters=parameters,
+            parameter_payload=parameter_payload,
+            parameter_json=parameter_json,
+            parameter_fingerprint=parameter_fingerprint,
+            basicpy_version=basicpy_version,
+            shape_tpczyx=shape_tpczyx,
+            chunks_tpczyx=chunks_tpczyx,
+            fit_mode=fit_mode,
+            fit_grid_yx=fit_grid_yx,
+            transform_grid_yx=transform_grid_yx,
+            blend_tiles_effective=blend_tiles_effective,
+        )
+    else:
+        latest_group.attrs.update(
+            {
+                "parameters": _to_jsonable(dict(parameters)),
+                "resume_parameters": dict(parameter_payload),
+                "resume_parameters_json": str(parameter_json),
+                "resume_parameter_fingerprint": str(parameter_fingerprint),
+                "basicpy_version": basicpy_version,
+                "updated_utc": _utc_now_iso(),
+            }
+        )
+        checkpoint_group = latest_group[CHECKPOINT_GROUP_NAME]
+        checkpoint_group.attrs.update(
+            {
+                "fit_stage_status": str(
+                    checkpoint_group.attrs.get("fit_stage_status", "pending")
+                ),
+                "transform_stage_status": str(
+                    checkpoint_group.attrs.get("transform_stage_status", "pending")
+                ),
+                "run_status": "running",
+                "updated_utc": _utc_now_iso(),
+                "last_error": None,
+            }
+        )
 
-    latest_group.attrs.update(
-        {
-            "storage_policy": "latest_only",
-            "run_id": None,
-            "source_component": str(source_component),
-            "data_component": data_component,
-            "flatfield_component": flatfield_component,
-            "darkfield_component": darkfield_component,
-            "baseline_component": baseline_component,
-            "parameters": {str(k): v for k, v in dict(parameters).items()},
-            "output_dtype": "float32",
-            "output_chunks_tpczyx": [int(v) for v in chunks],
-            "basicpy_version": basicpy_version,
-        }
-    )
-
-    return (
-        "results/flatfield/latest",
-        data_component,
-        flatfield_component,
-        darkfield_component,
-        baseline_component,
-        (
-            int(shape[0]),
-            int(shape[1]),
-            int(shape[2]),
-            int(shape[3]),
-            int(shape[4]),
-            int(shape[5]),
-        ),
-        (
-            int(chunks[0]),
-            int(chunks[1]),
-            int(chunks[2]),
-            int(chunks[3]),
-            int(chunks[4]),
-            int(chunks[5]),
-        ),
+    return FlatfieldOutputLayout(
+        component=component,
+        data_component=data_component,
+        flatfield_component=flatfield_component,
+        darkfield_component=darkfield_component,
+        baseline_component=baseline_component,
+        checkpoint_component=checkpoint_component,
+        shape_tpczyx=shape_tpczyx,
+        output_chunks_tpczyx=chunks_tpczyx,
+        fit_grid_yx=fit_grid_yx,
+        transform_grid_yx=transform_grid_yx,
+        fit_mode=fit_mode,
+        blend_tiles_effective=blend_tiles_effective,
+        parameter_fingerprint=parameter_fingerprint,
+        resumed=bool(should_resume),
     )
 
 
@@ -1075,34 +1828,33 @@ def _build_profile_tile_specs(
     y_core_regions = _axis_chunk_bounds(y_count, tile_y)
     x_core_regions = _axis_chunk_bounds(x_count, tile_x)
     specs: list[FlatfieldTileSpec] = []
-    for position_index, channel_index, y_core_region, x_core_region in product(
-        range(p_count),
-        range(c_count),
-        y_core_regions,
-        x_core_regions,
-    ):
-        y_core_bounds = (int(y_core_region[0]), int(y_core_region[1]))
-        x_core_bounds = (int(x_core_region[0]), int(x_core_region[1]))
-        y_read_bounds = _expand_bounds_with_overlap(
-            y_core_bounds,
-            overlap=overlap_y,
-            axis_size=y_count,
-        )
-        x_read_bounds = _expand_bounds_with_overlap(
-            x_core_bounds,
-            overlap=overlap_x,
-            axis_size=x_count,
-        )
-        specs.append(
-            FlatfieldTileSpec(
-                position_index=int(position_index),
-                channel_index=int(channel_index),
-                y_core_bounds=y_core_bounds,
-                x_core_bounds=x_core_bounds,
-                y_read_bounds=(int(y_read_bounds[0]), int(y_read_bounds[1])),
-                x_read_bounds=(int(x_read_bounds[0]), int(x_read_bounds[1])),
-            )
-        )
+    for position_index, channel_index in product(range(p_count), range(c_count)):
+        for tile_y_index, y_core_region in enumerate(y_core_regions):
+            for tile_x_index, x_core_region in enumerate(x_core_regions):
+                y_core_bounds = (int(y_core_region[0]), int(y_core_region[1]))
+                x_core_bounds = (int(x_core_region[0]), int(x_core_region[1]))
+                y_read_bounds = _expand_bounds_with_overlap(
+                    y_core_bounds,
+                    overlap=overlap_y,
+                    axis_size=y_count,
+                )
+                x_read_bounds = _expand_bounds_with_overlap(
+                    x_core_bounds,
+                    overlap=overlap_x,
+                    axis_size=x_count,
+                )
+                specs.append(
+                    FlatfieldTileSpec(
+                        position_index=int(position_index),
+                        channel_index=int(channel_index),
+                        tile_y_index=int(tile_y_index),
+                        tile_x_index=int(tile_x_index),
+                        y_core_bounds=y_core_bounds,
+                        x_core_bounds=x_core_bounds,
+                        y_read_bounds=(int(y_read_bounds[0]), int(y_read_bounds[1])),
+                        x_read_bounds=(int(x_read_bounds[0]), int(x_read_bounds[1])),
+                    )
+                )
     return specs
 
 
@@ -1181,6 +1933,8 @@ def _fit_profile_tile(
         return FlatfieldTileFitResult(
             position_index=int(tile.position_index),
             channel_index=int(tile.channel_index),
+            tile_y_index=int(tile.tile_y_index),
+            tile_x_index=int(tile.tile_x_index),
             y_bounds=(int(tile.y_read_bounds[0]), int(tile.y_read_bounds[1])),
             x_bounds=(int(tile.x_read_bounds[0]), int(tile.x_read_bounds[1])),
             flatfield_payload_yx=(
@@ -1196,6 +1950,8 @@ def _fit_profile_tile(
     return FlatfieldTileFitResult(
         position_index=int(tile.position_index),
         channel_index=int(tile.channel_index),
+        tile_y_index=int(tile.tile_y_index),
+        tile_x_index=int(tile.tile_x_index),
         y_bounds=(int(tile.y_core_bounds[0]), int(tile.y_core_bounds[1])),
         x_bounds=(int(tile.x_core_bounds[0]), int(tile.x_core_bounds[1])),
         flatfield_payload_yx=flatfield_tile[
@@ -1366,6 +2122,68 @@ def _transform_region(
     return 1
 
 
+def _build_transform_specs(
+    *,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    output_chunks_tpczyx: tuple[int, int, int, int, int, int],
+    overlap_zyx: tuple[int, int, int],
+    use_overlap: bool,
+) -> list[FlatfieldTransformSpec]:
+    """Build transform-task specs over all corrected output chunks.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+    output_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Output chunk shape in canonical axis order.
+    overlap_zyx : tuple[int, int, int]
+        Overlap halo in ``(z, y, x)`` order.
+    use_overlap : bool
+        Whether overlap halo should be applied.
+
+    Returns
+    -------
+    list[FlatfieldTransformSpec]
+        Ordered transform specs with chunk-grid indices.
+    """
+    y_bounds = _axis_chunk_bounds(int(shape_tpczyx[4]), int(output_chunks_tpczyx[4]))
+    x_bounds = _axis_chunk_bounds(int(shape_tpczyx[5]), int(output_chunks_tpczyx[5]))
+    specs: list[FlatfieldTransformSpec] = []
+    for t_index, p_index, c_index in product(
+        range(int(shape_tpczyx[0])),
+        range(int(shape_tpczyx[1])),
+        range(int(shape_tpczyx[2])),
+    ):
+        for y_chunk_index, y_bounds_chunk in enumerate(y_bounds):
+            for x_chunk_index, x_bounds_chunk in enumerate(x_bounds):
+                core_region: RegionBounds = (
+                    (int(t_index), int(t_index) + 1),
+                    (int(p_index), int(p_index) + 1),
+                    (int(c_index), int(c_index) + 1),
+                    (0, int(shape_tpczyx[3])),
+                    (int(y_bounds_chunk[0]), int(y_bounds_chunk[1])),
+                    (int(x_bounds_chunk[0]), int(x_bounds_chunk[1])),
+                )
+                specs.append(
+                    FlatfieldTransformSpec(
+                        t_index=int(t_index),
+                        p_index=int(p_index),
+                        c_index=int(c_index),
+                        y_chunk_index=int(y_chunk_index),
+                        x_chunk_index=int(x_chunk_index),
+                        read_region=_expand_region_with_overlap(
+                            core_region,
+                            shape_tpczyx=shape_tpczyx,
+                            overlap_zyx=overlap_zyx,
+                            use_overlap=bool(use_overlap),
+                        ),
+                        core_region=core_region,
+                    )
+                )
+    return specs
+
+
 def run_flatfield_analysis(
     *,
     zarr_path: Union[str, Path],
@@ -1404,6 +2222,68 @@ def run_flatfield_analysis(
             return
         progress_callback(int(percent), str(message))
 
+    def _execute_tasks(
+        *,
+        task_inputs: list[Any],
+        build_task: Callable[[Any], Any],
+        consume_result: Callable[[Any, Any], None],
+        progress_start: int,
+        progress_span: int,
+        progress_message: str,
+    ) -> None:
+        """Execute delayed tasks and consume results incrementally.
+
+        Parameters
+        ----------
+        task_inputs : list[Any]
+            Task descriptors used for building delayed computations.
+        build_task : callable
+            Builder returning a delayed task for one descriptor.
+        consume_result : callable
+            Callback invoked as ``consume_result(task_input, result)``.
+        progress_start : int
+            Inclusive progress lower bound.
+        progress_span : int
+            Progress points consumed by this stage.
+        progress_message : str
+            Message template with ``{completed}`` and ``{total}`` fields.
+
+        Returns
+        -------
+        None
+            Tasks are executed and consumed in-place.
+        """
+        if not task_inputs:
+            return
+
+        total = max(1, int(len(task_inputs)))
+        if client is None:
+            for completed, task_input in enumerate(task_inputs, start=1):
+                result = dask.compute(build_task(task_input), scheduler="processes")[0]
+                consume_result(task_input, result)
+                progress = progress_start + int((completed / total) * progress_span)
+                _emit(
+                    progress,
+                    progress_message.format(completed=completed, total=total),
+                )
+            return
+
+        from dask.distributed import as_completed
+
+        delayed_tasks = [build_task(task_input) for task_input in task_inputs]
+        futures = cast(list[Any], client.compute(delayed_tasks))
+        future_to_input = {future: task_inputs[index] for index, future in enumerate(futures)}
+        completed = 0
+        for future in as_completed(futures):
+            task_input = future_to_input[future]
+            consume_result(task_input, future.result())
+            completed += 1
+            progress = progress_start + int((completed / total) * progress_span)
+            _emit(
+                progress,
+                progress_message.format(completed=completed, total=total),
+            )
+
     normalized = _normalize_parameters(parameters)
     basicpy_version = _basicpy_version()
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -1424,310 +2304,501 @@ def run_flatfield_analysis(
         )
 
     _emit(5, "Preparing flatfield output datasets")
-    (
-        component,
-        data_component,
-        flatfield_component,
-        darkfield_component,
-        baseline_component,
-        shape_tpczyx,
-        output_chunks,
-    ) = _prepare_output_arrays(
+    layout = _prepare_output_arrays(
         zarr_path=zarr_path,
         source_component=source_component,
         parameters=normalized,
         basicpy_version=basicpy_version,
     )
-
-    fit_mode = str(normalized.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    shape_tpczyx = layout.shape_tpczyx
+    output_chunks = layout.output_chunks_tpczyx
     profile_pairs = [
         (int(position_index), int(channel_index))
         for position_index, channel_index in product(
-            range(shape_tpczyx[1]),
-            range(shape_tpczyx[2]),
+            range(int(shape_tpczyx[1])),
+            range(int(shape_tpczyx[2])),
         )
     ]
     profile_count = int(len(profile_pairs))
+    _emit(
+        6,
+        "Resuming existing flatfield checkpoint"
+        if layout.resumed
+        else "Initialized fresh flatfield checkpoint",
+    )
 
-    if fit_mode == "full_volume":
-        fit_tasks = [
-            delayed(_fit_profile_full_volume)(
-                zarr_path=str(zarr_path),
-                source_component=source_component,
-                position_index=int(position_index),
-                channel_index=int(channel_index),
-                parameters=normalized,
-            )
-            for position_index, channel_index in profile_pairs
-        ]
-        _emit(10, f"Prepared {len(fit_tasks)} flatfield profile fit tasks")
-        profile_results: list[FlatfieldProfileResult] = []
-        if client is None:
-            computed = dask.compute(*fit_tasks, scheduler="processes")
-            profile_results = [item for item in computed]
-        else:
-            from dask.distributed import as_completed
-
-            futures = cast(list[Any], client.compute(fit_tasks))
-            total = max(1, int(len(futures)))
-            completed = 0
-            for future in as_completed(futures):
-                profile_results.append(future.result())
-                completed += 1
-                progress = 10 + int((completed / total) * 25)
-                _emit(progress, f"Fitted flatfield profile {completed}/{total}")
-
-        profile_results.sort(
-            key=lambda item: (int(item.position_index), int(item.channel_index))
-        )
-        for profile in profile_results:
-            _persist_profile_artifacts(
-                zarr_path=str(zarr_path),
-                flatfield_component=flatfield_component,
-                darkfield_component=darkfield_component,
-                baseline_component=baseline_component,
-                profile=profile,
-            )
-        profile_count = int(len(profile_results))
-        _emit(40, f"Persisted {profile_count} fitted flatfield profiles")
-    else:
-        tile_specs = _build_profile_tile_specs(
-            shape_tpczyx=shape_tpczyx,
-            parameters=normalized,
-        )
-        tiles_per_profile = (
-            int(len(tile_specs) // max(1, profile_count))
-            if profile_count > 0
-            else 0
-        )
-        _emit(
-            10,
-            "Prepared "
-            f"{len(tile_specs)} flatfield tile fit tasks "
-            f"(profiles={profile_count}, tiles_per_profile~{tiles_per_profile})",
-        )
-        fit_tasks = [
-            delayed(_fit_profile_tile)(
-                zarr_path=str(zarr_path),
-                source_component=source_component,
-                tile=tile,
-                parameters=normalized,
-            )
-            for tile in tile_specs
-        ]
-        t_count = int(shape_tpczyx[0])
-        z_count = int(shape_tpczyx[3])
-        y_count = int(shape_tpczyx[4])
-        x_count = int(shape_tpczyx[5])
-        baseline_sum_by_profile = {
-            key: np.zeros((t_count, z_count), dtype=np.float32)
-            for key in profile_pairs
-        }
-        baseline_count_by_profile = {key: 0 for key in profile_pairs}
-        blend_tiles = bool(
-            normalized.get("blend_tiles", False) and normalized.get("use_map_overlap", True)
-        )
-        flatfield_sum_by_profile: dict[tuple[int, int], Float32Array] = {}
-        darkfield_sum_by_profile: dict[tuple[int, int], Float32Array] = {}
-        weight_sum_by_profile: dict[tuple[int, int], Float32Array] = {}
-        if blend_tiles:
-            flatfield_sum_by_profile = {
-                key: np.zeros((y_count, x_count), dtype=np.float32) for key in profile_pairs
-            }
-            darkfield_sum_by_profile = {
-                key: np.zeros((y_count, x_count), dtype=np.float32) for key in profile_pairs
-            }
-            weight_sum_by_profile = {
-                key: np.zeros((y_count, x_count), dtype=np.float32) for key in profile_pairs
-            }
-        write_root = zarr.open_group(str(zarr_path), mode="a")
-        flatfield_array = write_root[flatfield_component]
-        darkfield_array = write_root[darkfield_component]
-        baseline_array = write_root[baseline_component]
-
-        def _consume_tile_result(tile_result: FlatfieldTileFitResult) -> None:
-            key = (int(tile_result.position_index), int(tile_result.channel_index))
-            y_start, y_stop = int(tile_result.y_bounds[0]), int(tile_result.y_bounds[1])
-            x_start, x_stop = int(tile_result.x_bounds[0]), int(tile_result.x_bounds[1])
-            baseline_sum_by_profile[key] += np.asarray(
-                tile_result.baseline_tz,
-                dtype=np.float32,
-            )
-            baseline_count_by_profile[key] = int(baseline_count_by_profile[key]) + 1
-            if blend_tiles:
-                if tile_result.weight_payload_yx is None:
-                    raise ValueError(
-                        "Flatfield tiled reduction expected blend weights for a tile result."
-                    )
-                flatfield_sum_by_profile[key][y_start:y_stop, x_start:x_stop] += np.asarray(
-                    tile_result.flatfield_payload_yx,
-                    dtype=np.float32,
-                )
-                darkfield_sum_by_profile[key][y_start:y_stop, x_start:x_stop] += np.asarray(
-                    tile_result.darkfield_payload_yx,
-                    dtype=np.float32,
-                )
-                weight_sum_by_profile[key][y_start:y_stop, x_start:x_stop] += np.asarray(
-                    tile_result.weight_payload_yx,
-                    dtype=np.float32,
-                )
-            else:
-                flatfield_array[
-                    tile_result.position_index,
-                    tile_result.channel_index,
-                    y_start:y_stop,
-                    x_start:x_stop,
-                ] = tile_result.flatfield_payload_yx
-                darkfield_array[
-                    tile_result.position_index,
-                    tile_result.channel_index,
-                    y_start:y_stop,
-                    x_start:x_stop,
-                ] = tile_result.darkfield_payload_yx
-
-        if client is None:
-            computed = dask.compute(*fit_tasks, scheduler="processes")
-            total = max(1, int(len(computed)))
-            for completed, tile_result in enumerate(computed, start=1):
-                _consume_tile_result(tile_result)
-                progress = 10 + int((completed / total) * 25)
-                _emit(progress, f"Fitted flatfield tile {completed}/{total}")
-        else:
-            from dask.distributed import as_completed
-
-            futures = cast(list[Any], client.compute(fit_tasks))
-            total = max(1, int(len(futures)))
-            completed = 0
-            for future in as_completed(futures):
-                _consume_tile_result(cast(FlatfieldTileFitResult, future.result()))
-                completed += 1
-                progress = 10 + int((completed / total) * 25)
-                _emit(progress, f"Fitted flatfield tile {completed}/{total}")
-
-        if blend_tiles:
-            for position_index, channel_index in profile_pairs:
-                key = (int(position_index), int(channel_index))
-                denominator = np.maximum(
-                    weight_sum_by_profile[key],
-                    np.float32(1e-6),
-                )
-                flatfield_array[position_index, channel_index, :, :] = (
-                    flatfield_sum_by_profile[key] / denominator
-                ).astype(np.float32, copy=False)
-                darkfield_array[position_index, channel_index, :, :] = (
-                    darkfield_sum_by_profile[key] / denominator
-                ).astype(np.float32, copy=False)
-
-        for position_index, channel_index in profile_pairs:
-            key = (int(position_index), int(channel_index))
-            baseline_count = max(1, int(baseline_count_by_profile[key]))
-            baseline_array[position_index, channel_index, :, :] = (
-                baseline_sum_by_profile[key] / np.float32(float(baseline_count))
-            ).astype(np.float32, copy=False)
-        _emit(
-            40,
-            "Persisted "
-            f"{profile_count} fitted flatfield profiles from {len(tile_specs)} tile tasks",
-        )
-
-    y_bounds = _axis_chunk_bounds(shape_tpczyx[4], output_chunks[4])
-    x_bounds = _axis_chunk_bounds(shape_tpczyx[5], output_chunks[5])
-    transform_tasks = []
-    for t_index, p_index, c_index, y_bounds_chunk, x_bounds_chunk in product(
-        range(shape_tpczyx[0]),
-        range(shape_tpczyx[1]),
-        range(shape_tpczyx[2]),
-        y_bounds,
-        x_bounds,
-    ):
-        core_region: RegionBounds = (
-            (int(t_index), int(t_index) + 1),
-            (int(p_index), int(p_index) + 1),
-            (int(c_index), int(c_index) + 1),
-            (0, int(shape_tpczyx[3])),
-            (int(y_bounds_chunk[0]), int(y_bounds_chunk[1])),
-            (int(x_bounds_chunk[0]), int(x_bounds_chunk[1])),
-        )
-        transform_tasks.append(
-            delayed(_transform_region)(
-                zarr_path=str(zarr_path),
-                source_component=source_component,
-                output_data_component=data_component,
-                flatfield_component=flatfield_component,
-                darkfield_component=darkfield_component,
-                baseline_component=baseline_component,
-                position_index=int(p_index),
-                channel_index=int(c_index),
-                read_region=_expand_region_with_overlap(
-                    core_region,
-                    shape_tpczyx=shape_tpczyx,
-                    overlap_zyx=normalized["overlap_zyx"],
-                    use_overlap=bool(normalized["use_map_overlap"]),
-                ),
-                core_region=core_region,
-                is_timelapse=bool(normalized["is_timelapse"]),
-            )
-        )
-
-    _emit(45, f"Prepared {len(transform_tasks)} flatfield transform tasks")
-    if client is None:
-        dask.compute(*transform_tasks, scheduler="processes")
-        _emit(95, "Completed flatfield transform tasks")
-    else:
-        from dask.distributed import as_completed
-
-        futures = cast(list[Any], client.compute(transform_tasks))
-        total = max(1, int(len(futures)))
-        completed = 0
-        for future in as_completed(futures):
-            future.result()
-            completed += 1
-            progress = 45 + int((completed / total) * 50)
-            _emit(progress, f"Corrected chunk {completed}/{total}")
-
-    root = zarr.open_group(str(zarr_path), mode="a")
-    root[component].attrs.update(
+    checkpoint_group = zarr.open_group(str(zarr_path), mode="a")[layout.checkpoint_component]
+    checkpoint_group.attrs.update(
         {
-            "profile_count": int(profile_count),
-            "transformed_volumes": int(
-                shape_tpczyx[0] * shape_tpczyx[1] * shape_tpczyx[2]
-            ),
-            "source_component": str(source_component),
-            "data_component": data_component,
-            "flatfield_component": flatfield_component,
-            "darkfield_component": darkfield_component,
-            "baseline_component": baseline_component,
-            "output_dtype": "float32",
-            "output_chunks_tpczyx": [int(v) for v in output_chunks],
-            "basicpy_version": basicpy_version,
+            "run_status": "running",
+            "updated_utc": _utc_now_iso(),
+            "last_error": None,
         }
     )
-    register_latest_output_reference(
-        zarr_path=zarr_path,
-        analysis_name="flatfield",
-        component=component,
-        metadata={
-            "data_component": data_component,
-            "flatfield_component": flatfield_component,
-            "darkfield_component": darkfield_component,
-            "baseline_component": baseline_component,
-            "source_component": source_component,
-            "profile_count": int(profile_count),
-            "transformed_volumes": int(
-                shape_tpczyx[0] * shape_tpczyx[1] * shape_tpczyx[2]
-            ),
-            "output_dtype": "float32",
-            "output_chunks_tpczyx": [int(v) for v in output_chunks],
-            "basicpy_version": basicpy_version,
-        },
-    )
+
+    try:
+        fit_profile_done_array = checkpoint_group["fit_profile_done_pc"]
+
+        if layout.fit_mode == "full_volume":
+            fit_done_mask = np.asarray(fit_profile_done_array, dtype=bool)
+            pending_profile_pairs = [
+                (int(position_index), int(channel_index))
+                for position_index, channel_index in profile_pairs
+                if not bool(fit_done_mask[position_index, channel_index])
+            ]
+            _emit(
+                10,
+                "Prepared "
+                f"{len(pending_profile_pairs)} pending flatfield profile fit tasks "
+                f"(total_profiles={profile_count})",
+            )
+            if pending_profile_pairs:
+                checkpoint_group.attrs.update(
+                    {
+                        "fit_stage_status": "running",
+                        "updated_utc": _utc_now_iso(),
+                    }
+                )
+
+                def _build_profile_task(profile_key: tuple[int, int]) -> Any:
+                    position_index, channel_index = profile_key
+                    return delayed(_fit_profile_full_volume)(
+                        zarr_path=str(zarr_path),
+                        source_component=source_component,
+                        position_index=int(position_index),
+                        channel_index=int(channel_index),
+                        parameters=normalized,
+                    )
+
+                def _consume_profile_result(
+                    profile_key: tuple[int, int],
+                    profile_result: FlatfieldProfileResult,
+                ) -> None:
+                    _persist_profile_artifacts(
+                        zarr_path=str(zarr_path),
+                        flatfield_component=layout.flatfield_component,
+                        darkfield_component=layout.darkfield_component,
+                        baseline_component=layout.baseline_component,
+                        profile=profile_result,
+                    )
+                    position_index, channel_index = profile_key
+                    fit_profile_done_array[position_index, channel_index] = np.bool_(True)
+
+                _execute_tasks(
+                    task_inputs=pending_profile_pairs,
+                    build_task=_build_profile_task,
+                    consume_result=_consume_profile_result,
+                    progress_start=10,
+                    progress_span=25,
+                    progress_message="Fitted flatfield profile {completed}/{total}",
+                )
+
+            fit_done_mask = np.asarray(fit_profile_done_array, dtype=bool)
+            completed_profiles = int(np.count_nonzero(fit_done_mask))
+            if fit_done_mask.size == 0 or bool(np.all(fit_done_mask)):
+                checkpoint_group.attrs.update(
+                    {
+                        "fit_stage_status": "complete",
+                        "fit_outputs_materialized": True,
+                        "updated_utc": _utc_now_iso(),
+                    }
+                )
+            _emit(
+                40,
+                f"Persisted {completed_profiles} fitted flatfield profiles",
+            )
+        else:
+            tile_specs = _build_profile_tile_specs(
+                shape_tpczyx=shape_tpczyx,
+                parameters=normalized,
+            )
+            tiles_per_profile = (
+                int(len(tile_specs) // max(1, profile_count)) if profile_count > 0 else 0
+            )
+            tile_done_array = checkpoint_group["fit_tile_done_pcyx"]
+            tile_done_mask = np.asarray(tile_done_array, dtype=bool)
+            pending_tile_specs = [
+                tile
+                for tile in tile_specs
+                if not bool(
+                    tile_done_mask[
+                        tile.position_index,
+                        tile.channel_index,
+                        tile.tile_y_index,
+                        tile.tile_x_index,
+                    ]
+                )
+            ]
+            _emit(
+                10,
+                "Prepared "
+                f"{len(pending_tile_specs)} pending flatfield tile fit tasks "
+                f"(total_tiles={len(tile_specs)}, profiles={profile_count}, "
+                f"tiles_per_profile~{tiles_per_profile})",
+            )
+            write_root = zarr.open_group(str(zarr_path), mode="a")
+            flatfield_array = write_root[layout.flatfield_component]
+            darkfield_array = write_root[layout.darkfield_component]
+            baseline_array = write_root[layout.baseline_component]
+            baseline_sum_array = checkpoint_group["fit_baseline_sum_pctz"]
+            baseline_count_array = checkpoint_group["fit_baseline_count_pc"]
+            flatfield_sum_array = (
+                checkpoint_group["fit_flatfield_sum_pcyx"]
+                if layout.blend_tiles_effective
+                else None
+            )
+            darkfield_sum_array = (
+                checkpoint_group["fit_darkfield_sum_pcyx"]
+                if layout.blend_tiles_effective
+                else None
+            )
+            weight_sum_array = (
+                checkpoint_group["fit_weight_sum_pcyx"]
+                if layout.blend_tiles_effective
+                else None
+            )
+
+            if pending_tile_specs:
+                checkpoint_group.attrs.update(
+                    {
+                        "fit_stage_status": "running",
+                        "updated_utc": _utc_now_iso(),
+                    }
+                )
+
+                def _build_tile_task(tile: FlatfieldTileSpec) -> Any:
+                    return delayed(_fit_profile_tile)(
+                        zarr_path=str(zarr_path),
+                        source_component=source_component,
+                        tile=tile,
+                        parameters=normalized,
+                    )
+
+                def _consume_tile_result(
+                    _tile: FlatfieldTileSpec,
+                    tile_result: FlatfieldTileFitResult,
+                ) -> None:
+                    position_index = int(tile_result.position_index)
+                    channel_index = int(tile_result.channel_index)
+                    y_start, y_stop = int(tile_result.y_bounds[0]), int(tile_result.y_bounds[1])
+                    x_start, x_stop = int(tile_result.x_bounds[0]), int(tile_result.x_bounds[1])
+
+                    baseline_sum = np.asarray(
+                        baseline_sum_array[position_index, channel_index, :, :],
+                        dtype=np.float32,
+                    )
+                    baseline_sum += np.asarray(tile_result.baseline_tz, dtype=np.float32)
+                    baseline_sum_array[position_index, channel_index, :, :] = baseline_sum
+                    baseline_count = int(baseline_count_array[position_index, channel_index])
+                    baseline_count_array[position_index, channel_index] = np.uint32(
+                        baseline_count + 1
+                    )
+
+                    if layout.blend_tiles_effective:
+                        if tile_result.weight_payload_yx is None:
+                            raise ValueError(
+                                "Flatfield tiled reduction expected blend weights for a tile result."
+                            )
+                        if (
+                            flatfield_sum_array is None
+                            or darkfield_sum_array is None
+                            or weight_sum_array is None
+                        ):
+                            raise ValueError(
+                                "Flatfield checkpoint is missing blend-accumulator datasets."
+                            )
+                        flatfield_sum = np.asarray(
+                            flatfield_sum_array[
+                                position_index,
+                                channel_index,
+                                y_start:y_stop,
+                                x_start:x_stop,
+                            ],
+                            dtype=np.float32,
+                        )
+                        flatfield_sum += np.asarray(
+                            tile_result.flatfield_payload_yx,
+                            dtype=np.float32,
+                        )
+                        flatfield_sum_array[
+                            position_index,
+                            channel_index,
+                            y_start:y_stop,
+                            x_start:x_stop,
+                        ] = flatfield_sum
+
+                        darkfield_sum = np.asarray(
+                            darkfield_sum_array[
+                                position_index,
+                                channel_index,
+                                y_start:y_stop,
+                                x_start:x_stop,
+                            ],
+                            dtype=np.float32,
+                        )
+                        darkfield_sum += np.asarray(
+                            tile_result.darkfield_payload_yx,
+                            dtype=np.float32,
+                        )
+                        darkfield_sum_array[
+                            position_index,
+                            channel_index,
+                            y_start:y_stop,
+                            x_start:x_stop,
+                        ] = darkfield_sum
+
+                        weight_sum = np.asarray(
+                            weight_sum_array[
+                                position_index,
+                                channel_index,
+                                y_start:y_stop,
+                                x_start:x_stop,
+                            ],
+                            dtype=np.float32,
+                        )
+                        weight_sum += np.asarray(
+                            tile_result.weight_payload_yx,
+                            dtype=np.float32,
+                        )
+                        weight_sum_array[
+                            position_index,
+                            channel_index,
+                            y_start:y_stop,
+                            x_start:x_stop,
+                        ] = weight_sum
+                    else:
+                        flatfield_array[
+                            position_index,
+                            channel_index,
+                            y_start:y_stop,
+                            x_start:x_stop,
+                        ] = tile_result.flatfield_payload_yx
+                        darkfield_array[
+                            position_index,
+                            channel_index,
+                            y_start:y_stop,
+                            x_start:x_stop,
+                        ] = tile_result.darkfield_payload_yx
+
+                    tile_done_array[
+                        position_index,
+                        channel_index,
+                        int(tile_result.tile_y_index),
+                        int(tile_result.tile_x_index),
+                    ] = np.bool_(True)
+
+                _execute_tasks(
+                    task_inputs=pending_tile_specs,
+                    build_task=_build_tile_task,
+                    consume_result=_consume_tile_result,
+                    progress_start=10,
+                    progress_span=25,
+                    progress_message="Fitted flatfield tile {completed}/{total}",
+                )
+
+            tile_done_mask = np.asarray(tile_done_array, dtype=bool)
+            fit_outputs_materialized = bool(
+                checkpoint_group.attrs.get("fit_outputs_materialized", False)
+            )
+            if tile_done_mask.size == 0 or bool(np.all(tile_done_mask)):
+                if (not fit_outputs_materialized) or bool(pending_tile_specs):
+                    for position_index, channel_index in profile_pairs:
+                        baseline_sum = np.asarray(
+                            baseline_sum_array[position_index, channel_index, :, :],
+                            dtype=np.float32,
+                        )
+                        baseline_count = max(
+                            1,
+                            int(baseline_count_array[position_index, channel_index]),
+                        )
+                        baseline_array[position_index, channel_index, :, :] = (
+                            baseline_sum / np.float32(float(baseline_count))
+                        ).astype(np.float32, copy=False)
+                        if layout.blend_tiles_effective:
+                            if (
+                                flatfield_sum_array is None
+                                or darkfield_sum_array is None
+                                or weight_sum_array is None
+                            ):
+                                raise ValueError(
+                                    "Flatfield checkpoint is missing blend-accumulator datasets."
+                                )
+                            weight_sum = np.asarray(
+                                weight_sum_array[position_index, channel_index, :, :],
+                                dtype=np.float32,
+                            )
+                            denominator = np.maximum(weight_sum, np.float32(1e-6))
+                            flatfield_sum = np.asarray(
+                                flatfield_sum_array[position_index, channel_index, :, :],
+                                dtype=np.float32,
+                            )
+                            darkfield_sum = np.asarray(
+                                darkfield_sum_array[position_index, channel_index, :, :],
+                                dtype=np.float32,
+                            )
+                            flatfield_array[position_index, channel_index, :, :] = (
+                                flatfield_sum / denominator
+                            ).astype(np.float32, copy=False)
+                            darkfield_array[position_index, channel_index, :, :] = (
+                                darkfield_sum / denominator
+                            ).astype(np.float32, copy=False)
+
+                checkpoint_group.attrs.update(
+                    {
+                        "fit_stage_status": "complete",
+                        "fit_outputs_materialized": True,
+                        "updated_utc": _utc_now_iso(),
+                    }
+                )
+            completed_tiles = int(np.count_nonzero(tile_done_mask))
+            _emit(
+                40,
+                "Persisted "
+                f"{profile_count} fitted flatfield profiles from "
+                f"{completed_tiles}/{len(tile_specs)} completed tile tasks",
+            )
+
+        transform_done_array = checkpoint_group["transform_done_tpcyx"]
+        transform_specs = _build_transform_specs(
+            shape_tpczyx=shape_tpczyx,
+            output_chunks_tpczyx=output_chunks,
+            overlap_zyx=cast(tuple[int, int, int], normalized["overlap_zyx"]),
+            use_overlap=bool(normalized["use_map_overlap"]),
+        )
+        transform_done_mask = np.asarray(transform_done_array, dtype=bool)
+        pending_transform_specs = [
+            spec
+            for spec in transform_specs
+            if not bool(
+                transform_done_mask[
+                    spec.t_index,
+                    spec.p_index,
+                    spec.c_index,
+                    spec.y_chunk_index,
+                    spec.x_chunk_index,
+                ]
+            )
+        ]
+        _emit(
+            45,
+            "Prepared "
+            f"{len(pending_transform_specs)} pending flatfield transform tasks "
+            f"(total_chunks={len(transform_specs)})",
+        )
+        if pending_transform_specs:
+            checkpoint_group.attrs.update(
+                {
+                    "transform_stage_status": "running",
+                    "updated_utc": _utc_now_iso(),
+                }
+            )
+
+            def _build_transform_task(spec: FlatfieldTransformSpec) -> Any:
+                return delayed(_transform_region)(
+                    zarr_path=str(zarr_path),
+                    source_component=source_component,
+                    output_data_component=layout.data_component,
+                    flatfield_component=layout.flatfield_component,
+                    darkfield_component=layout.darkfield_component,
+                    baseline_component=layout.baseline_component,
+                    position_index=int(spec.p_index),
+                    channel_index=int(spec.c_index),
+                    read_region=spec.read_region,
+                    core_region=spec.core_region,
+                    is_timelapse=bool(normalized["is_timelapse"]),
+                )
+
+            def _consume_transform_result(
+                spec: FlatfieldTransformSpec,
+                _result: int,
+            ) -> None:
+                transform_done_array[
+                    int(spec.t_index),
+                    int(spec.p_index),
+                    int(spec.c_index),
+                    int(spec.y_chunk_index),
+                    int(spec.x_chunk_index),
+                ] = np.bool_(True)
+
+            _execute_tasks(
+                task_inputs=pending_transform_specs,
+                build_task=_build_transform_task,
+                consume_result=_consume_transform_result,
+                progress_start=45,
+                progress_span=50,
+                progress_message="Corrected chunk {completed}/{total}",
+            )
+
+        transform_done_mask = np.asarray(transform_done_array, dtype=bool)
+        if transform_done_mask.size == 0 or bool(np.all(transform_done_mask)):
+            checkpoint_group.attrs.update(
+                {
+                    "transform_stage_status": "complete",
+                    "run_status": "complete",
+                    "completed_utc": _utc_now_iso(),
+                    "updated_utc": _utc_now_iso(),
+                }
+            )
+
+        transformed_volumes = int(shape_tpczyx[0] * shape_tpczyx[1] * shape_tpczyx[2])
+        latest_group = zarr.open_group(str(zarr_path), mode="a")[layout.component]
+        latest_group.attrs.update(
+            {
+                "profile_count": int(profile_count),
+                "transformed_volumes": int(transformed_volumes),
+                "source_component": str(source_component),
+                "data_component": layout.data_component,
+                "flatfield_component": layout.flatfield_component,
+                "darkfield_component": layout.darkfield_component,
+                "baseline_component": layout.baseline_component,
+                "parameters": _to_jsonable(dict(normalized)),
+                "resume_parameter_fingerprint": str(layout.parameter_fingerprint),
+                "resumed_from_checkpoint": bool(layout.resumed),
+                "output_dtype": "float32",
+                "output_chunks_tpczyx": [int(v) for v in output_chunks],
+                "basicpy_version": basicpy_version,
+                "updated_utc": _utc_now_iso(),
+            }
+        )
+        register_latest_output_reference(
+            zarr_path=zarr_path,
+            analysis_name="flatfield",
+            component=layout.component,
+            metadata={
+                "data_component": layout.data_component,
+                "flatfield_component": layout.flatfield_component,
+                "darkfield_component": layout.darkfield_component,
+                "baseline_component": layout.baseline_component,
+                "source_component": source_component,
+                "profile_count": int(profile_count),
+                "transformed_volumes": int(transformed_volumes),
+                "output_dtype": "float32",
+                "output_chunks_tpczyx": [int(v) for v in output_chunks],
+                "basicpy_version": basicpy_version,
+                "resume_parameter_fingerprint": str(layout.parameter_fingerprint),
+                "resumed_from_checkpoint": bool(layout.resumed),
+            },
+        )
+    except Exception as exc:
+        failed_checkpoint_group = zarr.open_group(str(zarr_path), mode="a")[
+            layout.checkpoint_component
+        ]
+        failed_checkpoint_group.attrs.update(
+            {
+                "run_status": "failed",
+                "updated_utc": _utc_now_iso(),
+                "last_error": str(exc),
+            }
+        )
+        raise
+
     _emit(100, "Flatfield correction complete")
     return FlatfieldSummary(
-        component=component,
-        data_component=data_component,
-        flatfield_component=flatfield_component,
-        darkfield_component=darkfield_component,
-        baseline_component=baseline_component,
+        component=layout.component,
+        data_component=layout.data_component,
+        flatfield_component=layout.flatfield_component,
+        darkfield_component=layout.darkfield_component,
+        baseline_component=layout.baseline_component,
         source_component=source_component,
         profile_count=int(profile_count),
         transformed_volumes=int(shape_tpczyx[0] * shape_tpczyx[1] * shape_tpczyx[2]),
