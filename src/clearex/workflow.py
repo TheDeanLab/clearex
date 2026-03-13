@@ -74,6 +74,9 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "use_map_overlap": True,
         "overlap_zyx": [0, 32, 32],
         "memory_overhead_factor": 2.0,
+        "fit_mode": "tiled",
+        "fit_tile_shape_yx": [256, 256],
+        "blend_tiles": False,
         "get_darkfield": False,
         "smoothness_flatfield": 1.0,
         "working_size": 128,
@@ -321,6 +324,44 @@ def _normalize_parameter_int_triplet(
     if len(tokens) != 3:
         raise ValueError(f"{field_name} must define exactly three values.")
     parsed = [int(tokens[0]), int(tokens[1]), int(tokens[2])]
+    if any(item <= 0 for item in parsed):
+        raise ValueError(f"{field_name} values must be greater than zero.")
+    return parsed
+
+
+def _normalize_parameter_int_pair(
+    value: Any,
+    *,
+    field_name: str,
+    default: tuple[int, int],
+) -> list[int]:
+    """Normalize parameter value into a positive integer pair.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate value to parse.
+    field_name : str
+        Field name used in validation errors.
+    default : tuple[int, int]
+        Default pair when value is empty.
+
+    Returns
+    -------
+    list[int]
+        Positive integer pair.
+
+    Raises
+    ------
+    ValueError
+        If value does not define exactly two positive integers.
+    """
+    tokens = _normalize_parameter_string_list(value)
+    if not tokens:
+        return [int(default[0]), int(default[1])]
+    if len(tokens) != 2:
+        raise ValueError(f"{field_name} must define exactly two values.")
+    parsed = [int(tokens[0]), int(tokens[1])]
     if any(item <= 0 for item in parsed):
         raise ValueError(f"{field_name} values must be greater than zero.")
     return parsed
@@ -579,6 +620,18 @@ def _normalize_flatfield_parameters(
     normalized["working_size"] = int(normalized.get("working_size", 128))
     if normalized["working_size"] <= 0:
         raise ValueError("flatfield working_size must be greater than zero.")
+    fit_mode = (
+        str(normalized.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    )
+    if fit_mode not in {"tiled", "full_volume"}:
+        raise ValueError("flatfield fit_mode must be 'tiled' or 'full_volume'.")
+    normalized["fit_mode"] = fit_mode
+    normalized["fit_tile_shape_yx"] = _normalize_parameter_int_pair(
+        normalized.get("fit_tile_shape_yx", [256, 256]),
+        field_name="flatfield fit_tile_shape_yx",
+        default=(256, 256),
+    )
+    normalized["blend_tiles"] = bool(normalized.get("blend_tiles", False))
     return normalized
 
 

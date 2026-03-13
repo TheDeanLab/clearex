@@ -3177,6 +3177,14 @@ if HAS_PYQT6:
                 "Downsample size used by BaSiCPy during profile fitting. Larger "
                 "values use more detail but increase runtime and memory."
             ),
+            "fit_tile_shape_yx": (
+                "Spatial tile size for chunk-wise flatfield profile fitting in (y, x). "
+                "Larger tiles reduce seams but increase per-task memory."
+            ),
+            "blend_tiles": (
+                "Blend overlapping tile estimates when stitching flatfield/darkfield "
+                "profiles. Disable to use strict core-crop stitching."
+            ),
             "is_timelapse": (
                 "Apply BaSiCPy baseline subtraction for time-varying illumination."
             ),
@@ -3750,6 +3758,22 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["working_size"],
             )
 
+            self._flatfield_tile_y_spin = QSpinBox()
+            self._flatfield_tile_y_spin.setRange(1, 16384)
+            form.addRow("Fit tile Y", self._flatfield_tile_y_spin)
+            self._register_parameter_hint(
+                self._flatfield_tile_y_spin,
+                self._PARAMETER_HINTS["fit_tile_shape_yx"],
+            )
+
+            self._flatfield_tile_x_spin = QSpinBox()
+            self._flatfield_tile_x_spin.setRange(1, 16384)
+            form.addRow("Fit tile X", self._flatfield_tile_x_spin)
+            self._register_parameter_hint(
+                self._flatfield_tile_x_spin,
+                self._PARAMETER_HINTS["fit_tile_shape_yx"],
+            )
+
             self._flatfield_timelapse_checkbox = QCheckBox(
                 "Apply timelapse baseline correction"
             )
@@ -3766,6 +3790,13 @@ if HAS_PYQT6:
             self._register_parameter_hint(
                 self._flatfield_use_overlap_checkbox,
                 self._PARAMETER_HINTS["use_map_overlap"],
+            )
+
+            self._flatfield_blend_tiles_checkbox = QCheckBox("Blend Tiles")
+            form.addRow("", self._flatfield_blend_tiles_checkbox)
+            self._register_parameter_hint(
+                self._flatfield_blend_tiles_checkbox,
+                self._PARAMETER_HINTS["blend_tiles"],
             )
 
             self._flatfield_overlap_z_spin = QSpinBox()
@@ -4952,12 +4983,15 @@ if HAS_PYQT6:
                 self._flatfield_darkfield_checkbox,
                 self._flatfield_smoothness_spin,
                 self._flatfield_working_size_spin,
+                self._flatfield_tile_y_spin,
+                self._flatfield_tile_x_spin,
                 self._flatfield_timelapse_checkbox,
                 self._flatfield_use_overlap_checkbox,
             )
             for widget in widgets:
                 widget.setEnabled(flatfield_enabled)
 
+            self._flatfield_blend_tiles_checkbox.setEnabled(overlap_enabled)
             self._flatfield_overlap_z_spin.setEnabled(overlap_enabled)
             self._flatfield_overlap_y_spin.setEnabled(overlap_enabled)
             self._flatfield_overlap_x_spin.setEnabled(overlap_enabled)
@@ -5146,11 +5180,26 @@ if HAS_PYQT6:
             self._flatfield_working_size_spin.setValue(
                 max(1, int(flatfield_params.get("working_size", 128)))
             )
+            flatfield_fit_tile_shape = flatfield_params.get("fit_tile_shape_yx", [256, 256])
+            if (
+                not isinstance(flatfield_fit_tile_shape, (tuple, list))
+                or len(flatfield_fit_tile_shape) != 2
+            ):
+                flatfield_fit_tile_shape = [256, 256]
+            self._flatfield_tile_y_spin.setValue(
+                max(1, int(flatfield_fit_tile_shape[0]))
+            )
+            self._flatfield_tile_x_spin.setValue(
+                max(1, int(flatfield_fit_tile_shape[1]))
+            )
             self._flatfield_timelapse_checkbox.setChecked(
                 bool(flatfield_params.get("is_timelapse", False))
             )
             self._flatfield_use_overlap_checkbox.setChecked(
                 bool(flatfield_params.get("use_map_overlap", True))
+            )
+            self._flatfield_blend_tiles_checkbox.setChecked(
+                bool(flatfield_params.get("blend_tiles", False))
             )
             flatfield_overlap_zyx = flatfield_params.get("overlap_zyx", [0, 32, 32])
             if (
@@ -5672,6 +5721,15 @@ if HAS_PYQT6:
                 ],
                 "memory_overhead_factor": float(
                     self._flatfield_defaults.get("memory_overhead_factor", 2.0)
+                ),
+                "fit_mode": "tiled",
+                "fit_tile_shape_yx": [
+                    int(self._flatfield_tile_y_spin.value()),
+                    int(self._flatfield_tile_x_spin.value()),
+                ],
+                "blend_tiles": bool(
+                    self._flatfield_blend_tiles_checkbox.isChecked()
+                    and self._flatfield_use_overlap_checkbox.isChecked()
                 ),
                 "get_darkfield": bool(
                     self._flatfield_darkfield_checkbox.isChecked()

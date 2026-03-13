@@ -161,3 +161,149 @@ def test_run_flatfield_analysis_defaults_darkfield_off(
         client.close()
 
     assert seen_get_darkfield == [False]
+
+
+def test_run_flatfield_analysis_tiled_fit_without_blending(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_tiled_no_blend.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 1 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 1, 4, 4))
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 1, 2, 2),
+        overwrite=True,
+    )
+
+    seen_shapes: list[tuple[int, int, int]] = []
+
+    class _FakeBaSiC:
+        def __init__(
+            self,
+            *,
+            fitting_mode,
+            get_darkfield,
+            smoothness_flatfield,
+            working_size,
+            device,
+        ) -> None:
+            del fitting_mode, get_darkfield, smoothness_flatfield, working_size, device
+            self.flatfield = np.empty((0, 0), dtype=np.float32)
+            self.darkfield = np.empty((0, 0), dtype=np.float32)
+            self.baseline = np.empty((0,), dtype=np.float32)
+
+        def fit(self, images, skip_shape_warning=False) -> None:
+            del skip_shape_warning
+            seen_shapes.append(tuple(int(v) for v in images.shape))
+            marker = float(images[0, 0, 0]) + 10.0
+            self.flatfield = np.full(images.shape[1:], marker, dtype=np.float32)
+            self.darkfield = np.zeros(images.shape[1:], dtype=np.float32)
+            self.baseline = np.zeros(images.shape[0], dtype=np.float32)
+
+    monkeypatch.setattr(flatfield_pipeline, "_load_basic_class", lambda: _FakeBaSiC)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "fit_mode": "tiled",
+                "fit_tile_shape_yx": [2, 2],
+                "blend_tiles": False,
+                "smoothness_flatfield": 1.0,
+                "working_size": 64,
+                "use_map_overlap": True,
+                "overlap_zyx": [0, 1, 1],
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    assert len(seen_shapes) == 4
+    assert all(shape == (1, 3, 3) for shape in seen_shapes)
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    flatfield = np.asarray(
+        output_root["results"]["flatfield"]["latest"]["flatfield_pcyx"],
+        dtype=np.float32,
+    )
+    assert np.array_equal(
+        flatfield[0, 0],
+        np.asarray(
+            [
+                [10.0, 10.0, 11.0, 11.0],
+                [10.0, 10.0, 11.0, 11.0],
+                [14.0, 14.0, 15.0, 15.0],
+                [14.0, 14.0, 15.0, 15.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+
+def test_run_flatfield_analysis_tiled_fit_blends_tiles(tmp_path: Path, monkeypatch) -> None:
+    store_path = tmp_path / "analysis_store_tiled_blend.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 1 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 1, 4, 4))
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 1, 2, 2),
+        overwrite=True,
+    )
+
+    class _FakeBaSiC:
+        def __init__(
+            self,
+            *,
+            fitting_mode,
+            get_darkfield,
+            smoothness_flatfield,
+            working_size,
+            device,
+        ) -> None:
+            del fitting_mode, get_darkfield, smoothness_flatfield, working_size, device
+            self.flatfield = np.empty((0, 0), dtype=np.float32)
+            self.darkfield = np.empty((0, 0), dtype=np.float32)
+            self.baseline = np.empty((0,), dtype=np.float32)
+
+        def fit(self, images, skip_shape_warning=False) -> None:
+            del skip_shape_warning
+            marker = float(images[0, 0, 0]) + 10.0
+            self.flatfield = np.full(images.shape[1:], marker, dtype=np.float32)
+            self.darkfield = np.zeros(images.shape[1:], dtype=np.float32)
+            self.baseline = np.zeros(images.shape[0], dtype=np.float32)
+
+    monkeypatch.setattr(flatfield_pipeline, "_load_basic_class", lambda: _FakeBaSiC)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "fit_mode": "tiled",
+                "fit_tile_shape_yx": [2, 2],
+                "blend_tiles": True,
+                "smoothness_flatfield": 1.0,
+                "working_size": 64,
+                "use_map_overlap": True,
+                "overlap_zyx": [0, 1, 1],
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    flatfield = np.asarray(
+        output_root["results"]["flatfield"]["latest"]["flatfield_pcyx"],
+        dtype=np.float32,
+    )[0, 0]
+    assert flatfield.shape == (4, 4)
+    assert np.unique(flatfield).size > 4
+    assert flatfield[1, 1] > 10.0
+    assert flatfield[1, 1] < 14.0

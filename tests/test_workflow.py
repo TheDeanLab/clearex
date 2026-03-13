@@ -111,6 +111,9 @@ class TestWorkflowConfig:
         assert "flatfield" in cfg.analysis_parameters
         assert cfg.analysis_parameters["flatfield"]["execution_order"] == 1
         assert cfg.analysis_parameters["flatfield"]["get_darkfield"] is False
+        assert cfg.analysis_parameters["flatfield"]["fit_mode"] == "tiled"
+        assert cfg.analysis_parameters["flatfield"]["fit_tile_shape_yx"] == [256, 256]
+        assert cfg.analysis_parameters["flatfield"]["blend_tiles"] is False
         assert "particle_detection" in cfg.analysis_parameters
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
         assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 3
@@ -128,6 +131,9 @@ class TestWorkflowConfig:
                     "working_size": "192",
                     "is_timelapse": 1,
                     "overlap_zyx": [4, 8, 16],
+                    "fit_mode": "FULL-VOLUME",
+                    "fit_tile_shape_yx": "320,448",
+                    "blend_tiles": 1,
                     "input_source": "deconvolution",
                 }
             }
@@ -138,12 +144,27 @@ class TestWorkflowConfig:
         assert params["working_size"] == 192
         assert params["is_timelapse"] is True
         assert params["overlap_zyx"] == [4, 8, 16]
+        assert params["fit_mode"] == "full_volume"
+        assert params["fit_tile_shape_yx"] == [320, 448]
+        assert params["blend_tiles"] is True
         assert params["input_source"] == "deconvolution"
 
     def test_rejects_invalid_flatfield_working_size(self):
         with pytest.raises(ValueError):
             WorkflowConfig(
                 analysis_parameters={"flatfield": {"working_size": 0}}
+            )
+
+    def test_rejects_invalid_flatfield_fit_mode(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={"flatfield": {"fit_mode": "chunked"}}
+            )
+
+    def test_rejects_invalid_flatfield_fit_tile_shape(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={"flatfield": {"fit_tile_shape_yx": [128]}}
             )
 
     def test_normalizes_particle_analysis_parameters(self):

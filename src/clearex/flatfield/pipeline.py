@@ -57,6 +57,7 @@ RegionBounds = tuple[
     tuple[int, int],
     tuple[int, int],
 ]
+SpatialBounds = tuple[tuple[int, int], tuple[int, int]]
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,71 @@ class FlatfieldProfileResult:
     flatfield_yx: Float32Array
     darkfield_yx: Float32Array
     baseline_tz: Float32Array
+
+
+@dataclass(frozen=True)
+class FlatfieldTileSpec:
+    """Tile specification for one flatfield fit task.
+
+    Attributes
+    ----------
+    position_index : int
+        Position index on the ``p`` axis.
+    channel_index : int
+        Channel index on the ``c`` axis.
+    y_core_bounds : tuple[int, int]
+        Non-overlapping output bounds in ``y``.
+    x_core_bounds : tuple[int, int]
+        Non-overlapping output bounds in ``x``.
+    y_read_bounds : tuple[int, int]
+        Read bounds in ``y`` including overlap halo.
+    x_read_bounds : tuple[int, int]
+        Read bounds in ``x`` including overlap halo.
+    """
+
+    position_index: int
+    channel_index: int
+    y_core_bounds: tuple[int, int]
+    x_core_bounds: tuple[int, int]
+    y_read_bounds: tuple[int, int]
+    x_read_bounds: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class FlatfieldTileFitResult:
+    """One tile-level flatfield fit payload.
+
+    Attributes
+    ----------
+    position_index : int
+        Position index on the ``p`` axis.
+    channel_index : int
+        Channel index on the ``c`` axis.
+    y_bounds : tuple[int, int]
+        Destination bounds in ``y`` for payload arrays.
+    x_bounds : tuple[int, int]
+        Destination bounds in ``x`` for payload arrays.
+    flatfield_payload_yx : numpy.ndarray
+        Tile payload in ``(y, x)`` order. Contains either direct estimates
+        (no blending) or weighted contributions (blending mode).
+    darkfield_payload_yx : numpy.ndarray
+        Tile payload in ``(y, x)`` order. Contains either direct estimates
+        (no blending) or weighted contributions (blending mode).
+    baseline_tz : numpy.ndarray
+        Baseline estimate for the tile in ``(t, z)`` order.
+    weight_payload_yx : numpy.ndarray, optional
+        Tile blending weights in ``(y, x)`` order. ``None`` when blending is
+        disabled.
+    """
+
+    position_index: int
+    channel_index: int
+    y_bounds: tuple[int, int]
+    x_bounds: tuple[int, int]
+    flatfield_payload_yx: Float32Array
+    darkfield_payload_yx: Float32Array
+    baseline_tz: Float32Array
+    weight_payload_yx: Optional[Float32Array]
 
 
 @dataclass(frozen=True)
@@ -220,6 +286,21 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("flatfield smoothness_flatfield must be greater than zero.")
     normalized["working_size"] = max(1, int(normalized.get("working_size", 128)))
     normalized["is_timelapse"] = bool(normalized.get("is_timelapse", False))
+    fit_mode = str(normalized.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    if fit_mode not in {"tiled", "full_volume"}:
+        raise ValueError("flatfield fit_mode must be 'tiled' or 'full_volume'.")
+    normalized["fit_mode"] = fit_mode
+    fit_tile_shape = normalized.get("fit_tile_shape_yx", [256, 256])
+    if (
+        not isinstance(fit_tile_shape, (tuple, list))
+        or len(fit_tile_shape) != 2
+    ):
+        raise ValueError(
+            "flatfield fit_tile_shape_yx must define tile sizes in (y, x) order."
+        )
+    fit_tile_shape_yx = (max(1, int(fit_tile_shape[0])), max(1, int(fit_tile_shape[1])))
+    normalized["fit_tile_shape_yx"] = fit_tile_shape_yx
+    normalized["blend_tiles"] = bool(normalized.get("blend_tiles", False))
     return normalized
 
 
@@ -242,6 +323,136 @@ def _axis_chunk_bounds(size: int, chunk_size: int) -> list[tuple[int, int]]:
         (start, min(start + chunk_size, size))
         for start in range(0, size, chunk_size)
     ]
+
+
+def _expand_bounds_with_overlap(
+    bounds: tuple[int, int],
+    *,
+    overlap: int,
+    axis_size: int,
+) -> tuple[int, int]:
+    """Expand one-dimensional bounds by overlap and clip to axis limits.
+
+    Parameters
+    ----------
+    bounds : tuple[int, int]
+        Input ``(start, stop)`` bounds.
+    overlap : int
+        Overlap width to apply on both sides.
+    axis_size : int
+        Full axis size.
+
+    Returns
+    -------
+    tuple[int, int]
+        Expanded and clipped bounds.
+    """
+    return (
+        max(0, int(bounds[0]) - int(overlap)),
+        min(int(axis_size), int(bounds[1]) + int(overlap)),
+    )
+
+
+def _axis_blend_weights(length: int, left_core: int, right_core: int) -> Float32Array:
+    """Return 1D feather weights for one tile axis.
+
+    Parameters
+    ----------
+    length : int
+        Tile axis length.
+    left_core : int
+        Inclusive core start offset inside the tile.
+    right_core : int
+        Exclusive core stop offset inside the tile.
+
+    Returns
+    -------
+    numpy.ndarray
+        Feather weights in ``(length,)`` shape.
+    """
+    weights = np.ones(max(1, int(length)), dtype=np.float32)
+    left = max(0, int(left_core))
+    right = min(int(length), max(left, int(right_core)))
+    if left > 0:
+        ramp = np.linspace(0.0, 1.0, left + 2, dtype=np.float32)[1:-1]
+        weights[:left] = ramp
+    if right < int(length):
+        tail = int(length) - right
+        ramp = np.linspace(1.0, 0.0, tail + 2, dtype=np.float32)[1:-1]
+        weights[right:] = ramp
+    return np.maximum(weights, np.float32(1e-3))
+
+
+def _tile_blend_weights(
+    *,
+    shape_yx: tuple[int, int],
+    core_offsets_yx: SpatialBounds,
+) -> Float32Array:
+    """Build 2D blending weights for one read tile.
+
+    Parameters
+    ----------
+    shape_yx : tuple[int, int]
+        Read tile shape in ``(y, x)`` order.
+    core_offsets_yx : tuple[tuple[int, int], tuple[int, int]]
+        Core offsets inside the read tile as ``((y0, y1), (x0, x1))``.
+
+    Returns
+    -------
+    numpy.ndarray
+        2D blending weights in ``(y, x)`` order.
+    """
+    y_weights = _axis_blend_weights(
+        int(shape_yx[0]),
+        int(core_offsets_yx[0][0]),
+        int(core_offsets_yx[0][1]),
+    )
+    x_weights = _axis_blend_weights(
+        int(shape_yx[1]),
+        int(core_offsets_yx[1][0]),
+        int(core_offsets_yx[1][1]),
+    )
+    return np.outer(y_weights, x_weights).astype(np.float32, copy=False)
+
+
+def _fit_basic_profile(
+    *,
+    fit_images: Float32Array,
+    basic_class: Any,
+    parameters: Mapping[str, Any],
+) -> tuple[Float32Array, Float32Array, Float32Array]:
+    """Fit BaSiCPy artifacts for a stack of 2D images.
+
+    Parameters
+    ----------
+    fit_images : numpy.ndarray
+        Input images in ``(n_images, y, x)`` order.
+    basic_class : Any
+        Imported BaSiCPy ``BaSiC`` class.
+    parameters : mapping[str, Any]
+        Normalized flatfield parameter mapping.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+        Flatfield, darkfield, and baseline arrays.
+    """
+    basic = basic_class(
+        fitting_mode="approximate",
+        get_darkfield=bool(parameters.get("get_darkfield", False)),
+        smoothness_flatfield=float(parameters.get("smoothness_flatfield", 1.0)),
+        working_size=int(parameters.get("working_size", 128)),
+        device="cpu",
+    )
+    basic.fit(fit_images, skip_shape_warning=True)
+    flatfield_yx = np.asarray(basic.flatfield, dtype=np.float32)
+    darkfield_yx = np.asarray(basic.darkfield, dtype=np.float32)
+    baseline = np.asarray(basic.baseline, dtype=np.float32)
+    return (
+        flatfield_yx,
+        darkfield_yx,
+        baseline,
+    )
 
 
 def _region_to_slices(region: RegionBounds) -> tuple[slice, slice, slice, slice, slice, slice]:
@@ -580,6 +791,57 @@ def _fit_profile(
     ValueError
         If the fitted baseline length cannot be reshaped back to ``(t, z)``.
     """
+    fit_mode = str(parameters.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    if fit_mode == "full_volume":
+        return _fit_profile_full_volume(
+            zarr_path=zarr_path,
+            source_component=source_component,
+            position_index=position_index,
+            channel_index=channel_index,
+            parameters=parameters,
+        )
+    return _fit_profile_tiled(
+        zarr_path=zarr_path,
+        source_component=source_component,
+        position_index=position_index,
+        channel_index=channel_index,
+        parameters=parameters,
+    )
+
+
+def _fit_profile_full_volume(
+    *,
+    zarr_path: str,
+    source_component: str,
+    position_index: int,
+    channel_index: int,
+    parameters: Mapping[str, Any],
+) -> FlatfieldProfileResult:
+    """Fit one flatfield profile by materializing the full ``(t, z, y, x)`` volume.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Zarr analysis store path.
+    source_component : str
+        Source data component.
+    position_index : int
+        Position index on the ``p`` axis.
+    channel_index : int
+        Channel index on the ``c`` axis.
+    parameters : mapping[str, Any]
+        Normalized flatfield parameter mapping.
+
+    Returns
+    -------
+    FlatfieldProfileResult
+        Fitted profile artifacts for the requested ``(position, channel)`` pair.
+
+    Raises
+    ------
+    ValueError
+        If the fitted baseline length cannot be reshaped back to ``(t, z)``.
+    """
     root = zarr.open_group(str(zarr_path), mode="r")
     source = root[source_component]
     volume_tzyx = np.asarray(
@@ -588,20 +850,12 @@ def _fit_profile(
     )
     t_count, z_count, y_count, x_count = volume_tzyx.shape
     fit_images = volume_tzyx.reshape(t_count * z_count, y_count, x_count)
-
     basic_class = _load_basic_class()
-    basic = basic_class(
-        fitting_mode="approximate",
-        get_darkfield=bool(parameters.get("get_darkfield", False)),
-        smoothness_flatfield=float(parameters.get("smoothness_flatfield", 1.0)),
-        working_size=int(parameters.get("working_size", 128)),
-        device="cpu",
+    flatfield_yx, darkfield_yx, baseline = _fit_basic_profile(
+        fit_images=fit_images,
+        basic_class=basic_class,
+        parameters=parameters,
     )
-    basic.fit(fit_images, skip_shape_warning=True)
-
-    flatfield_yx = np.asarray(basic.flatfield, dtype=np.float32)
-    darkfield_yx = np.asarray(basic.darkfield, dtype=np.float32)
-    baseline = np.asarray(basic.baseline, dtype=np.float32)
     if int(baseline.size) != int(t_count * z_count):
         raise ValueError(
             "Flatfield baseline shape mismatch: "
@@ -614,6 +868,346 @@ def _fit_profile(
         flatfield_yx=flatfield_yx,
         darkfield_yx=darkfield_yx,
         baseline_tz=baseline.reshape(t_count, z_count),
+    )
+
+
+def _fit_profile_tiled(
+    *,
+    zarr_path: str,
+    source_component: str,
+    position_index: int,
+    channel_index: int,
+    parameters: Mapping[str, Any],
+) -> FlatfieldProfileResult:
+    """Fit one flatfield profile by iterating over spatial tiles.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Zarr analysis store path.
+    source_component : str
+        Source data component.
+    position_index : int
+        Position index on the ``p`` axis.
+    channel_index : int
+        Channel index on the ``c`` axis.
+    parameters : mapping[str, Any]
+        Normalized flatfield parameter mapping.
+
+    Returns
+    -------
+    FlatfieldProfileResult
+        Fitted profile artifacts for the requested ``(position, channel)`` pair.
+
+    Raises
+    ------
+    ValueError
+        If a fitted tile baseline cannot be reshaped back to ``(t, z)``.
+    """
+    root = zarr.open_group(str(zarr_path), mode="r")
+    source = root[source_component]
+    shape_tpczyx = tuple(int(v) for v in source.shape)
+    if len(shape_tpczyx) != 6:
+        raise ValueError(
+            "Flatfield tiled fitting requires canonical 6D data (t,p,c,z,y,x)."
+        )
+    t_count = int(shape_tpczyx[0])
+    z_count = int(shape_tpczyx[3])
+    y_count = int(shape_tpczyx[4])
+    x_count = int(shape_tpczyx[5])
+
+    fit_tile_shape = cast(
+        tuple[int, int],
+        parameters.get("fit_tile_shape_yx", (256, 256)),
+    )
+    tile_y = max(1, min(int(fit_tile_shape[0]), y_count))
+    tile_x = max(1, min(int(fit_tile_shape[1]), x_count))
+    blend_tiles = bool(parameters.get("blend_tiles", False))
+    use_overlap = bool(parameters.get("use_map_overlap", True))
+    overlap_zyx = cast(tuple[int, int, int], parameters.get("overlap_zyx", (0, 32, 32)))
+    overlap_y = int(overlap_zyx[1]) if use_overlap else 0
+    overlap_x = int(overlap_zyx[2]) if use_overlap else 0
+
+    y_core_regions = _axis_chunk_bounds(y_count, tile_y)
+    x_core_regions = _axis_chunk_bounds(x_count, tile_x)
+    tile_count = max(1, len(y_core_regions) * len(x_core_regions))
+    basic_class = _load_basic_class()
+
+    baseline_sum = np.zeros((t_count, z_count), dtype=np.float64)
+    if blend_tiles:
+        flatfield_sum = np.zeros((y_count, x_count), dtype=np.float64)
+        darkfield_sum = np.zeros((y_count, x_count), dtype=np.float64)
+        weight_sum = np.zeros((y_count, x_count), dtype=np.float64)
+    else:
+        flatfield_out = np.zeros((y_count, x_count), dtype=np.float32)
+        darkfield_out = np.zeros((y_count, x_count), dtype=np.float32)
+
+    for y_core_region in y_core_regions:
+        for x_core_region in x_core_regions:
+            y_core_start, y_core_stop = int(y_core_region[0]), int(y_core_region[1])
+            x_core_start, x_core_stop = int(x_core_region[0]), int(x_core_region[1])
+            y_read_start, y_read_stop = _expand_bounds_with_overlap(
+                (y_core_start, y_core_stop),
+                overlap=overlap_y,
+                axis_size=y_count,
+            )
+            x_read_start, x_read_stop = _expand_bounds_with_overlap(
+                (x_core_start, x_core_stop),
+                overlap=overlap_x,
+                axis_size=x_count,
+            )
+            y_core_offset_start = y_core_start - y_read_start
+            y_core_offset_stop = y_core_stop - y_read_start
+            x_core_offset_start = x_core_start - x_read_start
+            x_core_offset_stop = x_core_stop - x_read_start
+
+            volume_tzyx = np.asarray(
+                source[
+                    :,
+                    position_index,
+                    channel_index,
+                    :,
+                    y_read_start:y_read_stop,
+                    x_read_start:x_read_stop,
+                ],
+                dtype=np.float32,
+            )
+            _, _, y_read_count, x_read_count = volume_tzyx.shape
+            fit_images = volume_tzyx.reshape(t_count * z_count, y_read_count, x_read_count)
+            flatfield_tile, darkfield_tile, baseline = _fit_basic_profile(
+                fit_images=fit_images,
+                basic_class=basic_class,
+                parameters=parameters,
+            )
+            if int(baseline.size) != int(t_count * z_count):
+                raise ValueError(
+                    "Flatfield baseline shape mismatch: "
+                    f"expected {t_count * z_count} values, got {baseline.size}."
+                )
+            baseline_sum += baseline.reshape(t_count, z_count).astype(np.float64)
+
+            if blend_tiles:
+                blend_weights = _tile_blend_weights(
+                    shape_yx=(y_read_count, x_read_count),
+                    core_offsets_yx=(
+                        (y_core_offset_start, y_core_offset_stop),
+                        (x_core_offset_start, x_core_offset_stop),
+                    ),
+                )
+                blend_weights_64 = blend_weights.astype(np.float64)
+                flatfield_sum[
+                    y_read_start:y_read_stop,
+                    x_read_start:x_read_stop,
+                ] += flatfield_tile.astype(np.float64) * blend_weights_64
+                darkfield_sum[
+                    y_read_start:y_read_stop,
+                    x_read_start:x_read_stop,
+                ] += darkfield_tile.astype(np.float64) * blend_weights_64
+                weight_sum[
+                    y_read_start:y_read_stop,
+                    x_read_start:x_read_stop,
+                ] += blend_weights_64
+            else:
+                flatfield_out[y_core_start:y_core_stop, x_core_start:x_core_stop] = (
+                    flatfield_tile[
+                        y_core_offset_start:y_core_offset_stop,
+                        x_core_offset_start:x_core_offset_stop,
+                    ]
+                )
+                darkfield_out[y_core_start:y_core_stop, x_core_start:x_core_stop] = (
+                    darkfield_tile[
+                        y_core_offset_start:y_core_offset_stop,
+                        x_core_offset_start:x_core_offset_stop,
+                    ]
+                )
+
+    baseline_tz = (baseline_sum / float(tile_count)).astype(np.float32)
+    if blend_tiles:
+        denom = np.maximum(weight_sum, np.float64(1e-6))
+        flatfield_yx = (flatfield_sum / denom).astype(np.float32)
+        darkfield_yx = (darkfield_sum / denom).astype(np.float32)
+    else:
+        flatfield_yx = flatfield_out
+        darkfield_yx = darkfield_out
+
+    return FlatfieldProfileResult(
+        position_index=int(position_index),
+        channel_index=int(channel_index),
+        flatfield_yx=flatfield_yx,
+        darkfield_yx=darkfield_yx,
+        baseline_tz=baseline_tz,
+    )
+
+
+def _build_profile_tile_specs(
+    *,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    parameters: Mapping[str, Any],
+) -> list[FlatfieldTileSpec]:
+    """Build tiled-fit task specs across all ``(position, channel)`` pairs.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source data shape in canonical axis order.
+    parameters : mapping[str, Any]
+        Normalized flatfield parameter mapping.
+
+    Returns
+    -------
+    list[FlatfieldTileSpec]
+        Ordered tile specs for distributed fitting.
+    """
+    p_count = int(shape_tpczyx[1])
+    c_count = int(shape_tpczyx[2])
+    y_count = int(shape_tpczyx[4])
+    x_count = int(shape_tpczyx[5])
+    fit_tile_shape = cast(
+        tuple[int, int],
+        parameters.get("fit_tile_shape_yx", (256, 256)),
+    )
+    tile_y = max(1, min(int(fit_tile_shape[0]), y_count))
+    tile_x = max(1, min(int(fit_tile_shape[1]), x_count))
+    use_overlap = bool(parameters.get("use_map_overlap", True))
+    overlap_zyx = cast(tuple[int, int, int], parameters.get("overlap_zyx", (0, 32, 32)))
+    overlap_y = int(overlap_zyx[1]) if use_overlap else 0
+    overlap_x = int(overlap_zyx[2]) if use_overlap else 0
+    y_core_regions = _axis_chunk_bounds(y_count, tile_y)
+    x_core_regions = _axis_chunk_bounds(x_count, tile_x)
+    specs: list[FlatfieldTileSpec] = []
+    for position_index, channel_index, y_core_region, x_core_region in product(
+        range(p_count),
+        range(c_count),
+        y_core_regions,
+        x_core_regions,
+    ):
+        y_core_bounds = (int(y_core_region[0]), int(y_core_region[1]))
+        x_core_bounds = (int(x_core_region[0]), int(x_core_region[1]))
+        y_read_bounds = _expand_bounds_with_overlap(
+            y_core_bounds,
+            overlap=overlap_y,
+            axis_size=y_count,
+        )
+        x_read_bounds = _expand_bounds_with_overlap(
+            x_core_bounds,
+            overlap=overlap_x,
+            axis_size=x_count,
+        )
+        specs.append(
+            FlatfieldTileSpec(
+                position_index=int(position_index),
+                channel_index=int(channel_index),
+                y_core_bounds=y_core_bounds,
+                x_core_bounds=x_core_bounds,
+                y_read_bounds=(int(y_read_bounds[0]), int(y_read_bounds[1])),
+                x_read_bounds=(int(x_read_bounds[0]), int(x_read_bounds[1])),
+            )
+        )
+    return specs
+
+
+def _fit_profile_tile(
+    *,
+    zarr_path: str,
+    source_component: str,
+    tile: FlatfieldTileSpec,
+    parameters: Mapping[str, Any],
+) -> FlatfieldTileFitResult:
+    """Fit one flatfield tile for a specific ``(position, channel)`` profile.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Zarr analysis store path.
+    source_component : str
+        Source data component.
+    tile : FlatfieldTileSpec
+        Tile specification including core/read bounds.
+    parameters : mapping[str, Any]
+        Normalized flatfield parameter mapping.
+
+    Returns
+    -------
+    FlatfieldTileFitResult
+        Tile payload used by the reduction/stitch stage.
+
+    Raises
+    ------
+    ValueError
+        If baseline output cannot be reshaped to ``(t, z)``.
+    """
+    root = zarr.open_group(str(zarr_path), mode="r")
+    source = root[source_component]
+    volume_tzyx = np.asarray(
+        source[
+            :,
+            tile.position_index,
+            tile.channel_index,
+            :,
+            tile.y_read_bounds[0] : tile.y_read_bounds[1],
+            tile.x_read_bounds[0] : tile.x_read_bounds[1],
+        ],
+        dtype=np.float32,
+    )
+    t_count, z_count, y_read_count, x_read_count = volume_tzyx.shape
+    fit_images = volume_tzyx.reshape(t_count * z_count, y_read_count, x_read_count)
+    flatfield_tile, darkfield_tile, baseline = _fit_basic_profile(
+        fit_images=fit_images,
+        basic_class=_load_basic_class(),
+        parameters=parameters,
+    )
+    if int(baseline.size) != int(t_count * z_count):
+        raise ValueError(
+            "Flatfield baseline shape mismatch: "
+            f"expected {t_count * z_count} values, got {baseline.size}."
+        )
+    baseline_tz = baseline.reshape(t_count, z_count).astype(np.float32, copy=False)
+
+    blend_tiles = bool(
+        parameters.get("blend_tiles", False) and parameters.get("use_map_overlap", True)
+    )
+    y_core_offset_start = int(tile.y_core_bounds[0]) - int(tile.y_read_bounds[0])
+    y_core_offset_stop = int(tile.y_core_bounds[1]) - int(tile.y_read_bounds[0])
+    x_core_offset_start = int(tile.x_core_bounds[0]) - int(tile.x_read_bounds[0])
+    x_core_offset_stop = int(tile.x_core_bounds[1]) - int(tile.x_read_bounds[0])
+    if blend_tiles:
+        blend_weights = _tile_blend_weights(
+            shape_yx=(int(y_read_count), int(x_read_count)),
+            core_offsets_yx=(
+                (int(y_core_offset_start), int(y_core_offset_stop)),
+                (int(x_core_offset_start), int(x_core_offset_stop)),
+            ),
+        )
+        return FlatfieldTileFitResult(
+            position_index=int(tile.position_index),
+            channel_index=int(tile.channel_index),
+            y_bounds=(int(tile.y_read_bounds[0]), int(tile.y_read_bounds[1])),
+            x_bounds=(int(tile.x_read_bounds[0]), int(tile.x_read_bounds[1])),
+            flatfield_payload_yx=(
+                flatfield_tile.astype(np.float32, copy=False) * blend_weights
+            ),
+            darkfield_payload_yx=(
+                darkfield_tile.astype(np.float32, copy=False) * blend_weights
+            ),
+            baseline_tz=baseline_tz,
+            weight_payload_yx=blend_weights.astype(np.float32, copy=False),
+        )
+
+    return FlatfieldTileFitResult(
+        position_index=int(tile.position_index),
+        channel_index=int(tile.channel_index),
+        y_bounds=(int(tile.y_core_bounds[0]), int(tile.y_core_bounds[1])),
+        x_bounds=(int(tile.x_core_bounds[0]), int(tile.x_core_bounds[1])),
+        flatfield_payload_yx=flatfield_tile[
+            y_core_offset_start:y_core_offset_stop,
+            x_core_offset_start:x_core_offset_stop,
+        ].astype(np.float32, copy=False),
+        darkfield_payload_yx=darkfield_tile[
+            y_core_offset_start:y_core_offset_stop,
+            x_core_offset_start:x_core_offset_stop,
+        ].astype(np.float32, copy=False),
+        baseline_tz=baseline_tz,
+        weight_payload_yx=None,
     )
 
 
@@ -845,49 +1439,196 @@ def run_flatfield_analysis(
         basicpy_version=basicpy_version,
     )
 
-    fit_tasks = [
-        delayed(_fit_profile)(
-            zarr_path=str(zarr_path),
-            source_component=source_component,
-            position_index=int(position_index),
-            channel_index=int(channel_index),
-            parameters=normalized,
-        )
+    fit_mode = str(normalized.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    profile_pairs = [
+        (int(position_index), int(channel_index))
         for position_index, channel_index in product(
             range(shape_tpczyx[1]),
             range(shape_tpczyx[2]),
         )
     ]
+    profile_count = int(len(profile_pairs))
 
-    _emit(10, f"Prepared {len(fit_tasks)} flatfield profile fit tasks")
-    profile_results: list[FlatfieldProfileResult] = []
-    if client is None:
-        computed = dask.compute(*fit_tasks, scheduler="processes")
-        profile_results = [item for item in computed]
-    else:
-        from dask.distributed import as_completed
+    if fit_mode == "full_volume":
+        fit_tasks = [
+            delayed(_fit_profile_full_volume)(
+                zarr_path=str(zarr_path),
+                source_component=source_component,
+                position_index=int(position_index),
+                channel_index=int(channel_index),
+                parameters=normalized,
+            )
+            for position_index, channel_index in profile_pairs
+        ]
+        _emit(10, f"Prepared {len(fit_tasks)} flatfield profile fit tasks")
+        profile_results: list[FlatfieldProfileResult] = []
+        if client is None:
+            computed = dask.compute(*fit_tasks, scheduler="processes")
+            profile_results = [item for item in computed]
+        else:
+            from dask.distributed import as_completed
 
-        futures = cast(list[Any], client.compute(fit_tasks))
-        total = max(1, int(len(futures)))
-        completed = 0
-        for future in as_completed(futures):
-            profile_results.append(future.result())
-            completed += 1
-            progress = 10 + int((completed / total) * 25)
-            _emit(progress, f"Fitted flatfield profile {completed}/{total}")
+            futures = cast(list[Any], client.compute(fit_tasks))
+            total = max(1, int(len(futures)))
+            completed = 0
+            for future in as_completed(futures):
+                profile_results.append(future.result())
+                completed += 1
+                progress = 10 + int((completed / total) * 25)
+                _emit(progress, f"Fitted flatfield profile {completed}/{total}")
 
-    profile_results.sort(
-        key=lambda item: (int(item.position_index), int(item.channel_index))
-    )
-    for profile in profile_results:
-        _persist_profile_artifacts(
-            zarr_path=str(zarr_path),
-            flatfield_component=flatfield_component,
-            darkfield_component=darkfield_component,
-            baseline_component=baseline_component,
-            profile=profile,
+        profile_results.sort(
+            key=lambda item: (int(item.position_index), int(item.channel_index))
         )
-    _emit(40, f"Persisted {len(profile_results)} fitted flatfield profiles")
+        for profile in profile_results:
+            _persist_profile_artifacts(
+                zarr_path=str(zarr_path),
+                flatfield_component=flatfield_component,
+                darkfield_component=darkfield_component,
+                baseline_component=baseline_component,
+                profile=profile,
+            )
+        profile_count = int(len(profile_results))
+        _emit(40, f"Persisted {profile_count} fitted flatfield profiles")
+    else:
+        tile_specs = _build_profile_tile_specs(
+            shape_tpczyx=shape_tpczyx,
+            parameters=normalized,
+        )
+        tiles_per_profile = (
+            int(len(tile_specs) // max(1, profile_count))
+            if profile_count > 0
+            else 0
+        )
+        _emit(
+            10,
+            "Prepared "
+            f"{len(tile_specs)} flatfield tile fit tasks "
+            f"(profiles={profile_count}, tiles_per_profile~{tiles_per_profile})",
+        )
+        fit_tasks = [
+            delayed(_fit_profile_tile)(
+                zarr_path=str(zarr_path),
+                source_component=source_component,
+                tile=tile,
+                parameters=normalized,
+            )
+            for tile in tile_specs
+        ]
+        t_count = int(shape_tpczyx[0])
+        z_count = int(shape_tpczyx[3])
+        y_count = int(shape_tpczyx[4])
+        x_count = int(shape_tpczyx[5])
+        baseline_sum_by_profile = {
+            key: np.zeros((t_count, z_count), dtype=np.float32)
+            for key in profile_pairs
+        }
+        baseline_count_by_profile = {key: 0 for key in profile_pairs}
+        blend_tiles = bool(
+            normalized.get("blend_tiles", False) and normalized.get("use_map_overlap", True)
+        )
+        flatfield_sum_by_profile: dict[tuple[int, int], Float32Array] = {}
+        darkfield_sum_by_profile: dict[tuple[int, int], Float32Array] = {}
+        weight_sum_by_profile: dict[tuple[int, int], Float32Array] = {}
+        if blend_tiles:
+            flatfield_sum_by_profile = {
+                key: np.zeros((y_count, x_count), dtype=np.float32) for key in profile_pairs
+            }
+            darkfield_sum_by_profile = {
+                key: np.zeros((y_count, x_count), dtype=np.float32) for key in profile_pairs
+            }
+            weight_sum_by_profile = {
+                key: np.zeros((y_count, x_count), dtype=np.float32) for key in profile_pairs
+            }
+        write_root = zarr.open_group(str(zarr_path), mode="a")
+        flatfield_array = write_root[flatfield_component]
+        darkfield_array = write_root[darkfield_component]
+        baseline_array = write_root[baseline_component]
+
+        def _consume_tile_result(tile_result: FlatfieldTileFitResult) -> None:
+            key = (int(tile_result.position_index), int(tile_result.channel_index))
+            y_start, y_stop = int(tile_result.y_bounds[0]), int(tile_result.y_bounds[1])
+            x_start, x_stop = int(tile_result.x_bounds[0]), int(tile_result.x_bounds[1])
+            baseline_sum_by_profile[key] += np.asarray(
+                tile_result.baseline_tz,
+                dtype=np.float32,
+            )
+            baseline_count_by_profile[key] = int(baseline_count_by_profile[key]) + 1
+            if blend_tiles:
+                if tile_result.weight_payload_yx is None:
+                    raise ValueError(
+                        "Flatfield tiled reduction expected blend weights for a tile result."
+                    )
+                flatfield_sum_by_profile[key][y_start:y_stop, x_start:x_stop] += np.asarray(
+                    tile_result.flatfield_payload_yx,
+                    dtype=np.float32,
+                )
+                darkfield_sum_by_profile[key][y_start:y_stop, x_start:x_stop] += np.asarray(
+                    tile_result.darkfield_payload_yx,
+                    dtype=np.float32,
+                )
+                weight_sum_by_profile[key][y_start:y_stop, x_start:x_stop] += np.asarray(
+                    tile_result.weight_payload_yx,
+                    dtype=np.float32,
+                )
+            else:
+                flatfield_array[
+                    tile_result.position_index,
+                    tile_result.channel_index,
+                    y_start:y_stop,
+                    x_start:x_stop,
+                ] = tile_result.flatfield_payload_yx
+                darkfield_array[
+                    tile_result.position_index,
+                    tile_result.channel_index,
+                    y_start:y_stop,
+                    x_start:x_stop,
+                ] = tile_result.darkfield_payload_yx
+
+        if client is None:
+            computed = dask.compute(*fit_tasks, scheduler="processes")
+            total = max(1, int(len(computed)))
+            for completed, tile_result in enumerate(computed, start=1):
+                _consume_tile_result(tile_result)
+                progress = 10 + int((completed / total) * 25)
+                _emit(progress, f"Fitted flatfield tile {completed}/{total}")
+        else:
+            from dask.distributed import as_completed
+
+            futures = cast(list[Any], client.compute(fit_tasks))
+            total = max(1, int(len(futures)))
+            completed = 0
+            for future in as_completed(futures):
+                _consume_tile_result(cast(FlatfieldTileFitResult, future.result()))
+                completed += 1
+                progress = 10 + int((completed / total) * 25)
+                _emit(progress, f"Fitted flatfield tile {completed}/{total}")
+
+        if blend_tiles:
+            for position_index, channel_index in profile_pairs:
+                key = (int(position_index), int(channel_index))
+                denominator = np.maximum(
+                    weight_sum_by_profile[key],
+                    np.float32(1e-6),
+                )
+                flatfield_array[position_index, channel_index, :, :] = (
+                    flatfield_sum_by_profile[key] / denominator
+                ).astype(np.float32, copy=False)
+                darkfield_array[position_index, channel_index, :, :] = (
+                    darkfield_sum_by_profile[key] / denominator
+                ).astype(np.float32, copy=False)
+
+        for position_index, channel_index in profile_pairs:
+            key = (int(position_index), int(channel_index))
+            baseline_count = max(1, int(baseline_count_by_profile[key]))
+            baseline_array[position_index, channel_index, :, :] = (
+                baseline_sum_by_profile[key] / np.float32(float(baseline_count))
+            ).astype(np.float32, copy=False)
+        _emit(
+            40,
+            "Persisted "
+            f"{profile_count} fitted flatfield profiles from {len(tile_specs)} tile tasks",
+        )
 
     y_bounds = _axis_chunk_bounds(shape_tpczyx[4], output_chunks[4])
     x_bounds = _axis_chunk_bounds(shape_tpczyx[5], output_chunks[5])
@@ -947,7 +1688,7 @@ def run_flatfield_analysis(
     root = zarr.open_group(str(zarr_path), mode="a")
     root[component].attrs.update(
         {
-            "profile_count": int(len(profile_results)),
+            "profile_count": int(profile_count),
             "transformed_volumes": int(
                 shape_tpczyx[0] * shape_tpczyx[1] * shape_tpczyx[2]
             ),
@@ -971,7 +1712,7 @@ def run_flatfield_analysis(
             "darkfield_component": darkfield_component,
             "baseline_component": baseline_component,
             "source_component": source_component,
-            "profile_count": int(len(profile_results)),
+            "profile_count": int(profile_count),
             "transformed_volumes": int(
                 shape_tpczyx[0] * shape_tpczyx[1] * shape_tpczyx[2]
             ),
@@ -988,7 +1729,7 @@ def run_flatfield_analysis(
         darkfield_component=darkfield_component,
         baseline_component=baseline_component,
         source_component=source_component,
-        profile_count=int(len(profile_results)),
+        profile_count=int(profile_count),
         transformed_volumes=int(shape_tpczyx[0] * shape_tpczyx[1] * shape_tpczyx[2]),
         output_chunks_tpczyx=output_chunks,
         output_dtype="float32",
