@@ -359,15 +359,16 @@ class TestLocalClusterRecommendation:
             dtype_itemsize=2,
             cpu_count=16,
             memory_bytes=64 << 30,
+            gpu_count=0,
         )
 
-        assert recommendation.config.n_workers == 8
-        assert recommendation.config.threads_per_worker == 2
-        assert recommendation.config.memory_limit == "6400MiB"
+        assert recommendation.config.n_workers == 16
+        assert recommendation.config.threads_per_worker == 1
+        assert recommendation.config.memory_limit == "3584MiB"
         assert recommendation.estimated_chunk_count == 128
         summary = format_local_cluster_recommendation_summary(recommendation)
         assert "Detected 16 CPUs" in summary
-        assert "recommend 8 worker(s)" in summary
+        assert "recommend 16 worker(s)" in summary
 
     def test_recommendation_reduces_workers_for_large_chunks(self):
         recommendation = recommend_local_cluster_config(
@@ -376,11 +377,27 @@ class TestLocalClusterRecommendation:
             dtype_itemsize=2,
             cpu_count=32,
             memory_bytes=12 << 30,
+            gpu_count=0,
         )
 
-        assert recommendation.config.n_workers == 1
-        assert recommendation.config.threads_per_worker == 2
-        assert recommendation.config.memory_limit == "8GiB"
+        assert recommendation.config.n_workers == 3
+        assert recommendation.config.threads_per_worker == 1
+        assert recommendation.config.memory_limit == "3328MiB"
+
+    def test_recommendation_includes_gpu_diagnostics(self):
+        recommendation = recommend_local_cluster_config(
+            chunks_tpczyx=(1, 1, 1, 256, 256, 256),
+            dtype_itemsize=2,
+            cpu_count=24,
+            memory_bytes=96 << 30,
+            gpu_count=2,
+            gpu_memory_bytes=160 << 30,
+        )
+
+        assert recommendation.detected_gpu_count == 2
+        assert recommendation.detected_gpu_memory_bytes == (160 << 30)
+        summary = format_local_cluster_recommendation_summary(recommendation)
+        assert "2 GPU(s)" in summary
 
 
 def test_normalize_analysis_operation_parameters_returns_defaults():

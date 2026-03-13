@@ -28,6 +28,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import math
 import os
+import subprocess
 from typing import Any, Dict, Literal, Optional, Sequence, Tuple, Union
 
 
@@ -1692,6 +1693,10 @@ class LocalClusterRecommendation:
         Effective CPU count detected for the current process.
     detected_memory_bytes : int
         Effective memory budget detected for the current process.
+    detected_gpu_count : int
+        Number of locally visible GPUs.
+    detected_gpu_memory_bytes : int, optional
+        Aggregate GPU memory in bytes when detectable.
     estimated_chunk_bytes : int
         Estimated bytes per canonical chunk using the configured save chunks.
     estimated_dataset_bytes : int, optional
@@ -1703,6 +1708,8 @@ class LocalClusterRecommendation:
     config: LocalClusterConfig
     detected_cpu_count: int
     detected_memory_bytes: int
+    detected_gpu_count: int
+    detected_gpu_memory_bytes: Optional[int]
     estimated_chunk_bytes: int
     estimated_dataset_bytes: Optional[int]
     estimated_chunk_count: Optional[int]
@@ -1823,6 +1830,81 @@ def _detect_local_memory_bytes() -> int:
     return max(1 << 30, int(physical_total))
 
 
+def _detect_local_gpu_info() -> tuple[int, Optional[int]]:
+    """Return local GPU count and aggregate memory when detectable.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    tuple[int, int | None]
+        ``(gpu_count, total_gpu_memory_bytes)``.
+        Memory is ``None`` when not available.
+
+    Notes
+    -----
+    Detection prefers NVML via ``pynvml`` and falls back to ``nvidia-smi``.
+    Failure to query GPU information is non-fatal and returns ``(0, None)``.
+    """
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            count = max(0, int(pynvml.nvmlDeviceGetCount()))
+            total_bytes = 0
+            for index in range(count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                total_bytes += max(0, int(getattr(memory_info, "total", 0)))
+            return count, (int(total_bytes) if total_bytes > 0 else None)
+        finally:
+            try:
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except Exception:
+        return 0, None
+
+    if result.returncode != 0:
+        return 0, None
+
+    memories_mib: list[int] = []
+    for line in result.stdout.splitlines():
+        text = str(line).strip()
+        if not text:
+            continue
+        try:
+            parsed = int(float(text))
+        except ValueError:
+            continue
+        if parsed > 0:
+            memories_mib.append(parsed)
+
+    if not memories_mib:
+        return 0, None
+
+    total_bytes = int(sum(memories_mib)) << 20
+    return len(memories_mib), (total_bytes if total_bytes > 0 else None)
+
+
 def _format_binary_size(num_bytes: int) -> str:
     """Format byte counts in binary units for GUI display.
 
@@ -1874,8 +1956,10 @@ def recommend_local_cluster_config(
     dtype_itemsize: Optional[int] = None,
     cpu_count: Optional[int] = None,
     memory_bytes: Optional[int] = None,
+    gpu_count: Optional[int] = None,
+    gpu_memory_bytes: Optional[int] = None,
 ) -> LocalClusterRecommendation:
-    """Recommend LocalCluster settings from host and data characteristics.
+    """Recommend aggressive LocalCluster settings from host/data characteristics.
 
     Parameters
     ----------
@@ -1889,14 +1973,50 @@ def recommend_local_cluster_config(
         Explicit effective CPU count for deterministic testing.
     memory_bytes : int, optional
         Explicit effective memory budget in bytes for deterministic testing.
+    gpu_count : int, optional
+        Explicit GPU count for deterministic testing.
+    gpu_memory_bytes : int, optional
+        Explicit aggregate GPU memory in bytes for deterministic testing.
 
     Returns
     -------
     LocalClusterRecommendation
         Recommended LocalCluster configuration plus sizing diagnostics.
+
+    Notes
+    -----
+    Recommendations are intentionally aggressive by default: they target high
+    CPU utilization while respecting chunk-memory pressure and available RAM.
+    GPU presence is incorporated as additional diagnostic context and can raise
+    target worker counts when resources permit.
     """
     detected_cpus = max(1, int(cpu_count or _detect_local_cpu_count()))
     detected_memory = max(1 << 30, int(memory_bytes or _detect_local_memory_bytes()))
+    probed_gpu_count: int = 0
+    probed_gpu_memory_bytes: Optional[int] = None
+    if gpu_count is None or gpu_memory_bytes is None:
+        probed_gpu_count, probed_gpu_memory_bytes = _detect_local_gpu_info()
+    detected_gpu_count = max(
+        0,
+        int(
+            probed_gpu_count
+            if gpu_count is None
+            else gpu_count
+        ),
+    )
+    if detected_gpu_count == 0:
+        detected_gpu_memory_bytes: Optional[int] = None
+    else:
+        detected_gpu_memory_bytes = (
+            max(1, int(gpu_memory_bytes))
+            if gpu_memory_bytes is not None
+            else (
+                None
+                if probed_gpu_memory_bytes is None
+                else max(1, int(probed_gpu_memory_bytes))
+            )
+        )
+
     itemsize = max(1, int(dtype_itemsize or 2))
     effective_chunks = tuple(int(v) for v in (chunks_tpczyx or (1, 1, 1, 256, 256, 256)))
     estimated_chunk_bytes = max(1, math.prod(effective_chunks) * itemsize)
@@ -1913,22 +2033,29 @@ def recommend_local_cluster_config(
         estimated_chunk_count = max(1, math.prod(chunk_counts))
 
     reserve_bytes = min(
-        max(4 << 30, detected_memory // 5),
-        max(1 << 30, detected_memory // 3),
+        max(2 << 30, detected_memory // 10),
+        max(1 << 30, detected_memory // 6),
     )
     usable_bytes = max(1 << 30, detected_memory - reserve_bytes)
 
     threads_per_worker = 1
-    if detected_cpus >= 8 and estimated_chunk_bytes < (512 << 20):
+    if detected_cpus >= 32 and estimated_chunk_bytes < (16 << 20):
         threads_per_worker = 2
 
     max_workers_by_cpu = max(1, detected_cpus // threads_per_worker)
-    min_bytes_per_worker = max(2 << 30, estimated_chunk_bytes * 6)
+    min_bytes_per_worker = max(1 << 30, estimated_chunk_bytes * 3)
     max_workers_by_memory = max(1, usable_bytes // min_bytes_per_worker)
 
-    recommended_workers = min(max_workers_by_cpu, max_workers_by_memory, 8)
-    if estimated_chunk_count is not None:
+    recommended_workers = min(max_workers_by_cpu, max_workers_by_memory, 64)
+    if estimated_chunk_count is not None and detected_gpu_count == 0:
         recommended_workers = min(recommended_workers, estimated_chunk_count)
+    if detected_gpu_count > 0:
+        workers_per_gpu = 4 if estimated_chunk_bytes < (256 << 20) else 2
+        gpu_target_workers = max(1, int(detected_gpu_count) * int(workers_per_gpu))
+        recommended_workers = max(
+            int(recommended_workers),
+            min(max_workers_by_cpu, max_workers_by_memory, gpu_target_workers),
+        )
     recommended_workers = max(1, int(recommended_workers))
 
     if recommended_workers == 1:
@@ -1936,7 +2063,7 @@ def recommend_local_cluster_config(
             1,
             min(
                 detected_cpus,
-                2 if estimated_chunk_bytes >= (512 << 20) else 4,
+                2 if estimated_chunk_bytes >= (512 << 20) else 6,
             ),
         )
 
@@ -1956,6 +2083,12 @@ def recommend_local_cluster_config(
         config=config,
         detected_cpu_count=int(detected_cpus),
         detected_memory_bytes=int(detected_memory),
+        detected_gpu_count=int(detected_gpu_count),
+        detected_gpu_memory_bytes=(
+            None
+            if detected_gpu_memory_bytes is None
+            else int(detected_gpu_memory_bytes)
+        ),
         estimated_chunk_bytes=int(estimated_chunk_bytes),
         estimated_dataset_bytes=(
             None if estimated_dataset_bytes is None else int(estimated_dataset_bytes)
@@ -1990,6 +2123,14 @@ def format_local_cluster_recommendation_summary(
         f"{config.threads_per_worker} thread(s)/worker",
         f"{config.memory_limit} memory/worker",
     ]
+    if recommendation.detected_gpu_count > 0:
+        gpu_text = f"{recommendation.detected_gpu_count} GPU(s)"
+        if recommendation.detected_gpu_memory_bytes is not None:
+            gpu_text += (
+                " "
+                f"({_format_binary_size(recommendation.detected_gpu_memory_bytes)} total)"
+            )
+        parts.insert(2, gpu_text)
     if recommendation.estimated_dataset_bytes is not None:
         parts.insert(
             3,

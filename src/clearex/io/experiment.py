@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Optional, Union
 import json
 import math
+import os
 import re
 import warnings
 import xml.etree.ElementTree as ET
@@ -1325,6 +1326,461 @@ def _estimate_write_batch_region_count(
     return max(1, min(64, target_batch_bytes // chunk_bytes))
 
 
+def _chunk_axis_min_max(axis_chunks: tuple[int, ...]) -> tuple[int, int]:
+    """Return minimum and maximum chunk sizes for one Dask axis.
+
+    Parameters
+    ----------
+    axis_chunks : tuple[int, ...]
+        Chunk-size sequence for a single axis from ``dask.array.Array.chunks``.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(min_chunk, max_chunk)`` for the axis.
+
+    Raises
+    ------
+    ValueError
+        If ``axis_chunks`` is empty.
+    """
+    if not axis_chunks:
+        raise ValueError("axis_chunks cannot be empty.")
+    return (
+        min(int(value) for value in axis_chunks),
+        max(int(value) for value in axis_chunks),
+    )
+
+
+def _dask_chunk_min_max_tpczyx(
+    array: da.Array,
+) -> tuple[CanonicalShapeTpczyx, CanonicalShapeTpczyx]:
+    """Return per-axis min/max chunk sizes for canonical 6D arrays.
+
+    Parameters
+    ----------
+    array : dask.array.Array
+        Canonical ``(t, p, c, z, y, x)`` array.
+
+    Returns
+    -------
+    tuple[tuple[int, ...], tuple[int, ...]]
+        Pair of ``(min_chunks_tpczyx, max_chunks_tpczyx)``.
+
+    Raises
+    ------
+    ValueError
+        If ``array`` is not six-dimensional.
+    """
+    if array.ndim != 6:
+        raise ValueError(
+            "Expected canonical 6D array (t, p, c, z, y, x) for chunk inspection."
+        )
+    axis_min_max = [_chunk_axis_min_max(axis_chunks) for axis_chunks in array.chunks]
+    min_chunks: CanonicalShapeTpczyx = (
+        int(axis_min_max[0][0]),
+        int(axis_min_max[1][0]),
+        int(axis_min_max[2][0]),
+        int(axis_min_max[3][0]),
+        int(axis_min_max[4][0]),
+        int(axis_min_max[5][0]),
+    )
+    max_chunks: CanonicalShapeTpczyx = (
+        int(axis_min_max[0][1]),
+        int(axis_min_max[1][1]),
+        int(axis_min_max[2][1]),
+        int(axis_min_max[3][1]),
+        int(axis_min_max[4][1]),
+        int(axis_min_max[5][1]),
+    )
+    return min_chunks, max_chunks
+
+
+def _should_use_source_aligned_plane_writes(
+    *,
+    array: da.Array,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    target_chunks_tpczyx: CanonicalShapeTpczyx,
+) -> bool:
+    """Return whether source-aligned z-batch writes should be preferred.
+
+    Parameters
+    ----------
+    array : dask.array.Array
+        Canonical source array in ``(t, p, c, z, y, x)`` order.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Full canonical output shape.
+    target_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Configured output chunk shape.
+
+    Returns
+    -------
+    bool
+        ``True`` when source chunks are single-plane along ``z`` and full-frame
+        along ``y/x`` while the target chunking splits the lateral dimensions.
+
+    Raises
+    ------
+    ValueError
+        Propagates chunk-inspection errors for non-6D arrays.
+
+    Notes
+    -----
+    In this pattern, chunk-batched writes over small ``(y, x)`` tiles cause
+    repeated decompression of the same source plane chunks across many write
+    batches. Source-aligned z-batch writes avoid this read amplification.
+    """
+    min_chunks, max_chunks = _dask_chunk_min_max_tpczyx(array)
+    source_is_single_plane_z = min_chunks[3] == 1 and max_chunks[3] == 1
+    source_is_full_lateral = (
+        min_chunks[4] >= int(shape_tpczyx[4]) and min_chunks[5] >= int(shape_tpczyx[5])
+    )
+    target_splits_lateral = (
+        int(target_chunks_tpczyx[4]) < int(shape_tpczyx[4])
+        or int(target_chunks_tpczyx[5]) < int(shape_tpczyx[5])
+    )
+    return bool(source_is_single_plane_z and source_is_full_lateral and target_splits_lateral)
+
+
+def _detect_runtime_memory_bytes() -> int:
+    """Return an approximate runtime memory budget in bytes.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int
+        Detected physical memory in bytes, with a conservative fallback.
+
+    Notes
+    -----
+    This helper is intentionally lightweight and best-effort. It is used only
+    to scale source-aligned write aggressiveness and should never raise.
+    """
+    try:
+        import psutil
+
+        total = int(psutil.virtual_memory().total)
+        if total > 0:
+            return total
+    except Exception:
+        pass
+
+    if hasattr(os, "sysconf"):
+        try:
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            phys_pages = int(os.sysconf("SC_PHYS_PAGES"))
+            if page_size > 0 and phys_pages > 0:
+                return page_size * phys_pages
+        except Exception:
+            pass
+
+    return 8 << 30
+
+
+def _detect_client_worker_resources(
+    client: Optional["Client"],
+) -> tuple[Optional[int], Optional[int]]:
+    """Return active worker count and smallest worker memory limit.
+
+    Parameters
+    ----------
+    client : dask.distributed.Client, optional
+        Active distributed client.
+
+    Returns
+    -------
+    tuple[int | None, int | None]
+        ``(worker_count, min_worker_memory_limit_bytes)``. Values are ``None``
+        when the scheduler metadata is unavailable.
+
+    Notes
+    -----
+    This helper is best-effort and never raises. It uses scheduler metadata to
+    constrain ingestion batching to real worker memory limits.
+    """
+    if client is None:
+        return None, None
+    try:
+        scheduler = client.scheduler_info()
+    except Exception:
+        return None, None
+
+    workers = scheduler.get("workers")
+    if not isinstance(workers, dict) or not workers:
+        return None, None
+
+    worker_count = len(workers)
+    memory_limits: list[int] = []
+    for worker_payload in workers.values():
+        if not isinstance(worker_payload, dict):
+            continue
+        raw_limit = worker_payload.get("memory_limit")
+        try:
+            parsed_limit = int(raw_limit)
+        except Exception:
+            continue
+        if parsed_limit > 0:
+            memory_limits.append(parsed_limit)
+
+    min_worker_memory_limit = min(memory_limits) if memory_limits else None
+    return int(worker_count), (
+        None if min_worker_memory_limit is None else int(min_worker_memory_limit)
+    )
+
+
+def _estimate_source_plane_batch_depth(
+    *,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    target_chunks_tpczyx: CanonicalShapeTpczyx,
+    dtype_itemsize: int,
+    max_planes_per_batch: int = 128,
+    target_batch_bytes: Optional[int] = None,
+    worker_memory_limit_bytes: Optional[int] = None,
+) -> int:
+    """Estimate z-depth per source-aligned write region.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Canonical array shape.
+    target_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Canonical target chunk shape.
+    dtype_itemsize : int
+        Bytes per element.
+    max_planes_per_batch : int, default=128
+        Hard cap on z-planes read per source-aligned write region.
+    target_batch_bytes : int, optional
+        Approximate in-memory byte budget per source-aligned write region.
+        When omitted, runtime memory heuristics choose an aggressive value.
+    worker_memory_limit_bytes : int, optional
+        Best-effort per-worker memory limit in bytes. When provided, this
+        constrains the batch depth against real Dask worker limits.
+
+    Returns
+    -------
+    int
+        Estimated z-plane count per source-aligned region.
+
+    Raises
+    ------
+    ValueError
+        If provided limits are not positive.
+
+    Notes
+    -----
+    The estimate is conservative and memory-first. It prefers source-aligned
+    batches that fit comfortably in worker memory and only snaps to target
+    ``z`` chunk multiples when they fit inside that budget.
+    """
+    if max_planes_per_batch <= 0:
+        raise ValueError("max_planes_per_batch must be greater than zero.")
+    z_size = max(1, int(shape_tpczyx[3]))
+    y_size = max(1, int(shape_tpczyx[4]))
+    x_size = max(1, int(shape_tpczyx[5]))
+    plane_bytes = max(1, y_size * x_size * max(1, int(dtype_itemsize)))
+
+    target_z = max(1, int(target_chunks_tpczyx[3]))
+    if worker_memory_limit_bytes is not None and int(worker_memory_limit_bytes) > 0:
+        max_safe_batch_bytes = max(
+            512 << 20,
+            min(
+                12 << 30,
+                int(int(worker_memory_limit_bytes) * 0.30),
+            ),
+        )
+    else:
+        runtime_memory = _detect_runtime_memory_bytes()
+        max_safe_batch_bytes = max(
+            512 << 20,
+            min(8 << 30, int(runtime_memory // 16)),
+        )
+    if target_batch_bytes is not None and target_batch_bytes <= 0:
+        raise ValueError("target_batch_bytes must be greater than zero.")
+    desired_chunk_aligned_bytes = max(
+        plane_bytes,
+        int(target_z) * int(plane_bytes),
+    )
+    candidate_budgets = [int(max_safe_batch_bytes), int(desired_chunk_aligned_bytes)]
+    if target_batch_bytes is not None:
+        candidate_budgets.append(int(target_batch_bytes))
+    effective_target_batch_bytes = max(plane_bytes, min(candidate_budgets))
+
+    by_bytes = max(1, int(effective_target_batch_bytes) // plane_bytes)
+    depth = min(z_size, int(max_planes_per_batch), by_bytes)
+
+    if depth >= target_z:
+        depth = max(target_z, (depth // target_z) * target_z)
+
+    return max(1, int(depth))
+
+
+def _iter_source_aligned_plane_regions(
+    *,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    z_batch_depth: int,
+) -> Iterator[tuple[slice, slice, slice, slice, slice, slice]]:
+    """Yield canonical write regions that preserve full ``(y, x)`` source planes.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Full canonical output shape.
+    z_batch_depth : int
+        Number of z-planes per region.
+
+    Returns
+    -------
+    iterator of tuple[slice, ...]
+        Source-aligned write regions in ``(t, p, c, z, y, x)`` order.
+
+    Raises
+    ------
+    ValueError
+        If ``z_batch_depth`` is not positive.
+    """
+    if z_batch_depth <= 0:
+        raise ValueError("z_batch_depth must be greater than zero.")
+
+    t_size, p_size, c_size, z_size, y_size, x_size = (
+        int(shape_tpczyx[0]),
+        int(shape_tpczyx[1]),
+        int(shape_tpczyx[2]),
+        int(shape_tpczyx[3]),
+        int(shape_tpczyx[4]),
+        int(shape_tpczyx[5]),
+    )
+    for t_index in range(t_size):
+        for p_index in range(p_size):
+            for c_index in range(c_size):
+                for z_start in range(0, z_size, int(z_batch_depth)):
+                    z_stop = min(z_size, z_start + int(z_batch_depth))
+                    yield (
+                        slice(t_index, t_index + 1),
+                        slice(p_index, p_index + 1),
+                        slice(c_index, c_index + 1),
+                        slice(z_start, z_stop),
+                        slice(0, y_size),
+                        slice(0, x_size),
+                    )
+
+
+def _count_source_aligned_plane_regions(
+    *,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    z_batch_depth: int,
+) -> int:
+    """Return number of source-aligned write regions.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Full canonical output shape.
+    z_batch_depth : int
+        Number of z-planes per source-aligned region.
+
+    Returns
+    -------
+    int
+        Number of write regions required to cover the full array.
+    """
+    t_size, p_size, c_size, z_size = (
+        int(shape_tpczyx[0]),
+        int(shape_tpczyx[1]),
+        int(shape_tpczyx[2]),
+        int(shape_tpczyx[3]),
+    )
+    z_regions = max(1, math.ceil(z_size / max(1, int(z_batch_depth))))
+    return int(max(1, t_size * p_size * c_size * z_regions))
+
+
+def _estimate_source_aligned_submission_batch_count(
+    *,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    z_batch_depth: int,
+    dtype_itemsize: int,
+    worker_count: Optional[int] = None,
+    worker_memory_limit_bytes: Optional[int] = None,
+) -> int:
+    """Estimate regions per compute submission for source-aligned writes.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Full canonical output shape.
+    z_batch_depth : int
+        Source-aligned z-planes per region.
+    dtype_itemsize : int
+        Bytes per element.
+    worker_count : int, optional
+        Active Dask worker count when distributed execution is enabled.
+    worker_memory_limit_bytes : int, optional
+        Per-worker memory limit in bytes when available.
+
+    Returns
+    -------
+    int
+        Recommended source-aligned regions per graph submission.
+    """
+    region_bytes = max(
+        1,
+        int(z_batch_depth)
+        * int(shape_tpczyx[4])
+        * int(shape_tpczyx[5])
+        * max(1, int(dtype_itemsize)),
+    )
+    runtime_memory = _detect_runtime_memory_bytes()
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    effective_worker_count = max(
+        1,
+        int(worker_count) if worker_count is not None and int(worker_count) > 0 else cpu_count,
+    )
+
+    per_worker_memory_limit = (
+        int(worker_memory_limit_bytes)
+        if worker_memory_limit_bytes is not None and int(worker_memory_limit_bytes) > 0
+        else None
+    )
+    if per_worker_memory_limit is not None:
+        target_submission_bytes = max(
+            2 << 30,
+            min(
+                128 << 30,
+                int(per_worker_memory_limit * effective_worker_count * 0.50),
+            ),
+        )
+        max_regions_per_worker = max(
+            1,
+            int((int(per_worker_memory_limit) * 0.60) // region_bytes),
+        )
+        max_regions_by_worker_memory = max(
+            1,
+            int(max_regions_per_worker) * int(effective_worker_count),
+        )
+        max_regions_by_concurrency = max(1, int(effective_worker_count) * 2)
+        hard_cap = 128
+    else:
+        target_submission_bytes = max(
+            2 << 30,
+            min(64 << 30, int(runtime_memory // 3)),
+        )
+        max_regions_by_worker_memory = max(1, int(effective_worker_count))
+        max_regions_by_concurrency = max(1, int(cpu_count))
+        hard_cap = 64
+
+    return max(
+        1,
+        min(
+            int(hard_cap),
+            int(max_regions_by_concurrency),
+            int(max_regions_by_worker_memory),
+            int(target_submission_bytes // region_bytes),
+        ),
+    )
+
+
 def _write_numpy_region(
     block: np.ndarray,
     *,
@@ -1444,6 +1900,118 @@ def _write_dask_array_in_batches(
                 progress,
                 f"{progress_label}: batch {batch_index}/{total_batches} "
                 f"({completed_regions}/{total_regions} regions)",
+            )
+
+
+def _write_dask_array_source_aligned_plane_batches(
+    *,
+    array: da.Array,
+    store_path: Path,
+    component: str,
+    shape_tpczyx: CanonicalShapeTpczyx,
+    z_batch_depth: int,
+    dtype_itemsize: int,
+    client: Optional["Client"] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_start: int = 0,
+    progress_end: int = 100,
+    progress_label: str = "Writing data",
+    worker_count: Optional[int] = None,
+    worker_memory_limit_bytes: Optional[int] = None,
+) -> None:
+    """Write canonical data using source-aligned full-frame z-batches.
+
+    Parameters
+    ----------
+    array : dask.array.Array
+        Canonical source array in ``(t, p, c, z, y, x)`` order.
+    store_path : pathlib.Path
+        Target Zarr/N5 store path.
+    component : str
+        Target component path.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Full output shape.
+    z_batch_depth : int
+        Number of z-planes per source-aligned write region.
+    dtype_itemsize : int
+        Bytes per array element.
+    client : dask.distributed.Client, optional
+        Active Dask client for distributed execution.
+    progress_callback : callable, optional
+        Optional callback invoked as ``callback(percent, message)``.
+    progress_start : int, default=0
+        Start percentage for write progress.
+    progress_end : int, default=100
+        End percentage for write progress.
+    progress_label : str, default="Writing data"
+        Human-readable stage label.
+    worker_count : int, optional
+        Active Dask worker count. When omitted, this is auto-detected from the
+        provided client when possible.
+    worker_memory_limit_bytes : int, optional
+        Per-worker memory limit in bytes. When omitted, this is auto-detected
+        from the provided client when possible.
+
+    Returns
+    -------
+    None
+        Side-effect writes only.
+    """
+    total_regions = _count_source_aligned_plane_regions(
+        shape_tpczyx=shape_tpczyx,
+        z_batch_depth=z_batch_depth,
+    )
+    if total_regions == 0:
+        return
+
+    detected_worker_count = worker_count
+    detected_worker_memory_limit_bytes = worker_memory_limit_bytes
+    if detected_worker_count is None or detected_worker_memory_limit_bytes is None:
+        auto_worker_count, auto_worker_memory_limit = _detect_client_worker_resources(client)
+        if detected_worker_count is None:
+            detected_worker_count = auto_worker_count
+        if detected_worker_memory_limit_bytes is None:
+            detected_worker_memory_limit_bytes = auto_worker_memory_limit
+
+    regions_per_submission = _estimate_source_aligned_submission_batch_count(
+        shape_tpczyx=shape_tpczyx,
+        z_batch_depth=z_batch_depth,
+        dtype_itemsize=dtype_itemsize,
+        worker_count=detected_worker_count,
+        worker_memory_limit_bytes=detected_worker_memory_limit_bytes,
+    )
+    total_batches = max(1, math.ceil(total_regions / regions_per_submission))
+    completed_regions = 0
+    region_iter = _iter_source_aligned_plane_regions(
+        shape_tpczyx=shape_tpczyx,
+        z_batch_depth=z_batch_depth,
+    )
+
+    for batch_index in range(1, total_batches + 1):
+        batch_regions = list(islice(region_iter, regions_per_submission))
+        if not batch_regions:
+            break
+        batch_tasks = [
+            delayed(_write_numpy_region)(
+                array[region],
+                zarr_path=str(store_path),
+                component=component,
+                region=region,
+            )
+            for region in batch_regions
+        ]
+        _compute_dask_graph(batch_tasks, client=client)
+        completed_regions += len(batch_regions)
+        if progress_callback is not None:
+            progress = int(
+                progress_start
+                + (completed_regions / total_regions)
+                * max(0, progress_end - progress_start)
+            )
+            progress_callback(
+                progress,
+                f"{progress_label}: batch {batch_index}/{total_batches} "
+                f"({completed_regions}/{total_regions} regions; z_batch={z_batch_depth})",
             )
 
 
@@ -1840,6 +2408,13 @@ def materialize_experiment_data_store(
         experiment=experiment, source_path=source_resolved
     )
     write_client = client if _is_zarr_like_path(source_resolved) else None
+    source_aligned_worker_count: Optional[int] = None
+    source_aligned_worker_memory_limit_bytes: Optional[int] = None
+    if write_client is not None:
+        (
+            source_aligned_worker_count,
+            source_aligned_worker_memory_limit_bytes,
+        ) = _detect_client_worker_resources(write_client)
     _emit_progress(5, "Opening source data")
 
     with ExitStack() as exit_stack:
@@ -1879,9 +2454,87 @@ def materialize_experiment_data_store(
             shape_tpczyx=canonical_shape,
             chunks=chunks,
         )
-        with dask.config.set({"array.rechunk.method": "tasks"}):
-            canonical = canonical.rechunk(normalized_chunks)
-        _emit_progress(45, "Preparing chunk-batched canonical writes")
+        use_source_aligned_plane_writes = _should_use_source_aligned_plane_writes(
+            array=canonical,
+            shape_tpczyx=canonical_shape,
+            target_chunks_tpczyx=normalized_chunks,
+        )
+        source_aligned_z_batch_depth: Optional[int] = None
+        if use_source_aligned_plane_writes:
+            source_aligned_z_batch_depth = _estimate_source_plane_batch_depth(
+                shape_tpczyx=canonical_shape,
+                target_chunks_tpczyx=normalized_chunks,
+                dtype_itemsize=int(source_dtype.itemsize),
+                worker_memory_limit_bytes=source_aligned_worker_memory_limit_bytes,
+            )
+            _emit_progress(
+                45,
+                "Preparing source-aligned canonical writes "
+                f"(z_batch={source_aligned_z_batch_depth})",
+            )
+        else:
+            with dask.config.set({"array.rechunk.method": "tasks"}):
+                canonical = canonical.rechunk(normalized_chunks)
+            _emit_progress(45, "Preparing chunk-batched canonical writes")
+
+        def _write_canonical_component(
+            *,
+            component: str,
+            progress_start: int,
+            progress_end: int,
+            progress_label: str,
+        ) -> None:
+            """Write canonical base data to one target component.
+
+            Parameters
+            ----------
+            component : str
+                Target Zarr component path.
+            progress_start : int
+                Stage progress lower bound.
+            progress_end : int
+                Stage progress upper bound.
+            progress_label : str
+                Human-readable progress prefix.
+
+            Returns
+            -------
+            None
+                Side-effect writes only.
+            """
+            if (
+                use_source_aligned_plane_writes
+                and source_aligned_z_batch_depth is not None
+            ):
+                _write_dask_array_source_aligned_plane_batches(
+                    array=canonical,
+                    store_path=store_path,
+                    component=component,
+                    shape_tpczyx=canonical_shape,
+                    z_batch_depth=source_aligned_z_batch_depth,
+                    dtype_itemsize=int(source_dtype.itemsize),
+                    client=write_client,
+                    progress_callback=progress_callback,
+                    progress_start=progress_start,
+                    progress_end=progress_end,
+                    progress_label=progress_label,
+                    worker_count=source_aligned_worker_count,
+                    worker_memory_limit_bytes=source_aligned_worker_memory_limit_bytes,
+                )
+                return
+            _write_dask_array_in_batches(
+                array=canonical,
+                store_path=store_path,
+                component=component,
+                shape_tpczyx=canonical_shape,
+                chunks_tpczyx=normalized_chunks,
+                dtype_itemsize=int(source_dtype.itemsize),
+                client=write_client,
+                progress_callback=progress_callback,
+                progress_start=progress_start,
+                progress_end=progress_end,
+                progress_label=progress_label,
+            )
 
         should_stage_same_component = (
             store_path == source_resolved and source_component == "data"
@@ -1898,15 +2551,8 @@ def materialize_experiment_data_store(
                 dtype=source_dtype.name,
                 overwrite=True,
             )
-            _write_dask_array_in_batches(
-                array=canonical,
-                store_path=store_path,
+            _write_canonical_component(
                 component=temp_component,
-                shape_tpczyx=canonical_shape,
-                chunks_tpczyx=normalized_chunks,
-                dtype_itemsize=int(source_dtype.itemsize),
-                client=write_client,
-                progress_callback=progress_callback,
                 progress_start=55,
                 progress_end=82,
                 progress_label="Writing staged canonical data",
@@ -1944,15 +2590,8 @@ def materialize_experiment_data_store(
                 dtype=source_dtype.name,
                 shape_tpczyx=canonical_shape,
             )
-            _write_dask_array_in_batches(
-                array=canonical,
-                store_path=store_path,
+            _write_canonical_component(
                 component="data",
-                shape_tpczyx=canonical_shape,
-                chunks_tpczyx=normalized_chunks,
-                dtype_itemsize=int(source_dtype.itemsize),
-                client=write_client,
-                progress_callback=progress_callback,
                 progress_start=55,
                 progress_end=70,
                 progress_label="Writing canonical data",
@@ -1983,11 +2622,32 @@ def materialize_experiment_data_store(
             float(experiment.xy_pixel_size_um),
             float(experiment.xy_pixel_size_um),
         ]
+    write_strategy = (
+        "source_aligned_plane_batches"
+        if use_source_aligned_plane_writes
+        else "chunk_region_batches"
+    )
     root["data"].attrs.update(
         {
             "source_path": source_metadata_path,
             "source_axes": source_axes_attr,
             "voxel_size_um_zyx": voxel_size_um_zyx,
+            "materialization_write_strategy": write_strategy,
+            "source_aligned_z_batch_depth": (
+                int(source_aligned_z_batch_depth)
+                if source_aligned_z_batch_depth is not None
+                else None
+            ),
+            "source_aligned_worker_count": (
+                int(source_aligned_worker_count)
+                if source_aligned_worker_count is not None
+                else None
+            ),
+            "source_aligned_worker_memory_limit_bytes": (
+                int(source_aligned_worker_memory_limit_bytes)
+                if source_aligned_worker_memory_limit_bytes is not None
+                else None
+            ),
         }
     )
     if source_component is not None:
@@ -1998,6 +2658,22 @@ def materialize_experiment_data_store(
             "source_data_axes": source_axes_attr,
             "source_data_component": source_component,
             "voxel_size_um_zyx": voxel_size_um_zyx,
+            "materialization_write_strategy": write_strategy,
+            "source_aligned_z_batch_depth": (
+                int(source_aligned_z_batch_depth)
+                if source_aligned_z_batch_depth is not None
+                else None
+            ),
+            "source_aligned_worker_count": (
+                int(source_aligned_worker_count)
+                if source_aligned_worker_count is not None
+                else None
+            ),
+            "source_aligned_worker_memory_limit_bytes": (
+                int(source_aligned_worker_memory_limit_bytes)
+                if source_aligned_worker_memory_limit_bytes is not None
+                else None
+            ),
         }
     )
 

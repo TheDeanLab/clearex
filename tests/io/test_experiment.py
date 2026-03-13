@@ -29,6 +29,7 @@ from pathlib import Path
 import json
 
 # Third Party Imports
+import dask.array as da
 import h5py
 import numpy as np
 import tifffile
@@ -827,3 +828,171 @@ def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
                 root["data"][0, position_index, channel_index, :, :, :]
             )
             assert np.array_equal(loaded, expected_blocks[(position_index, channel_index)])
+
+
+def test_should_use_source_aligned_plane_writes_detects_plane_chunk_pattern():
+    source = da.from_array(
+        np.zeros((1, 1, 1, 6, 8, 10), dtype=np.uint16),
+        chunks=(1, 1, 1, 1, 8, 10),
+    )
+
+    assert (
+        experiment_module._should_use_source_aligned_plane_writes(
+            array=source,
+            shape_tpczyx=(1, 1, 1, 6, 8, 10),
+            target_chunks_tpczyx=(1, 1, 1, 2, 2, 2),
+        )
+        is True
+    )
+    assert (
+        experiment_module._should_use_source_aligned_plane_writes(
+            array=source,
+            shape_tpczyx=(1, 1, 1, 6, 8, 10),
+            target_chunks_tpczyx=(1, 1, 1, 2, 8, 10),
+        )
+        is False
+    )
+
+
+def test_materialize_experiment_data_store_uses_source_aligned_plane_writes(
+    tmp_path: Path, monkeypatch
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="OME-ZARR",
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(4 * 8 * 10, dtype=np.uint16).reshape(4, 8, 10)
+    source_store = tmp_path / "source.ome.zarr"
+    source_root = zarr.open_group(str(source_store), mode="w")
+    source_root.create_dataset("raw", data=source_data, chunks=(1, 8, 10), overwrite=True)
+    source_root["raw"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
+
+    original_source_writer = experiment_module._write_dask_array_source_aligned_plane_batches
+    original_chunk_writer = experiment_module._write_dask_array_in_batches
+    writer_calls = {"source_aligned": 0, "chunk_batched": 0}
+
+    def _count_source_writer(**kwargs):
+        writer_calls["source_aligned"] += 1
+        return original_source_writer(**kwargs)
+
+    def _count_chunk_writer(**kwargs):
+        writer_calls["chunk_batched"] += 1
+        return original_chunk_writer(**kwargs)
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_write_dask_array_source_aligned_plane_batches",
+        _count_source_writer,
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "_write_dask_array_in_batches",
+        _count_chunk_writer,
+    )
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_store,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert writer_calls["source_aligned"] == 1
+    assert writer_calls["chunk_batched"] == 0
+    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert root.attrs["materialization_write_strategy"] == "source_aligned_plane_batches"
+    assert root.attrs["source_aligned_z_batch_depth"] == 2
+    assert root.attrs["source_aligned_worker_count"] is None
+    assert root.attrs["source_aligned_worker_memory_limit_bytes"] is None
+
+
+def test_materialize_experiment_data_store_falls_back_to_chunk_batched_writes(
+    tmp_path: Path, monkeypatch
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="OME-ZARR",
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(4 * 8 * 10, dtype=np.uint16).reshape(4, 8, 10)
+    source_store = tmp_path / "source.ome.zarr"
+    source_root = zarr.open_group(str(source_store), mode="w")
+    source_root.create_dataset("raw", data=source_data, chunks=(2, 8, 10), overwrite=True)
+    source_root["raw"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
+
+    original_source_writer = experiment_module._write_dask_array_source_aligned_plane_batches
+    original_chunk_writer = experiment_module._write_dask_array_in_batches
+    writer_calls = {"source_aligned": 0, "chunk_batched": 0}
+
+    def _count_source_writer(**kwargs):
+        writer_calls["source_aligned"] += 1
+        return original_source_writer(**kwargs)
+
+    def _count_chunk_writer(**kwargs):
+        writer_calls["chunk_batched"] += 1
+        return original_chunk_writer(**kwargs)
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_write_dask_array_source_aligned_plane_batches",
+        _count_source_writer,
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "_write_dask_array_in_batches",
+        _count_chunk_writer,
+    )
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_store,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert writer_calls["source_aligned"] == 0
+    assert writer_calls["chunk_batched"] == 1
+    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert root.attrs["materialization_write_strategy"] == "chunk_region_batches"
+    assert root.attrs["source_aligned_z_batch_depth"] is None
+    assert root.attrs["source_aligned_worker_count"] is None
+    assert root.attrs["source_aligned_worker_memory_limit_bytes"] is None
+
+
+def test_detect_client_worker_resources_extracts_min_limit():
+    class _FakeClient:
+        def scheduler_info(self):
+            return {
+                "workers": {
+                    "tcp://127.0.0.1:1111": {"memory_limit": 12 << 30},
+                    "tcp://127.0.0.1:2222": {"memory_limit": 8 << 30},
+                }
+            }
+
+    worker_count, worker_memory_limit = experiment_module._detect_client_worker_resources(
+        _FakeClient()
+    )
+
+    assert worker_count == 2
+    assert worker_memory_limit == (8 << 30)
+
+
+def test_estimate_source_plane_batch_depth_respects_worker_memory_limit():
+    depth = experiment_module._estimate_source_plane_batch_depth(
+        shape_tpczyx=(1, 1, 1, 4200, 3840, 5112),
+        target_chunks_tpczyx=(1, 1, 1, 256, 256, 256),
+        dtype_itemsize=2,
+        worker_memory_limit_bytes=7 << 30,
+    )
+
+    assert depth < 256
+    assert depth <= 64

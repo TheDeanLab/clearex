@@ -72,10 +72,12 @@ from clearex.workflow import (
     DASK_BACKEND_SLURM_CLUSTER,
     DASK_BACKEND_SLURM_RUNNER,
     WorkflowConfig,
+    LocalClusterConfig,
     dask_backend_to_dict,
     format_dask_backend_summary,
     format_chunks,
     normalize_analysis_operation_parameters,
+    recommend_local_cluster_config,
     resolve_analysis_execution_sequence,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
@@ -431,8 +433,9 @@ def _configure_dask_backend(
     exit_stack : contextlib.ExitStack
         Exit stack used to manage backend resource teardown.
     workload : str, default="io"
-        Workload profile. ``"io"`` configures local clusters with threads,
-        while ``"analysis"`` configures local clusters with processes.
+        Workload profile. ``"analysis"`` configures local clusters with
+        processes. ``"io"`` uses processes when multiple workers are active to
+        isolate worker memory accounting, and threads for single-worker mode.
 
     Returns
     -------
@@ -445,6 +448,10 @@ def _configure_dask_backend(
     Backend initialization errors are converted into warnings and the workflow
     continues without a distributed client. This keeps local/headless paths
     operational even when optional Dask distributed backends are unavailable.
+    When LocalCluster ``n_workers`` is unset, runtime applies aggressive
+    host/data-aware defaults from
+    :func:`clearex.workflow.recommend_local_cluster_config`, including worker
+    count and, when left at defaults, thread and memory settings.
     """
     if not workflow.prefer_dask:
         logger.info("Dask lazy loading disabled; skipping backend startup.")
@@ -458,13 +465,47 @@ def _configure_dask_backend(
 
     try:
         if backend.mode == DASK_BACKEND_LOCAL_CLUSTER:
-            use_processes = workload.strip().lower() == "analysis"
+            local_cfg = backend.local_cluster
+            requested_processes = workload.strip().lower() == "analysis"
+            default_local_cfg = LocalClusterConfig()
+            effective_n_workers = local_cfg.n_workers
+            effective_threads_per_worker = local_cfg.threads_per_worker
+            effective_memory_limit = local_cfg.memory_limit
+            if effective_n_workers is None:
+                recommendation = recommend_local_cluster_config(
+                    chunks_tpczyx=workflow.zarr_save.chunks_tpczyx(),
+                )
+                effective_n_workers = recommendation.config.n_workers
+                if local_cfg.threads_per_worker == default_local_cfg.threads_per_worker:
+                    effective_threads_per_worker = recommendation.config.threads_per_worker
+                if (
+                    str(local_cfg.memory_limit).strip().lower()
+                    == str(default_local_cfg.memory_limit).strip().lower()
+                ):
+                    effective_memory_limit = recommendation.config.memory_limit
+                logger.info(
+                    "Auto-selected aggressive LocalCluster settings from "
+                    "host/data recommendation: "
+                    f"workers={effective_n_workers}, "
+                    f"threads_per_worker={effective_threads_per_worker}, "
+                    f"memory_limit={effective_memory_limit}, "
+                    f"gpus={recommendation.detected_gpu_count}."
+                )
+            effective_worker_count = (
+                int(effective_n_workers) if effective_n_workers is not None else 1
+            )
+            use_processes = bool(requested_processes or effective_worker_count > 1)
+            if not requested_processes and use_processes:
+                logger.info(
+                    "Using process-based LocalCluster for multi-worker I/O "
+                    "execution (memory isolation enabled)."
+                )
             client = create_dask_client(
-                n_workers=backend.local_cluster.n_workers,
-                threads_per_worker=backend.local_cluster.threads_per_worker,
+                n_workers=effective_n_workers,
+                threads_per_worker=effective_threads_per_worker,
                 processes=use_processes,
-                memory_limit=backend.local_cluster.memory_limit,
-                local_directory=backend.local_cluster.local_directory,
+                memory_limit=effective_memory_limit,
+                local_directory=local_cfg.local_directory,
             )
             exit_stack.callback(client.close)
             logger.info(

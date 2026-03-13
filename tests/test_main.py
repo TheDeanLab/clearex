@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Standard Library Imports
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 import logging
@@ -17,6 +18,7 @@ import clearex.main as main_module
 from clearex.io.provenance import persist_run_provenance
 from clearex.io.read import ImageInfo
 from clearex.workflow import WorkflowConfig
+from clearex.workflow import DaskBackendConfig, LocalClusterConfig
 
 
 def _test_logger(name: str) -> logging.Logger:
@@ -37,6 +39,78 @@ def _test_logger(name: str) -> logging.Logger:
     logger.addHandler(logging.NullHandler())
     logger.propagate = False
     return logger
+
+
+def test_configure_dask_backend_uses_processes_for_multiworker_io(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _DummyClient:
+        def close(self) -> None:
+            return None
+
+    def _fake_create_dask_client(**kwargs):
+        captured.update(kwargs)
+        return _DummyClient()
+
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        dask_backend=DaskBackendConfig(
+            local_cluster=LocalClusterConfig(
+                n_workers=4,
+                threads_per_worker=1,
+                memory_limit="7GiB",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(main_module, "create_dask_client", _fake_create_dask_client)
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.configure_io_multi"),
+            exit_stack=stack,
+            workload="io",
+        )
+
+    assert client is not None
+    assert captured["processes"] is True
+
+
+def test_configure_dask_backend_uses_threads_for_single_worker_io(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _DummyClient:
+        def close(self) -> None:
+            return None
+
+    def _fake_create_dask_client(**kwargs):
+        captured.update(kwargs)
+        return _DummyClient()
+
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        dask_backend=DaskBackendConfig(
+            local_cluster=LocalClusterConfig(
+                n_workers=1,
+                threads_per_worker=4,
+                memory_limit="14GiB",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(main_module, "create_dask_client", _fake_create_dask_client)
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.configure_io_single"),
+            exit_stack=stack,
+            workload="io",
+        )
+
+    assert client is not None
+    assert captured["processes"] is False
 
 
 def test_run_workflow_visualization_only_skips_analysis_dask_startup(
