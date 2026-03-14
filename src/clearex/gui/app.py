@@ -636,8 +636,8 @@ def _popup_dialog_stylesheet() -> str:
         QGroupBox {
             border: 1px solid #2a3442;
             border-radius: 10px;
-            margin-top: 14px;
-            padding: 12px;
+            margin-top: 16px;
+            padding: 14px;
             background-color: #111925;
             font-weight: 600;
             color: #9cc6ff;
@@ -652,7 +652,8 @@ def _popup_dialog_stylesheet() -> str:
             background-color: #0b1320;
             border: 1px solid #2b3f58;
             border-radius: 8px;
-            padding: 6px 8px;
+            min-height: 30px;
+            padding: 7px 10px;
             color: #e6edf3;
             selection-background-color: #2f81f7;
         }
@@ -687,7 +688,7 @@ def _popup_dialog_stylesheet() -> str:
             background-color: #1a2635;
             border: 1px solid #2f4460;
             border-radius: 8px;
-            padding: 8px 12px;
+            padding: 9px 14px;
             color: #dbe9ff;
         }
         QPushButton:hover {
@@ -1116,7 +1117,8 @@ if HAS_PYQT6:
             """
             super().__init__(parent)
             self.setWindowTitle("Zarr Save Settings")
-            self.setMinimumWidth(760)
+            self.setMinimumWidth(860)
+            self.setMinimumHeight(660)
             self.result_config: Optional[ZarrSaveConfig] = None
             self._chunk_inputs: Dict[str, QSpinBox] = {}
             self._pyramid_inputs: Dict[str, QLineEdit] = {}
@@ -1338,8 +1340,8 @@ if HAS_PYQT6:
             """
             super().__init__(parent)
             self.setWindowTitle("Dask Backend Settings")
-            self.setMinimumWidth(820)
-            self.setMinimumHeight(760)
+            self.setMinimumWidth(940)
+            self.setMinimumHeight(840)
             self.result_config: Optional[DaskBackendConfig] = None
             self._mode_index: Dict[str, int] = {}
             self._recommendation_shape_tpczyx = recommendation_shape_tpczyx
@@ -2388,8 +2390,8 @@ if HAS_PYQT6:
             """
             super().__init__()
             self.setWindowTitle("ClearEx")
-            self.setMinimumWidth(960)
-            self.setMinimumHeight(700)
+            self.setMinimumWidth(1100)
+            self.setMinimumHeight(780)
             self.setAcceptDrops(True)
 
             self._opener = ImageOpener()
@@ -2696,8 +2698,8 @@ if HAS_PYQT6:
                 QGroupBox {
                     border: 1px solid #2a3442;
                     border-radius: 10px;
-                    margin-top: 14px;
-                    padding: 12px;
+                    margin-top: 16px;
+                    padding: 14px;
                     background-color: #111925;
                     font-weight: 600;
                 }
@@ -2721,7 +2723,8 @@ if HAS_PYQT6:
                     background-color: #0b1320;
                     border: 1px solid #2b3f58;
                     border-radius: 8px;
-                    padding: 8px;
+                    min-height: 30px;
+                    padding: 5px 10px;
                     color: #e6edf3;
                     selection-background-color: #2f81f7;
                 }
@@ -2733,7 +2736,7 @@ if HAS_PYQT6:
                     background-color: #1a2635;
                     border: 1px solid #2f4460;
                     border-radius: 8px;
-                    padding: 8px 12px;
+                    padding: 9px 14px;
                     color: #dbe9ff;
                 }
                 QPushButton:hover {
@@ -3552,8 +3555,8 @@ if HAS_PYQT6:
             """
             super().__init__()
             self.setWindowTitle("ClearEx Analysis")
-            self.setMinimumWidth(1120)
-            self.setMinimumHeight(640)
+            self.setMinimumWidth(1280)
+            self.setMinimumHeight(760)
 
             self._base_config = initial
             self.result_config: Optional[WorkflowConfig] = None
@@ -3659,7 +3662,7 @@ if HAS_PYQT6:
             left_column.addLayout(store_row)
 
             analysis_group = QGroupBox("Analysis Selection")
-            analysis_group.setMinimumWidth(430)
+            analysis_group.setMinimumWidth(500)
             analysis_layout = QVBoxLayout(analysis_group)
             apply_stack_spacing(analysis_layout)
 
@@ -3678,7 +3681,7 @@ if HAS_PYQT6:
 
                 order_spin = QSpinBox()
                 order_spin.setRange(1, len(self._OPERATION_KEYS))
-                order_spin.setMinimumWidth(64)
+                order_spin.setMinimumWidth(76)
                 row.addWidget(order_spin)
                 self._operation_order_spins[operation_name] = order_spin
                 self._register_parameter_hint(
@@ -5690,8 +5693,8 @@ if HAS_PYQT6:
                 QGroupBox {
                     border: 1px solid #2a3442;
                     border-radius: 10px;
-                    margin-top: 14px;
-                    padding: 12px;
+                    margin-top: 16px;
+                    padding: 14px;
                     background-color: #111925;
                     font-weight: 600;
                 }
@@ -5716,12 +5719,12 @@ if HAS_PYQT6:
                     color: #9ab0ca;
                 }
                 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-                    min-height: 28px;
+                    min-height: 30px;
                     border: 1px solid #2b3f58;
                     border-radius: 8px;
                     background-color: #101a29;
                     color: #e6edf3;
-                    padding: 4px 8px;
+                    padding: 5px 10px;
                     selection-background-color: #2f81f7;
                     selection-color: #f8fbff;
                 }
@@ -5745,7 +5748,7 @@ if HAS_PYQT6:
                     background-color: #1a2635;
                     border: 1px solid #2f4460;
                     border-radius: 8px;
-                    padding: 8px 12px;
+                    padding: 9px 14px;
                     color: #dbe9ff;
                 }
                 QPushButton:hover {

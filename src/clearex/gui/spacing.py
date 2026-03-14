@@ -56,28 +56,28 @@ class LayoutSpacingSpec:
     vertical_spacing: Optional[int] = None
 
 
-_WINDOW_ROOT_SPEC = LayoutSpacingSpec(margins=(20, 20, 20, 20), spacing=14)
-_POPUP_ROOT_SPEC = LayoutSpacingSpec(margins=(16, 16, 16, 16), spacing=12)
-_STACK_SPEC = LayoutSpacingSpec(margins=(0, 0, 0, 0), spacing=10)
-_ROW_SPEC = LayoutSpacingSpec(margins=(0, 0, 0, 0), spacing=10)
-_COMPACT_ROW_SPEC = LayoutSpacingSpec(margins=(0, 0, 0, 0), spacing=8)
-_FOOTER_ROW_SPEC = LayoutSpacingSpec(margins=(0, 6, 0, 0), spacing=10)
+_WINDOW_ROOT_SPEC = LayoutSpacingSpec(margins=(24, 24, 24, 24), spacing=18)
+_POPUP_ROOT_SPEC = LayoutSpacingSpec(margins=(20, 20, 20, 20), spacing=14)
+_STACK_SPEC = LayoutSpacingSpec(margins=(0, 0, 0, 0), spacing=12)
+_ROW_SPEC = LayoutSpacingSpec(margins=(0, 0, 0, 0), spacing=12)
+_COMPACT_ROW_SPEC = LayoutSpacingSpec(margins=(0, 0, 0, 0), spacing=10)
+_FOOTER_ROW_SPEC = LayoutSpacingSpec(margins=(0, 8, 0, 0), spacing=12)
 _GRID_SPEC = LayoutSpacingSpec(
-    margins=(6, 6, 6, 6),
-    horizontal_spacing=16,
-    vertical_spacing=10,
-)
-_METADATA_GRID_SPEC = LayoutSpacingSpec(
     margins=(8, 8, 8, 8),
     horizontal_spacing=20,
-    vertical_spacing=10,
+    vertical_spacing=14,
+)
+_METADATA_GRID_SPEC = LayoutSpacingSpec(
+    margins=(10, 10, 10, 10),
+    horizontal_spacing=24,
+    vertical_spacing=14,
 )
 _FORM_SPEC = LayoutSpacingSpec(
     margins=(0, 0, 0, 0),
-    horizontal_spacing=12,
-    vertical_spacing=10,
+    horizontal_spacing=14,
+    vertical_spacing=12,
 )
-_HELP_STACK_SPEC = LayoutSpacingSpec(margins=(0, 0, 0, 0), spacing=6)
+_HELP_STACK_SPEC = LayoutSpacingSpec(margins=(0, 0, 0, 0), spacing=8)
 
 
 def _apply_layout_spec(layout: Any, spec: LayoutSpacingSpec) -> None:
