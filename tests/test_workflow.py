@@ -115,9 +115,12 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["flatfield"]["fit_mode"] == "tiled"
         assert cfg.analysis_parameters["flatfield"]["fit_tile_shape_yx"] == [256, 256]
         assert cfg.analysis_parameters["flatfield"]["blend_tiles"] is False
+        assert "shear_transform" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["shear_transform"]["execution_order"] == 3
+        assert cfg.analysis_parameters["shear_transform"]["interpolation"] == "linear"
         assert "particle_detection" in cfg.analysis_parameters
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
-        assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 3
+        assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 4
         assert cfg.analysis_parameters["particle_detection"]["input_source"] == "data"
         assert cfg.analysis_parameters["visualization"]["show_all_positions"] is False
         assert cfg.analysis_parameters["visualization"]["position_index"] == 0
@@ -292,6 +295,39 @@ class TestWorkflowConfig:
         assert params["use_multiscale"] is False
         assert params["overlay_particle_detections"] is True
         assert params["launch_mode"] == "subprocess"
+
+    def test_normalizes_shear_transform_parameters(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "shear_transform": {
+                    "shear_xy": "0.12",
+                    "shear_xz": "-0.3",
+                    "shear_yz": "0.45",
+                    "rotation_deg_x": "10",
+                    "rotation_deg_y": "-5",
+                    "rotation_deg_z": "2.5",
+                    "auto_rotate_from_shear": 1,
+                    "interpolation": "NearestNeighbor",
+                    "fill_value": "15.5",
+                    "output_dtype": "uint16",
+                    "roi_padding_zyx": [4, 8, 12],
+                    "execution_order": "6",
+                }
+            }
+        )
+        params = cfg.analysis_parameters["shear_transform"]
+        assert params["shear_xy"] == 0.12
+        assert params["shear_xz"] == -0.3
+        assert params["shear_yz"] == 0.45
+        assert params["rotation_deg_x"] == 10.0
+        assert params["rotation_deg_y"] == -5.0
+        assert params["rotation_deg_z"] == 2.5
+        assert params["auto_rotate_from_shear"] is True
+        assert params["interpolation"] == "nearestneighbor"
+        assert params["fill_value"] == 15.5
+        assert params["output_dtype"] == "uint16"
+        assert params["roi_padding_zyx"] == [4, 8, 12]
+        assert params["execution_order"] == 6
 
 
 class TestZarrSaveConfig:
@@ -480,6 +516,7 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     )
     assert normalized["deconvolution"]["execution_order"] == 2
     assert normalized["flatfield"]["execution_order"] == 1
+    assert normalized["shear_transform"]["execution_order"] == 3
     assert normalized["visualization"]["input_source"] == "data"
     assert normalized["visualization"]["show_all_positions"] is False
     assert normalized["visualization"]["use_multiscale"] is True
@@ -489,12 +526,14 @@ def test_resolve_analysis_execution_sequence_uses_execution_order():
     sequence = resolve_analysis_execution_sequence(
         flatfield=True,
         deconvolution=True,
+        shear_transform=True,
         particle_detection=True,
         registration=True,
         visualization=False,
         analysis_parameters={
             "flatfield": {"execution_order": 4},
             "deconvolution": {"execution_order": 2},
+            "shear_transform": {"execution_order": 5},
             "particle_detection": {"execution_order": 3},
             "registration": {"execution_order": 1},
         },
@@ -504,6 +543,7 @@ def test_resolve_analysis_execution_sequence_uses_execution_order():
         "deconvolution",
         "particle_detection",
         "flatfield",
+        "shear_transform",
     )
 
 
@@ -511,6 +551,7 @@ def test_analysis_operation_order_contains_expected_keys():
     assert ANALYSIS_OPERATION_ORDER == (
         "flatfield",
         "deconvolution",
+        "shear_transform",
         "particle_detection",
         "registration",
         "visualization",

@@ -49,6 +49,7 @@ _PTCZYX_TO_TPCZYX_INDICES = (1, 0, 2, 3, 4, 5)
 ANALYSIS_OPERATION_ORDER = (
     "flatfield",
     "deconvolution",
+    "shear_transform",
     "particle_detection",
     "registration",
     "visualization",
@@ -124,8 +125,29 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "config_file": "",
         "gpu_config_file": "",
     },
-    "particle_detection": {
+    "shear_transform": {
         "execution_order": 3,
+        "input_source": "data",
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 2.0,
+        "shear_xy": 0.0,
+        "shear_xz": 0.0,
+        "shear_yz": 0.0,
+        "rotation_deg_x": 0.0,
+        "rotation_deg_y": 0.0,
+        "rotation_deg_z": 0.0,
+        "auto_rotate_from_shear": False,
+        "interpolation": "linear",
+        "fill_value": 0.0,
+        "output_dtype": "float32",
+        "roi_padding_zyx": [2, 2, 2],
+    },
+    "particle_detection": {
+        "execution_order": 4,
         "input_source": "data",
         "force_rerun": False,
         "channel_index": 0,
@@ -146,7 +168,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "min_distance_sigma": 10.0,
     },
     "registration": {
-        "execution_order": 4,
+        "execution_order": 5,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -156,7 +178,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "memory_overhead_factor": 2.5,
     },
     "visualization": {
-        "execution_order": 5,
+        "execution_order": 6,
         "input_source": "data",
         "chunk_basis": "2d",
         "detect_2d_per_slice": True,
@@ -682,6 +704,59 @@ def _normalize_particle_detection_parameters(
     return normalized
 
 
+def _normalize_shear_transform_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize shear-transform runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate shear-transform parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized shear-transform parameters.
+
+    Raises
+    ------
+    ValueError
+        If required values are invalid.
+    """
+    normalized = _normalize_common_operation_parameters("shear_transform", params)
+    normalized["detect_2d_per_slice"] = False
+    normalized["shear_xy"] = float(normalized.get("shear_xy", 0.0))
+    normalized["shear_xz"] = float(normalized.get("shear_xz", 0.0))
+    normalized["shear_yz"] = float(normalized.get("shear_yz", 0.0))
+    normalized["rotation_deg_x"] = float(normalized.get("rotation_deg_x", 0.0))
+    normalized["rotation_deg_y"] = float(normalized.get("rotation_deg_y", 0.0))
+    normalized["rotation_deg_z"] = float(normalized.get("rotation_deg_z", 0.0))
+    normalized["auto_rotate_from_shear"] = bool(
+        normalized.get("auto_rotate_from_shear", False)
+    )
+    interpolation = (
+        str(normalized.get("interpolation", "linear")).strip().lower() or "linear"
+    )
+    if interpolation not in {"linear", "nearestneighbor", "bspline"}:
+        raise ValueError(
+            "shear_transform interpolation must be one of "
+            "linear, nearestneighbor, or bspline."
+        )
+    normalized["interpolation"] = interpolation
+    normalized["fill_value"] = float(normalized.get("fill_value", 0.0))
+    normalized["output_dtype"] = (
+        str(normalized.get("output_dtype", "float32")).strip().lower() or "float32"
+    )
+    roi_padding = normalized.get("roi_padding_zyx", [2, 2, 2])
+    if not isinstance(roi_padding, (tuple, list)) or len(roi_padding) != 3:
+        raise ValueError(
+            "shear_transform roi_padding_zyx must define three integers in (z, y, x) order."
+        )
+    normalized["roi_padding_zyx"] = [max(0, int(v)) for v in roi_padding]
+    return normalized
+
+
 def _normalize_visualization_parameters(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -771,6 +846,10 @@ def normalize_analysis_operation_parameters(
             merged[operation_name] = _normalize_deconvolution_parameters(
                 merged[operation_name]
             )
+        elif operation_name == "shear_transform":
+            merged[operation_name] = _normalize_shear_transform_parameters(
+                merged[operation_name]
+            )
         elif operation_name == "particle_detection":
             merged[operation_name] = _normalize_particle_detection_parameters(
                 merged[operation_name]
@@ -791,6 +870,7 @@ def selected_analysis_operations(
     *,
     flatfield: bool,
     deconvolution: bool,
+    shear_transform: bool,
     particle_detection: bool,
     registration: bool,
     visualization: bool,
@@ -803,6 +883,8 @@ def selected_analysis_operations(
         Whether flatfield correction is enabled.
     deconvolution : bool
         Whether deconvolution is enabled.
+    shear_transform : bool
+        Whether shear transform is enabled.
     particle_detection : bool
         Whether particle detection is enabled.
     registration : bool
@@ -820,6 +902,8 @@ def selected_analysis_operations(
         selected.append("flatfield")
     if deconvolution:
         selected.append("deconvolution")
+    if shear_transform:
+        selected.append("shear_transform")
     if particle_detection:
         selected.append("particle_detection")
     if registration:
@@ -833,6 +917,7 @@ def resolve_analysis_execution_sequence(
     *,
     flatfield: bool,
     deconvolution: bool,
+    shear_transform: bool,
     particle_detection: bool,
     registration: bool,
     visualization: bool,
@@ -846,6 +931,8 @@ def resolve_analysis_execution_sequence(
         Whether flatfield correction is enabled.
     deconvolution : bool
         Whether deconvolution is enabled.
+    shear_transform : bool
+        Whether shear transform is enabled.
     particle_detection : bool
         Whether particle detection is enabled.
     registration : bool
@@ -866,6 +953,7 @@ def resolve_analysis_execution_sequence(
     selected = selected_analysis_operations(
         flatfield=flatfield,
         deconvolution=deconvolution,
+        shear_transform=shear_transform,
         particle_detection=particle_detection,
         registration=registration,
         visualization=visualization,
@@ -2444,6 +2532,8 @@ class WorkflowConfig:
         Flag indicating whether flatfield-correction workflow should run.
     deconvolution : bool
         Flag indicating whether deconvolution workflow should run.
+    shear_transform : bool
+        Flag indicating whether shear-transform workflow should run.
     particle_detection : bool
         Flag indicating whether particle detection workflow should run.
     registration : bool
@@ -2462,6 +2552,7 @@ class WorkflowConfig:
     chunks: ChunkSpec = None
     flatfield: bool = False
     deconvolution: bool = False
+    shear_transform: bool = False
     particle_detection: bool = False
     registration: bool = False
     visualization: bool = False
@@ -2503,6 +2594,7 @@ class WorkflowConfig:
             (
                 self.flatfield,
                 self.deconvolution,
+                self.shear_transform,
                 self.particle_detection,
                 self.registration,
                 self.visualization,

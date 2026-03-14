@@ -1,0 +1,31 @@
+2026-03-14 16:58:43,839 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:33331'
+2026-03-14 16:58:44,679 - distributed.diskutils - INFO - Found stale lock file and directory '/project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-6vvy78dd', purging
+2026-03-14 16:58:44,685 - distributed.diskutils - INFO - Found stale lock file and directory '/project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-euy4is7a', purging
+2026-03-14 16:58:44,690 - distributed.diskutils - INFO - Found stale lock file and directory '/project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-p961t0wy', purging
+2026-03-14 16:58:44,695 - distributed.diskutils - INFO - Found stale lock file and directory '/project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-r0di2ooy', purging
+2026-03-14 16:58:44,699 - distributed.diskutils - INFO - Found stale lock file and directory '/project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-yjoa4v_i', purging
+2026-03-14 16:58:44,704 - distributed.diskutils - INFO - Found stale lock file and directory '/project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-e142ep38', purging
+2026-03-14 16:58:44,834 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:41039
+2026-03-14 16:58:44,834 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:41039
+2026-03-14 16:58:44,834 - distributed.worker - INFO -           Worker name:             SLURMCluster-1
+2026-03-14 16:58:44,834 - distributed.worker - INFO -          dashboard at:        10.100.162.61:43689
+2026-03-14 16:58:44,834 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:35635
+2026-03-14 16:58:44,834 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 16:58:44,834 - distributed.worker - INFO -               Threads:                         70
+2026-03-14 16:58:44,834 - distributed.worker - INFO -                Memory:                 465.66 GiB
+2026-03-14 16:58:44,834 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-bwm5ukvn
+2026-03-14 16:58:44,834 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 16:58:56,311 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 16:58:56,311 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:35635
+2026-03-14 16:58:56,311 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 16:58:56,312 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:35635
+2026-03-14 17:25:14,014 - distributed.core - INFO - Connection to tcp://10.100.162.59:35635 has been closed.
+2026-03-14 17:25:14,016 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:41039. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 17:25:14,017 - distributed.utils_comm - INFO - Retrying functools.partial(<function PooledRPCCall.__getattr__.<locals>.send_recv_from_rpc at 0x7f40b8678ea0>, address='tcp://10.100.162.61:41039', now=1773527112.81284, metrics={'task_counts': Counter(), 'bandwidth': {'total': 100000000, 'workers': {}, 'types': {}}, 'digests_total_since_heartbeat': {'latency': 0.0043182373046875, 'tick-duration': 0.5002589225769043}, 'managed_bytes': 0, 'spilled_bytes': {'memory': 0, 'disk': 0}, 'transfer': {'incoming_bytes': 0, 'incoming_count': 0, 'incoming_count_total': 0, 'outgoing_bytes': 0, 'outgoing_count': 0, 'outgoing_count_total': 0}, 'event_loop_interval': 0.02000988006591797, 'cpu': 2.0, 'memory': 137752576, 'time': 1773527112.313492, 'host_net_io': {'read_bps': 58383.143790258284, 'write_bps': 1542.3317777885122}, 'host_disk_io': {'read_bps': 0.0, 'write_bps': 0.0}, 'num_fds': 20}, executing={}, extensions={'spans': {}, 'shuffle': {}}) after exception in attempt 0/10: in <TCP (closed) ConnectionPool.heartbeat_worker local=tcp://10.100.162.61:37516 remote=tcp://10.100.162.59:35635>: ConnectionResetError: [Errno 104] Connection reset by peer
+2026-03-14 17:25:14,017 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:33331'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 17:25:14,018 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 17:25:14,018 - distributed.utils_comm - INFO - Retrying functools.partial(<function PooledRPCCall.__getattr__.<locals>.send_recv_from_rpc at 0x7f40b8678ea0>, address='tcp://10.100.162.61:41039', now=1773527112.81284, metrics={'task_counts': Counter(), 'bandwidth': {'total': 100000000, 'workers': {}, 'types': {}}, 'digests_total_since_heartbeat': {'latency': 0.0043182373046875, 'tick-duration': 0.5002589225769043}, 'managed_bytes': 0, 'spilled_bytes': {'memory': 0, 'disk': 0}, 'transfer': {'incoming_bytes': 0, 'incoming_count': 0, 'incoming_count_total': 0, 'outgoing_bytes': 0, 'outgoing_count': 0, 'outgoing_count_total': 0}, 'event_loop_interval': 0.02000988006591797, 'cpu': 2.0, 'memory': 137752576, 'time': 1773527112.313492, 'host_net_io': {'read_bps': 58383.143790258284, 'write_bps': 1542.3317777885122}, 'host_disk_io': {'read_bps': 0.0, 'write_bps': 0.0}, 'num_fds': 20}, executing={}, extensions={'spans': {}, 'shuffle': {}}) after exception in attempt 1/10: ConnectionPool closing.
+2026-03-14 17:25:14,031 - distributed.nanny - INFO - Worker closed
+2026-03-14 17:25:16,724 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:33331'. Reason: nanny-close-gracefully
+2026-03-14 17:25:16,725 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:33331' closed.
+2026-03-14 17:25:16,725 - distributed.dask_worker - INFO - End worker

@@ -61,6 +61,9 @@ from clearex.detect.pipeline import (
 from clearex.deconvolution.pipeline import (
     run_deconvolution_analysis,
 )
+from clearex.shear.pipeline import (
+    run_shear_transform_analysis,
+)
 from clearex.flatfield.pipeline import (
     run_flatfield_analysis,
 )
@@ -89,15 +92,22 @@ _ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
     "data": "data",
     "flatfield": "results/flatfield/latest/data",
     "deconvolution": "results/deconvolution/latest/data",
+    "shear_transform": "results/shear_transform/latest/data",
     "registration": "results/registration/latest/data",
     "visualization": "data",
 }
 
 _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
-    {"flatfield", "deconvolution", "particle_detection"}
+    {"flatfield", "deconvolution", "shear_transform", "particle_detection"}
 )
 _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
-    {"flatfield", "deconvolution", "particle_detection", "registration"}
+    {
+        "flatfield",
+        "deconvolution",
+        "shear_transform",
+        "particle_detection",
+        "registration",
+    }
 )
 _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "flatfield": (
@@ -108,6 +118,7 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
         "results/flatfield/latest/baseline_pctz",
     ),
     "deconvolution": ("results/deconvolution/latest/data",),
+    "shear_transform": ("results/shear_transform/latest/data",),
     "particle_detection": ("results/particle_detection/latest/detections",),
     "registration": ("results/registration/latest/data",),
 }
@@ -285,6 +296,7 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         chunks=parse_chunks(args.chunks),
         flatfield=args.flatfield,
         deconvolution=args.deconvolution,
+        shear_transform=args.shear_transform,
         particle_detection=args.particle_detection,
         registration=args.registration,
         visualization=args.visualization,
@@ -545,6 +557,19 @@ def _configure_dask_backend(
             from dask_jobqueue import SLURMCluster
 
             cluster_cfg = backend.slurm_cluster
+            if (
+                workload.strip().lower() == "analysis"
+                and int(cluster_cfg.processes) == 1
+                and int(cluster_cfg.cores) > 1
+            ):
+                logger.warning(
+                    "SLURMCluster is configured with processes=1 and cores=%s. "
+                    "CPU-bound Python analyses (for example shear transform) may "
+                    "underutilize allocated CPUs with this layout. "
+                    "For maximum process-level parallelism, increase processes "
+                    "toward cores in the Dask backend configuration.",
+                    cluster_cfg.cores,
+                )
             extra_directives = [
                 directive.strip()
                 for directive in cluster_cfg.job_extra_directives
@@ -784,6 +809,7 @@ def _run_workflow(
         execution_sequence = resolve_analysis_execution_sequence(
             flatfield=workflow.flatfield,
             deconvolution=workflow.deconvolution,
+            shear_transform=workflow.shear_transform,
             particle_detection=workflow.particle_detection,
             registration=workflow.registration,
             visualization=workflow.visualization,
@@ -1173,7 +1199,138 @@ def _run_workflow(
                             "Deconvolution skipped (no Zarr/N5 store).",
                         )
                     continue
-    
+
+                if operation_name == "shear_transform":
+                    shear_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                        if not _zarr_component_exists(
+                            provenance_store_path,
+                            str(shear_parameters.get("input_source", "data")),
+                        ):
+                            logger.warning(
+                                "Requested shear-transform input component '%s' was "
+                                "not found. Falling back to 'data'.",
+                                shear_parameters.get("input_source", "data"),
+                            )
+                            shear_parameters["input_source"] = "data"
+                            runtime_analysis_parameters["shear_transform"] = dict(
+                                shear_parameters
+                            )
+
+                        progress_state = {"last_percent": -5}
+
+                        def _shear_progress(percent: int, message: str) -> None:
+                            """Throttle shear-transform progress logs.
+
+                            Parameters
+                            ----------
+                            percent : int
+                                Progress percent.
+                            message : str
+                                Progress message.
+
+                            Returns
+                            -------
+                            None
+                                Logger side effects only.
+                            """
+                            last_percent = int(progress_state["last_percent"])
+                            if percent >= 100 or percent - last_percent >= 5:
+                                progress_state["last_percent"] = int(percent)
+                                logger.info(
+                                    f"[shear_transform] {int(percent)}% - {message}"
+                                )
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            _emit_analysis_progress(
+                                mapped,
+                                f"shear_transform: {message}",
+                            )
+
+                        summary = run_shear_transform_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=shear_parameters,
+                            client=analysis_client,
+                            progress_callback=_shear_progress,
+                        )
+                        produced_components["shear_transform"] = summary.data_component
+                        output_records["shear_transform"] = {
+                            "component": summary.component,
+                            "data_component": summary.data_component,
+                            "volumes_processed": summary.volumes_processed,
+                            "output_shape_tpczyx": list(summary.output_shape_tpczyx),
+                            "output_chunks_tpczyx": list(summary.output_chunks_tpczyx),
+                            "voxel_size_um_zyx": list(summary.voxel_size_um_zyx),
+                            "applied_shear": {
+                                "xy": summary.applied_shear_xy,
+                                "xz": summary.applied_shear_xz,
+                                "yz": summary.applied_shear_yz,
+                            },
+                            "applied_rotation_deg_xyz": list(
+                                summary.applied_rotation_deg_xyz
+                            ),
+                            "interpolation": summary.interpolation,
+                            "output_dtype": summary.output_dtype,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Shear transform completed: "
+                            f"volumes_processed={summary.volumes_processed}, "
+                            f"shape={summary.output_shape_tpczyx}, "
+                            f"component={summary.component}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "shear_transform",
+                                "parameters": {
+                                    **shear_parameters,
+                                    "component": summary.component,
+                                    "data_component": summary.data_component,
+                                    "volumes_processed": summary.volumes_processed,
+                                    "output_shape_tpczyx": list(
+                                        summary.output_shape_tpczyx
+                                    ),
+                                    "output_chunks_tpczyx": list(
+                                        summary.output_chunks_tpczyx
+                                    ),
+                                    "voxel_size_um_zyx": list(summary.voxel_size_um_zyx),
+                                    "applied_shear_xy": summary.applied_shear_xy,
+                                    "applied_shear_xz": summary.applied_shear_xz,
+                                    "applied_shear_yz": summary.applied_shear_yz,
+                                    "applied_rotation_deg_xyz": list(
+                                        summary.applied_rotation_deg_xyz
+                                    ),
+                                    "interpolation": summary.interpolation,
+                                    "output_dtype": summary.output_dtype,
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Shear transform complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "Shear transform requires a canonical Zarr/N5 data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "shear_transform",
+                                "parameters": {
+                                    **shear_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Shear transform skipped (no Zarr/N5 store).",
+                        )
+                    continue
+
                 if operation_name == "particle_detection":
                     particle_parameters = dict(operation_parameters)
                     if provenance_store_path and is_zarr_store_path(provenance_store_path):
@@ -1456,6 +1613,7 @@ def _run_workflow(
             chunks=workflow.chunks,
             flatfield=workflow.flatfield,
             deconvolution=workflow.deconvolution,
+            shear_transform=workflow.shear_transform,
             particle_detection=workflow.particle_detection,
             registration=workflow.registration,
             visualization=workflow.visualization,

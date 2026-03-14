@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 
 import clearex.gui.app as app_module
@@ -343,6 +344,7 @@ def test_build_input_source_options_includes_existing_store_outputs() -> None:
         operation_key_order=(
             "flatfield",
             "deconvolution",
+            "shear_transform",
             "particle_detection",
             "registration",
             "visualization",
@@ -350,6 +352,7 @@ def test_build_input_source_options_includes_existing_store_outputs() -> None:
         operation_labels={
             "flatfield": "Flatfield Correction",
             "deconvolution": "Deconvolution",
+            "shear_transform": "Shear Transform",
             "particle_detection": "Particle Detection",
             "registration": "Registration",
             "visualization": "Visualization",
@@ -357,6 +360,7 @@ def test_build_input_source_options_includes_existing_store_outputs() -> None:
         operation_output_components={
             "flatfield": "results/flatfield/latest/data",
             "deconvolution": "results/deconvolution/latest/data",
+            "shear_transform": "results/shear_transform/latest/data",
             "registration": "results/registration/latest/data",
         },
         available_store_output_components={
@@ -378,6 +382,7 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
         operation_key_order=(
             "flatfield",
             "deconvolution",
+            "shear_transform",
             "particle_detection",
             "registration",
             "visualization",
@@ -385,6 +390,7 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
         operation_labels={
             "flatfield": "Flatfield Correction",
             "deconvolution": "Deconvolution",
+            "shear_transform": "Shear Transform",
             "particle_detection": "Particle Detection",
             "registration": "Registration",
             "visualization": "Visualization",
@@ -392,6 +398,7 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
         operation_output_components={
             "flatfield": "results/flatfield/latest/data",
             "deconvolution": "results/deconvolution/latest/data",
+            "shear_transform": "results/shear_transform/latest/data",
             "registration": "results/registration/latest/data",
         },
         available_store_output_components={
@@ -457,3 +464,20 @@ def test_particle_overlay_available_with_historical_detections() -> None:
     )
 
     assert from_history is True
+
+
+def test_shear_degree_to_coefficient_and_back_round_trip() -> None:
+    for angle in (-70.0, -35.0, -5.5, 0.0, 8.25, 35.0, 70.0):
+        coefficient = app_module._shear_degrees_to_coefficient(angle)
+        restored = app_module._shear_coefficient_to_degrees(coefficient)
+        assert math.isclose(restored, angle, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_shear_degree_conversion_matches_expected_tangent() -> None:
+    coefficient = app_module._shear_degrees_to_coefficient(35.0)
+    assert math.isclose(
+        coefficient,
+        math.tan(math.radians(35.0)),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )

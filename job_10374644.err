@@ -1,0 +1,281 @@
+2026-03-14 17:27:28,540 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:43817'
+2026-03-14 17:27:28,544 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:36831'
+2026-03-14 17:27:28,545 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:38239'
+2026-03-14 17:27:28,546 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:46687'
+2026-03-14 17:27:28,547 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:39329'
+2026-03-14 17:27:28,549 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:42907'
+2026-03-14 17:27:28,550 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:44187'
+2026-03-14 17:27:28,551 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:41533'
+2026-03-14 17:27:28,552 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:45301'
+2026-03-14 17:27:28,554 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.61:34295'
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:44239
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:36135
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:38711
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:34215
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:44469
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:37965
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:36737
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:34395
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:37837
+2026-03-14 17:27:29,648 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.61:44891
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:44239
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:36135
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:38711
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:34215
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:44469
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:37965
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:36737
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:34395
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:37837
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-6
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.61:44891
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-8
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-0
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-5
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-7
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-3
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-9
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-2
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-1
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:45833
+2026-03-14 17:27:29,648 - distributed.worker - INFO -           Worker name:           SLURMCluster-3-4
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:41739
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:43407
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:33443
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:40843
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:39657
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:40651
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:37473
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:42481
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO -          dashboard at:        10.100.162.61:43445
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,648 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -               Threads:                          7
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -                Memory:                  46.57 GiB
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-uvtrzlin
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-gm1xchoe
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-r90ut6hc
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-s3rvs1lj
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-7oamgpeq
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-h_41byab
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-zyt2j941
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-3o2gl9h2
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-u641xpuw
+2026-03-14 17:27:29,649 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-wbfnn73a
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:29,649 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,046 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,047 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,047 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,047 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:27:37,050 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,050 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,050 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,051 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:27:37,053 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,053 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,053 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,053 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,053 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,054 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,054 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,054 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,054 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,054 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,054 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:27:37,054 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:27:37,054 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,055 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,055 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:27:37,055 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,055 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:27:37,056 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,056 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,056 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:27:37,058 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,059 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,059 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,060 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:27:37,070 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,071 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 17:27:37,072 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,072 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,072 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:37137
+2026-03-14 17:27:37,072 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 17:27:37,074 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:27:37,074 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:37137
+2026-03-14 17:28:34,185 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.62s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 17:28:34,202 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.63s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 17:28:34,202 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.63s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 17:28:34,202 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.63s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 17:28:34,202 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.63s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 17:28:34,202 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.63s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 17:28:34,202 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.63s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 17:28:34,202 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.62s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 17:28:34,202 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.63s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 17:28:34,205 - distributed.core - INFO - Event loop was unresponsive in Worker for 56.63s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+2026-03-14 18:13:03,527 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,527 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,528 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:44239. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,527 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,528 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:36737. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,527 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,527 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,528 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:34215. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,528 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,528 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:44891. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,528 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:38711. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,528 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:37965. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,528 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,527 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,527 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,529 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:34395. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,529 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:36135. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,529 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:44469. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,529 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:46687'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,529 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,530 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:44187'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,530 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,531 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:38239'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,531 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:36831'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,531 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,531 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:41533'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,531 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,531 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:43817'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,531 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,532 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,532 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:34295'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,532 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:39329'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,532 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,532 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:42907'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,533 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,533 - distributed.worker.state_machine - WARNING - Async instruction for <Task cancelled name="execute('_process_and_write_tile-78005594-c086-4e7e-854e-25ba61bd76d6')" coro=<Worker.execute() done, defined at /project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/distributed/worker_state_machine.py:3606>> ended with CancelledError
+2026-03-14 18:13:03,533 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,533 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:03,533 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:03,533 - distributed.core - INFO - Connection to tcp://10.100.162.59:37137 has been closed.
+2026-03-14 18:13:03,534 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.61:37837. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,535 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:03,535 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:03,535 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.61:45301'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 18:13:03,535 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:03,535 - distributed.worker.state_machine - WARNING - Async instruction for <Task cancelled name="execute('_process_and_write_tile-f775df20-6a5e-4015-be90-0935709ceaa1')" coro=<Worker.execute() done, defined at /project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/distributed/worker_state_machine.py:3606>> ended with CancelledError
+2026-03-14 18:13:03,535 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 18:13:03,536 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:03,536 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:03,536 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:03,549 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:03,567 - distributed.nanny - INFO - Worker closed
+2026-03-14 18:13:05,535 - distributed.nanny - ERROR - Worker process died unexpectedly
+2026-03-14 18:13:05,536 - distributed.nanny - ERROR - Worker process died unexpectedly
+2026-03-14 18:13:05,536 - distributed.nanny - ERROR - Worker process died unexpectedly
+2026-03-14 18:13:05,537 - distributed.nanny - ERROR - Worker process died unexpectedly
+2026-03-14 18:13:05,538 - distributed.nanny - ERROR - Worker process died unexpectedly
+2026-03-14 18:13:05,538 - distributed.nanny - ERROR - Worker process died unexpectedly
+2026-03-14 18:13:05,551 - distributed.nanny - ERROR - Worker process died unexpectedly
+2026-03-14 18:13:05,568 - distributed.nanny - ERROR - Worker process died unexpectedly
+2026-03-14 18:13:06,610 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:45301'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,611 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:45301' closed.
+2026-03-14 18:13:06,613 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:43817'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,613 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:43817' closed.
+2026-03-14 18:13:06,617 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:38239'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,617 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:38239' closed.
+2026-03-14 18:13:06,618 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:41533'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,618 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:41533' closed.
+2026-03-14 18:13:06,618 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:44187'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,618 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:44187' closed.
+2026-03-14 18:13:06,621 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:42907'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,621 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:42907' closed.
+2026-03-14 18:13:06,622 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:46687'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,622 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:46687' closed.
+2026-03-14 18:13:06,622 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:34295'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,623 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:34295' closed.
+2026-03-14 18:13:06,625 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:36831'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,625 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:36831' closed.
+2026-03-14 18:13:06,646 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.61:39329'. Reason: nanny-close-gracefully
+2026-03-14 18:13:06,646 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.61:39329' closed.
+2026-03-14 18:13:06,647 - distributed.dask_worker - INFO - End worker

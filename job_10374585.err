@@ -1,0 +1,25 @@
+2026-03-14 16:58:43,839 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.80:36775'
+2026-03-14 16:58:44,834 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.80:36879
+2026-03-14 16:58:44,834 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.80:36879
+2026-03-14 16:58:44,834 - distributed.worker - INFO -           Worker name:             SLURMCluster-0
+2026-03-14 16:58:44,834 - distributed.worker - INFO -          dashboard at:        10.100.162.80:36183
+2026-03-14 16:58:44,834 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:35635
+2026-03-14 16:58:44,835 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 16:58:44,835 - distributed.worker - INFO -               Threads:                         70
+2026-03-14 16:58:44,835 - distributed.worker - INFO -                Memory:                 465.66 GiB
+2026-03-14 16:58:44,835 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-37x17nwh
+2026-03-14 16:58:44,835 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 16:58:56,315 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 16:58:56,317 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:35635
+2026-03-14 16:58:56,318 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 16:58:56,320 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:35635
+2026-03-14 17:25:14,014 - distributed.core - INFO - Connection to tcp://10.100.162.59:35635 has been closed.
+2026-03-14 17:25:14,016 - distributed.worker - INFO - Stopping worker at tcp://10.100.162.80:36879. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 17:25:14,017 - distributed.utils_comm - INFO - Retrying functools.partial(<function PooledRPCCall.__getattr__.<locals>.send_recv_from_rpc at 0x7f10f81a5da0>, address='tcp://10.100.162.80:36879', now=1773527112.8182223, metrics={'task_counts': Counter(), 'bandwidth': {'total': 100000000, 'workers': {}, 'types': {}}, 'digests_total_since_heartbeat': {'tick-duration': 0.5004920959472656, 'latency': 0.024225473403930664}, 'managed_bytes': 0, 'spilled_bytes': {'memory': 0, 'disk': 0}, 'transfer': {'incoming_bytes': 0, 'incoming_count': 0, 'incoming_count_total': 0, 'outgoing_bytes': 0, 'outgoing_count': 0, 'outgoing_count_total': 0}, 'event_loop_interval': 0.02000511169433594, 'cpu': 2.0, 'memory': 137441280, 'time': 1773527112.319503, 'host_net_io': {'read_bps': 58295.795928425105, 'write_bps': 1425.3592982739651}, 'host_disk_io': {'read_bps': 0.0, 'write_bps': 0.0}, 'num_fds': 20}, executing={}, extensions={'spans': {}, 'shuffle': {}}) after exception in attempt 0/10: in <TCP (closed) ConnectionPool.heartbeat_worker local=tcp://10.100.162.80:46028 remote=tcp://10.100.162.59:35635>: ConnectionResetError: [Errno 104] Connection reset by peer
+2026-03-14 17:25:14,018 - distributed.nanny - INFO - Closing Nanny gracefully at 'tcp://10.100.162.80:36775'. Reason: worker-handle-scheduler-connection-broken
+2026-03-14 17:25:14,019 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-03-14 17:25:14,020 - distributed.utils_comm - INFO - Retrying functools.partial(<function PooledRPCCall.__getattr__.<locals>.send_recv_from_rpc at 0x7f10f81a5da0>, address='tcp://10.100.162.80:36879', now=1773527112.8182223, metrics={'task_counts': Counter(), 'bandwidth': {'total': 100000000, 'workers': {}, 'types': {}}, 'digests_total_since_heartbeat': {'tick-duration': 0.5004920959472656, 'latency': 0.024225473403930664}, 'managed_bytes': 0, 'spilled_bytes': {'memory': 0, 'disk': 0}, 'transfer': {'incoming_bytes': 0, 'incoming_count': 0, 'incoming_count_total': 0, 'outgoing_bytes': 0, 'outgoing_count': 0, 'outgoing_count_total': 0}, 'event_loop_interval': 0.02000511169433594, 'cpu': 2.0, 'memory': 137441280, 'time': 1773527112.319503, 'host_net_io': {'read_bps': 58295.795928425105, 'write_bps': 1425.3592982739651}, 'host_disk_io': {'read_bps': 0.0, 'write_bps': 0.0}, 'num_fds': 20}, executing={}, extensions={'spans': {}, 'shuffle': {}}) after exception in attempt 1/10: ConnectionPool closing.
+2026-03-14 17:25:14,032 - distributed.nanny - INFO - Worker closed
+2026-03-14 17:25:16,730 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.100.162.80:36775'. Reason: nanny-close-gracefully
+2026-03-14 17:25:16,730 - distributed.nanny - INFO - Nanny at 'tcp://10.100.162.80:36775' closed.
+2026-03-14 17:25:16,730 - distributed.dask_worker - INFO - End worker

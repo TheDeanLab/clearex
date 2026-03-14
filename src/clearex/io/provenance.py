@@ -323,6 +323,8 @@ def _selected_analyses(workflow: WorkflowConfig) -> list[str]:
         selected.append("flatfield")
     if workflow.deconvolution:
         selected.append("deconvolution")
+    if workflow.shear_transform:
+        selected.append("shear_transform")
     if workflow.particle_detection:
         selected.append("particle_detection")
     if workflow.registration:
@@ -834,6 +836,7 @@ def persist_run_provenance(
         ),
         "flatfield": workflow.flatfield,
         "deconvolution": workflow.deconvolution,
+        "shear_transform": workflow.shear_transform,
         "particle_detection": workflow.particle_detection,
         "registration": workflow.registration,
         "visualization": workflow.visualization,

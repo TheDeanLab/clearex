@@ -46,6 +46,7 @@ def test_analysis_flags_are_parsed():
         [
             "--flatfield",
             "--deconvolution",
+            "--shear-transform",
             "--particle-detection",
             "--registration",
             "--visualization",
@@ -55,6 +56,7 @@ def test_analysis_flags_are_parsed():
     )
     assert args.flatfield is True
     assert args.deconvolution is True
+    assert args.shear_transform is True
     assert args.particle_detection is True
     assert args.registration is True
     assert args.visualization is True

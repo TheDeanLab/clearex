@@ -31,6 +31,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 import json
 import logging
+import math
 import os
 import sys
 import traceback
@@ -555,6 +556,38 @@ def _particle_overlay_available_for_visualization(
             return True
 
     return bool(has_particle_detection_history)
+
+
+def _shear_degrees_to_coefficient(angle_degrees: float) -> float:
+    """Convert a shear angle in degrees to a dimensionless shear coefficient.
+
+    Parameters
+    ----------
+    angle_degrees : float
+        Shear angle in degrees.
+
+    Returns
+    -------
+    float
+        Shear coefficient computed as ``tan(angle_degrees)``.
+    """
+    return float(math.tan(math.radians(float(angle_degrees))))
+
+
+def _shear_coefficient_to_degrees(coefficient: float) -> float:
+    """Convert a shear coefficient to an equivalent angle in degrees.
+
+    Parameters
+    ----------
+    coefficient : float
+        Dimensionless shear coefficient.
+
+    Returns
+    -------
+    float
+        Shear angle in degrees computed as ``atan(coefficient)``.
+    """
+    return float(math.degrees(math.atan(float(coefficient))))
 
 
 def _format_optional_value(value: Optional[Any]) -> str:
@@ -3397,6 +3430,7 @@ if HAS_PYQT6:
                 chunks=self._chunks,
                 flatfield=False,
                 deconvolution=False,
+                shear_transform=False,
                 particle_detection=False,
                 registration=False,
                 visualization=False,
@@ -3509,6 +3543,7 @@ if HAS_PYQT6:
         _OPERATION_KEYS: tuple[str, ...] = (
             "flatfield",
             "deconvolution",
+            "shear_transform",
             "particle_detection",
             "registration",
             "visualization",
@@ -3516,12 +3551,14 @@ if HAS_PYQT6:
         _PROVENANCE_HISTORY_OPERATIONS: tuple[str, ...] = (
             "flatfield",
             "deconvolution",
+            "shear_transform",
             "particle_detection",
             "registration",
         )
         _OPERATION_LABELS: Dict[str, str] = {
             "flatfield": "Flatfield Correction",
             "deconvolution": "Deconvolution",
+            "shear_transform": "Shear Transform",
             "particle_detection": "Particle Detection",
             "registration": "Registration",
             "visualization": "Visualization",
@@ -3529,6 +3566,7 @@ if HAS_PYQT6:
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
             "flatfield": "results/flatfield/latest/data",
             "deconvolution": "results/deconvolution/latest/data",
+            "shear_transform": "results/shear_transform/latest/data",
             "registration": "results/registration/latest/data",
         }
         _PARTICLE_DETECTION_OVERLAY_COMPONENT = (
@@ -3639,6 +3677,42 @@ if HAS_PYQT6:
             "batch_size_zyx": (
                 "Batch size in (z, y, x) when large-file mode is enabled."
             ),
+            "shear_xy": (
+                "XY shear angle in degrees where X changes as a function of Y. "
+                "Converted internally to coefficient tan(angle): "
+                "x' = x + tan(shear_xy_deg) * y."
+            ),
+            "shear_xz": (
+                "XZ shear angle in degrees where X changes as a function of Z. "
+                "Converted internally to coefficient tan(angle): "
+                "x' = x + tan(shear_xz_deg) * z."
+            ),
+            "shear_yz": (
+                "YZ shear angle in degrees where Y changes as a function of Z. "
+                "Converted internally to coefficient tan(angle): "
+                "y' = y + tan(shear_yz_deg) * z."
+            ),
+            "rotation_deg_xyz": (
+                "Rotation angles in degrees around X, Y, and Z after shearing. "
+                "Positive values follow right-hand-rule axes in physical space."
+            ),
+            "auto_rotate_from_shear": (
+                "Automatically derive rotation angles from shear values (after "
+                "degree-to-coefficient conversion) to "
+                "reduce empty-space growth after deskew."
+            ),
+            "interpolation": (
+                "ANTsPy interpolation mode used during affine resampling."
+            ),
+            "fill_value": (
+                "Fill value for non-overlapping output regions."
+            ),
+            "output_dtype": (
+                "Output dtype used for results/shear_transform/latest/data."
+            ),
+            "roi_padding_zyx": (
+                "Extra source-ROI padding in (z, y, x) voxels per output tile."
+            ),
             "cpus_per_task": (
                 "CPU count passed to each PyPetaKit5D job. Keep low when many tasks run "
                 "in parallel on process workers."
@@ -3735,6 +3809,9 @@ if HAS_PYQT6:
             self._flatfield_defaults = dict(self._operation_defaults.get("flatfield", {}))
             self._decon_defaults = dict(
                 self._operation_defaults.get("deconvolution", {})
+            )
+            self._shear_defaults = dict(
+                self._operation_defaults.get("shear_transform", {})
             )
             self._particle_defaults = dict(
                 self._operation_defaults.get("particle_detection", {})
@@ -4042,6 +4119,8 @@ if HAS_PYQT6:
                 self._build_deconvolution_parameter_rows(form)
             elif operation_name == "flatfield":
                 self._build_flatfield_parameter_rows(form)
+            elif operation_name == "shear_transform":
+                self._build_shear_parameter_rows(form)
             elif operation_name == "particle_detection":
                 self._build_particle_parameter_rows(form)
             elif operation_name == "visualization":
@@ -4455,6 +4534,139 @@ if HAS_PYQT6:
             form.addRow("CPUs per task", self._decon_cpus_spin)
             self._register_parameter_hint(
                 self._decon_cpus_spin, self._PARAMETER_HINTS["cpus_per_task"]
+            )
+
+        def _build_shear_parameter_rows(self, form: QFormLayout) -> None:
+            """Add shear-transform parameter controls to a form.
+
+            Parameters
+            ----------
+            form : QFormLayout
+                Parent form layout receiving shear-transform controls.
+
+            Returns
+            -------
+            None
+                Widgets are created and attached in-place.
+            """
+            self._shear_xy_spin = QDoubleSpinBox()
+            self._shear_xy_spin.setDecimals(3)
+            self._shear_xy_spin.setRange(-89.9, 89.9)
+            self._shear_xy_spin.setSingleStep(0.1)
+            form.addRow("shear_xy_deg", self._shear_xy_spin)
+            self._register_parameter_hint(
+                self._shear_xy_spin, self._PARAMETER_HINTS["shear_xy"]
+            )
+
+            self._shear_xz_spin = QDoubleSpinBox()
+            self._shear_xz_spin.setDecimals(3)
+            self._shear_xz_spin.setRange(-89.9, 89.9)
+            self._shear_xz_spin.setSingleStep(0.1)
+            form.addRow("shear_xz_deg", self._shear_xz_spin)
+            self._register_parameter_hint(
+                self._shear_xz_spin, self._PARAMETER_HINTS["shear_xz"]
+            )
+
+            self._shear_yz_spin = QDoubleSpinBox()
+            self._shear_yz_spin.setDecimals(3)
+            self._shear_yz_spin.setRange(-89.9, 89.9)
+            self._shear_yz_spin.setSingleStep(0.1)
+            form.addRow("shear_yz_deg", self._shear_yz_spin)
+            self._register_parameter_hint(
+                self._shear_yz_spin, self._PARAMETER_HINTS["shear_yz"]
+            )
+
+            self._shear_auto_rotate_checkbox = QCheckBox(
+                "Derive rotation from shear angles"
+            )
+            form.addRow("Auto rotate", self._shear_auto_rotate_checkbox)
+            self._register_parameter_hint(
+                self._shear_auto_rotate_checkbox,
+                self._PARAMETER_HINTS["auto_rotate_from_shear"],
+            )
+
+            self._shear_rotation_x_spin = QDoubleSpinBox()
+            self._shear_rotation_x_spin.setDecimals(4)
+            self._shear_rotation_x_spin.setRange(-360.0, 360.0)
+            self._shear_rotation_x_spin.setSingleStep(0.5)
+            form.addRow("rotation_deg_x", self._shear_rotation_x_spin)
+            self._register_parameter_hint(
+                self._shear_rotation_x_spin, self._PARAMETER_HINTS["rotation_deg_xyz"]
+            )
+
+            self._shear_rotation_y_spin = QDoubleSpinBox()
+            self._shear_rotation_y_spin.setDecimals(4)
+            self._shear_rotation_y_spin.setRange(-360.0, 360.0)
+            self._shear_rotation_y_spin.setSingleStep(0.5)
+            form.addRow("rotation_deg_y", self._shear_rotation_y_spin)
+            self._register_parameter_hint(
+                self._shear_rotation_y_spin, self._PARAMETER_HINTS["rotation_deg_xyz"]
+            )
+
+            self._shear_rotation_z_spin = QDoubleSpinBox()
+            self._shear_rotation_z_spin.setDecimals(4)
+            self._shear_rotation_z_spin.setRange(-360.0, 360.0)
+            self._shear_rotation_z_spin.setSingleStep(0.5)
+            form.addRow("rotation_deg_z", self._shear_rotation_z_spin)
+            self._register_parameter_hint(
+                self._shear_rotation_z_spin, self._PARAMETER_HINTS["rotation_deg_xyz"]
+            )
+
+            self._shear_interpolation_combo = QComboBox()
+            self._shear_interpolation_combo.addItem("Linear", "linear")
+            self._shear_interpolation_combo.addItem(
+                "Nearest Neighbor", "nearestneighbor"
+            )
+            self._shear_interpolation_combo.addItem("B-spline", "bspline")
+            form.addRow("interpolation", self._shear_interpolation_combo)
+            self._register_parameter_hint(
+                self._shear_interpolation_combo, self._PARAMETER_HINTS["interpolation"]
+            )
+
+            self._shear_fill_value_spin = QDoubleSpinBox()
+            self._shear_fill_value_spin.setDecimals(4)
+            self._shear_fill_value_spin.setRange(-1_000_000_000.0, 1_000_000_000.0)
+            self._shear_fill_value_spin.setSingleStep(1.0)
+            form.addRow("fill_value", self._shear_fill_value_spin)
+            self._register_parameter_hint(
+                self._shear_fill_value_spin, self._PARAMETER_HINTS["fill_value"]
+            )
+
+            self._shear_output_dtype_combo = QComboBox()
+            self._shear_output_dtype_combo.addItem("float32", "float32")
+            self._shear_output_dtype_combo.addItem("float64", "float64")
+            self._shear_output_dtype_combo.addItem("uint16", "uint16")
+            self._shear_output_dtype_combo.addItem("uint8", "uint8")
+            form.addRow("output_dtype", self._shear_output_dtype_combo)
+            self._register_parameter_hint(
+                self._shear_output_dtype_combo, self._PARAMETER_HINTS["output_dtype"]
+            )
+
+            padding_row = QHBoxLayout()
+            apply_compact_row_spacing(padding_row)
+            self._shear_padding_z_spin = QSpinBox()
+            self._shear_padding_z_spin.setRange(0, 10_000)
+            self._shear_padding_y_spin = QSpinBox()
+            self._shear_padding_y_spin.setRange(0, 10_000)
+            self._shear_padding_x_spin = QSpinBox()
+            self._shear_padding_x_spin.setRange(0, 10_000)
+            padding_row.addWidget(QLabel("z"))
+            padding_row.addWidget(self._shear_padding_z_spin)
+            padding_row.addWidget(QLabel("y"))
+            padding_row.addWidget(self._shear_padding_y_spin)
+            padding_row.addWidget(QLabel("x"))
+            padding_row.addWidget(self._shear_padding_x_spin)
+            padding_widget = QWidget()
+            padding_widget.setLayout(padding_row)
+            form.addRow("roi_padding_zyx", padding_widget)
+            self._register_parameter_hint(
+                self._shear_padding_z_spin, self._PARAMETER_HINTS["roi_padding_zyx"]
+            )
+            self._register_parameter_hint(
+                self._shear_padding_y_spin, self._PARAMETER_HINTS["roi_padding_zyx"]
+            )
+            self._register_parameter_hint(
+                self._shear_padding_x_spin, self._PARAMETER_HINTS["roi_padding_zyx"]
             )
 
         def _build_particle_parameter_rows(self, form: QFormLayout) -> None:
@@ -5066,6 +5278,7 @@ if HAS_PYQT6:
             self._refresh_input_source_options()
             self._set_flatfield_parameter_enabled_state()
             self._set_deconvolution_parameter_enabled_state()
+            self._set_shear_parameter_enabled_state()
             self._set_particle_parameter_enabled_state()
             self._set_visualization_parameter_enabled_state()
 
@@ -5331,6 +5544,37 @@ if HAS_PYQT6:
             for widget in block_widgets:
                 widget.setEnabled(large_file_enabled)
 
+        def _set_shear_parameter_enabled_state(self) -> None:
+            """Enable/disable shear-transform widgets based on selection.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widget enabled states are updated in-place.
+            """
+            shear_enabled = self._operation_checkboxes["shear_transform"].isChecked()
+            widgets = (
+                self._shear_xy_spin,
+                self._shear_xz_spin,
+                self._shear_yz_spin,
+                self._shear_auto_rotate_checkbox,
+                self._shear_rotation_x_spin,
+                self._shear_rotation_y_spin,
+                self._shear_rotation_z_spin,
+                self._shear_interpolation_combo,
+                self._shear_fill_value_spin,
+                self._shear_output_dtype_combo,
+                self._shear_padding_z_spin,
+                self._shear_padding_y_spin,
+                self._shear_padding_x_spin,
+            )
+            for widget in widgets:
+                widget.setEnabled(shear_enabled)
+
         def _set_particle_parameter_enabled_state(self) -> None:
             """Enable/disable particle widgets based on selection and sub-options.
 
@@ -5494,6 +5738,9 @@ if HAS_PYQT6:
             decon_params = dict(
                 normalized_parameters.get("deconvolution", self._decon_defaults)
             )
+            shear_params = dict(
+                normalized_parameters.get("shear_transform", self._shear_defaults)
+            )
             particle_params = dict(
                 normalized_parameters.get("particle_detection", self._particle_defaults)
             )
@@ -5507,6 +5754,7 @@ if HAS_PYQT6:
             checkbox_defaults = {
                 "flatfield": bool(initial.flatfield),
                 "deconvolution": bool(initial.deconvolution),
+                "shear_transform": bool(initial.shear_transform),
                 "particle_detection": bool(initial.particle_detection),
                 "registration": bool(initial.registration),
                 "visualization": bool(initial.visualization),
@@ -5754,6 +6002,79 @@ if HAS_PYQT6:
             self._decon_cpus_spin.setValue(
                 max(1, int(decon_params.get("cpus_per_task", 2)))
             )
+
+            self._shear_xy_spin.setValue(
+                float(
+                    shear_params.get(
+                        "shear_xy_deg",
+                        _shear_coefficient_to_degrees(
+                            float(shear_params.get("shear_xy", 0.0))
+                        ),
+                    )
+                )
+            )
+            self._shear_xz_spin.setValue(
+                float(
+                    shear_params.get(
+                        "shear_xz_deg",
+                        _shear_coefficient_to_degrees(
+                            float(shear_params.get("shear_xz", 0.0))
+                        ),
+                    )
+                )
+            )
+            self._shear_yz_spin.setValue(
+                float(
+                    shear_params.get(
+                        "shear_yz_deg",
+                        _shear_coefficient_to_degrees(
+                            float(shear_params.get("shear_yz", 0.0))
+                        ),
+                    )
+                )
+            )
+            self._shear_auto_rotate_checkbox.setChecked(
+                bool(shear_params.get("auto_rotate_from_shear", False))
+            )
+            self._shear_rotation_x_spin.setValue(
+                float(shear_params.get("rotation_deg_x", 0.0))
+            )
+            self._shear_rotation_y_spin.setValue(
+                float(shear_params.get("rotation_deg_y", 0.0))
+            )
+            self._shear_rotation_z_spin.setValue(
+                float(shear_params.get("rotation_deg_z", 0.0))
+            )
+            interpolation_value = (
+                str(shear_params.get("interpolation", "linear")).strip().lower()
+                or "linear"
+            )
+            interpolation_index = self._shear_interpolation_combo.findData(
+                interpolation_value
+            )
+            if interpolation_index < 0:
+                interpolation_index = self._shear_interpolation_combo.findData("linear")
+            if interpolation_index < 0:
+                interpolation_index = 0
+            self._shear_interpolation_combo.setCurrentIndex(interpolation_index)
+            self._shear_fill_value_spin.setValue(
+                float(shear_params.get("fill_value", 0.0))
+            )
+            dtype_value = (
+                str(shear_params.get("output_dtype", "float32")).strip().lower()
+                or "float32"
+            )
+            dtype_index = self._shear_output_dtype_combo.findData(dtype_value)
+            if dtype_index < 0:
+                self._shear_output_dtype_combo.addItem(dtype_value, dtype_value)
+                dtype_index = self._shear_output_dtype_combo.count() - 1
+            self._shear_output_dtype_combo.setCurrentIndex(dtype_index)
+            padding_zyx = shear_params.get("roi_padding_zyx", [2, 2, 2])
+            if not isinstance(padding_zyx, (tuple, list)) or len(padding_zyx) != 3:
+                padding_zyx = [2, 2, 2]
+            self._shear_padding_z_spin.setValue(max(0, int(padding_zyx[0])))
+            self._shear_padding_y_spin.setValue(max(0, int(padding_zyx[1])))
+            self._shear_padding_x_spin.setValue(max(0, int(padding_zyx[2])))
 
             self._particle_channel_spin.setValue(
                 max(
@@ -6168,6 +6489,57 @@ if HAS_PYQT6:
                 ),
             }
 
+        def _collect_shear_parameters(self) -> Dict[str, Any]:
+            """Collect shear-transform parameter values from widgets.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, Any]
+                Shear-transform parameter mapping.
+            """
+            interpolation = str(
+                self._shear_interpolation_combo.currentData() or "linear"
+            ).strip()
+            output_dtype = str(
+                self._shear_output_dtype_combo.currentData() or "float32"
+            ).strip()
+            shear_xy_deg = float(self._shear_xy_spin.value())
+            shear_xz_deg = float(self._shear_xz_spin.value())
+            shear_yz_deg = float(self._shear_yz_spin.value())
+            return {
+                "chunk_basis": "3d",
+                "detect_2d_per_slice": False,
+                "use_map_overlap": False,
+                "overlap_zyx": [0, 0, 0],
+                "memory_overhead_factor": float(
+                    self._shear_defaults.get("memory_overhead_factor", 2.0)
+                ),
+                "shear_xy_deg": float(shear_xy_deg),
+                "shear_xz_deg": float(shear_xz_deg),
+                "shear_yz_deg": float(shear_yz_deg),
+                "shear_xy": _shear_degrees_to_coefficient(shear_xy_deg),
+                "shear_xz": _shear_degrees_to_coefficient(shear_xz_deg),
+                "shear_yz": _shear_degrees_to_coefficient(shear_yz_deg),
+                "rotation_deg_x": float(self._shear_rotation_x_spin.value()),
+                "rotation_deg_y": float(self._shear_rotation_y_spin.value()),
+                "rotation_deg_z": float(self._shear_rotation_z_spin.value()),
+                "auto_rotate_from_shear": bool(
+                    self._shear_auto_rotate_checkbox.isChecked()
+                ),
+                "interpolation": interpolation.lower() or "linear",
+                "fill_value": float(self._shear_fill_value_spin.value()),
+                "output_dtype": output_dtype.lower() or "float32",
+                "roi_padding_zyx": [
+                    int(self._shear_padding_z_spin.value()),
+                    int(self._shear_padding_y_spin.value()),
+                    int(self._shear_padding_x_spin.value()),
+                ],
+            }
+
         def _collect_particle_parameters(self) -> Dict[str, Any]:
             """Collect particle-detection parameter values from widgets.
 
@@ -6283,6 +6655,8 @@ if HAS_PYQT6:
                 defaults.update(self._collect_flatfield_parameters())
             elif operation_name == "deconvolution":
                 defaults.update(self._collect_deconvolution_parameters())
+            elif operation_name == "shear_transform":
+                defaults.update(self._collect_shear_parameters())
             elif operation_name == "particle_detection":
                 defaults.update(self._collect_particle_parameters())
             elif operation_name == "visualization":
@@ -6403,6 +6777,7 @@ if HAS_PYQT6:
                 chunks=self._base_config.chunks,
                 flatfield=selected_flags["flatfield"],
                 deconvolution=selected_flags["deconvolution"],
+                shear_transform=selected_flags["shear_transform"],
                 particle_detection=selected_flags["particle_detection"],
                 registration=selected_flags["registration"],
                 visualization=selected_flags["visualization"],
@@ -6542,6 +6917,7 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
     for operation_name in (
         "flatfield",
         "deconvolution",
+        "shear_transform",
         "particle_detection",
         "registration",
     ):
@@ -6556,6 +6932,7 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         chunks=workflow.chunks,
         flatfield=False,
         deconvolution=False,
+        shear_transform=False,
         particle_detection=False,
         registration=False,
         visualization=False,

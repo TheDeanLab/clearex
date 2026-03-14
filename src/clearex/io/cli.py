@@ -153,6 +153,14 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     input_args.add_argument(
+        "--shear-transform",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Run shear-transform workflow",
+    )
+
+    input_args.add_argument(
         "-r",
         "--registration",
         required=False,
