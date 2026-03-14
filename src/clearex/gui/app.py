@@ -28,6 +28,8 @@ from __future__ import annotations
 
 # Standard Library Imports
 from contextlib import ExitStack
+from dataclasses import replace
+import json
 import logging
 import os
 import sys
@@ -78,6 +80,8 @@ from clearex.workflow import (
     SlurmRunnerConfig,
     WorkflowConfig,
     ZarrSaveConfig,
+    dask_backend_from_dict,
+    dask_backend_to_dict,
     default_analysis_operation_parameters,
     format_dask_backend_summary,
     format_local_cluster_recommendation_summary,
@@ -153,6 +157,8 @@ _GUI_ASSET_DIRECTORY = Path(__file__).resolve().parent
 _GUI_SPLASH_IMAGE = "ClearEx_full.png"
 _GUI_HEADER_IMAGE = "ClearEx_full_header.png"
 _GUI_APP_ICON = "icon.png"
+_CLEAREX_SETTINGS_DIR_NAME = ".clearex"
+_CLEAREX_DASK_BACKEND_SETTINGS_FILE = "dask_backend_settings.json"
 
 
 def _resolve_gui_asset_path(filename: str) -> Path:
@@ -189,6 +195,204 @@ def _display_is_available() -> bool:
     if sys.platform == "darwin":
         return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _resolve_clearex_settings_directory() -> Path:
+    """Resolve the default per-user ClearEx settings directory.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute path to ``~/.clearex``.
+    """
+    return (Path.home() / _CLEAREX_SETTINGS_DIR_NAME).expanduser().resolve()
+
+
+def _resolve_dask_backend_settings_path(
+    settings_directory: Optional[Path] = None,
+) -> Path:
+    """Resolve the user settings JSON path for persisted backend config.
+
+    Parameters
+    ----------
+    settings_directory : pathlib.Path, optional
+        Settings directory override. Defaults to ``~/.clearex``.
+
+    Returns
+    -------
+    pathlib.Path
+        Full JSON path used for Dask backend persistence.
+    """
+    directory = (
+        settings_directory
+        if settings_directory is not None
+        else _resolve_clearex_settings_directory()
+    )
+    return directory / _CLEAREX_DASK_BACKEND_SETTINGS_FILE
+
+
+def _ensure_clearex_settings_directory(
+    settings_directory: Optional[Path] = None,
+) -> Path:
+    """Create the ClearEx user settings directory when missing.
+
+    Parameters
+    ----------
+    settings_directory : pathlib.Path, optional
+        Directory path override. Defaults to ``~/.clearex``.
+
+    Returns
+    -------
+    pathlib.Path
+        The resolved settings directory path.
+
+    Raises
+    ------
+    None
+        Directory creation errors are logged and handled internally.
+    """
+    directory = (
+        settings_directory
+        if settings_directory is not None
+        else _resolve_clearex_settings_directory()
+    )
+    target = directory.expanduser()
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to create ClearEx settings directory %s: %s",
+            target,
+            exc,
+        )
+    return target
+
+
+def _load_last_used_dask_backend_config(
+    settings_path: Optional[Path] = None,
+) -> Optional[DaskBackendConfig]:
+    """Load the last-used Dask backend configuration from JSON.
+
+    Parameters
+    ----------
+    settings_path : pathlib.Path, optional
+        JSON file path override.
+
+    Returns
+    -------
+    DaskBackendConfig, optional
+        Persisted backend configuration, or ``None`` when settings are missing
+        or unreadable.
+
+    Raises
+    ------
+    None
+        Read and parse errors are logged and handled internally.
+    """
+    path = (
+        settings_path
+        if settings_path is not None
+        else _resolve_dask_backend_settings_path()
+    )
+    resolved = path.expanduser()
+    if not resolved.exists():
+        return None
+
+    try:
+        raw_text = resolved.read_text(encoding="utf-8")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to read Dask backend settings %s: %s",
+            resolved,
+            exc,
+        )
+        return None
+
+    if not raw_text.strip():
+        return None
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to decode Dask backend settings %s: %s",
+            resolved,
+            exc,
+        )
+        return None
+
+    if isinstance(payload, dict) and not payload:
+        return None
+
+    return dask_backend_from_dict(payload)
+
+
+def _save_last_used_dask_backend_config(
+    config: DaskBackendConfig,
+    settings_path: Optional[Path] = None,
+) -> bool:
+    """Persist the most recently used Dask backend configuration.
+
+    Parameters
+    ----------
+    config : DaskBackendConfig
+        Backend configuration to persist.
+    settings_path : pathlib.Path, optional
+        JSON file path override.
+
+    Returns
+    -------
+    bool
+        ``True`` when settings are written successfully, otherwise ``False``.
+
+    Raises
+    ------
+    None
+        Write errors are logged and handled internally.
+    """
+    path = (
+        settings_path
+        if settings_path is not None
+        else _resolve_dask_backend_settings_path()
+    )
+    resolved = path.expanduser()
+    _ensure_clearex_settings_directory(resolved.parent)
+
+    try:
+        payload = dask_backend_to_dict(config)
+        serialized = json.dumps(payload, indent=2, sort_keys=True)
+        resolved.write_text(f"{serialized}\n", encoding="utf-8")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to persist Dask backend settings %s: %s",
+            resolved,
+            exc,
+        )
+        return False
+    return True
+
+
+def _should_apply_persisted_dask_backend(initial: Optional[WorkflowConfig]) -> bool:
+    """Return whether persisted backend settings should override GUI defaults.
+
+    Parameters
+    ----------
+    initial : WorkflowConfig, optional
+        Initial workflow provided by caller.
+
+    Returns
+    -------
+    bool
+        ``True`` when caller did not provide a custom backend and persisted
+        settings can safely populate the GUI defaults.
+    """
+    if initial is None:
+        return True
+    return initial.dask_backend == DaskBackendConfig()
 
 
 def _format_optional_value(value: Optional[Any]) -> str:
@@ -3033,6 +3237,7 @@ if HAS_PYQT6:
                 visualization=False,
                 zarr_save=self._zarr_save_config,
             )
+            _save_last_used_dask_backend_config(self._dask_backend_config)
             self.accept()
 
         def _on_next(self) -> None:
@@ -6018,6 +6223,11 @@ def launch_gui(
     ------
     GuiUnavailableError
         If PyQt6 is not installed or no display server is available.
+
+    Notes
+    -----
+    The launch path ensures ``~/.clearex`` exists and attempts to pre-populate
+    GUI backend controls from the last persisted backend settings JSON.
     """
     if not HAS_PYQT6:
         raise GuiUnavailableError(
@@ -6028,6 +6238,16 @@ def launch_gui(
             "No display detected. Use `--headless` or run with a graphical display."
         )
 
+    settings_directory = _ensure_clearex_settings_directory()
+    settings_path = _resolve_dask_backend_settings_path(settings_directory)
+    effective_initial = initial or WorkflowConfig()
+    persisted_backend = _load_last_used_dask_backend_config(settings_path=settings_path)
+    if (
+        persisted_backend is not None
+        and _should_apply_persisted_dask_backend(initial)
+    ):
+        effective_initial = replace(effective_initial, dask_backend=persisted_backend)
+
     app = QApplication.instance()
     owns_app = app is None
     if app is None:
@@ -6036,7 +6256,7 @@ def launch_gui(
 
     _show_startup_splash(app)
 
-    setup_dialog = ClearExSetupDialog(initial=initial or WorkflowConfig())
+    setup_dialog = ClearExSetupDialog(initial=effective_initial)
     setup_result = setup_dialog.exec()
     if (
         setup_result != QDialog.DialogCode.Accepted

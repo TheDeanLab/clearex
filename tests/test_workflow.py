@@ -40,6 +40,7 @@ from clearex.workflow import (
     SlurmRunnerConfig,
     WorkflowConfig,
     ZarrSaveConfig,
+    dask_backend_from_dict,
     dask_backend_to_dict,
     format_dask_backend_summary,
     format_local_cluster_recommendation_summary,
@@ -366,6 +367,52 @@ class TestDaskBackendConfig:
         payload = dask_backend_to_dict(cfg)
         assert payload["mode"] == DASK_BACKEND_SLURM_CLUSTER
         assert payload["slurm_cluster"]["mail_user"] == "user@example.com"
+
+    def test_slurm_cluster_round_trip_serialization(self):
+        cfg = DaskBackendConfig(
+            mode=DASK_BACKEND_SLURM_CLUSTER,
+            local_cluster=LocalClusterConfig(
+                n_workers=8,
+                threads_per_worker=2,
+                memory_limit="10GB",
+                local_directory="/tmp/clearex-local",
+            ),
+            slurm_runner=SlurmRunnerConfig(
+                scheduler_file="/tmp/scheduler.json",
+                wait_for_workers=4,
+            ),
+            slurm_cluster=SlurmClusterConfig(
+                workers=3,
+                cores=12,
+                processes=2,
+                memory="48GB",
+                local_directory="/tmp/clearex-slurm",
+                interface="ib1",
+                walltime="08:00:00",
+                job_name="clearex-test",
+                queue="gpu",
+                death_timeout="700s",
+                mail_user="user@example.com",
+                job_extra_directives=("--mail-type=FAIL", "--qos=long"),
+                dashboard_address=":9100",
+                scheduler_interface="ib1",
+                idle_timeout="4000s",
+                allowed_failures=5,
+            ),
+        )
+        payload = dask_backend_to_dict(cfg)
+        parsed = dask_backend_from_dict(payload)
+        assert parsed == cfg
+
+    def test_deserialization_invalid_payload_falls_back_to_defaults(self):
+        payload = {
+            "mode": "unknown_mode",
+            "local_cluster": {"n_workers": 0, "threads_per_worker": "bad"},
+            "slurm_runner": {"scheduler_file": 42, "wait_for_workers": 0},
+            "slurm_cluster": {"workers": "NaN", "queue": ""},
+        }
+        parsed = dask_backend_from_dict(payload)
+        assert parsed == DaskBackendConfig()
 
     def test_reject_invalid_mode(self):
         with pytest.raises(ValueError):

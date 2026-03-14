@@ -2240,6 +2240,157 @@ def dask_backend_to_dict(config: DaskBackendConfig) -> Dict[str, Any]:
     }
 
 
+def dask_backend_from_dict(payload: Any) -> DaskBackendConfig:
+    """Deserialize a backend mapping into ``DaskBackendConfig``.
+
+    Parameters
+    ----------
+    payload : Any
+        JSON-like mapping, typically produced by :func:`dask_backend_to_dict`.
+
+    Returns
+    -------
+    DaskBackendConfig
+        Parsed backend configuration. Invalid or partial payloads fall back to
+        default values for affected sections.
+
+    Notes
+    -----
+    This parser is intentionally tolerant for user-level persisted settings.
+    Unknown keys are ignored and malformed subsections are replaced with
+    defaults so GUI startup can always proceed.
+    """
+    defaults = DaskBackendConfig()
+    if not isinstance(payload, dict):
+        return defaults
+
+    local_payload = payload.get("local_cluster")
+    runner_payload = payload.get("slurm_runner")
+    cluster_payload = payload.get("slurm_cluster")
+    scheduler_options_payload: Any = (
+        cluster_payload.get("scheduler_options")
+        if isinstance(cluster_payload, dict)
+        else None
+    )
+
+    try:
+        local_cluster = (
+            LocalClusterConfig(
+                n_workers=local_payload.get("n_workers"),
+                threads_per_worker=local_payload.get(
+                    "threads_per_worker",
+                    defaults.local_cluster.threads_per_worker,
+                ),
+                memory_limit=local_payload.get(
+                    "memory_limit",
+                    defaults.local_cluster.memory_limit,
+                ),
+                local_directory=local_payload.get(
+                    "local_directory",
+                    defaults.local_cluster.local_directory,
+                ),
+            )
+            if isinstance(local_payload, dict)
+            else defaults.local_cluster
+        )
+    except Exception:
+        local_cluster = defaults.local_cluster
+
+    try:
+        slurm_runner = (
+            SlurmRunnerConfig(
+                scheduler_file=runner_payload.get("scheduler_file"),
+                wait_for_workers=runner_payload.get("wait_for_workers"),
+            )
+            if isinstance(runner_payload, dict)
+            else defaults.slurm_runner
+        )
+    except Exception:
+        slurm_runner = defaults.slurm_runner
+
+    try:
+        slurm_cluster = (
+            SlurmClusterConfig(
+                workers=cluster_payload.get("workers", defaults.slurm_cluster.workers),
+                cores=cluster_payload.get("cores", defaults.slurm_cluster.cores),
+                processes=cluster_payload.get("processes", defaults.slurm_cluster.processes),
+                memory=cluster_payload.get("memory", defaults.slurm_cluster.memory),
+                local_directory=cluster_payload.get(
+                    "local_directory",
+                    defaults.slurm_cluster.local_directory,
+                ),
+                interface=cluster_payload.get("interface", defaults.slurm_cluster.interface),
+                walltime=cluster_payload.get("walltime", defaults.slurm_cluster.walltime),
+                job_name=cluster_payload.get("job_name", defaults.slurm_cluster.job_name),
+                queue=cluster_payload.get("queue", defaults.slurm_cluster.queue),
+                death_timeout=cluster_payload.get(
+                    "death_timeout",
+                    defaults.slurm_cluster.death_timeout,
+                ),
+                mail_user=cluster_payload.get("mail_user", defaults.slurm_cluster.mail_user),
+                job_extra_directives=tuple(
+                    cluster_payload.get(
+                        "job_extra_directives",
+                        defaults.slurm_cluster.job_extra_directives,
+                    )
+                ),
+                dashboard_address=(
+                    scheduler_options_payload.get(
+                        "dashboard_address",
+                        defaults.slurm_cluster.dashboard_address,
+                    )
+                    if isinstance(scheduler_options_payload, dict)
+                    else defaults.slurm_cluster.dashboard_address
+                ),
+                scheduler_interface=(
+                    scheduler_options_payload.get(
+                        "interface",
+                        defaults.slurm_cluster.scheduler_interface,
+                    )
+                    if isinstance(scheduler_options_payload, dict)
+                    else defaults.slurm_cluster.scheduler_interface
+                ),
+                idle_timeout=(
+                    scheduler_options_payload.get(
+                        "idle_timeout",
+                        defaults.slurm_cluster.idle_timeout,
+                    )
+                    if isinstance(scheduler_options_payload, dict)
+                    else defaults.slurm_cluster.idle_timeout
+                ),
+                allowed_failures=(
+                    scheduler_options_payload.get(
+                        "allowed_failures",
+                        defaults.slurm_cluster.allowed_failures,
+                    )
+                    if isinstance(scheduler_options_payload, dict)
+                    else defaults.slurm_cluster.allowed_failures
+                ),
+            )
+            if isinstance(cluster_payload, dict)
+            else defaults.slurm_cluster
+        )
+    except Exception:
+        slurm_cluster = defaults.slurm_cluster
+
+    mode_value = str(payload.get("mode", defaults.mode)).strip().lower()
+    mode = (
+        mode_value
+        if mode_value in DASK_BACKEND_MODE_LABELS
+        else DASK_BACKEND_LOCAL_CLUSTER
+    )
+
+    try:
+        return DaskBackendConfig(
+            mode=mode,
+            local_cluster=local_cluster,
+            slurm_runner=slurm_runner,
+            slurm_cluster=slurm_cluster,
+        )
+    except Exception:
+        return defaults
+
+
 def format_dask_backend_summary(config: DaskBackendConfig) -> str:
     """Format a compact summary of the selected Dask backend.
 
