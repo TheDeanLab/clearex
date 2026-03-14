@@ -6146,6 +6146,13 @@ def run_workflow_with_progress(
     ------
     GuiUnavailableError
         If PyQt6 or a display server is unavailable.
+
+    Notes
+    -----
+    ``SLURMCluster``/``SLURMRunner`` backend startup can require Python signal
+    handlers, which must be installed from the main interpreter thread.
+    For these backend modes, execution is run synchronously on the GUI thread
+    with explicit ``processEvents`` updates.
     """
     if not HAS_PYQT6:
         raise GuiUnavailableError(
@@ -6165,24 +6172,66 @@ def run_workflow_with_progress(
     progress_dialog = AnalysisExecutionProgressDialog(parent=None)
     failure_payload: dict[str, str] = {}
     completed = {"ok": False}
+    use_main_thread_execution = workflow.dask_backend.mode in {
+        DASK_BACKEND_SLURM_RUNNER,
+        DASK_BACKEND_SLURM_CLUSTER,
+    }
+    if use_main_thread_execution:
+        progress_dialog.show()
+        app.processEvents()
 
-    worker = AnalysisExecutionWorker(
-        workflow=workflow,
-        run_callback=run_callback,
-    )
-    worker.progress_changed.connect(progress_dialog.update_progress)
-    worker.succeeded.connect(lambda: completed.__setitem__("ok", True))
-    worker.succeeded.connect(progress_dialog.accept)
-    worker.failed.connect(
-        lambda summary, details: failure_payload.update(
-            {"summary": str(summary), "details": str(details)}
+        def _progress_with_events(percent: int, message: str) -> None:
+            """Update modal progress UI and flush GUI events.
+
+            Parameters
+            ----------
+            percent : int
+                Progress percentage.
+            message : str
+                Human-readable status text.
+
+            Returns
+            -------
+            None
+                Progress UI side effects only.
+            """
+            progress_dialog.update_progress(int(percent), str(message))
+            app.processEvents()
+
+        try:
+            _progress_with_events(1, "Starting analysis workflow...")
+            run_callback(workflow, _progress_with_events)
+            _progress_with_events(100, "Analysis workflow completed.")
+            completed["ok"] = True
+            progress_dialog.accept()
+        except Exception as exc:
+            failure_payload.update(
+                {
+                    "summary": f"{type(exc).__name__}: {exc}",
+                    "details": traceback.format_exc(),
+                }
+            )
+            progress_dialog.reject()
+        finally:
+            progress_dialog.close()
+    else:
+        worker = AnalysisExecutionWorker(
+            workflow=workflow,
+            run_callback=run_callback,
         )
-    )
-    worker.failed.connect(lambda *_: progress_dialog.reject())
+        worker.progress_changed.connect(progress_dialog.update_progress)
+        worker.succeeded.connect(lambda: completed.__setitem__("ok", True))
+        worker.succeeded.connect(progress_dialog.accept)
+        worker.failed.connect(
+            lambda summary, details: failure_payload.update(
+                {"summary": str(summary), "details": str(details)}
+            )
+        )
+        worker.failed.connect(lambda *_: progress_dialog.reject())
 
-    worker.start()
-    progress_dialog.exec()
-    worker.wait()
+        worker.start()
+        progress_dialog.exec()
+        worker.wait()
 
     if failure_payload:
         _show_themed_error_dialog(
