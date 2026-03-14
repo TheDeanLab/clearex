@@ -1359,6 +1359,8 @@ def _initialize_latest_flatfield_group(
             "updated_utc": _utc_now_iso(),
             "completed_utc": None,
             "last_error": None,
+            "fit_warning_count": 0,
+            "fit_fallback_records": [],
         }
     )
     return latest_group
@@ -1490,6 +1492,15 @@ def _prepare_output_arrays(
                 "run_status": "running",
                 "updated_utc": _utc_now_iso(),
                 "last_error": None,
+                "fit_warning_count": int(
+                    checkpoint_group.attrs.get(
+                        "fit_warning_count",
+                        len(checkpoint_group.attrs.get("fit_fallback_records", [])),
+                    )
+                ),
+                "fit_fallback_records": _to_jsonable(
+                    checkpoint_group.attrs.get("fit_fallback_records", [])
+                ),
             }
         )
 
@@ -1967,6 +1978,201 @@ def _fit_profile_tile(
     )
 
 
+def _is_recoverable_svd_failure(error: BaseException) -> bool:
+    """Return whether an exception represents a recoverable SVD fit failure.
+
+    Parameters
+    ----------
+    error : BaseException
+        Exception raised while fitting a flatfield tile/profile.
+
+    Returns
+    -------
+    bool
+        ``True`` when the error message indicates an SVD convergence failure.
+    """
+    message = str(error).strip().lower()
+    if "linalg.svd" not in message:
+        return False
+    if "failed to converge" in message:
+        return True
+    return "ill-conditioned" in message
+
+
+def _identity_profile_result(
+    *,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    position_index: int,
+    channel_index: int,
+) -> FlatfieldProfileResult:
+    """Build an identity flatfield profile that leaves source data unchanged.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source dataset shape in canonical ``(t, p, c, z, y, x)`` order.
+    position_index : int
+        Position index on the ``p`` axis.
+    channel_index : int
+        Channel index on the ``c`` axis.
+
+    Returns
+    -------
+    FlatfieldProfileResult
+        Identity profile with ``flatfield=1``, ``darkfield=0``, and ``baseline=0``.
+    """
+    t_count = int(shape_tpczyx[0])
+    z_count = int(shape_tpczyx[3])
+    y_count = int(shape_tpczyx[4])
+    x_count = int(shape_tpczyx[5])
+    return FlatfieldProfileResult(
+        position_index=int(position_index),
+        channel_index=int(channel_index),
+        flatfield_yx=np.ones((y_count, x_count), dtype=np.float32),
+        darkfield_yx=np.zeros((y_count, x_count), dtype=np.float32),
+        baseline_tz=np.zeros((t_count, z_count), dtype=np.float32),
+    )
+
+
+def _profile_blend_weight_sum(
+    *,
+    profile_tiles: list[FlatfieldTileSpec],
+    shape_yx: tuple[int, int],
+) -> Float32Array:
+    """Return aggregate blending weights for one ``(position, channel)`` profile.
+
+    Parameters
+    ----------
+    profile_tiles : list[FlatfieldTileSpec]
+        Tile specifications for a single profile.
+    shape_yx : tuple[int, int]
+        Full spatial shape as ``(y, x)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Aggregate blending-weight image in ``(y, x)`` order.
+    """
+    weight_sum = np.zeros((int(shape_yx[0]), int(shape_yx[1])), dtype=np.float32)
+    for tile in profile_tiles:
+        y_start, y_stop = int(tile.y_read_bounds[0]), int(tile.y_read_bounds[1])
+        x_start, x_stop = int(tile.x_read_bounds[0]), int(tile.x_read_bounds[1])
+        blend_weights = _tile_blend_weights(
+            shape_yx=(int(y_stop - y_start), int(x_stop - x_start)),
+            core_offsets_yx=(
+                (
+                    int(tile.y_core_bounds[0]) - int(y_start),
+                    int(tile.y_core_bounds[1]) - int(y_start),
+                ),
+                (
+                    int(tile.x_core_bounds[0]) - int(x_start),
+                    int(tile.x_core_bounds[1]) - int(x_start),
+                ),
+            ),
+        ).astype(np.float32, copy=False)
+        weight_sum[y_start:y_stop, x_start:x_stop] += blend_weights
+    return weight_sum
+
+
+def _apply_tiled_profile_fallback(
+    *,
+    profile: FlatfieldProfileResult,
+    profile_tiles: list[FlatfieldTileSpec],
+    blend_tiles_effective: bool,
+    fit_profile_done_array: Any,
+    fit_tile_done_array: Any,
+    baseline_sum_array: Any,
+    baseline_count_array: Any,
+    flatfield_array: Any,
+    darkfield_array: Any,
+    flatfield_sum_array: Optional[Any],
+    darkfield_sum_array: Optional[Any],
+    weight_sum_array: Optional[Any],
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+) -> None:
+    """Apply one profile-level fallback and mark all profile tiles complete.
+
+    Parameters
+    ----------
+    profile : FlatfieldProfileResult
+        Profile artifacts produced by full-volume retry or identity fallback.
+    profile_tiles : list[FlatfieldTileSpec]
+        Tile specifications that belong to ``profile``.
+    blend_tiles_effective : bool
+        Whether tiled blending accumulators are active.
+    fit_profile_done_array : Any
+        Checkpoint profile completion dataset.
+    fit_tile_done_array : Any
+        Checkpoint tile completion dataset.
+    baseline_sum_array : Any
+        Checkpoint baseline accumulation dataset.
+    baseline_count_array : Any
+        Checkpoint baseline sample-count dataset.
+    flatfield_array : Any
+        Final flatfield artifact array.
+    darkfield_array : Any
+        Final darkfield artifact array.
+    flatfield_sum_array : Any, optional
+        Blend accumulation array for flatfield payloads.
+    darkfield_sum_array : Any, optional
+        Blend accumulation array for darkfield payloads.
+    weight_sum_array : Any, optional
+        Blend accumulation array for weights.
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+
+    Returns
+    -------
+    None
+        Fallback artifacts are written in-place to checkpoint/output datasets.
+
+    Raises
+    ------
+    ValueError
+        If blend accumulators are required but missing.
+    """
+    position_index = int(profile.position_index)
+    channel_index = int(profile.channel_index)
+    tile_count = max(1, int(len(profile_tiles)))
+
+    fit_profile_done_array[position_index, channel_index] = np.bool_(True)
+    fit_tile_done_array[position_index, channel_index, :, :] = np.bool_(True)
+
+    baseline_sum_array[position_index, channel_index, :, :] = (
+        np.asarray(profile.baseline_tz, dtype=np.float32) * np.float32(float(tile_count))
+    ).astype(np.float32, copy=False)
+    baseline_count_array[position_index, channel_index] = np.uint32(tile_count)
+
+    if bool(blend_tiles_effective):
+        if (
+            flatfield_sum_array is None
+            or darkfield_sum_array is None
+            or weight_sum_array is None
+        ):
+            raise ValueError("Flatfield fallback requires blend-accumulator datasets.")
+        weight_sum = _profile_blend_weight_sum(
+            profile_tiles=profile_tiles,
+            shape_yx=(int(shape_tpczyx[4]), int(shape_tpczyx[5])),
+        )
+        flatfield_sum_array[position_index, channel_index, :, :] = (
+            np.asarray(profile.flatfield_yx, dtype=np.float32) * weight_sum
+        ).astype(np.float32, copy=False)
+        darkfield_sum_array[position_index, channel_index, :, :] = (
+            np.asarray(profile.darkfield_yx, dtype=np.float32) * weight_sum
+        ).astype(np.float32, copy=False)
+        weight_sum_array[position_index, channel_index, :, :] = weight_sum
+        return
+
+    flatfield_array[position_index, channel_index, :, :] = np.asarray(
+        profile.flatfield_yx,
+        dtype=np.float32,
+    )
+    darkfield_array[position_index, channel_index, :, :] = np.asarray(
+        profile.darkfield_yx,
+        dtype=np.float32,
+    )
+
+
 def _persist_profile_artifacts(
     *,
     zarr_path: str,
@@ -2227,6 +2433,7 @@ def run_flatfield_analysis(
         task_inputs: list[Any],
         build_task: Callable[[Any], Any],
         consume_result: Callable[[Any, Any], None],
+        handle_task_error: Optional[Callable[[Any, BaseException], bool]] = None,
         progress_start: int,
         progress_span: int,
         progress_message: str,
@@ -2241,6 +2448,9 @@ def run_flatfield_analysis(
             Builder returning a delayed task for one descriptor.
         consume_result : callable
             Callback invoked as ``consume_result(task_input, result)``.
+        handle_task_error : callable, optional
+            Error handler invoked as ``handle_task_error(task_input, error)``.
+            Return ``True`` to treat the failure as handled and continue.
         progress_start : int
             Inclusive progress lower bound.
         progress_span : int
@@ -2259,8 +2469,15 @@ def run_flatfield_analysis(
         total = max(1, int(len(task_inputs)))
         if client is None:
             for completed, task_input in enumerate(task_inputs, start=1):
-                result = dask.compute(build_task(task_input), scheduler="processes")[0]
-                consume_result(task_input, result)
+                try:
+                    result = dask.compute(build_task(task_input), scheduler="processes")[0]
+                except Exception as exc:  # pragma: no cover - mirrored distributed path
+                    if handle_task_error is None or not bool(
+                        handle_task_error(task_input, exc)
+                    ):
+                        raise
+                else:
+                    consume_result(task_input, result)
                 progress = progress_start + int((completed / total) * progress_span)
                 _emit(
                     progress,
@@ -2276,7 +2493,13 @@ def run_flatfield_analysis(
         completed = 0
         for future in as_completed(futures):
             task_input = future_to_input[future]
-            consume_result(task_input, future.result())
+            try:
+                result = future.result()
+            except Exception as exc:
+                if handle_task_error is None or not bool(handle_task_error(task_input, exc)):
+                    raise
+            else:
+                consume_result(task_input, result)
             completed += 1
             progress = progress_start + int((completed / total) * progress_span)
             _emit(
@@ -2328,11 +2551,19 @@ def run_flatfield_analysis(
     )
 
     checkpoint_group = zarr.open_group(str(zarr_path), mode="a")[layout.checkpoint_component]
+    raw_fallback_records = checkpoint_group.attrs.get("fit_fallback_records", [])
+    fit_fallback_records: list[dict[str, Any]] = []
+    if isinstance(raw_fallback_records, list):
+        for record in raw_fallback_records:
+            if isinstance(record, Mapping):
+                fit_fallback_records.append(cast(dict[str, Any], _to_jsonable(dict(record))))
     checkpoint_group.attrs.update(
         {
             "run_status": "running",
             "updated_utc": _utc_now_iso(),
             "last_error": None,
+            "fit_warning_count": int(len(fit_fallback_records)),
+            "fit_fallback_records": _to_jsonable(fit_fallback_records),
         }
     )
 
@@ -2412,6 +2643,18 @@ def run_flatfield_analysis(
                 shape_tpczyx=shape_tpczyx,
                 parameters=normalized,
             )
+            tiles_by_profile: dict[tuple[int, int], list[FlatfieldTileSpec]] = {}
+            for tile in tile_specs:
+                key = (int(tile.position_index), int(tile.channel_index))
+                tiles_by_profile.setdefault(key, []).append(tile)
+            fallback_profile_keys: set[tuple[int, int]] = {
+                (
+                    int(record["position_index"]),
+                    int(record["channel_index"]),
+                )
+                for record in fit_fallback_records
+                if "position_index" in record and "channel_index" in record
+            }
             tiles_per_profile = (
                 int(len(tile_specs) // max(1, profile_count)) if profile_count > 0 else 0
             )
@@ -2428,6 +2671,11 @@ def run_flatfield_analysis(
                         tile.tile_x_index,
                     ]
                 )
+                and (
+                    int(tile.position_index),
+                    int(tile.channel_index),
+                )
+                not in fallback_profile_keys
             ]
             _emit(
                 10,
@@ -2474,12 +2722,133 @@ def run_flatfield_analysis(
                         parameters=normalized,
                     )
 
+                def _record_profile_fallback(
+                    *,
+                    profile_key: tuple[int, int],
+                    fallback_mode: str,
+                    trigger_error: BaseException,
+                    retry_error: Optional[BaseException],
+                ) -> None:
+                    """Persist one profile-level fallback record to checkpoint attrs.
+
+                    Parameters
+                    ----------
+                    profile_key : tuple[int, int]
+                        Profile key in ``(position, channel)`` order.
+                    fallback_mode : str
+                        Applied fallback mode (for example ``full_volume`` or ``identity``).
+                    trigger_error : BaseException
+                        Original exception raised by tile fitting.
+                    retry_error : BaseException, optional
+                        Exception from full-volume retry, when fallback used identity.
+
+                    Returns
+                    -------
+                    None
+                        Checkpoint attributes are updated in-place.
+                    """
+                    record = {
+                        "position_index": int(profile_key[0]),
+                        "channel_index": int(profile_key[1]),
+                        "fallback_mode": str(fallback_mode),
+                        "trigger_error": str(trigger_error),
+                        "retry_error": None if retry_error is None else str(retry_error),
+                        "recorded_utc": _utc_now_iso(),
+                    }
+                    fit_fallback_records.append(record)
+                    checkpoint_group.attrs.update(
+                        {
+                            "fit_warning_count": int(len(fit_fallback_records)),
+                            "fit_fallback_records": _to_jsonable(fit_fallback_records),
+                            "updated_utc": _utc_now_iso(),
+                        }
+                    )
+
+                def _handle_tile_fit_error(
+                    tile: FlatfieldTileSpec,
+                    error: BaseException,
+                ) -> bool:
+                    """Handle recoverable tiled-fit failures with profile-level fallback.
+
+                    Parameters
+                    ----------
+                    tile : FlatfieldTileSpec
+                        Tile descriptor associated with the failed task.
+                    error : BaseException
+                        Exception raised by the task.
+
+                    Returns
+                    -------
+                    bool
+                        ``True`` when a fallback was applied and execution can continue.
+                    """
+                    profile_key = (int(tile.position_index), int(tile.channel_index))
+                    if profile_key in fallback_profile_keys:
+                        return True
+                    if not _is_recoverable_svd_failure(error):
+                        return False
+
+                    profile_tiles = tiles_by_profile.get(profile_key, [])
+                    if not profile_tiles:
+                        return False
+
+                    retry_error: Optional[BaseException] = None
+                    try:
+                        fallback_profile = _fit_profile_full_volume(
+                            zarr_path=str(zarr_path),
+                            source_component=source_component,
+                            position_index=int(profile_key[0]),
+                            channel_index=int(profile_key[1]),
+                            parameters=normalized,
+                        )
+                        fallback_mode = "full_volume"
+                    except Exception as exc:
+                        retry_error = exc
+                        fallback_profile = _identity_profile_result(
+                            shape_tpczyx=shape_tpczyx,
+                            position_index=int(profile_key[0]),
+                            channel_index=int(profile_key[1]),
+                        )
+                        fallback_mode = "identity"
+
+                    _apply_tiled_profile_fallback(
+                        profile=fallback_profile,
+                        profile_tiles=profile_tiles,
+                        blend_tiles_effective=layout.blend_tiles_effective,
+                        fit_profile_done_array=fit_profile_done_array,
+                        fit_tile_done_array=tile_done_array,
+                        baseline_sum_array=baseline_sum_array,
+                        baseline_count_array=baseline_count_array,
+                        flatfield_array=flatfield_array,
+                        darkfield_array=darkfield_array,
+                        flatfield_sum_array=flatfield_sum_array,
+                        darkfield_sum_array=darkfield_sum_array,
+                        weight_sum_array=weight_sum_array,
+                        shape_tpczyx=shape_tpczyx,
+                    )
+                    fallback_profile_keys.add(profile_key)
+                    _record_profile_fallback(
+                        profile_key=profile_key,
+                        fallback_mode=fallback_mode,
+                        trigger_error=error,
+                        retry_error=retry_error,
+                    )
+                    _emit(
+                        10,
+                        "Recovered flatfield profile "
+                        f"p{profile_key[0]} c{profile_key[1]} via {fallback_mode} fallback",
+                    )
+                    return True
+
                 def _consume_tile_result(
                     _tile: FlatfieldTileSpec,
                     tile_result: FlatfieldTileFitResult,
                 ) -> None:
                     position_index = int(tile_result.position_index)
                     channel_index = int(tile_result.channel_index)
+                    profile_key = (position_index, channel_index)
+                    if profile_key in fallback_profile_keys:
+                        return
                     y_start, y_stop = int(tile_result.y_bounds[0]), int(tile_result.y_bounds[1])
                     x_start, x_stop = int(tile_result.x_bounds[0]), int(tile_result.x_bounds[1])
 
@@ -2591,6 +2960,7 @@ def run_flatfield_analysis(
                     task_inputs=pending_tile_specs,
                     build_task=_build_tile_task,
                     consume_result=_consume_tile_result,
+                    handle_task_error=_handle_tile_fit_error,
                     progress_start=10,
                     progress_span=25,
                     progress_message="Fitted flatfield tile {completed}/{total}",
@@ -2730,11 +3100,17 @@ def run_flatfield_analysis(
             )
 
         transform_done_mask = np.asarray(transform_done_array, dtype=bool)
+        warning_count = int(len(fit_fallback_records))
+        completed_run_status = (
+            "complete_with_warnings" if warning_count > 0 else "complete"
+        )
         if transform_done_mask.size == 0 or bool(np.all(transform_done_mask)):
             checkpoint_group.attrs.update(
                 {
                     "transform_stage_status": "complete",
-                    "run_status": "complete",
+                    "run_status": completed_run_status,
+                    "fit_warning_count": int(warning_count),
+                    "fit_fallback_records": _to_jsonable(fit_fallback_records),
                     "completed_utc": _utc_now_iso(),
                     "updated_utc": _utc_now_iso(),
                 }
@@ -2757,6 +3133,9 @@ def run_flatfield_analysis(
                 "output_dtype": "float32",
                 "output_chunks_tpczyx": [int(v) for v in output_chunks],
                 "basicpy_version": basicpy_version,
+                "run_status": completed_run_status,
+                "fit_warning_count": int(warning_count),
+                "fit_fallback_records": _to_jsonable(fit_fallback_records),
                 "updated_utc": _utc_now_iso(),
             }
         )
@@ -2777,6 +3156,8 @@ def run_flatfield_analysis(
                 "basicpy_version": basicpy_version,
                 "resume_parameter_fingerprint": str(layout.parameter_fingerprint),
                 "resumed_from_checkpoint": bool(layout.resumed),
+                "run_status": completed_run_status,
+                "fit_warning_count": int(warning_count),
             },
         )
     except Exception as exc:

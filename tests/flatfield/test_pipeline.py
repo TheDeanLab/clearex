@@ -523,3 +523,187 @@ def test_run_flatfield_analysis_restarts_when_parameters_change(
     assert fit_calls["count"] == first_run_fit_calls + 4
     assert third_fingerprint != first_fingerprint
     assert bool(third_latest.attrs["resumed_from_checkpoint"]) is False
+
+
+def test_run_flatfield_analysis_tiled_fallback_uses_full_volume_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_tiled_fallback_full_volume.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 1 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 1, 4, 4))
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 1, 2, 2),
+        overwrite=True,
+    )
+
+    def _failing_tile(
+        *,
+        zarr_path,
+        source_component,
+        tile,
+        parameters,
+    ):
+        del zarr_path, source_component, parameters
+        if int(tile.tile_y_index) == 0 and int(tile.tile_x_index) == 0:
+            raise RuntimeError(
+                "torch._C._LinAlgError: linalg.svd: The algorithm failed to converge "
+                "because the input matrix is ill-conditioned or has too many repeated "
+                "singular values (error code: 1)."
+            )
+        y0, y1 = int(tile.y_core_bounds[0]), int(tile.y_core_bounds[1])
+        x0, x1 = int(tile.x_core_bounds[0]), int(tile.x_core_bounds[1])
+        return flatfield_pipeline.FlatfieldTileFitResult(
+            position_index=int(tile.position_index),
+            channel_index=int(tile.channel_index),
+            tile_y_index=int(tile.tile_y_index),
+            tile_x_index=int(tile.tile_x_index),
+            y_bounds=(y0, y1),
+            x_bounds=(x0, x1),
+            flatfield_payload_yx=np.full((y1 - y0, x1 - x0), 99.0, dtype=np.float32),
+            darkfield_payload_yx=np.zeros((y1 - y0, x1 - x0), dtype=np.float32),
+            baseline_tz=np.zeros((1, 1), dtype=np.float32),
+            weight_payload_yx=None,
+        )
+
+    def _full_volume_profile(
+        *,
+        zarr_path,
+        source_component,
+        position_index,
+        channel_index,
+        parameters,
+    ):
+        del zarr_path, source_component, parameters
+        return flatfield_pipeline.FlatfieldProfileResult(
+            position_index=int(position_index),
+            channel_index=int(channel_index),
+            flatfield_yx=np.full((4, 4), 5.0, dtype=np.float32),
+            darkfield_yx=np.full((4, 4), 2.0, dtype=np.float32),
+            baseline_tz=np.zeros((1, 1), dtype=np.float32),
+        )
+
+    monkeypatch.setattr(flatfield_pipeline, "_fit_profile_tile", _failing_tile)
+    monkeypatch.setattr(flatfield_pipeline, "_fit_profile_full_volume", _full_volume_profile)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "fit_mode": "tiled",
+                "fit_tile_shape_yx": [2, 2],
+                "blend_tiles": False,
+                "smoothness_flatfield": 1.0,
+                "working_size": 64,
+                "use_map_overlap": False,
+                "overlap_zyx": [0, 0, 0],
+                "is_timelapse": False,
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    checkpoint = latest["checkpoint"]
+    fallback_records = list(checkpoint.attrs["fit_fallback_records"])
+
+    assert str(checkpoint.attrs["run_status"]) == "complete_with_warnings"
+    assert int(checkpoint.attrs["fit_warning_count"]) == 1
+    assert len(fallback_records) == 1
+    assert str(fallback_records[0]["fallback_mode"]) == "full_volume"
+    assert str(latest.attrs["run_status"]) == "complete_with_warnings"
+    assert int(latest.attrs["fit_warning_count"]) == 1
+
+    flatfield = np.asarray(latest["flatfield_pcyx"], dtype=np.float32)[0, 0]
+    darkfield = np.asarray(latest["darkfield_pcyx"], dtype=np.float32)[0, 0]
+    corrected = np.asarray(latest["data"], dtype=np.float32)
+    assert np.allclose(flatfield, 5.0)
+    assert np.allclose(darkfield, 2.0)
+    assert np.allclose(corrected, (data.astype(np.float32) - 2.0) / 5.0)
+
+
+def test_run_flatfield_analysis_tiled_fallback_uses_identity_when_retry_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_tiled_fallback_identity.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 1 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 1, 4, 4))
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 1, 2, 2),
+        overwrite=True,
+    )
+
+    def _always_failing_tile(
+        *,
+        zarr_path,
+        source_component,
+        tile,
+        parameters,
+    ):
+        del zarr_path, source_component, tile, parameters
+        raise RuntimeError(
+            "torch._C._LinAlgError: linalg.svd: The algorithm failed to converge "
+            "because the input matrix is ill-conditioned or has too many repeated "
+            "singular values (error code: 1)."
+        )
+
+    def _failing_full_volume(
+        *,
+        zarr_path,
+        source_component,
+        position_index,
+        channel_index,
+        parameters,
+    ):
+        del zarr_path, source_component, position_index, channel_index, parameters
+        raise RuntimeError("full-volume fallback failed")
+
+    monkeypatch.setattr(flatfield_pipeline, "_fit_profile_tile", _always_failing_tile)
+    monkeypatch.setattr(flatfield_pipeline, "_fit_profile_full_volume", _failing_full_volume)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "fit_mode": "tiled",
+                "fit_tile_shape_yx": [2, 2],
+                "blend_tiles": False,
+                "smoothness_flatfield": 1.0,
+                "working_size": 64,
+                "use_map_overlap": False,
+                "overlap_zyx": [0, 0, 0],
+                "is_timelapse": False,
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    checkpoint = latest["checkpoint"]
+    fallback_records = list(checkpoint.attrs["fit_fallback_records"])
+
+    assert str(checkpoint.attrs["run_status"]) == "complete_with_warnings"
+    assert int(checkpoint.attrs["fit_warning_count"]) == 1
+    assert len(fallback_records) == 1
+    assert str(fallback_records[0]["fallback_mode"]) == "identity"
+    assert "full-volume fallback failed" in str(fallback_records[0]["retry_error"])
+    assert str(latest.attrs["run_status"]) == "complete_with_warnings"
+    assert int(latest.attrs["fit_warning_count"]) == 1
+
+    flatfield = np.asarray(latest["flatfield_pcyx"], dtype=np.float32)[0, 0]
+    darkfield = np.asarray(latest["darkfield_pcyx"], dtype=np.float32)[0, 0]
+    baseline = np.asarray(latest["baseline_pctz"], dtype=np.float32)[0, 0]
+    corrected = np.asarray(latest["data"], dtype=np.float32)
+    assert np.allclose(flatfield, 1.0)
+    assert np.allclose(darkfield, 0.0)
+    assert np.allclose(baseline, 0.0)
+    assert np.allclose(corrected, data.astype(np.float32))
