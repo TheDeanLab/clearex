@@ -35,7 +35,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 # Local Imports
 from .spacing import (
@@ -393,6 +393,139 @@ def _should_apply_persisted_dask_backend(initial: Optional[WorkflowConfig]) -> b
     if initial is None:
         return True
     return initial.dask_backend == DaskBackendConfig()
+
+
+def _zarr_component_exists_in_root(root: Any, component: str) -> bool:
+    """Return whether a component path resolves inside an open Zarr root.
+
+    Parameters
+    ----------
+    root : Any
+        Open Zarr group-like object.
+    component : str
+        Candidate component path.
+
+    Returns
+    -------
+    bool
+        ``True`` when the component exists, otherwise ``False``.
+
+    Notes
+    -----
+    Existence checks are intentionally exception-tolerant because Zarr backends
+    may surface missing keys and transient I/O issues through different error
+    types.
+    """
+    path = str(component).strip()
+    if not path:
+        return False
+    try:
+        root[path]
+    except Exception:
+        return False
+    return True
+
+
+def _discover_available_operation_output_components(
+    *,
+    store_path: Optional[str],
+    operation_output_components: Mapping[str, str],
+) -> Dict[str, str]:
+    """Discover operation outputs currently present in a canonical Zarr store.
+
+    Parameters
+    ----------
+    store_path : str, optional
+        Candidate Zarr/N5 store path.
+    operation_output_components : mapping[str, str]
+        Mapping from operation key to expected output component path.
+
+    Returns
+    -------
+    dict[str, str]
+        Operation-to-component mapping for outputs that currently exist.
+
+    Notes
+    -----
+    This helper is used only for GUI option hints; failures return an empty
+    mapping so runtime behavior remains unchanged.
+    """
+    candidate = str(store_path or "").strip()
+    if not candidate or not is_zarr_store_path(candidate):
+        return {}
+
+    try:
+        root = zarr.open_group(candidate, mode="r")
+    except Exception:
+        return {}
+
+    available: Dict[str, str] = {}
+    for operation_name, component in operation_output_components.items():
+        if _zarr_component_exists_in_root(root, component):
+            available[str(operation_name)] = str(component)
+    return available
+
+
+def _build_input_source_options(
+    *,
+    operation_name: str,
+    selected_order: Sequence[str],
+    operation_key_order: Sequence[str],
+    operation_labels: Mapping[str, str],
+    operation_output_components: Mapping[str, str],
+    available_store_output_components: Optional[Mapping[str, str]] = None,
+) -> list[tuple[str, str]]:
+    """Build GUI input-source options for one analysis operation.
+
+    Parameters
+    ----------
+    operation_name : str
+        Operation key for which options are generated.
+    selected_order : sequence of str
+        Operations selected in current execution order.
+    operation_key_order : sequence of str
+        Canonical operation order used for deterministic display ordering.
+    operation_labels : mapping[str, str]
+        Human-readable labels per operation.
+    operation_output_components : mapping[str, str]
+        Expected output component per operation.
+    available_store_output_components : mapping[str, str], optional
+        Existing outputs discovered in the selected store from prior runs.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Ordered ``(value, label)`` options used by source-selection combo boxes.
+    """
+    options: list[tuple[str, str]] = [("data", "Raw data (data)")]
+    option_values = {"data"}
+
+    for upstream_name in selected_order:
+        if upstream_name == operation_name:
+            break
+        component = operation_output_components.get(upstream_name)
+        if not component or upstream_name in option_values:
+            continue
+        label = operation_labels.get(
+            upstream_name, upstream_name.replace("_", " ").title()
+        )
+        options.append((upstream_name, f"{label} output ({component})"))
+        option_values.add(upstream_name)
+
+    available = available_store_output_components or {}
+    for upstream_name in operation_key_order:
+        if upstream_name == operation_name or upstream_name in option_values:
+            continue
+        component = str(available.get(upstream_name, "")).strip()
+        if not component:
+            continue
+        label = operation_labels.get(
+            upstream_name, upstream_name.replace("_", " ").title()
+        )
+        options.append((upstream_name, f"{label} output ({component}) [existing]"))
+        option_values.add(upstream_name)
+
+    return options
 
 
 def _format_optional_value(value: Optional[Any]) -> str:
@@ -4628,6 +4761,7 @@ if HAS_PYQT6:
         def _input_options_for_operation(
             self,
             operation_name: str,
+            available_store_outputs: Optional[Mapping[str, str]] = None,
         ) -> list[tuple[str, str]]:
             """Build input-source options for a specific operation.
 
@@ -4635,27 +4769,22 @@ if HAS_PYQT6:
             ----------
             operation_name : str
                 Operation key for which options are generated.
+            available_store_outputs : mapping[str, str], optional
+                Existing operation outputs discovered in the selected store.
 
             Returns
             -------
             list[tuple[str, str]]
                 List of ``(value, label)`` input-source options.
             """
-            options: list[tuple[str, str]] = [("data", "Raw data (data)")]
-            selected_order = self._selected_operations_in_sequence()
-            for upstream_name in selected_order:
-                if upstream_name == operation_name:
-                    break
-                if upstream_name not in self._OPERATION_OUTPUT_COMPONENTS:
-                    continue
-                options.append(
-                    (
-                        upstream_name,
-                        f"{self._OPERATION_LABELS[upstream_name]} output "
-                        f"({self._operation_output_component(upstream_name)})",
-                    )
-                )
-            return options
+            return _build_input_source_options(
+                operation_name=operation_name,
+                selected_order=self._selected_operations_in_sequence(),
+                operation_key_order=self._OPERATION_KEYS,
+                operation_labels=self._OPERATION_LABELS,
+                operation_output_components=self._OPERATION_OUTPUT_COMPONENTS,
+                available_store_output_components=available_store_outputs,
+            )
 
         def _refresh_input_source_options(self) -> None:
             """Refresh all input-source combo box options.
@@ -4669,12 +4798,19 @@ if HAS_PYQT6:
             None
                 Combo options are rebuilt in-place.
             """
+            available_store_outputs = _discover_available_operation_output_components(
+                store_path=str(self._base_config.file or "").strip(),
+                operation_output_components=self._OPERATION_OUTPUT_COMPONENTS,
+            )
             for operation_name, combo in self._operation_input_combos.items():
                 current_data = combo.currentData()
                 current_source = (
                     str(current_data).strip() if current_data is not None else "data"
                 ) or "data"
-                options = self._input_options_for_operation(operation_name)
+                options = self._input_options_for_operation(
+                    operation_name,
+                    available_store_outputs=available_store_outputs,
+                )
                 option_values = [value for value, _ in options]
 
                 combo.blockSignals(True)

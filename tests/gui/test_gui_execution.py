@@ -334,3 +334,99 @@ def test_launch_gui_applies_persisted_backend_defaults(monkeypatch, tmp_path) ->
     assert calls["ensure"] == 1
     assert captured["setup_initial"].dask_backend == persisted_backend
     assert selected is not None
+
+
+def test_build_input_source_options_includes_existing_store_outputs() -> None:
+    options = app_module._build_input_source_options(
+        operation_name="visualization",
+        selected_order=["visualization"],
+        operation_key_order=(
+            "flatfield",
+            "deconvolution",
+            "particle_detection",
+            "registration",
+            "visualization",
+        ),
+        operation_labels={
+            "flatfield": "Flatfield Correction",
+            "deconvolution": "Deconvolution",
+            "particle_detection": "Particle Detection",
+            "registration": "Registration",
+            "visualization": "Visualization",
+        },
+        operation_output_components={
+            "flatfield": "results/flatfield/latest/data",
+            "deconvolution": "results/deconvolution/latest/data",
+            "registration": "results/registration/latest/data",
+        },
+        available_store_output_components={
+            "flatfield": "results/flatfield/latest/data",
+        },
+    )
+
+    assert options[0] == ("data", "Raw data (data)")
+    assert (
+        "flatfield",
+        "Flatfield Correction output (results/flatfield/latest/data) [existing]",
+    ) in options
+
+
+def test_build_input_source_options_deduplicates_existing_and_selected() -> None:
+    options = app_module._build_input_source_options(
+        operation_name="visualization",
+        selected_order=["flatfield", "visualization"],
+        operation_key_order=(
+            "flatfield",
+            "deconvolution",
+            "particle_detection",
+            "registration",
+            "visualization",
+        ),
+        operation_labels={
+            "flatfield": "Flatfield Correction",
+            "deconvolution": "Deconvolution",
+            "particle_detection": "Particle Detection",
+            "registration": "Registration",
+            "visualization": "Visualization",
+        },
+        operation_output_components={
+            "flatfield": "results/flatfield/latest/data",
+            "deconvolution": "results/deconvolution/latest/data",
+            "registration": "results/registration/latest/data",
+        },
+        available_store_output_components={
+            "flatfield": "results/flatfield/latest/data",
+        },
+    )
+
+    values = [value for value, _label in options]
+    assert values.count("flatfield") == 1
+    assert (
+        "flatfield",
+        "Flatfield Correction output (results/flatfield/latest/data)",
+    ) in options
+
+
+def test_discover_available_operation_output_components(monkeypatch) -> None:
+    class _FakeRoot:
+        def __getitem__(self, key):
+            if key == "results/flatfield/latest/data":
+                return object()
+            raise KeyError(key)
+
+    monkeypatch.setattr(app_module, "is_zarr_store_path", lambda _path: True)
+    monkeypatch.setattr(
+        app_module.zarr,
+        "open_group",
+        lambda _path, mode="r": _FakeRoot(),
+    )
+
+    discovered = app_module._discover_available_operation_output_components(
+        store_path="/tmp/fake_store.zarr",
+        operation_output_components={
+            "flatfield": "results/flatfield/latest/data",
+            "deconvolution": "results/deconvolution/latest/data",
+        },
+    )
+
+    assert discovered == {"flatfield": "results/flatfield/latest/data"}

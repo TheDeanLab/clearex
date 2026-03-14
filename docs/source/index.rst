@@ -8,6 +8,7 @@ ClearEx is a Python package for scalable analytics of cleared and expanded tissu
    :caption: Documentation
 
    getting-started
+   runtime/index
    workflows/index
    api/index
    development
