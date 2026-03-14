@@ -108,6 +108,97 @@ def test_run_flatfield_analysis_writes_latest_results(
     )
 
 
+def test_run_flatfield_analysis_materializes_output_pyramid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_pyramid.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 2 * 4 * 4, dtype=np.uint16).reshape(
+        (1, 1, 1, 2, 4, 4)
+    )
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 2, 2, 2),
+        overwrite=True,
+    )
+    root["data"].attrs.update(
+        {
+            "pyramid_levels": ["data", "data_pyramid/level_1"],
+            "pyramid_factors_tpczyx": [
+                [1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 2, 2],
+            ],
+        }
+    )
+    root.attrs.update(
+        {
+            "data_pyramid_levels": ["data", "data_pyramid/level_1"],
+            "data_pyramid_factors_tpczyx": [
+                [1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 2, 2],
+            ],
+        }
+    )
+
+    class _FakeBaSiC:
+        def __init__(
+            self,
+            *,
+            fitting_mode,
+            get_darkfield,
+            smoothness_flatfield,
+            working_size,
+            device,
+        ) -> None:
+            del fitting_mode, get_darkfield, smoothness_flatfield, working_size, device
+            self.flatfield = np.empty((0, 0), dtype=np.float32)
+            self.darkfield = np.empty((0, 0), dtype=np.float32)
+            self.baseline = np.empty((0,), dtype=np.float32)
+
+        def fit(self, images, skip_shape_warning=False) -> None:
+            del skip_shape_warning
+            self.flatfield = np.ones(images.shape[1:], dtype=np.float32)
+            self.darkfield = np.zeros(images.shape[1:], dtype=np.float32)
+            self.baseline = np.zeros(images.shape[0], dtype=np.float32)
+
+    monkeypatch.setattr(flatfield_pipeline, "_load_basic_class", lambda: _FakeBaSiC)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "fit_mode": "full_volume",
+                "smoothness_flatfield": 1.0,
+                "working_size": 64,
+                "use_map_overlap": False,
+                "is_timelapse": False,
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    latest = output_root["results"]["flatfield"]["latest"]
+    corrected = np.asarray(latest["data"], dtype=np.float32)
+    level_1 = np.asarray(latest["data_pyramid"]["level_1"], dtype=np.float32)
+    expected = corrected[:, :, :, :, ::2, ::2]
+
+    assert level_1.shape == expected.shape
+    assert np.array_equal(level_1, expected)
+    assert latest["data"].attrs["pyramid_levels"] == [
+        "results/flatfield/latest/data",
+        "results/flatfield/latest/data_pyramid/level_1",
+    ]
+    assert latest["data"].attrs["pyramid_factors_tpczyx"] == [
+        [1, 1, 1, 1, 1, 1],
+        [1, 1, 1, 1, 2, 2],
+    ]
+
+
 def test_run_flatfield_analysis_defaults_darkfield_off(
     tmp_path: Path, monkeypatch
 ) -> None:

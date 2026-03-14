@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence, Union, cast
 
 import dask
+import dask.array as da
 from dask import delayed
 import numpy as np
 from numpy.typing import NDArray
@@ -61,6 +62,7 @@ RegionBounds = tuple[
     tuple[int, int],
 ]
 SpatialBounds = tuple[tuple[int, int], tuple[int, int]]
+CanonicalShapeTpczyx = tuple[int, int, int, int, int, int]
 RESUME_SCHEMA_VERSION = "clearex.flatfield.resume.v1"
 CHECKPOINT_GROUP_NAME = "checkpoint"
 
@@ -975,6 +977,448 @@ def _copy_source_array_attrs(
         elif key in root_attrs:
             copied[key] = root_attrs.get(key)
     target_array.attrs.update(copied)
+
+
+def _normalize_level_factor_payload(
+    payload: Any,
+) -> Optional[tuple[CanonicalShapeTpczyx, ...]]:
+    """Normalize per-level absolute pyramid factors.
+
+    Parameters
+    ----------
+    payload : Any
+        Candidate payload where each entry defines one
+        ``(t, p, c, z, y, x)`` level factor tuple.
+
+    Returns
+    -------
+    tuple[tuple[int, int, int, int, int, int], ...], optional
+        Normalized level factors, or ``None`` when payload is missing or invalid.
+
+    Raises
+    ------
+    None
+        Invalid payloads return ``None``.
+    """
+    if not isinstance(payload, (list, tuple)) or len(payload) <= 0:
+        return None
+    parsed: list[CanonicalShapeTpczyx] = []
+    for level in payload:
+        if not isinstance(level, (list, tuple)) or len(level) != 6:
+            return None
+        try:
+            factors: CanonicalShapeTpczyx = (
+                int(level[0]),
+                int(level[1]),
+                int(level[2]),
+                int(level[3]),
+                int(level[4]),
+                int(level[5]),
+            )
+        except Exception:
+            return None
+        if any(value <= 0 for value in factors):
+            return None
+        if parsed and factors == parsed[-1]:
+            continue
+        parsed.append(factors)
+    if not parsed:
+        return None
+    if parsed[0] != (1, 1, 1, 1, 1, 1):
+        return None
+    return tuple(parsed)
+
+
+def _normalize_axis_factor_payload(
+    payload: Any,
+) -> Optional[tuple[CanonicalShapeTpczyx, ...]]:
+    """Normalize per-axis pyramid factors into absolute level factors.
+
+    Parameters
+    ----------
+    payload : Any
+        Candidate payload where each entry defines one axis factor sequence in
+        canonical ``(t, p, c, z, y, x)`` order.
+
+    Returns
+    -------
+    tuple[tuple[int, int, int, int, int, int], ...], optional
+        Normalized level factors, or ``None`` when payload is missing or invalid.
+
+    Raises
+    ------
+    None
+        Invalid payloads return ``None``.
+    """
+    if not isinstance(payload, (list, tuple)) or len(payload) != 6:
+        return None
+
+    axis_levels: list[tuple[int, ...]] = []
+    for axis_payload in payload:
+        if not isinstance(axis_payload, (list, tuple)) or len(axis_payload) <= 0:
+            return None
+        try:
+            parsed_levels = tuple(int(value) for value in axis_payload)
+        except Exception:
+            return None
+        if any(value <= 0 for value in parsed_levels):
+            return None
+        if parsed_levels[0] != 1:
+            return None
+        axis_levels.append(parsed_levels)
+
+    max_levels = max(len(levels) for levels in axis_levels)
+    resolved: list[CanonicalShapeTpczyx] = []
+    for level_index in range(max_levels):
+        factors: CanonicalShapeTpczyx = (
+            int(axis_levels[0][min(level_index, len(axis_levels[0]) - 1)]),
+            int(axis_levels[1][min(level_index, len(axis_levels[1]) - 1)]),
+            int(axis_levels[2][min(level_index, len(axis_levels[2]) - 1)]),
+            int(axis_levels[3][min(level_index, len(axis_levels[3]) - 1)]),
+            int(axis_levels[4][min(level_index, len(axis_levels[4]) - 1)]),
+            int(axis_levels[5][min(level_index, len(axis_levels[5]) - 1)]),
+        )
+        if resolved and factors == resolved[-1]:
+            continue
+        resolved.append(factors)
+
+    if not resolved:
+        return None
+    if resolved[0] != (1, 1, 1, 1, 1, 1):
+        return None
+    return tuple(resolved)
+
+
+def _resolve_output_level_factors(
+    *,
+    root: zarr.Group,
+    source_component: str,
+) -> tuple[CanonicalShapeTpczyx, ...]:
+    """Resolve pyramid level factors to apply to flatfield corrected output.
+
+    Parameters
+    ----------
+    root : zarr.Group
+        Open Zarr root group.
+    source_component : str
+        Source component used for flatfield correction.
+
+    Returns
+    -------
+    tuple[tuple[int, int, int, int, int, int], ...]
+        Absolute downsample factors in canonical ``(t, p, c, z, y, x)`` order.
+        Always includes a base level ``(1, 1, 1, 1, 1, 1)``.
+
+    Raises
+    ------
+    None
+        Unavailable metadata falls back to a base-only level definition.
+    """
+    source_attrs = dict(root[source_component].attrs)
+    root_attrs = dict(root.attrs)
+
+    for candidate in (
+        source_attrs.get("pyramid_factors_tpczyx"),
+        root_attrs.get("data_pyramid_factors_tpczyx"),
+    ):
+        normalized = _normalize_level_factor_payload(candidate)
+        if normalized is not None:
+            return normalized
+
+    for candidate in (
+        source_attrs.get("resolution_pyramid_factors_tpczyx"),
+        root_attrs.get("resolution_pyramid_factors_tpczyx"),
+    ):
+        normalized = _normalize_axis_factor_payload(candidate)
+        if normalized is not None:
+            return normalized
+
+    return ((1, 1, 1, 1, 1, 1),)
+
+
+def _normalize_level_chunks(
+    *,
+    level_shape_tpczyx: CanonicalShapeTpczyx,
+    requested_chunks_tpczyx: CanonicalShapeTpczyx,
+) -> CanonicalShapeTpczyx:
+    """Normalize requested chunk sizes for one canonical level.
+
+    Parameters
+    ----------
+    level_shape_tpczyx : tuple[int, int, int, int, int, int]
+        Level shape in canonical axis order.
+    requested_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Requested chunks in canonical axis order.
+
+    Returns
+    -------
+    tuple[int, int, int, int, int, int]
+        Chunks clipped to valid positive values per axis.
+
+    Raises
+    ------
+    ValueError
+        If any tuple is malformed.
+    """
+    if len(level_shape_tpczyx) != 6 or len(requested_chunks_tpczyx) != 6:
+        raise ValueError("Expected six-axis canonical shape/chunk tuples.")
+
+    normalized: list[int] = []
+    for axis_size, chunk_size in zip(
+        level_shape_tpczyx, requested_chunks_tpczyx, strict=False
+    ):
+        if int(axis_size) <= 0:
+            raise ValueError("Level shape values must be greater than zero.")
+        normalized.append(max(1, min(int(axis_size), int(chunk_size))))
+    return (
+        int(normalized[0]),
+        int(normalized[1]),
+        int(normalized[2]),
+        int(normalized[3]),
+        int(normalized[4]),
+        int(normalized[5]),
+    )
+
+
+def _derive_level_chunks(
+    *,
+    base_chunks_tpczyx: CanonicalShapeTpczyx,
+    level_shape_tpczyx: CanonicalShapeTpczyx,
+    level_factors_tpczyx: CanonicalShapeTpczyx,
+) -> CanonicalShapeTpczyx:
+    """Derive downsampled-level chunks from base chunks and absolute factors.
+
+    Parameters
+    ----------
+    base_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Base chunk shape in canonical order.
+    level_shape_tpczyx : tuple[int, int, int, int, int, int]
+        Target level shape in canonical order.
+    level_factors_tpczyx : tuple[int, int, int, int, int, int]
+        Absolute level factors in canonical order.
+
+    Returns
+    -------
+    tuple[int, int, int, int, int, int]
+        Normalized chunks for the level.
+
+    Raises
+    ------
+    ValueError
+        If any factor is invalid.
+    """
+    if any(int(factor) <= 0 for factor in level_factors_tpczyx):
+        raise ValueError("Level factors must be greater than zero.")
+    requested_chunks: CanonicalShapeTpczyx = (
+        max(1, int(base_chunks_tpczyx[0]) // int(level_factors_tpczyx[0])),
+        max(1, int(base_chunks_tpczyx[1]) // int(level_factors_tpczyx[1])),
+        max(1, int(base_chunks_tpczyx[2]) // int(level_factors_tpczyx[2])),
+        max(1, int(base_chunks_tpczyx[3]) // int(level_factors_tpczyx[3])),
+        max(1, int(base_chunks_tpczyx[4]) // int(level_factors_tpczyx[4])),
+        max(1, int(base_chunks_tpczyx[5]) // int(level_factors_tpczyx[5])),
+    )
+    return _normalize_level_chunks(
+        level_shape_tpczyx=level_shape_tpczyx,
+        requested_chunks_tpczyx=requested_chunks,
+    )
+
+
+def _materialize_output_pyramid(
+    *,
+    zarr_path: Union[str, Path],
+    source_component: str,
+    base_component: str,
+    base_chunks_tpczyx: CanonicalShapeTpczyx,
+    client: Optional["Client"] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_start: int = 95,
+    progress_end: int = 99,
+) -> tuple[list[str], list[list[int]], list[list[int]]]:
+    """Materialize a multiscale pyramid for corrected flatfield output data.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Target analysis-store path.
+    source_component : str
+        Source component used during flatfield correction.
+    base_component : str
+        Base corrected output component (``results/flatfield/latest/data``).
+    base_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Base corrected-output chunk shape in canonical axis order.
+    client : dask.distributed.Client, optional
+        Active Dask client for distributed writes.
+    progress_callback : callable, optional
+        Progress callback invoked as ``callback(percent, message)``.
+    progress_start : int, default=95
+        Progress range start.
+    progress_end : int, default=99
+        Progress range end.
+
+    Returns
+    -------
+    tuple[list[str], list[list[int]], list[list[int]]]
+        ``(level_paths, level_factor_payload, level_shape_payload)`` including
+        base level at index ``0``.
+
+    Raises
+    ------
+    ValueError
+        If base output component shape/chunks are not canonical.
+    """
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    base_array = root[base_component]
+    base_shape = tuple(int(value) for value in base_array.shape)
+    if len(base_shape) != 6 or len(tuple(base_chunks_tpczyx)) != 6:
+        raise ValueError(
+            "Flatfield output pyramid requires canonical 6D data "
+            f"for component '{base_component}'."
+        )
+
+    level_factors = _resolve_output_level_factors(
+        root=root,
+        source_component=source_component,
+    )
+
+    base_parent = str(base_component).rsplit("/", 1)[0]
+    latest_group = root[base_parent]
+    if "data_pyramid" in latest_group:
+        del latest_group["data_pyramid"]
+    latest_group.require_group("data_pyramid")
+
+    level_paths = [str(base_component)]
+    level_factor_payload = [[1, 1, 1, 1, 1, 1]]
+    level_shape_payload = [[int(value) for value in base_shape]]
+
+    if len(level_factors) <= 1:
+        base_array.attrs.update(
+            {
+                "pyramid_levels": list(level_paths),
+                "pyramid_factors_tpczyx": list(level_factor_payload),
+                "pyramid_shapes_tpczyx": list(level_shape_payload),
+            }
+        )
+        latest_group.attrs.update(
+            {
+                "data_pyramid_levels": list(level_paths),
+                "data_pyramid_factors_tpczyx": list(level_factor_payload),
+                "data_pyramid_shapes_tpczyx": list(level_shape_payload),
+            }
+        )
+        _emit(progress_end, "Flatfield pyramid generation complete")
+        return level_paths, level_factor_payload, level_shape_payload
+
+    prior_component = str(base_component)
+    prior_factors = level_factors[0]
+    total_levels = max(1, int(len(level_factors) - 1))
+    for level_index, absolute_factors in enumerate(level_factors[1:], start=1):
+        if all(
+            int(current) % int(previous) == 0
+            for current, previous in zip(absolute_factors, prior_factors, strict=False)
+        ):
+            relative_factors: CanonicalShapeTpczyx = (
+                int(absolute_factors[0] // prior_factors[0]),
+                int(absolute_factors[1] // prior_factors[1]),
+                int(absolute_factors[2] // prior_factors[2]),
+                int(absolute_factors[3] // prior_factors[3]),
+                int(absolute_factors[4] // prior_factors[4]),
+                int(absolute_factors[5] // prior_factors[5]),
+            )
+            level_source_component = str(prior_component)
+            downsample_factors = relative_factors
+        else:
+            level_source_component = str(base_component)
+            downsample_factors = absolute_factors
+
+        level_progress_start = progress_start + int(
+            ((level_index - 1) / total_levels) * max(0, progress_end - progress_start)
+        )
+        level_progress_end = progress_start + int(
+            (level_index / total_levels) * max(0, progress_end - progress_start)
+        )
+        _emit(
+            level_progress_start,
+            "Writing flatfield pyramid "
+            f"level {level_index}/{total_levels} (factors={absolute_factors})",
+        )
+
+        source_array = da.from_zarr(str(zarr_path), component=level_source_component)
+        downsampled = source_array[
+            tuple(slice(None, None, int(factor)) for factor in downsample_factors)
+        ]
+        level_shape: CanonicalShapeTpczyx = (
+            int(downsampled.shape[0]),
+            int(downsampled.shape[1]),
+            int(downsampled.shape[2]),
+            int(downsampled.shape[3]),
+            int(downsampled.shape[4]),
+            int(downsampled.shape[5]),
+        )
+        level_chunks = _derive_level_chunks(
+            base_chunks_tpczyx=base_chunks_tpczyx,
+            level_shape_tpczyx=level_shape,
+            level_factors_tpczyx=absolute_factors,
+        )
+        with dask.config.set({"array.rechunk.method": "tasks"}):
+            downsampled = downsampled.rechunk(level_chunks)
+
+        level_component = f"{base_parent}/data_pyramid/level_{level_index}"
+        write_task = da.to_zarr(
+            downsampled,
+            url=str(zarr_path),
+            component=level_component,
+            overwrite=True,
+            compute=False,
+        )
+        if client is None:
+            dask.compute(write_task, scheduler="processes")
+        else:
+            client.compute(write_task).result()
+
+        root = zarr.open_group(str(zarr_path), mode="a")
+        root[level_component].attrs.update(
+            {
+                "axes": ["t", "p", "c", "z", "y", "x"],
+                "pyramid_level": int(level_index),
+                "downsample_factors_tpczyx": [
+                    int(value) for value in absolute_factors
+                ],
+                "chunk_shape_tpczyx": [int(value) for value in level_chunks],
+                "source_component": str(level_source_component),
+            }
+        )
+        level_paths.append(level_component)
+        level_factor_payload.append([int(value) for value in absolute_factors])
+        level_shape_payload.append([int(value) for value in level_shape])
+        prior_component = level_component
+        prior_factors = absolute_factors
+        _emit(
+            level_progress_end,
+            f"Wrote flatfield pyramid level {level_index}/{total_levels}",
+        )
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root[base_component].attrs.update(
+        {
+            "pyramid_levels": list(level_paths),
+            "pyramid_factors_tpczyx": list(level_factor_payload),
+            "pyramid_shapes_tpczyx": list(level_shape_payload),
+        }
+    )
+    root[base_parent].attrs.update(
+        {
+            "data_pyramid_levels": list(level_paths),
+            "data_pyramid_factors_tpczyx": list(level_factor_payload),
+            "data_pyramid_shapes_tpczyx": list(level_shape_payload),
+        }
+    )
+    _emit(progress_end, "Flatfield pyramid generation complete")
+    return level_paths, level_factor_payload, level_shape_payload
 
 
 def _checkpoint_dataset_specs(
@@ -3236,6 +3680,18 @@ def run_flatfield_analysis(
             )
 
         transformed_volumes = int(shape_tpczyx[0] * shape_tpczyx[1] * shape_tpczyx[2])
+        pyramid_levels, pyramid_factors_tpczyx, pyramid_shapes_tpczyx = (
+            _materialize_output_pyramid(
+                zarr_path=str(zarr_path),
+                source_component=source_component,
+                base_component=layout.data_component,
+                base_chunks_tpczyx=output_chunks,
+                client=client,
+                progress_callback=progress_callback,
+                progress_start=95,
+                progress_end=99,
+            )
+        )
         latest_group = zarr.open_group(str(zarr_path), mode="a")[layout.component]
         latest_group.attrs.update(
             {
@@ -3251,6 +3707,9 @@ def run_flatfield_analysis(
                 "resumed_from_checkpoint": bool(layout.resumed),
                 "output_dtype": "float32",
                 "output_chunks_tpczyx": [int(v) for v in output_chunks],
+                "pyramid_levels": list(pyramid_levels),
+                "pyramid_factors_tpczyx": list(pyramid_factors_tpczyx),
+                "pyramid_shapes_tpczyx": list(pyramid_shapes_tpczyx),
                 "basicpy_version": basicpy_version,
                 "run_status": completed_run_status,
                 "fit_warning_count": int(warning_count),
@@ -3272,6 +3731,9 @@ def run_flatfield_analysis(
                 "transformed_volumes": int(transformed_volumes),
                 "output_dtype": "float32",
                 "output_chunks_tpczyx": [int(v) for v in output_chunks],
+                "pyramid_levels": list(pyramid_levels),
+                "pyramid_factors_tpczyx": list(pyramid_factors_tpczyx),
+                "pyramid_shapes_tpczyx": list(pyramid_shapes_tpczyx),
                 "basicpy_version": basicpy_version,
                 "resume_parameter_fingerprint": str(layout.parameter_fingerprint),
                 "resumed_from_checkpoint": bool(layout.resumed),

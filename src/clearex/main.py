@@ -102,6 +102,7 @@ _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
 _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "flatfield": (
         "results/flatfield/latest/data",
+        "results/flatfield/latest/data_pyramid",
         "results/flatfield/latest/flatfield_pcyx",
         "results/flatfield/latest/darkfield_pcyx",
         "results/flatfield/latest/baseline_pctz",

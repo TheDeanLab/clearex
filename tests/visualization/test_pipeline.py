@@ -672,36 +672,7 @@ def test_launch_napari_viewer_three_channels_use_requested_default_colormaps(
     assert all(float(kwargs["opacity"]) == 0.8 for kwargs in viewer.image_calls)
 
 
-def test_resolve_initial_viewer_ndisplay_falls_back_for_large_single_level_volume() -> None:
-    class _LargeArray:
-        shape = (1, 1, 1150, 2048, 2048)
-        dtype = np.dtype(np.float32)
-
-    ndisplay, reason = visualization_pipeline._resolve_initial_viewer_ndisplay(
-        first_level_data_tczyx=_LargeArray(),
-        source_components=("results/flatfield/latest/data",),
-    )
-
-    assert ndisplay == 2
-    assert isinstance(reason, str)
-    assert "Large single-level volume detected" in reason
-
-
-def test_resolve_initial_viewer_ndisplay_keeps_3d_for_multiscale() -> None:
-    class _LargeArray:
-        shape = (1, 1, 1150, 2048, 2048)
-        dtype = np.dtype(np.float32)
-
-    ndisplay, reason = visualization_pipeline._resolve_initial_viewer_ndisplay(
-        first_level_data_tczyx=_LargeArray(),
-        source_components=("data", "data_pyramid/level_1"),
-    )
-
-    assert ndisplay == 3
-    assert reason is None
-
-
-def test_launch_napari_viewer_2d_fallback_omits_volume_rendering(
+def test_launch_napari_viewer_requests_3d_display_mode(
     tmp_path: Path, monkeypatch
 ) -> None:
     source = np.zeros((1, 1, 1, 3, 4, 5), dtype=np.uint16)
@@ -711,11 +682,6 @@ def test_launch_napari_viewer_2d_fallback_omits_volume_rendering(
         return source
 
     monkeypatch.setattr(visualization_pipeline.da, "from_zarr", _fake_from_zarr)
-    monkeypatch.setattr(
-        visualization_pipeline,
-        "_resolve_initial_viewer_ndisplay",
-        lambda **_kwargs: (2, "fallback"),
-    )
 
     class _FakeDims:
         def __init__(self) -> None:
@@ -768,6 +734,6 @@ def test_launch_napari_viewer_2d_fallback_omits_volume_rendering(
 
     viewer = fake_napari.viewer
     assert viewer is not None
-    assert viewer.initial_ndisplay == 2
+    assert viewer.initial_ndisplay == 3
     assert len(viewer.image_calls) == 1
-    assert "rendering" not in viewer.image_calls[0]
+    assert viewer.image_calls[0]["rendering"] == "attenuated_mip"
