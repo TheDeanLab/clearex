@@ -670,3 +670,104 @@ def test_launch_napari_viewer_three_channels_use_requested_default_colormaps(
         "bop orange",
     ]
     assert all(float(kwargs["opacity"]) == 0.8 for kwargs in viewer.image_calls)
+
+
+def test_resolve_initial_viewer_ndisplay_falls_back_for_large_single_level_volume() -> None:
+    class _LargeArray:
+        shape = (1, 1, 1150, 2048, 2048)
+        dtype = np.dtype(np.float32)
+
+    ndisplay, reason = visualization_pipeline._resolve_initial_viewer_ndisplay(
+        first_level_data_tczyx=_LargeArray(),
+        source_components=("results/flatfield/latest/data",),
+    )
+
+    assert ndisplay == 2
+    assert isinstance(reason, str)
+    assert "Large single-level volume detected" in reason
+
+
+def test_resolve_initial_viewer_ndisplay_keeps_3d_for_multiscale() -> None:
+    class _LargeArray:
+        shape = (1, 1, 1150, 2048, 2048)
+        dtype = np.dtype(np.float32)
+
+    ndisplay, reason = visualization_pipeline._resolve_initial_viewer_ndisplay(
+        first_level_data_tczyx=_LargeArray(),
+        source_components=("data", "data_pyramid/level_1"),
+    )
+
+    assert ndisplay == 3
+    assert reason is None
+
+
+def test_launch_napari_viewer_2d_fallback_omits_volume_rendering(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = np.zeros((1, 1, 1, 3, 4, 5), dtype=np.uint16)
+
+    def _fake_from_zarr(_path: str, *, component: str):
+        assert component == "data"
+        return source
+
+    monkeypatch.setattr(visualization_pipeline.da, "from_zarr", _fake_from_zarr)
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_resolve_initial_viewer_ndisplay",
+        lambda **_kwargs: (2, "fallback"),
+    )
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.ndim = 2
+            self.axis_labels = ("0", "1")
+
+    class _FakeViewer:
+        def __init__(self, *, ndisplay: int, show: bool) -> None:
+            del show
+            self.initial_ndisplay = int(ndisplay)
+            self.dims = _FakeDims()
+            self.image_calls: list[dict[str, object]] = []
+
+        def add_image(self, data, **kwargs):
+            del data
+            self.image_calls.append(dict(kwargs))
+            self.dims.ndim = 5
+            return None
+
+        def add_points(self, *_args, **_kwargs):
+            return None
+
+    class _FakeNapari:
+        def __init__(self) -> None:
+            self.viewer: _FakeViewer | None = None
+
+        def Viewer(self, *, ndisplay: int, show: bool):
+            self.viewer = _FakeViewer(ndisplay=ndisplay, show=show)
+            return self.viewer
+
+        def run(self) -> None:
+            return None
+
+    fake_napari = _FakeNapari()
+    monkeypatch.setitem(sys.modules, "napari", fake_napari)
+
+    visualization_pipeline._launch_napari_viewer(
+        zarr_path=tmp_path / "analysis_store.zarr",
+        source_components=("data",),
+        source_component="data",
+        selected_positions=(0,),
+        points_by_position={},
+        point_properties_by_position={},
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        axis_labels=("t", "c", "z", "y", "x"),
+        scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        image_metadata={},
+        points_metadata={},
+    )
+
+    viewer = fake_napari.viewer
+    assert viewer is not None
+    assert viewer.initial_ndisplay == 2
+    assert len(viewer.image_calls) == 1
+    assert "rendering" not in viewer.image_calls[0]

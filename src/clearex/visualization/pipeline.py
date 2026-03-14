@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import logging
 import math
 from pathlib import Path
 import re
@@ -53,6 +54,8 @@ from clearex.io.provenance import register_latest_output_reference
 ProgressCallback = Callable[[int, str], None]
 _AXIS_LABELS_TCZYX = ("t", "c", "z", "y", "x")
 _TPCZYX_TO_TCZYX = (0, 2, 3, 4, 5)
+_MAX_SAFE_SINGLE_LEVEL_VOLUME_TEXTURE_BYTES = 2 * 1024 * 1024 * 1024
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -765,6 +768,91 @@ def _normalize_visualization_parameters(
     return normalized
 
 
+def _estimate_single_channel_texture_bytes_tczyx(array: Any) -> int:
+    """Estimate per-channel texture allocation size for a ``(t, c, z, y, x)`` array.
+
+    Parameters
+    ----------
+    array : Any
+        Array-like value exposing ``shape`` and ``dtype``.
+
+    Returns
+    -------
+    int
+        Estimated bytes required for one channel texture. Returns ``0`` when
+        estimation is not possible.
+
+    Raises
+    ------
+    None
+        Invalid shapes/dtypes are handled internally and return ``0``.
+    """
+    shape = tuple(int(value) for value in getattr(array, "shape", tuple()))
+    if len(shape) != 5:
+        return 0
+    t_size, _channel_size, z_size, y_size, x_size = shape
+    if min(t_size, z_size, y_size, x_size) <= 0:
+        return 0
+    try:
+        dtype = np.dtype(getattr(array, "dtype", np.float32))
+        itemsize = int(dtype.itemsize)
+    except Exception:
+        itemsize = 4
+    voxel_count = int(t_size) * int(z_size) * int(y_size) * int(x_size)
+    if voxel_count <= 0:
+        return 0
+    return int(voxel_count) * int(max(1, itemsize))
+
+
+def _resolve_initial_viewer_ndisplay(
+    *,
+    first_level_data_tczyx: Any,
+    source_components: Sequence[str],
+) -> tuple[int, Optional[str]]:
+    """Resolve initial napari ``ndisplay`` mode for image rendering.
+
+    Parameters
+    ----------
+    first_level_data_tczyx : Any
+        First source level data for one position in ``(t, c, z, y, x)`` order.
+    source_components : sequence of str
+        Source component paths used for rendering.
+
+    Returns
+    -------
+    tuple[int, str or None]
+        ``(ndisplay, reason)``. ``reason`` is populated when 2D fallback is
+        selected to avoid GPU texture allocation failures.
+
+    Raises
+    ------
+    None
+        Unsupported input values are handled internally via fallback logic.
+
+    Notes
+    -----
+    Single-level (non-pyramid) sources can trigger OpenGL out-of-memory errors
+    when napari attempts 3D texture allocation for very large volumes.
+    """
+    if len(tuple(source_components)) > 1:
+        return 3, None
+
+    estimated_bytes = _estimate_single_channel_texture_bytes_tczyx(
+        first_level_data_tczyx
+    )
+    if estimated_bytes <= _MAX_SAFE_SINGLE_LEVEL_VOLUME_TEXTURE_BYTES:
+        return 3, None
+
+    gib = float(estimated_bytes) / float(1024**3)
+    threshold_gib = float(_MAX_SAFE_SINGLE_LEVEL_VOLUME_TEXTURE_BYTES) / float(1024**3)
+    reason = (
+        "Large single-level volume detected "
+        f"(estimated {gib:.2f} GiB per channel exceeds {threshold_gib:.2f} GiB "
+        "safety threshold). Using 2D slicing view."
+    )
+    return 2, reason
+
+
 def _resolve_effective_launch_mode(requested_mode: str) -> str:
     """Resolve effective viewer launch mode for current runtime context.
 
@@ -1367,11 +1455,23 @@ def _launch_napari_viewer(
         return float(low_value), float(high_value)
 
     scale = tuple(float(value) for value in scale_tczyx)
-    viewer = napari.Viewer(ndisplay=3, show=True)
+    selected = tuple(int(index) for index in selected_positions)
+    first_position_index = int(selected[0]) if selected else 0
+    first_level_data_tczyx = da.from_zarr(
+        str(zarr_path), component=str(source_components[0])
+    )[:, first_position_index, :, :, :, :]
+    ndisplay, ndisplay_reason = _resolve_initial_viewer_ndisplay(
+        first_level_data_tczyx=first_level_data_tczyx,
+        source_components=source_components,
+    )
+    if ndisplay_reason:
+        LOGGER.warning(ndisplay_reason)
+
+    viewer = napari.Viewer(ndisplay=int(ndisplay), show=True)
     axis_labels_tuple = tuple(str(label) for label in axis_labels)
     axis_labels_applied = False
+    volume_rendering_enabled = int(ndisplay) == 3
 
-    selected = tuple(int(index) for index in selected_positions)
     multi_position = len(selected) > 1
     for position_index in selected:
         level_arrays = [
@@ -1421,24 +1521,25 @@ def _launch_napari_viewer(
                 else f"{source_component} (p={position_index})"
             )
 
-            viewer.add_image(
-                image_data,
-                multiscale=is_multiscale,
-                name=layer_name,
-                scale=scale,
-                affine=channel_affine,
-                metadata={
+            image_kwargs: Dict[str, Any] = {
+                "multiscale": is_multiscale,
+                "name": layer_name,
+                "scale": scale,
+                "affine": channel_affine,
+                "metadata": {
                     str(key): value for key, value in image_layer_metadata.items()
                 },
-                colormap=str(colormaps[channel_index]),
-                opacity=float(channel_opacity),
-                blending="additive",
-                rendering="attenuated_mip",
-                contrast_limits=(
+                "colormap": str(colormaps[channel_index]),
+                "opacity": float(channel_opacity),
+                "blending": "additive",
+                "contrast_limits": (
                     float(contrast_limits[0]),
                     float(contrast_limits[1]),
                 ),
-            )
+            }
+            if volume_rendering_enabled:
+                image_kwargs["rendering"] = "attenuated_mip"
+            viewer.add_image(image_data, **image_kwargs)
             if not axis_labels_applied:
                 try:
                     if int(viewer.dims.ndim) == len(axis_labels_tuple):
