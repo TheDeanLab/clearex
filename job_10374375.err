@@ -1,0 +1,74 @@
+2026-03-14 10:25:50,449 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.100.162.75:43471'
+2026-03-14 10:25:51,377 - distributed.worker - INFO -       Start worker at:  tcp://10.100.162.75:38911
+2026-03-14 10:25:51,377 - distributed.worker - INFO -          Listening to:  tcp://10.100.162.75:38911
+2026-03-14 10:25:51,377 - distributed.worker - INFO -           Worker name:             SLURMCluster-4
+2026-03-14 10:25:51,377 - distributed.worker - INFO -          dashboard at:        10.100.162.75:38237
+2026-03-14 10:25:51,377 - distributed.worker - INFO - Waiting to connect to:  tcp://10.100.162.59:33697
+2026-03-14 10:25:51,377 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 10:25:51,377 - distributed.worker - INFO -               Threads:                         70
+2026-03-14 10:25:51,377 - distributed.worker - INFO -                Memory:                 465.66 GiB
+2026-03-14 10:25:51,377 - distributed.worker - INFO -       Local Directory: /project/bioinformatics/Danuser_lab/Dean/dean/temp/dask-scratch-space/worker-6vvy78dd
+2026-03-14 10:25:51,377 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 10:25:55,476 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-03-14 10:25:55,476 - distributed.worker - INFO -         Registered to:  tcp://10.100.162.59:33697
+2026-03-14 10:25:55,476 - distributed.worker - INFO - -------------------------------------------------
+2026-03-14 10:25:55,476 - distributed.core - INFO - Starting established connection to tcp://10.100.162.59:33697
+2026-03-14 10:26:11,016 - distributed.core - INFO - Event loop was unresponsive in Worker for 12.60s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+2026-03-14 10:26:37,528 - distributed.core - INFO - Event loop was unresponsive in Worker for 4.31s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 10:26:48,214 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.95s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 10:26:57,886 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.37s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 10:27:03,272 - distributed.core - INFO - Event loop was unresponsive in Worker for 5.17s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 10:27:07,668 - distributed.core - INFO - Event loop was unresponsive in Worker for 4.40s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 10:27:30,130 - distributed.core - INFO - Event loop was unresponsive in Worker for 11.91s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 10:27:37,224 - distributed.core - INFO - Event loop was unresponsive in Worker for 7.01s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 10:28:03,292 - distributed.core - INFO - Event loop was unresponsive in Worker for 22.34s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/n5.py:77: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 for more information.
+  super().__init__(*args, **kwargs)
+/project/bioinformatics/Danuser_lab/Dean/dean/git/clearex/.venv/lib/python3.12/site-packages/zarr/storage.py:179: FutureWarning: The N5Store is deprecated and will be removed in a Zarr-Python version 3, see https://github.com/zarr-developers/zarr-python/issues/1274 and https://github.com/zarr-developers/n5py for more information.
+  return N5Store(store)
+2026-03-14 10:45:50,877 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.44s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 11:23:10,060 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.22s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:15:12,225 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.73s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:15:15,849 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.20s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:15:22,549 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.49s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:15:30,642 - distributed.core - INFO - Event loop was unresponsive in Worker for 4.91s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:15:42,229 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.19s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:15:51,952 - distributed.core - INFO - Event loop was unresponsive in Worker for 4.09s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:16:08,999 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.11s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:16:59,065 - distributed.core - INFO - Event loop was unresponsive in Worker for 4.39s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:17:02,455 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.39s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:17:09,903 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.42s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:17:14,145 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.69s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:17:17,458 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.31s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:17:20,767 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.31s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:17:28,155 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.55s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:17:32,409 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.90s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:17:37,280 - distributed.core - INFO - Event loop was unresponsive in Worker for 4.87s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:17:41,096 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.09s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:18:47,409 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.21s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:18:53,822 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.13s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:18:57,639 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.82s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:19:00,935 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.30s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:19:15,735 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.95s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:20:21,583 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.01s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:20:27,905 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.10s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:20:32,277 - distributed.core - INFO - Event loop was unresponsive in Worker for 4.23s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:20:49,992 - distributed.core - INFO - Event loop was unresponsive in Worker for 4.20s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:20:53,724 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.09s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:21:03,273 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.75s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:21:58,624 - distributed.core - INFO - Event loop was unresponsive in Worker for 4.02s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:22:09,698 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.50s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:22:13,183 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.48s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:22:17,256 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.64s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:22:29,306 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.02s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:23:44,032 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.05s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:24:33,269 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.22s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:25:31,229 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.14s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:25:34,884 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.40s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:33:45,666 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.22s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-03-14 13:35:36,744 - distributed.core - INFO - Event loop was unresponsive in Worker for 3.20s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+slurmstepd: error: *** JOB 10374375 ON NucleusB075 CANCELLED AT 2026-03-14T13:36:56 ***

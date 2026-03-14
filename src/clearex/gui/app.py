@@ -528,6 +528,35 @@ def _build_input_source_options(
     return options
 
 
+def _particle_overlay_available_for_visualization(
+    *,
+    selected_order: Sequence[str],
+    has_particle_detection_history: bool = False,
+) -> bool:
+    """Return whether particle-overlay controls should be available.
+
+    Parameters
+    ----------
+    selected_order : sequence[str]
+        Currently selected operations in execution order.
+    has_particle_detection_history : bool, default=False
+        Whether provenance indicates a completed particle-detection run.
+
+    Returns
+    -------
+    bool
+        ``True`` when overlay can be supported by either:
+        a current particle-detection run before visualization or successful
+        particle-detection provenance history.
+    """
+    ordered = [str(name).strip() for name in selected_order]
+    if "particle_detection" in ordered and "visualization" in ordered:
+        if ordered.index("particle_detection") < ordered.index("visualization"):
+            return True
+
+    return bool(has_particle_detection_history)
+
+
 def _format_optional_value(value: Optional[Any]) -> str:
     """Format optional metadata values for display labels.
 
@@ -3502,6 +3531,9 @@ if HAS_PYQT6:
             "deconvolution": "results/deconvolution/latest/data",
             "registration": "results/registration/latest/data",
         }
+        _PARTICLE_DETECTION_OVERLAY_COMPONENT = (
+            "results/particle_detection/latest/detections"
+        )
         _PARAMETER_HINTS: Dict[str, str] = {
             "input_source": (
                 "Input source controls which dataset this operation reads from. "
@@ -3669,7 +3701,8 @@ if HAS_PYQT6:
             ),
             "overlay_particle_detections": (
                 "Overlay particle detections as a napari points layer when "
-                "results/particle_detection/latest/detections is available."
+                "particle detections already exist in the store or are selected "
+                "to run before visualization."
             ),
         }
 
@@ -4721,7 +4754,7 @@ if HAS_PYQT6:
                 Component path used for upstream-input labels.
             """
             if operation_name == "particle_detection":
-                return "results/particle_detection/latest/detections"
+                return self._PARTICLE_DETECTION_OVERLAY_COMPONENT
             if operation_name == "visualization":
                 return "results/visualization/latest"
             return self._OPERATION_OUTPUT_COMPONENTS.get(
@@ -4802,6 +4835,7 @@ if HAS_PYQT6:
                 store_path=str(self._base_config.file or "").strip(),
                 operation_output_components=self._OPERATION_OUTPUT_COMPONENTS,
             )
+
             for operation_name, combo in self._operation_input_combos.items():
                 current_data = combo.currentData()
                 current_source = (
@@ -4831,6 +4865,39 @@ if HAS_PYQT6:
                 combo.setCurrentIndex(selected_index)
                 combo.setEnabled(self._operation_checkboxes[operation_name].isChecked())
                 combo.blockSignals(False)
+
+        def _has_completed_particle_detection_history(self) -> bool:
+            """Return whether provenance has a successful particle-detection run.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            bool
+                ``True`` when provenance indicates particle detection completed.
+            """
+            history = self._operation_history_cache.get("particle_detection", {})
+            return bool(history.get("has_successful_run", False))
+
+        def _is_particle_overlay_available(self) -> bool:
+            """Return whether visualization particle overlay can be enabled.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            bool
+                ``True`` when current run order or existing outputs/history make
+                particle overlay available.
+            """
+            return _particle_overlay_available_for_visualization(
+                selected_order=self._selected_operations_in_sequence(),
+                has_particle_detection_history=self._has_completed_particle_detection_history(),
+            )
 
         def _refresh_operation_provenance_statuses(self) -> None:
             """Update per-operation provenance history labels and force-rerun controls.
@@ -5037,6 +5104,7 @@ if HAS_PYQT6:
                 Input options and status text are refreshed in-place.
             """
             self._refresh_input_source_options()
+            self._set_visualization_parameter_enabled_state()
             sequence = self._selected_operations_in_sequence()
             if sequence:
                 sequence_text = " -> ".join(
@@ -5355,6 +5423,7 @@ if HAS_PYQT6:
             visualization_enabled = self._operation_checkboxes[
                 "visualization"
             ].isChecked()
+            overlay_available = self._is_particle_overlay_available()
             self._visualization_show_all_positions_checkbox.setEnabled(
                 visualization_enabled
             )
@@ -5368,8 +5437,20 @@ if HAS_PYQT6:
                 visualization_enabled and not show_all_positions
             )
             self._visualization_multiscale_checkbox.setEnabled(visualization_enabled)
+            if not overlay_available:
+                self._visualization_overlay_points_checkbox.setChecked(False)
             self._visualization_overlay_points_checkbox.setEnabled(
-                visualization_enabled
+                visualization_enabled and overlay_available
+            )
+            overlay_hint = self._PARAMETER_HINTS["overlay_particle_detections"]
+            if not overlay_available:
+                overlay_hint = (
+                    "Particle overlay is unavailable until particle detection has "
+                    "completed in this store or is selected to run before visualization."
+                )
+            self._visualization_overlay_points_checkbox.setToolTip(overlay_hint)
+            self._parameter_help_map[self._visualization_overlay_points_checkbox] = (
+                overlay_hint
             )
             self._set_visualization_position_selector_state()
 
@@ -6142,6 +6223,7 @@ if HAS_PYQT6:
             dict[str, Any]
                 Visualization parameter mapping.
             """
+            overlay_enabled = self._is_particle_overlay_available()
             return {
                 "chunk_basis": "2d",
                 "detect_2d_per_slice": True,
@@ -6159,11 +6241,12 @@ if HAS_PYQT6:
                 ),
                 "overlay_particle_detections": bool(
                     self._visualization_overlay_points_checkbox.isChecked()
-                ),
+                )
+                and overlay_enabled,
                 "particle_detection_component": str(
                     self._visualization_defaults.get(
                         "particle_detection_component",
-                        "results/particle_detection/latest/detections",
+                        self._PARTICLE_DETECTION_OVERLAY_COMPONENT,
                     )
                 ),
                 "launch_mode": str(

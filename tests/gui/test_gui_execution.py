@@ -430,3 +430,30 @@ def test_discover_available_operation_output_components(monkeypatch) -> None:
     )
 
     assert discovered == {"flatfield": "results/flatfield/latest/data"}
+
+
+def test_particle_overlay_available_when_particle_detection_runs_first() -> None:
+    available = app_module._particle_overlay_available_for_visualization(
+        selected_order=["particle_detection", "visualization"],
+        has_particle_detection_history=False,
+    )
+
+    assert available is True
+
+
+def test_particle_overlay_unavailable_when_no_outputs_or_history() -> None:
+    available = app_module._particle_overlay_available_for_visualization(
+        selected_order=["visualization", "particle_detection"],
+        has_particle_detection_history=False,
+    )
+
+    assert available is False
+
+
+def test_particle_overlay_available_with_historical_detections() -> None:
+    from_history = app_module._particle_overlay_available_for_visualization(
+        selected_order=["visualization"],
+        has_particle_detection_history=True,
+    )
+
+    assert from_history is True
