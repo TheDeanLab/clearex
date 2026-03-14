@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import struct
 
 import numpy as np
 import pytest
@@ -523,6 +524,163 @@ def test_run_flatfield_analysis_restarts_when_parameters_change(
     assert fit_calls["count"] == first_run_fit_calls + 4
     assert third_fingerprint != first_fingerprint
     assert bool(third_latest.attrs["resumed_from_checkpoint"]) is False
+
+
+def test_run_flatfield_analysis_tiled_n5_checkpoint_chunks_keep_full_rank(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_tiled_n5_chunk_headers.n5"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 4 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 4, 4, 4))
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 2, 2, 2),
+        overwrite=True,
+    )
+
+    class _FakeBaSiC:
+        def __init__(
+            self,
+            *,
+            fitting_mode,
+            get_darkfield,
+            smoothness_flatfield,
+            working_size,
+            device,
+        ) -> None:
+            del fitting_mode, get_darkfield, smoothness_flatfield, working_size, device
+            self.flatfield = np.empty((0, 0), dtype=np.float32)
+            self.darkfield = np.empty((0, 0), dtype=np.float32)
+            self.baseline = np.empty((0,), dtype=np.float32)
+
+        def fit(self, images, skip_shape_warning=False) -> None:
+            del skip_shape_warning
+            self.flatfield = np.ones(images.shape[1:], dtype=np.float32)
+            self.darkfield = np.zeros(images.shape[1:], dtype=np.float32)
+            self.baseline = np.zeros(images.shape[0], dtype=np.float32)
+
+    monkeypatch.setattr(flatfield_pipeline, "_load_basic_class", lambda: _FakeBaSiC)
+    parameters = {
+        "input_source": "data",
+        "fit_mode": "tiled",
+        "fit_tile_shape_yx": [2, 2],
+        "blend_tiles": False,
+        "smoothness_flatfield": 1.0,
+        "working_size": 64,
+        "use_map_overlap": True,
+        "overlap_zyx": [0, 1, 1],
+        "is_timelapse": False,
+    }
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters=parameters,
+            client=client,
+        )
+    finally:
+        client.close()
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    checkpoint_array = output_root["results"]["flatfield"]["latest"]["checkpoint"][
+        "fit_baseline_sum_pctz"
+    ]
+    expected_chunk_shape = tuple(int(v) for v in checkpoint_array.chunks)
+
+    chunk_root = (
+        store_path / "results" / "flatfield" / "latest" / "checkpoint" / "fit_baseline_sum_pctz"
+    )
+    chunk_files = [p for p in chunk_root.rglob("*") if p.is_file() and p.name != "attributes.json"]
+    assert chunk_files, "Expected at least one written checkpoint chunk in N5 store."
+    for chunk_file in chunk_files:
+        with chunk_file.open("rb") as handle:
+            header = handle.read(64)
+        num_dims = struct.unpack(">H", header[2:4])[0]
+        chunk_shape = tuple(
+            struct.unpack(">I", header[index : index + 4])[0]
+            for index in range(4, 4 + 4 * num_dims, 4)
+        )[::-1]
+        assert chunk_shape == expected_chunk_shape
+
+
+def test_run_flatfield_analysis_restarts_on_malformed_n5_checkpoint_chunk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_resume_malformed_checkpoint.n5"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 4 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 4, 4, 4))
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 2, 2, 2),
+        overwrite=True,
+    )
+
+    class _FakeBaSiC:
+        def __init__(
+            self,
+            *,
+            fitting_mode,
+            get_darkfield,
+            smoothness_flatfield,
+            working_size,
+            device,
+        ) -> None:
+            del fitting_mode, get_darkfield, smoothness_flatfield, working_size, device
+            self.flatfield = np.empty((0, 0), dtype=np.float32)
+            self.darkfield = np.empty((0, 0), dtype=np.float32)
+            self.baseline = np.empty((0,), dtype=np.float32)
+
+        def fit(self, images, skip_shape_warning=False) -> None:
+            del skip_shape_warning
+            self.flatfield = np.ones(images.shape[1:], dtype=np.float32)
+            self.darkfield = np.zeros(images.shape[1:], dtype=np.float32)
+            self.baseline = np.zeros(images.shape[0], dtype=np.float32)
+
+    monkeypatch.setattr(flatfield_pipeline, "_load_basic_class", lambda: _FakeBaSiC)
+    parameters = {
+        "input_source": "data",
+        "fit_mode": "tiled",
+        "fit_tile_shape_yx": [2, 2],
+        "blend_tiles": False,
+        "smoothness_flatfield": 1.0,
+        "working_size": 64,
+        "use_map_overlap": True,
+        "overlap_zyx": [0, 1, 1],
+        "is_timelapse": False,
+    }
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters=parameters,
+            client=client,
+        )
+    finally:
+        client.close()
+
+    writable_root = zarr.open_group(str(store_path), mode="a")
+    malformed = writable_root["results"]["flatfield"]["latest"]["checkpoint"]["fit_baseline_sum_pctz"]
+    malformed[0, 0, :, :] = np.asarray(malformed[0, 0, :, :], dtype=np.float32) + np.float32(1.0)
+    with pytest.raises(AssertionError, match="Expected chunk of shape"):
+        np.asarray(malformed[0:1, 0:1, :, :], dtype=np.float32)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        run_flatfield_analysis(
+            zarr_path=store_path,
+            parameters=parameters,
+            client=client,
+        )
+    finally:
+        client.close()
+
+    resumed_root = zarr.open_group(str(store_path), mode="r")
+    resumed_latest = resumed_root["results"]["flatfield"]["latest"]
+    assert bool(resumed_latest.attrs["resumed_from_checkpoint"]) is False
 
 
 def test_run_flatfield_analysis_tiled_fallback_uses_full_volume_profile(

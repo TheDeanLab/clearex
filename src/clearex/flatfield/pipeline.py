@@ -36,7 +36,7 @@ from importlib.metadata import PackageNotFoundError, version
 from itertools import product
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence, Union, cast
 
 import dask
 from dask import delayed
@@ -572,6 +572,97 @@ def _has_dataset(
     return np.dtype(candidate.dtype) == np.dtype(dtype)
 
 
+def _full_chunk_probe_selection(
+    array: zarr.Array,
+    *,
+    leading_indices: Sequence[int] = (),
+) -> tuple[slice, ...]:
+    """Build a selection that reads one full chunk from an array.
+
+    Parameters
+    ----------
+    array : zarr.Array
+        Target array.
+    leading_indices : sequence[int], optional
+        Fixed index values for leading axes. Fixed axes are emitted as
+        unit-width slices so the dimensionality is preserved.
+
+    Returns
+    -------
+    tuple[slice, ...]
+        Selection that covers one full chunk from each unfixed axis.
+
+    Raises
+    ------
+    ValueError
+        If indices exceed rank or any fixed index is out of bounds.
+    """
+    shape = tuple(int(v) for v in array.shape)
+    chunks = tuple(int(v) for v in array.chunks)
+    fixed = tuple(int(v) for v in leading_indices)
+    if len(fixed) > len(shape):
+        raise ValueError("Leading indices exceed array rank.")
+
+    selection: list[slice] = []
+    for axis, axis_size in enumerate(shape):
+        if axis < len(fixed):
+            index = int(fixed[axis])
+            if index < 0 or index >= axis_size:
+                raise ValueError("Leading index is out of bounds for chunk probe.")
+            selection.append(slice(index, index + 1))
+            continue
+        chunk_size = max(1, int(chunks[axis]))
+        selection.append(slice(0, min(axis_size, chunk_size)))
+    return tuple(selection)
+
+
+def _dataset_chunk_probe_is_readable(
+    array: zarr.Array,
+    *,
+    scan_profile_axes: bool = False,
+) -> bool:
+    """Return whether representative full-chunk reads decode successfully.
+
+    Parameters
+    ----------
+    array : zarr.Array
+        Dataset to probe.
+    scan_profile_axes : bool, optional
+        Whether to probe one chunk for each ``(axis0, axis1)`` pair. This is
+        used for ``(p, c, ...)`` profile/channel datasets where malformed chunk
+        headers may only affect specific profile/channel combinations.
+
+    Returns
+    -------
+    bool
+        ``True`` when all selected probes decode cleanly.
+
+    Notes
+    -----
+    Probes intentionally request full chunk extents to trigger strict N5 chunk
+    header validation and reject rank-mismatched chunks before resume.
+    """
+    shape = tuple(int(v) for v in array.shape)
+    if any(int(v) == 0 for v in shape):
+        return True
+
+    try:
+        if bool(scan_profile_axes) and array.ndim >= 2:
+            for axis0, axis1 in product(range(shape[0]), range(shape[1])):
+                selection = _full_chunk_probe_selection(
+                    array,
+                    leading_indices=(int(axis0), int(axis1)),
+                )
+                np.asarray(array[selection], dtype=array.dtype)
+            return True
+
+        selection = _full_chunk_probe_selection(array)
+        np.asarray(array[selection], dtype=array.dtype)
+        return True
+    except Exception:
+        return False
+
+
 def _axis_chunk_bounds(size: int, chunk_size: int) -> list[tuple[int, int]]:
     """Build contiguous chunk bounds for one axis.
 
@@ -1060,6 +1151,31 @@ def _checkpoint_is_compatible(
     )
     for name, (shape, dtype) in expected_specs.items():
         if not _has_dataset(checkpoint_group, name=name, shape=shape, dtype=dtype):
+            return False
+
+    # Ensure pre-existing chunks decode cleanly before attempting resume.
+    for name in ("flatfield_pcyx", "darkfield_pcyx", "baseline_pctz"):
+        candidate = latest_group.get(name)
+        if candidate is None or not isinstance(candidate, zarr.Array):
+            return False
+        if not _dataset_chunk_probe_is_readable(candidate, scan_profile_axes=True):
+            return False
+
+    for name in expected_specs:
+        candidate = checkpoint_group.get(name)
+        if candidate is None or not isinstance(candidate, zarr.Array):
+            return False
+        if not _dataset_chunk_probe_is_readable(
+            candidate,
+            scan_profile_axes=name
+            in {
+                "fit_tile_done_pcyx",
+                "fit_baseline_sum_pctz",
+                "fit_flatfield_sum_pcyx",
+                "fit_darkfield_sum_pcyx",
+                "fit_weight_sum_pcyx",
+            },
+        ):
             return False
     return True
 
@@ -2134,12 +2250,24 @@ def _apply_tiled_profile_fallback(
     position_index = int(profile.position_index)
     channel_index = int(profile.channel_index)
     tile_count = max(1, int(len(profile_tiles)))
+    profile_selection = (
+        slice(position_index, position_index + 1),
+        slice(channel_index, channel_index + 1),
+        slice(None),
+        slice(None),
+    )
 
     fit_profile_done_array[position_index, channel_index] = np.bool_(True)
-    fit_tile_done_array[position_index, channel_index, :, :] = np.bool_(True)
+    fit_tile_done_array[
+        slice(position_index, position_index + 1),
+        slice(channel_index, channel_index + 1),
+        slice(None),
+        slice(None),
+    ] = np.bool_(True)
 
-    baseline_sum_array[position_index, channel_index, :, :] = (
-        np.asarray(profile.baseline_tz, dtype=np.float32) * np.float32(float(tile_count))
+    baseline_sum_array[profile_selection] = (
+        np.asarray(profile.baseline_tz, dtype=np.float32)[None, None, :, :]
+        * np.float32(float(tile_count))
     ).astype(np.float32, copy=False)
     baseline_count_array[position_index, channel_index] = np.uint32(tile_count)
 
@@ -2154,23 +2282,25 @@ def _apply_tiled_profile_fallback(
             profile_tiles=profile_tiles,
             shape_yx=(int(shape_tpczyx[4]), int(shape_tpczyx[5])),
         )
-        flatfield_sum_array[position_index, channel_index, :, :] = (
-            np.asarray(profile.flatfield_yx, dtype=np.float32) * weight_sum
+        flatfield_sum_array[profile_selection] = (
+            np.asarray(profile.flatfield_yx, dtype=np.float32)[None, None, :, :]
+            * weight_sum[None, None, :, :]
         ).astype(np.float32, copy=False)
-        darkfield_sum_array[position_index, channel_index, :, :] = (
-            np.asarray(profile.darkfield_yx, dtype=np.float32) * weight_sum
+        darkfield_sum_array[profile_selection] = (
+            np.asarray(profile.darkfield_yx, dtype=np.float32)[None, None, :, :]
+            * weight_sum[None, None, :, :]
         ).astype(np.float32, copy=False)
-        weight_sum_array[position_index, channel_index, :, :] = weight_sum
+        weight_sum_array[profile_selection] = weight_sum[None, None, :, :]
         return
 
-    flatfield_array[position_index, channel_index, :, :] = np.asarray(
+    flatfield_array[profile_selection] = np.asarray(
         profile.flatfield_yx,
         dtype=np.float32,
-    )
-    darkfield_array[position_index, channel_index, :, :] = np.asarray(
+    )[None, None, :, :]
+    darkfield_array[profile_selection] = np.asarray(
         profile.darkfield_yx,
         dtype=np.float32,
-    )
+    )[None, None, :, :]
 
 
 def _persist_profile_artifacts(
@@ -2202,24 +2332,24 @@ def _persist_profile_artifacts(
         Artifacts are written in-place to the store.
     """
     root = zarr.open_group(str(zarr_path), mode="a")
-    root[flatfield_component][
-        profile.position_index,
-        profile.channel_index,
-        :,
-        :,
-    ] = profile.flatfield_yx
-    root[darkfield_component][
-        profile.position_index,
-        profile.channel_index,
-        :,
-        :,
-    ] = profile.darkfield_yx
-    root[baseline_component][
-        profile.position_index,
-        profile.channel_index,
-        :,
-        :,
-    ] = profile.baseline_tz
+    profile_selection = (
+        slice(int(profile.position_index), int(profile.position_index) + 1),
+        slice(int(profile.channel_index), int(profile.channel_index) + 1),
+        slice(None),
+        slice(None),
+    )
+    root[flatfield_component][profile_selection] = np.asarray(
+        profile.flatfield_yx,
+        dtype=np.float32,
+    )[None, None, :, :]
+    root[darkfield_component][profile_selection] = np.asarray(
+        profile.darkfield_yx,
+        dtype=np.float32,
+    )[None, None, :, :]
+    root[baseline_component][profile_selection] = np.asarray(
+        profile.baseline_tz,
+        dtype=np.float32,
+    )[None, None, :, :]
 
 
 def _transform_region(
@@ -2851,13 +2981,30 @@ def run_flatfield_analysis(
                         return
                     y_start, y_stop = int(tile_result.y_bounds[0]), int(tile_result.y_bounds[1])
                     x_start, x_stop = int(tile_result.x_bounds[0]), int(tile_result.x_bounds[1])
+                    profile_selection = (
+                        slice(position_index, position_index + 1),
+                        slice(channel_index, channel_index + 1),
+                        slice(None),
+                        slice(None),
+                    )
+                    tile_selection = (
+                        slice(position_index, position_index + 1),
+                        slice(channel_index, channel_index + 1),
+                        slice(y_start, y_stop),
+                        slice(x_start, x_stop),
+                    )
 
                     baseline_sum = np.asarray(
-                        baseline_sum_array[position_index, channel_index, :, :],
+                        baseline_sum_array[profile_selection],
                         dtype=np.float32,
                     )
-                    baseline_sum += np.asarray(tile_result.baseline_tz, dtype=np.float32)
-                    baseline_sum_array[position_index, channel_index, :, :] = baseline_sum
+                    baseline_sum += np.asarray(tile_result.baseline_tz, dtype=np.float32)[
+                        None,
+                        None,
+                        :,
+                        :,
+                    ]
+                    baseline_sum_array[profile_selection] = baseline_sum
                     baseline_count = int(baseline_count_array[position_index, channel_index])
                     baseline_count_array[position_index, channel_index] = np.uint32(
                         baseline_count + 1
@@ -2877,77 +3024,43 @@ def run_flatfield_analysis(
                                 "Flatfield checkpoint is missing blend-accumulator datasets."
                             )
                         flatfield_sum = np.asarray(
-                            flatfield_sum_array[
-                                position_index,
-                                channel_index,
-                                y_start:y_stop,
-                                x_start:x_stop,
-                            ],
+                            flatfield_sum_array[tile_selection],
                             dtype=np.float32,
                         )
                         flatfield_sum += np.asarray(
                             tile_result.flatfield_payload_yx,
                             dtype=np.float32,
-                        )
-                        flatfield_sum_array[
-                            position_index,
-                            channel_index,
-                            y_start:y_stop,
-                            x_start:x_stop,
-                        ] = flatfield_sum
+                        )[None, None, :, :]
+                        flatfield_sum_array[tile_selection] = flatfield_sum
 
                         darkfield_sum = np.asarray(
-                            darkfield_sum_array[
-                                position_index,
-                                channel_index,
-                                y_start:y_stop,
-                                x_start:x_stop,
-                            ],
+                            darkfield_sum_array[tile_selection],
                             dtype=np.float32,
                         )
                         darkfield_sum += np.asarray(
                             tile_result.darkfield_payload_yx,
                             dtype=np.float32,
-                        )
-                        darkfield_sum_array[
-                            position_index,
-                            channel_index,
-                            y_start:y_stop,
-                            x_start:x_stop,
-                        ] = darkfield_sum
+                        )[None, None, :, :]
+                        darkfield_sum_array[tile_selection] = darkfield_sum
 
                         weight_sum = np.asarray(
-                            weight_sum_array[
-                                position_index,
-                                channel_index,
-                                y_start:y_stop,
-                                x_start:x_stop,
-                            ],
+                            weight_sum_array[tile_selection],
                             dtype=np.float32,
                         )
                         weight_sum += np.asarray(
                             tile_result.weight_payload_yx,
                             dtype=np.float32,
-                        )
-                        weight_sum_array[
-                            position_index,
-                            channel_index,
-                            y_start:y_stop,
-                            x_start:x_stop,
-                        ] = weight_sum
+                        )[None, None, :, :]
+                        weight_sum_array[tile_selection] = weight_sum
                     else:
-                        flatfield_array[
-                            position_index,
-                            channel_index,
-                            y_start:y_stop,
-                            x_start:x_stop,
-                        ] = tile_result.flatfield_payload_yx
-                        darkfield_array[
-                            position_index,
-                            channel_index,
-                            y_start:y_stop,
-                            x_start:x_stop,
-                        ] = tile_result.darkfield_payload_yx
+                        flatfield_array[tile_selection] = np.asarray(
+                            tile_result.flatfield_payload_yx,
+                            dtype=np.float32,
+                        )[None, None, :, :]
+                        darkfield_array[tile_selection] = np.asarray(
+                            tile_result.darkfield_payload_yx,
+                            dtype=np.float32,
+                        )[None, None, :, :]
 
                     tile_done_array[
                         position_index,
@@ -2973,15 +3086,21 @@ def run_flatfield_analysis(
             if tile_done_mask.size == 0 or bool(np.all(tile_done_mask)):
                 if (not fit_outputs_materialized) or bool(pending_tile_specs):
                     for position_index, channel_index in profile_pairs:
+                        profile_selection = (
+                            slice(position_index, position_index + 1),
+                            slice(channel_index, channel_index + 1),
+                            slice(None),
+                            slice(None),
+                        )
                         baseline_sum = np.asarray(
-                            baseline_sum_array[position_index, channel_index, :, :],
+                            baseline_sum_array[profile_selection],
                             dtype=np.float32,
                         )
                         baseline_count = max(
                             1,
                             int(baseline_count_array[position_index, channel_index]),
                         )
-                        baseline_array[position_index, channel_index, :, :] = (
+                        baseline_array[profile_selection] = (
                             baseline_sum / np.float32(float(baseline_count))
                         ).astype(np.float32, copy=False)
                         if layout.blend_tiles_effective:
@@ -2994,22 +3113,22 @@ def run_flatfield_analysis(
                                     "Flatfield checkpoint is missing blend-accumulator datasets."
                                 )
                             weight_sum = np.asarray(
-                                weight_sum_array[position_index, channel_index, :, :],
+                                weight_sum_array[profile_selection],
                                 dtype=np.float32,
                             )
                             denominator = np.maximum(weight_sum, np.float32(1e-6))
                             flatfield_sum = np.asarray(
-                                flatfield_sum_array[position_index, channel_index, :, :],
+                                flatfield_sum_array[profile_selection],
                                 dtype=np.float32,
                             )
                             darkfield_sum = np.asarray(
-                                darkfield_sum_array[position_index, channel_index, :, :],
+                                darkfield_sum_array[profile_selection],
                                 dtype=np.float32,
                             )
-                            flatfield_array[position_index, channel_index, :, :] = (
+                            flatfield_array[profile_selection] = (
                                 flatfield_sum / denominator
                             ).astype(np.float32, copy=False)
-                            darkfield_array[position_index, channel_index, :, :] = (
+                            darkfield_array[profile_selection] = (
                                 darkfield_sum / denominator
                             ).astype(np.float32, copy=False)
 
