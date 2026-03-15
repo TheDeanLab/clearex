@@ -726,9 +726,17 @@ def _normalize_shear_transform_parameters(
     """
     normalized = _normalize_common_operation_parameters("shear_transform", params)
     normalized["detect_2d_per_slice"] = False
-    normalized["shear_xy"] = float(normalized.get("shear_xy", 0.0))
-    normalized["shear_xz"] = float(normalized.get("shear_xz", 0.0))
-    normalized["shear_yz"] = float(normalized.get("shear_yz", 0.0))
+    for axis_suffix in ("xy", "xz", "yz"):
+        shear_key = f"shear_{axis_suffix}"
+        shear_deg_key = f"shear_{axis_suffix}_deg"
+        if shear_deg_key in normalized:
+            angle_deg = float(normalized.get(shear_deg_key, 0.0))
+            normalized[shear_deg_key] = angle_deg
+            normalized[shear_key] = float(math.tan(math.radians(angle_deg)))
+            continue
+        shear_value = float(normalized.get(shear_key, 0.0))
+        normalized[shear_key] = shear_value
+        normalized[shear_deg_key] = float(math.degrees(math.atan(shear_value)))
     normalized["rotation_deg_x"] = float(normalized.get("rotation_deg_x", 0.0))
     normalized["rotation_deg_y"] = float(normalized.get("rotation_deg_y", 0.0))
     normalized["rotation_deg_z"] = float(normalized.get("rotation_deg_z", 0.0))

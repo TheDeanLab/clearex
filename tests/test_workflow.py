@@ -24,6 +24,7 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
+import numpy as np
 import pytest
 
 from clearex.workflow import (
@@ -319,6 +320,9 @@ class TestWorkflowConfig:
         assert params["shear_xy"] == 0.12
         assert params["shear_xz"] == -0.3
         assert params["shear_yz"] == 0.45
+        assert params["shear_xy_deg"] == pytest.approx(np.degrees(np.arctan(0.12)))
+        assert params["shear_xz_deg"] == pytest.approx(np.degrees(np.arctan(-0.3)))
+        assert params["shear_yz_deg"] == pytest.approx(np.degrees(np.arctan(0.45)))
         assert params["rotation_deg_x"] == 10.0
         assert params["rotation_deg_y"] == -5.0
         assert params["rotation_deg_z"] == 2.5
@@ -328,6 +332,25 @@ class TestWorkflowConfig:
         assert params["output_dtype"] == "uint16"
         assert params["roi_padding_zyx"] == [4, 8, 12]
         assert params["execution_order"] == 6
+
+    def test_normalizes_shear_transform_degree_inputs(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "shear_transform": {
+                    "shear_xy": 99.0,
+                    "shear_xy_deg": 35.0,
+                    "shear_xz_deg": -10.0,
+                    "shear_yz_deg": 0.0,
+                }
+            }
+        )
+        params = cfg.analysis_parameters["shear_transform"]
+        assert params["shear_xy_deg"] == 35.0
+        assert params["shear_xz_deg"] == -10.0
+        assert params["shear_yz_deg"] == 0.0
+        assert params["shear_xy"] == pytest.approx(np.tan(np.deg2rad(35.0)))
+        assert params["shear_xz"] == pytest.approx(np.tan(np.deg2rad(-10.0)))
+        assert params["shear_yz"] == pytest.approx(0.0)
 
 
 class TestZarrSaveConfig:

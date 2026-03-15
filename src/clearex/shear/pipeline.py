@@ -329,9 +329,17 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     normalized["memory_overhead_factor"] = float(
         normalized.get("memory_overhead_factor", 2.0)
     )
-    normalized["shear_xy"] = float(normalized.get("shear_xy", 0.0))
-    normalized["shear_xz"] = float(normalized.get("shear_xz", 0.0))
-    normalized["shear_yz"] = float(normalized.get("shear_yz", 0.0))
+    for axis_suffix in ("xy", "xz", "yz"):
+        shear_key = f"shear_{axis_suffix}"
+        shear_deg_key = f"shear_{axis_suffix}_deg"
+        if shear_deg_key in normalized:
+            angle_deg = float(normalized.get(shear_deg_key, 0.0))
+            normalized[shear_deg_key] = angle_deg
+            normalized[shear_key] = float(np.tan(np.deg2rad(angle_deg)))
+            continue
+        shear_value = float(normalized.get(shear_key, 0.0))
+        normalized[shear_key] = shear_value
+        normalized[shear_deg_key] = float(np.rad2deg(np.arctan(shear_value)))
     normalized["rotation_deg_x"] = float(normalized.get("rotation_deg_x", 0.0))
     normalized["rotation_deg_y"] = float(normalized.get("rotation_deg_y", 0.0))
     normalized["rotation_deg_z"] = float(normalized.get("rotation_deg_z", 0.0))
