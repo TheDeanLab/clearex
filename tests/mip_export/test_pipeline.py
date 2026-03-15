@@ -6,10 +6,59 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import tifffile
 import zarr
 
+from clearex.mip_export import pipeline
 from clearex.mip_export.pipeline import run_mip_export_analysis
+
+
+class _GuardedSourceArray:
+    """Array wrapper that fails when callers request whole-volume slices."""
+
+    def __init__(self, data: np.ndarray, *, chunks: tuple[int, ...]) -> None:
+        self._data = np.asarray(data)
+        self.shape = tuple(int(value) for value in self._data.shape)
+        self.dtype = self._data.dtype
+        self.chunks = tuple(int(value) for value in chunks)
+        self.read_count = 0
+
+    @staticmethod
+    def _is_full_slice(selector: object, length: int) -> bool:
+        """Return whether a selector spans a complete axis range."""
+        if not isinstance(selector, slice):
+            return False
+        start = 0 if selector.start is None else int(selector.start)
+        stop = int(length) if selector.stop is None else int(selector.stop)
+        step = 1 if selector.step is None else int(selector.step)
+        return start == 0 and stop == int(length) and step == 1
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        """Return selected data and reject whole-volume requests."""
+        if not isinstance(key, tuple) or len(key) != 6:
+            raise AssertionError("Expected 6D canonical indexing for source reads.")
+
+        self.read_count += 1
+        per_position_full = (
+            isinstance(key[0], (int, np.integer))
+            and isinstance(key[1], (int, np.integer))
+            and isinstance(key[2], (int, np.integer))
+            and self._is_full_slice(key[3], self.shape[3])
+            and self._is_full_slice(key[4], self.shape[4])
+            and self._is_full_slice(key[5], self.shape[5])
+        )
+        multi_position_full = (
+            isinstance(key[0], (int, np.integer))
+            and self._is_full_slice(key[1], self.shape[1])
+            and isinstance(key[2], (int, np.integer))
+            and self._is_full_slice(key[3], self.shape[3])
+            and self._is_full_slice(key[4], self.shape[4])
+            and self._is_full_slice(key[5], self.shape[5])
+        )
+        if per_position_full or multi_position_full:
+            raise RuntimeError("Detected forbidden full-volume source read.")
+        return np.asarray(self._data[key])
 
 
 def test_run_mip_export_analysis_writes_uint16_tiff_outputs(
@@ -122,3 +171,66 @@ def test_run_mip_export_analysis_writes_multi_position_zarr_outputs(
     yz = np.asarray(yz_root["data"])
     assert tuple(yz.shape) == (3, 4, 3)
     assert list(yz_root["data"].attrs["axes"]) == ["p", "z", "y"]
+
+
+@pytest.mark.parametrize(("projection", "expected_axis"), [("xy", 0), ("xz", 1), ("yz", 2)])
+def test_run_export_task_reads_single_position_source_in_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    projection: str,
+    expected_axis: int,
+) -> None:
+    data = np.arange(1 * 1 * 1 * 4 * 6 * 8, dtype=np.float32).reshape((1, 1, 1, 4, 6, 8))
+    guarded = _GuardedSourceArray(data, chunks=(1, 1, 1, 2, 3, 4))
+    fake_group = {"data": guarded}
+    monkeypatch.setattr(pipeline.zarr, "open_group", lambda *_args, **_kwargs: fake_group)
+
+    task = pipeline._MipExportTask(
+        projection=projection,
+        t_index=0,
+        c_index=0,
+        p_index=0,
+    )
+    result = pipeline._run_export_task(
+        zarr_path="ignored.zarr",
+        source_component="data",
+        output_directory=str(tmp_path),
+        export_format="tiff",
+        position_mode="per_position",
+        task=task,
+    )
+
+    expected = np.max(data[0, 0, 0, :, :, :], axis=expected_axis).astype(np.uint16)
+    observed = np.asarray(tifffile.imread(str(result["path"])))
+    np.testing.assert_array_equal(observed, expected)
+    assert guarded.read_count > 1
+
+
+def test_run_export_task_reads_multi_position_source_in_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = np.arange(1 * 3 * 1 * 4 * 6 * 8, dtype=np.float32).reshape((1, 3, 1, 4, 6, 8))
+    guarded = _GuardedSourceArray(data, chunks=(1, 3, 1, 2, 3, 4))
+    fake_group = {"data": guarded}
+    monkeypatch.setattr(pipeline.zarr, "open_group", lambda *_args, **_kwargs: fake_group)
+
+    task = pipeline._MipExportTask(
+        projection="xy",
+        t_index=0,
+        c_index=0,
+        p_index=None,
+    )
+    result = pipeline._run_export_task(
+        zarr_path="ignored.zarr",
+        source_component="data",
+        output_directory=str(tmp_path),
+        export_format="tiff",
+        position_mode="multi_position",
+        task=task,
+    )
+
+    expected = np.max(data[0, :, 0, :, :, :], axis=1).astype(np.uint16)
+    observed = np.asarray(tifffile.imread(str(result["path"])))
+    np.testing.assert_array_equal(observed, expected)
+    assert guarded.read_count > 1

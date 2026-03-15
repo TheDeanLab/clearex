@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
 ProgressCallback = Callable[[int, str], None]
 _PROJECTIONS = ("xy", "xz", "yz")
+_MAX_REDUCTION_READ_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -381,6 +382,357 @@ def _projection_from_position_stack(
     return np.max(volume_pzyx, axis=3)
 
 
+def _iter_block_ranges(
+    *,
+    length: int,
+    block_size: int,
+) -> list[tuple[int, int]]:
+    """Return contiguous half-open block ranges for one axis length.
+
+    Parameters
+    ----------
+    length : int
+        Axis length.
+    block_size : int
+        Requested block size.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Half-open index ranges ``(start, stop)``.
+
+    Raises
+    ------
+    ValueError
+        If ``length`` or ``block_size`` are not positive.
+    """
+    axis_length = int(length)
+    step = int(block_size)
+    if axis_length <= 0:
+        raise ValueError("mip_export requires non-empty reduction axes.")
+    if step <= 0:
+        raise ValueError("mip_export reduction block size must be positive.")
+    return [
+        (int(start), int(min(axis_length, start + step)))
+        for start in range(0, axis_length, step)
+    ]
+
+
+def _coerce_chunk_length(chunk_value: Any) -> int:
+    """Normalize one Zarr chunk-size value to a positive integer.
+
+    Parameters
+    ----------
+    chunk_value : Any
+        Candidate chunk-size value.
+
+    Returns
+    -------
+    int
+        Positive chunk length.
+
+    Raises
+    ------
+    None
+        Invalid values fall back to ``1``.
+    """
+    if isinstance(chunk_value, tuple):
+        if not chunk_value:
+            return 1
+        chunk_value = chunk_value[0]
+    try:
+        parsed = int(chunk_value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, parsed)
+
+
+def _choose_reduction_block_size(
+    *,
+    source_array: Any,
+    reduction_axis: int,
+    preserved_shape: tuple[int, ...],
+    max_read_bytes: int = _MAX_REDUCTION_READ_BYTES,
+) -> int:
+    """Choose a safe read block size for chunkwise projection reduction.
+
+    Parameters
+    ----------
+    source_array : Any
+        Source Zarr-like array exposing ``chunks`` and ``dtype`` attributes.
+    reduction_axis : int
+        Axis index in ``source_array`` reduced by max-projection.
+    preserved_shape : tuple[int, ...]
+        Shape of output-preserved axes (not reduced).
+    max_read_bytes : int, default=268435456
+        Maximum in-memory byte budget for one read block.
+
+    Returns
+    -------
+    int
+        Positive reduction block size.
+
+    Raises
+    ------
+    None
+        Missing metadata falls back to conservative defaults.
+    """
+    preferred_block = 1
+    chunks = getattr(source_array, "chunks", None)
+    if isinstance(chunks, tuple) and len(chunks) > int(reduction_axis):
+        preferred_block = _coerce_chunk_length(chunks[int(reduction_axis)])
+
+    try:
+        source_dtype = np.dtype(getattr(source_array, "dtype"))
+    except Exception:
+        source_dtype = np.dtype(np.float32)
+
+    try:
+        preserved_elements = int(np.prod(np.asarray(preserved_shape, dtype=np.int64)))
+    except Exception:
+        preserved_elements = 0
+    if preserved_elements <= 0:
+        return max(1, int(preferred_block))
+
+    bytes_per_slice = preserved_elements * max(1, int(source_dtype.itemsize))
+    if bytes_per_slice <= 0:
+        return max(1, int(preferred_block))
+
+    max_slices = max(1, int(max_read_bytes // bytes_per_slice))
+    return max(1, min(int(preferred_block), int(max_slices)))
+
+
+def _max_reduce_into(
+    current: Optional[np.ndarray],
+    update: np.ndarray,
+) -> np.ndarray:
+    """Accumulate max-projection updates into an output array.
+
+    Parameters
+    ----------
+    current : numpy.ndarray, optional
+        Existing reduction output.
+    update : numpy.ndarray
+        New partial reduction result.
+
+    Returns
+    -------
+    numpy.ndarray
+        Updated reduction output.
+
+    Raises
+    ------
+    None
+        Input arrays are coerced to NumPy arrays internally.
+    """
+    update_arr = np.asarray(update)
+    if current is None:
+        return update_arr
+    np.maximum(current, update_arr, out=current)
+    return current
+
+
+def _chunkwise_projection_from_single_position(
+    *,
+    source_array: Any,
+    t_index: int,
+    p_index: int,
+    c_index: int,
+    projection: str,
+) -> np.ndarray:
+    """Compute one projection from a single position via chunkwise reads.
+
+    Parameters
+    ----------
+    source_array : Any
+        Canonical source data array in ``(t, p, c, z, y, x)`` order.
+    t_index : int
+        Time index.
+    p_index : int
+        Position index.
+    c_index : int
+        Channel index.
+    projection : str
+        Projection identifier (``xy``, ``xz``, or ``yz``).
+
+    Returns
+    -------
+    numpy.ndarray
+        Projection result.
+
+    Raises
+    ------
+    ValueError
+        If projection value is unsupported.
+    """
+    shape_tpczyx = tuple(int(value) for value in source_array.shape)
+    _, _, _, z_count, y_count, x_count = shape_tpczyx
+
+    if projection == "xy":
+        block_size = _choose_reduction_block_size(
+            source_array=source_array,
+            reduction_axis=3,
+            preserved_shape=(y_count, x_count),
+        )
+        reduced: Optional[np.ndarray] = None
+        for start, stop in _iter_block_ranges(length=z_count, block_size=block_size):
+            chunk = np.asarray(
+                source_array[
+                    int(t_index),
+                    int(p_index),
+                    int(c_index),
+                    int(start) : int(stop),
+                    :,
+                    :,
+                ]
+            )
+            reduced = _max_reduce_into(reduced, np.max(chunk, axis=0))
+        return np.asarray(reduced)
+
+    if projection == "xz":
+        block_size = _choose_reduction_block_size(
+            source_array=source_array,
+            reduction_axis=4,
+            preserved_shape=(z_count, x_count),
+        )
+        reduced = None
+        for start, stop in _iter_block_ranges(length=y_count, block_size=block_size):
+            chunk = np.asarray(
+                source_array[
+                    int(t_index),
+                    int(p_index),
+                    int(c_index),
+                    :,
+                    int(start) : int(stop),
+                    :,
+                ]
+            )
+            reduced = _max_reduce_into(reduced, np.max(chunk, axis=1))
+        return np.asarray(reduced)
+
+    if projection == "yz":
+        block_size = _choose_reduction_block_size(
+            source_array=source_array,
+            reduction_axis=5,
+            preserved_shape=(z_count, y_count),
+        )
+        reduced = None
+        for start, stop in _iter_block_ranges(length=x_count, block_size=block_size):
+            chunk = np.asarray(
+                source_array[
+                    int(t_index),
+                    int(p_index),
+                    int(c_index),
+                    :,
+                    :,
+                    int(start) : int(stop),
+                ]
+            )
+            reduced = _max_reduce_into(reduced, np.max(chunk, axis=2))
+        return np.asarray(reduced)
+
+    raise ValueError(f"Unsupported MIP projection: {projection!r}.")
+
+
+def _chunkwise_projection_from_multi_position(
+    *,
+    source_array: Any,
+    t_index: int,
+    c_index: int,
+    projection: str,
+) -> np.ndarray:
+    """Compute one projection preserving all positions via chunkwise reads.
+
+    Parameters
+    ----------
+    source_array : Any
+        Canonical source data array in ``(t, p, c, z, y, x)`` order.
+    t_index : int
+        Time index.
+    c_index : int
+        Channel index.
+    projection : str
+        Projection identifier (``xy``, ``xz``, or ``yz``).
+
+    Returns
+    -------
+    numpy.ndarray
+        Projection result preserving the ``p`` axis.
+
+    Raises
+    ------
+    ValueError
+        If projection value is unsupported.
+    """
+    shape_tpczyx = tuple(int(value) for value in source_array.shape)
+    _, p_count, _, z_count, y_count, x_count = shape_tpczyx
+
+    if projection == "xy":
+        block_size = _choose_reduction_block_size(
+            source_array=source_array,
+            reduction_axis=3,
+            preserved_shape=(p_count, y_count, x_count),
+        )
+        reduced: Optional[np.ndarray] = None
+        for start, stop in _iter_block_ranges(length=z_count, block_size=block_size):
+            chunk = np.asarray(
+                source_array[
+                    int(t_index),
+                    :,
+                    int(c_index),
+                    int(start) : int(stop),
+                    :,
+                    :,
+                ]
+            )
+            reduced = _max_reduce_into(reduced, np.max(chunk, axis=1))
+        return np.asarray(reduced)
+
+    if projection == "xz":
+        block_size = _choose_reduction_block_size(
+            source_array=source_array,
+            reduction_axis=4,
+            preserved_shape=(p_count, z_count, x_count),
+        )
+        reduced = None
+        for start, stop in _iter_block_ranges(length=y_count, block_size=block_size):
+            chunk = np.asarray(
+                source_array[
+                    int(t_index),
+                    :,
+                    int(c_index),
+                    :,
+                    int(start) : int(stop),
+                    :,
+                ]
+            )
+            reduced = _max_reduce_into(reduced, np.max(chunk, axis=2))
+        return np.asarray(reduced)
+
+    if projection == "yz":
+        block_size = _choose_reduction_block_size(
+            source_array=source_array,
+            reduction_axis=5,
+            preserved_shape=(p_count, z_count, y_count),
+        )
+        reduced = None
+        for start, stop in _iter_block_ranges(length=x_count, block_size=block_size):
+            chunk = np.asarray(
+                source_array[
+                    int(t_index),
+                    :,
+                    int(c_index),
+                    :,
+                    :,
+                    int(start) : int(stop),
+                ]
+            )
+            reduced = _max_reduce_into(reduced, np.max(chunk, axis=3))
+        return np.asarray(reduced)
+
+    raise ValueError(f"Unsupported MIP projection: {projection!r}.")
+
+
 def _to_uint16(data: np.ndarray) -> np.ndarray:
     """Convert projection data to TIFF-compatible uint16."""
     clipped = np.clip(np.asarray(data, dtype=np.float64), 0.0, 65535.0)
@@ -514,26 +866,18 @@ def _run_export_task(
     source_array = root[source_component]
 
     if task.p_index is None:
-        source_volume = np.asarray(
-            source_array[int(task.t_index), :, int(task.c_index), :, :, :]
-        )
-        projection = _projection_from_position_stack(
-            volume_pzyx=source_volume,
+        projection = _chunkwise_projection_from_multi_position(
+            source_array=source_array,
+            t_index=int(task.t_index),
+            c_index=int(task.c_index),
             projection=str(task.projection),
         )
     else:
-        source_volume = np.asarray(
-            source_array[
-                int(task.t_index),
-                int(task.p_index),
-                int(task.c_index),
-                :,
-                :,
-                :,
-            ]
-        )
-        projection = _projection_from_single_volume(
-            volume_zyx=source_volume,
+        projection = _chunkwise_projection_from_single_position(
+            source_array=source_array,
+            t_index=int(task.t_index),
+            p_index=int(task.p_index),
+            c_index=int(task.c_index),
             projection=str(task.projection),
         )
 
