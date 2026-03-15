@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
 ProgressCallback = Callable[[int, str], None]
 _PROJECTIONS = ("xy", "xz", "yz")
-_MAX_REDUCTION_READ_BYTES = 256 * 1024 * 1024
+_MAX_REDUCTION_READ_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -330,6 +330,59 @@ def _projection_axes(
     return spatial_axes
 
 
+def _projection_layout(
+    *,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    projection: str,
+    position_mode: str,
+) -> tuple[tuple[int, ...], tuple[int, ...], int]:
+    """Return output shape and source-axis mapping for one projection.
+
+    Parameters
+    ----------
+    shape_tpczyx : tuple[int, int, int, int, int, int]
+        Source shape in canonical axis order.
+    projection : str
+        Projection identifier.
+    position_mode : str
+        Export mode.
+
+    Returns
+    -------
+    tuple[tuple[int, ...], tuple[int, ...], int]
+        ``(output_shape, preserved_axes, reduction_axis)`` where
+        ``preserved_axes`` are source-axis indices in output order.
+
+    Raises
+    ------
+    ValueError
+        If projection or position-mode values are unsupported.
+    """
+    _, p_count, _, z_count, y_count, x_count = shape_tpczyx
+    mode = str(position_mode).strip().lower()
+    proj = str(projection).strip().lower()
+
+    if mode not in {"multi_position", "per_position"}:
+        raise ValueError(
+            "mip_export position_mode must be 'multi_position' or 'per_position'."
+        )
+    if proj not in set(_PROJECTIONS):
+        raise ValueError(f"Unsupported MIP projection: {projection!r}.")
+
+    if mode == "per_position":
+        if proj == "xy":
+            return ((int(y_count), int(x_count)), (4, 5), 3)
+        if proj == "xz":
+            return ((int(z_count), int(x_count)), (3, 5), 4)
+        return ((int(z_count), int(y_count)), (3, 4), 5)
+
+    if proj == "xy":
+        return ((int(p_count), int(y_count), int(x_count)), (1, 4, 5), 3)
+    if proj == "xz":
+        return ((int(p_count), int(z_count), int(x_count)), (1, 3, 5), 4)
+    return ((int(p_count), int(z_count), int(y_count)), (1, 3, 4), 5)
+
+
 def _projection_from_single_volume(
     *,
     volume_zyx: np.ndarray,
@@ -500,6 +553,116 @@ def _choose_reduction_block_size(
 
     max_slices = max(1, int(max_read_bytes // bytes_per_slice))
     return max(1, min(int(preferred_block), int(max_slices)))
+
+
+def _choose_preserved_tile_shape(
+    *,
+    source_array: Any,
+    preserved_axes: tuple[int, ...],
+    preserved_shape: tuple[int, ...],
+    reduction_block_size: int,
+    max_read_bytes: int = _MAX_REDUCTION_READ_BYTES,
+) -> tuple[int, ...]:
+    """Choose tile sizes for preserved output axes.
+
+    Parameters
+    ----------
+    source_array : Any
+        Source array exposing ``chunks`` and ``dtype``.
+    preserved_axes : tuple[int, ...]
+        Source-axis indices preserved in the projection output.
+    preserved_shape : tuple[int, ...]
+        Output shape for preserved axes.
+    reduction_block_size : int
+        Selected reduction-axis block size.
+    max_read_bytes : int, default=134217728
+        Maximum in-memory byte budget for one source read.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Tile lengths for each preserved axis in output order.
+
+    Raises
+    ------
+    ValueError
+        If preserved-axis metadata is inconsistent.
+    """
+    if len(preserved_axes) != len(preserved_shape):
+        raise ValueError(
+            "mip_export preserved-axis metadata is inconsistent with output shape."
+        )
+
+    chunks = getattr(source_array, "chunks", None)
+    tile_lengths: list[int] = []
+    for axis_index, axis_length in zip(preserved_axes, preserved_shape):
+        axis_size = max(1, int(axis_length))
+        preferred = 1
+        if isinstance(chunks, tuple) and len(chunks) > int(axis_index):
+            preferred = _coerce_chunk_length(chunks[int(axis_index)])
+        tile_lengths.append(max(1, min(axis_size, preferred)))
+
+    try:
+        source_dtype = np.dtype(getattr(source_array, "dtype"))
+    except Exception:
+        source_dtype = np.dtype(np.float32)
+    itemsize = max(1, int(source_dtype.itemsize))
+
+    read_bytes = int(
+        int(max(1, int(reduction_block_size)))
+        * int(np.prod(np.asarray(tile_lengths, dtype=np.int64)))
+        * itemsize
+    )
+    budget = max(1, int(max_read_bytes))
+    while read_bytes > budget:
+        largest_axis = int(
+            np.argmax(np.asarray(tile_lengths, dtype=np.int64))
+        )
+        if tile_lengths[largest_axis] <= 1:
+            break
+        tile_lengths[largest_axis] = max(1, tile_lengths[largest_axis] // 2)
+        read_bytes = int(
+            int(max(1, int(reduction_block_size)))
+            * int(np.prod(np.asarray(tile_lengths, dtype=np.int64)))
+            * itemsize
+        )
+    return tuple(int(value) for value in tile_lengths)
+
+
+def _iter_tile_slices(
+    *,
+    shape: tuple[int, ...],
+    tile_shape: tuple[int, ...],
+) -> list[tuple[slice, ...]]:
+    """Enumerate output tile slices for a projection array.
+
+    Parameters
+    ----------
+    shape : tuple[int, ...]
+        Output array shape.
+    tile_shape : tuple[int, ...]
+        Tile lengths for each output axis.
+
+    Returns
+    -------
+    list[tuple[slice, ...]]
+        Output tile slices in row-major order.
+
+    Raises
+    ------
+    ValueError
+        If shape and tile metadata lengths do not match.
+    """
+    if len(shape) != len(tile_shape):
+        raise ValueError("mip_export tile metadata is inconsistent with shape.")
+    axis_ranges = [
+        _iter_block_ranges(length=int(axis_length), block_size=int(axis_tile))
+        for axis_length, axis_tile in zip(shape, tile_shape)
+    ]
+    return [
+        tuple(slice(int(start), int(stop)) for start, stop in range_tuple)
+        for range_tuple in product(*axis_ranges)
+    ]
 
 
 def _max_reduce_into(
@@ -864,38 +1027,120 @@ def _run_export_task(
     """
     root = zarr.open_group(str(zarr_path), mode="r")
     source_array = root[source_component]
-
-    if task.p_index is None:
-        projection = _chunkwise_projection_from_multi_position(
-            source_array=source_array,
-            t_index=int(task.t_index),
-            c_index=int(task.c_index),
-            projection=str(task.projection),
-        )
-    else:
-        projection = _chunkwise_projection_from_single_position(
-            source_array=source_array,
-            t_index=int(task.t_index),
-            p_index=int(task.p_index),
-            c_index=int(task.c_index),
-            projection=str(task.projection),
-        )
-
     axes = _projection_axes(
         projection=str(task.projection),
         position_mode=str(position_mode),
     )
+    source_shape_tpczyx = tuple(int(value) for value in source_array.shape)
+    output_shape, preserved_axes, reduction_axis = _projection_layout(
+        shape_tpczyx=source_shape_tpczyx,
+        projection=str(task.projection),
+        position_mode=str(position_mode),
+    )
+    reduction_block_size = _choose_reduction_block_size(
+        source_array=source_array,
+        reduction_axis=int(reduction_axis),
+        preserved_shape=tuple(int(v) for v in output_shape),
+    )
+    tile_shape = _choose_preserved_tile_shape(
+        source_array=source_array,
+        preserved_axes=tuple(int(v) for v in preserved_axes),
+        preserved_shape=tuple(int(v) for v in output_shape),
+        reduction_block_size=int(reduction_block_size),
+    )
+    output_tiles = _iter_tile_slices(
+        shape=tuple(int(v) for v in output_shape),
+        tile_shape=tuple(int(v) for v in tile_shape),
+    )
+    reduction_ranges = _iter_block_ranges(
+        length=int(source_shape_tpczyx[int(reduction_axis)]),
+        block_size=int(reduction_block_size),
+    )
+    fixed_indices: dict[int, int] = {
+        0: int(task.t_index),
+        2: int(task.c_index),
+    }
+    if task.p_index is not None:
+        fixed_indices[1] = int(task.p_index)
+
+    chunk_slice_axes = tuple(
+        sorted(
+            (
+                int(reduction_axis),
+                *tuple(int(axis) for axis in preserved_axes),
+            )
+        )
+    )
+    reduce_axis_in_chunk = int(chunk_slice_axes.index(int(reduction_axis)))
+
     output_path = _build_output_path(
         output_directory=Path(output_directory),
         export_format=str(export_format),
         task=task,
     )
-    stored_dtype = _write_projection_output(
-        output_path=output_path,
-        projection=np.asarray(projection),
-        export_format=str(export_format),
-        axes=axes,
-    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if export_format == "tiff":
+        if output_path.exists():
+            try:
+                output_path.unlink()
+            except Exception:
+                shutil.rmtree(output_path)
+        output_target = tifffile.memmap(
+            str(output_path),
+            shape=tuple(int(v) for v in output_shape),
+            dtype=np.uint16,
+            bigtiff=True,
+            photometric="minisblack",
+        )
+    else:
+        if output_path.exists():
+            shutil.rmtree(output_path)
+        output_root = zarr.open_group(str(output_path), mode="w")
+        output_target = output_root.create_dataset(
+            name="data",
+            shape=tuple(int(v) for v in output_shape),
+            chunks=_default_projection_chunks(
+                tuple(int(v) for v in output_shape)
+            ),
+            dtype=np.dtype(getattr(source_array, "dtype")),
+            overwrite=True,
+        )
+        output_root["data"].attrs.update({"axes": [str(axis) for axis in axes]})
+        output_root.attrs.update({"axes": [str(axis) for axis in axes]})
+
+    for output_slices in output_tiles:
+        reduced_tile: Optional[np.ndarray] = None
+        for red_start, red_stop in reduction_ranges:
+            source_selection: list[object] = [slice(None)] * 6
+            for axis_index, fixed_value in fixed_indices.items():
+                source_selection[int(axis_index)] = int(fixed_value)
+            source_selection[int(reduction_axis)] = slice(
+                int(red_start), int(red_stop)
+            )
+            for source_axis, output_slice in zip(preserved_axes, output_slices):
+                source_selection[int(source_axis)] = slice(
+                    int(output_slice.start),
+                    int(output_slice.stop),
+                )
+
+            source_chunk = np.asarray(source_array[tuple(source_selection)])
+            reduced_tile = _max_reduce_into(
+                reduced_tile,
+                np.max(source_chunk, axis=int(reduce_axis_in_chunk)),
+            )
+
+        tile_payload = np.asarray(reduced_tile)
+        if export_format == "tiff":
+            output_target[output_slices] = _to_uint16(tile_payload)
+        else:
+            output_target[output_slices] = tile_payload
+
+    if export_format == "tiff":
+        output_target.flush()
+        stored_dtype = str(np.dtype(np.uint16))
+    else:
+        stored_dtype = str(np.dtype(getattr(output_target, "dtype", source_array.dtype)))
     return {
         "path": str(output_path),
         "projection": str(task.projection),
