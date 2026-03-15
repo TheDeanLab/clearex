@@ -204,6 +204,33 @@ def test_run_workflow_flatfield_starts_analysis_dask_startup(
     assert workloads == ["analysis"]
 
 
+def test_run_workflow_mip_export_starts_analysis_dask_startup(
+    monkeypatch,
+) -> None:
+    workloads: list[str] = []
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack
+        workloads.append(str(workload))
+        return object()
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+
+    workflow = WorkflowConfig(
+        file=None,
+        prefer_dask=True,
+        mip_export=True,
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.mip_export"),
+    )
+
+    assert workloads == ["analysis"]
+
+
 def test_run_workflow_logs_operation_context_on_flatfield_failure(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -35,6 +35,7 @@ from . import filter
 from . import flatfield
 from . import fit
 from . import io
+from . import mip_export
 from . import plot
 from . import preprocess
 from . import registration
@@ -49,6 +50,7 @@ __all__ = [
     "flatfield",
     "fit",
     "io",
+    "mip_export",
     "plot",
     "preprocess",
     "registration",

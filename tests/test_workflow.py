@@ -126,6 +126,10 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["visualization"]["show_all_positions"] is False
         assert cfg.analysis_parameters["visualization"]["position_index"] == 0
         assert cfg.analysis_parameters["visualization"]["use_multiscale"] is True
+        assert "mip_export" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 7
+        assert cfg.analysis_parameters["mip_export"]["position_mode"] == "multi_position"
+        assert cfg.analysis_parameters["mip_export"]["export_format"] == "tiff"
 
     def test_normalizes_flatfield_analysis_parameters(self):
         cfg = WorkflowConfig(
@@ -296,6 +300,21 @@ class TestWorkflowConfig:
         assert params["use_multiscale"] is False
         assert params["overlay_particle_detections"] is True
         assert params["launch_mode"] == "subprocess"
+
+    def test_normalizes_mip_export_parameters(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "mip_export": {
+                    "position_mode": "PER_POSITION",
+                    "export_format": "ZARR",
+                    "output_directory": " exports/mip ",
+                }
+            }
+        )
+        params = cfg.analysis_parameters["mip_export"]
+        assert params["position_mode"] == "per_position"
+        assert params["export_format"] == "zarr"
+        assert params["output_directory"] == "exports/mip"
 
     def test_normalizes_shear_transform_parameters(self):
         cfg = WorkflowConfig(
@@ -543,6 +562,9 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     assert normalized["visualization"]["input_source"] == "data"
     assert normalized["visualization"]["show_all_positions"] is False
     assert normalized["visualization"]["use_multiscale"] is True
+    assert normalized["mip_export"]["execution_order"] == 7
+    assert normalized["mip_export"]["position_mode"] == "multi_position"
+    assert normalized["mip_export"]["export_format"] == "tiff"
 
 
 def test_resolve_analysis_execution_sequence_uses_execution_order():
@@ -553,6 +575,7 @@ def test_resolve_analysis_execution_sequence_uses_execution_order():
         particle_detection=True,
         registration=True,
         visualization=False,
+        mip_export=False,
         analysis_parameters={
             "flatfield": {"execution_order": 4},
             "deconvolution": {"execution_order": 2},
@@ -570,6 +593,20 @@ def test_resolve_analysis_execution_sequence_uses_execution_order():
     )
 
 
+def test_resolve_analysis_execution_sequence_includes_mip_export_last_by_default():
+    sequence = resolve_analysis_execution_sequence(
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        registration=False,
+        visualization=True,
+        mip_export=True,
+        analysis_parameters=None,
+    )
+    assert sequence == ("visualization", "mip_export")
+
+
 def test_analysis_operation_order_contains_expected_keys():
     assert ANALYSIS_OPERATION_ORDER == (
         "flatfield",
@@ -578,4 +615,5 @@ def test_analysis_operation_order_contains_expected_keys():
         "particle_detection",
         "registration",
         "visualization",
+        "mip_export",
     )

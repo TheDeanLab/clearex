@@ -35,8 +35,10 @@ import math
 import os
 import sys
 import traceback
+import webbrowser
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 # Local Imports
 from .spacing import (
@@ -141,6 +143,7 @@ try:
         QSizePolicy,
         QSpinBox,
         QStackedWidget,
+        QTabWidget,
         QVBoxLayout,
         QWidget,
     )
@@ -3434,6 +3437,7 @@ if HAS_PYQT6:
                 particle_detection=False,
                 registration=False,
                 visualization=False,
+                mip_export=False,
                 zarr_save=self._zarr_save_config,
             )
             _save_last_used_dask_backend_config(self._dask_backend_config)
@@ -3547,6 +3551,7 @@ if HAS_PYQT6:
             "particle_detection",
             "registration",
             "visualization",
+            "mip_export",
         )
         _PROVENANCE_HISTORY_OPERATIONS: tuple[str, ...] = (
             "flatfield",
@@ -3554,20 +3559,32 @@ if HAS_PYQT6:
             "shear_transform",
             "particle_detection",
             "registration",
+            "mip_export",
         )
         _OPERATION_LABELS: Dict[str, str] = {
             "flatfield": "Flatfield Correction",
             "deconvolution": "Deconvolution",
-            "shear_transform": "Shear Transform",
+            "shear_transform": "Shearing",
             "particle_detection": "Particle Detection",
             "registration": "Registration",
             "visualization": "Visualization",
+            "mip_export": "MIP Export",
         }
+        _OPERATION_TABS: tuple[tuple[str, tuple[str, ...]], ...] = (
+            (
+                "Preprocessing",
+                ("flatfield", "deconvolution", "shear_transform"),
+            ),
+            ("Segmentation", ("particle_detection",)),
+            ("Postprocessing", ("registration",)),
+            ("Export", ("visualization", "mip_export")),
+        )
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
             "flatfield": "results/flatfield/latest/data",
             "deconvolution": "results/deconvolution/latest/data",
             "shear_transform": "results/shear_transform/latest/data",
             "registration": "results/registration/latest/data",
+            "mip_export": "results/mip_export/latest",
         }
         _PARTICLE_DETECTION_OVERLAY_COMPONENT = (
             "results/particle_detection/latest/detections"
@@ -3778,6 +3795,18 @@ if HAS_PYQT6:
                 "particle detections already exist in the store or are selected "
                 "to run before visualization."
             ),
+            "mip_position_mode": (
+                "Choose whether each projection file contains all positions for a "
+                "(time, channel) pair, or writes separate files per position."
+            ),
+            "mip_export_format": (
+                "Choose export file format. TIFF outputs are always written as uint16; "
+                "Zarr exports keep projection dtype."
+            ),
+            "mip_output_directory": (
+                "Optional export directory path. Leave empty to write under an "
+                "auto-generated sibling directory next to the analysis store."
+            ),
         }
 
         def __init__(self, initial: WorkflowConfig) -> None:
@@ -3799,8 +3828,12 @@ if HAS_PYQT6:
             self.setMinimumHeight(760)
 
             self._base_config = initial
+            self._dask_backend_config: DaskBackendConfig = initial.dask_backend
             self.result_config: Optional[WorkflowConfig] = None
             self._status_label: Optional[QLabel] = None
+            self._dask_backend_summary_label: Optional[QLabel] = None
+            self._dask_backend_button: Optional[QPushButton] = None
+            self._dask_dashboard_button: Optional[QPushButton] = None
             self._parameter_help_default = (
                 "Hover over a parameter to see a detailed explanation."
             )
@@ -3818,6 +3851,9 @@ if HAS_PYQT6:
             )
             self._visualization_defaults = dict(
                 self._operation_defaults.get("visualization", {})
+            )
+            self._mip_export_defaults = dict(
+                self._operation_defaults.get("mip_export", {})
             )
 
             self._operation_checkboxes: Dict[str, QCheckBox] = {}
@@ -3904,68 +3940,25 @@ if HAS_PYQT6:
             store_row.addWidget(self._store_label, 1)
             left_column.addLayout(store_row)
 
-            analysis_group = QGroupBox("Analysis Selection")
-            analysis_group.setMinimumWidth(500)
-            analysis_layout = QVBoxLayout(analysis_group)
-            apply_stack_spacing(analysis_layout)
+            analysis_tabs = QTabWidget()
+            analysis_tabs.setObjectName("analysisTabs")
+            analysis_tabs.setMinimumWidth(500)
+            for tab_name, tab_operations in self._OPERATION_TABS:
+                tab_widget = QWidget()
+                tab_layout = QVBoxLayout(tab_widget)
+                apply_stack_spacing(tab_layout)
 
-            for operation_name in self._OPERATION_KEYS:
-                row = QHBoxLayout()
-                apply_compact_row_spacing(row)
-
-                checkbox = QCheckBox(self._OPERATION_LABELS[operation_name])
-                checkbox.setObjectName("operationCheckbox")
-                row.addWidget(checkbox, 1)
-                self._operation_checkboxes[operation_name] = checkbox
-
-                order_label = QLabel("Order")
-                order_label.setObjectName("statusLabel")
-                row.addWidget(order_label)
-
-                order_spin = QSpinBox()
-                order_spin.setRange(1, len(self._OPERATION_KEYS))
-                order_spin.setMinimumWidth(76)
-                row.addWidget(order_spin)
-                self._operation_order_spins[operation_name] = order_spin
-                self._register_parameter_hint(
-                    order_spin, self._PARAMETER_HINTS["execution_order"]
-                )
-
-                configure_button = QPushButton("Configure")
-                configure_button.setCheckable(True)
-                configure_button.setObjectName("configureButton")
-                row.addWidget(configure_button)
-                self._operation_config_buttons[operation_name] = configure_button
-
-                if operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
-                    force_rerun_checkbox = QCheckBox("Force rerun")
-                    force_rerun_checkbox.setVisible(False)
-                    force_rerun_checkbox.setEnabled(False)
-                    force_rerun_checkbox.setToolTip(
-                        "Run this routine even when a matching completed run exists "
-                        "in provenance."
+                operations_group = QGroupBox(f"{tab_name} Operations")
+                operations_layout = QVBoxLayout(operations_group)
+                apply_stack_spacing(operations_layout)
+                for operation_name in tab_operations:
+                    self._build_operation_selection_row(
+                        parent_layout=operations_layout,
+                        operation_name=operation_name,
                     )
-                    row.addWidget(force_rerun_checkbox)
-                    self._operation_force_rerun_checkboxes[operation_name] = (
-                        force_rerun_checkbox
-                    )
-
-                analysis_layout.addLayout(row)
-
-                if operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
-                    history_label = QLabel("Provenance: no successful run recorded yet.")
-                    history_label.setObjectName("statusLabel")
-                    history_label.setWordWrap(True)
-                    history_label.setContentsMargins(24, 0, 0, 0)
-                    analysis_layout.addWidget(history_label)
-                    self._operation_history_labels[operation_name] = history_label
-
-                checkbox.toggled.connect(self._on_operation_selection_changed)
-                order_spin.valueChanged.connect(self._on_operation_order_changed)
-                configure_button.clicked.connect(
-                    lambda _checked=False,
-                    op=operation_name: self._show_operation_configuration(op)
-                )
+                operations_layout.addStretch(1)
+                tab_layout.addWidget(operations_group, 1)
+                analysis_tabs.addTab(tab_widget, tab_name)
 
             analysis_hint = QLabel(
                 "Use Configure to edit one operation at a time. "
@@ -3973,9 +3966,8 @@ if HAS_PYQT6:
             )
             analysis_hint.setObjectName("statusLabel")
             analysis_hint.setWordWrap(True)
-            analysis_layout.addWidget(analysis_hint)
-            analysis_layout.addStretch(1)
-            left_column.addWidget(analysis_group, 1)
+            left_column.addWidget(analysis_tabs, 1)
+            left_column.addWidget(analysis_hint)
             content_row.addLayout(left_column, 1)
 
             parameters_group = QGroupBox("Operation Parameters")
@@ -4011,19 +4003,33 @@ if HAS_PYQT6:
 
             footer = QHBoxLayout()
             apply_footer_row_spacing(footer)
-            self._status_label = QLabel(
-                "Configure selected analysis routines and click Run."
-            )
+            status_stack = QVBoxLayout()
+            apply_help_stack_spacing(status_stack)
+            self._status_label = QLabel("Configure selected analysis routines and click Run.")
             self._status_label.setObjectName("statusLabel")
             self._status_label.setWordWrap(True)
-            footer.addWidget(self._status_label, 1)
+            status_stack.addWidget(self._status_label)
+            self._dask_backend_summary_label = QLabel("Dask backend: n/a")
+            self._dask_backend_summary_label.setObjectName("statusLabel")
+            self._dask_backend_summary_label.setWordWrap(True)
+            self._dask_backend_summary_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            status_stack.addWidget(self._dask_backend_summary_label)
+            footer.addLayout(status_stack, 1)
+            self._dask_backend_button = QPushButton("Edit Dask Backend")
+            self._dask_dashboard_button = QPushButton("Open Dask Dashboard")
             self._cancel_button = QPushButton("Cancel")
             self._run_button = QPushButton("Run")
             self._run_button.setObjectName("runButton")
+            footer.addWidget(self._dask_backend_button)
+            footer.addWidget(self._dask_dashboard_button)
             footer.addWidget(self._cancel_button)
             footer.addWidget(self._run_button)
             root.addLayout(footer)
 
+            self._dask_backend_button.clicked.connect(self._on_edit_dask_backend)
+            self._dask_dashboard_button.clicked.connect(self._on_open_dask_dashboard)
             self._cancel_button.clicked.connect(self.reject)
             self._run_button.clicked.connect(self._on_run)
             self._decon_psf_mode_combo.currentIndexChanged.connect(
@@ -4049,6 +4055,88 @@ if HAS_PYQT6:
             )
             self._visualization_show_all_positions_checkbox.toggled.connect(
                 self._set_visualization_position_selector_state
+            )
+
+        def _build_operation_selection_row(
+            self,
+            *,
+            parent_layout: QVBoxLayout,
+            operation_name: str,
+        ) -> None:
+            """Create one operation-selection row and attach it to a parent layout.
+
+            Parameters
+            ----------
+            parent_layout : QVBoxLayout
+                Layout receiving the operation controls.
+            operation_name : str
+                Operation key rendered in the row.
+
+            Returns
+            -------
+            None
+                Widgets are created, connected, and stored in-place.
+
+            Raises
+            ------
+            None
+                All validation is handled internally.
+            """
+            row = QHBoxLayout()
+            apply_compact_row_spacing(row)
+
+            checkbox = QCheckBox(self._OPERATION_LABELS[operation_name])
+            checkbox.setObjectName("operationCheckbox")
+            row.addWidget(checkbox, 1)
+            self._operation_checkboxes[operation_name] = checkbox
+
+            order_label = QLabel("Order")
+            order_label.setObjectName("statusLabel")
+            row.addWidget(order_label)
+
+            order_spin = QSpinBox()
+            order_spin.setRange(1, len(self._OPERATION_KEYS))
+            order_spin.setMinimumWidth(76)
+            row.addWidget(order_spin)
+            self._operation_order_spins[operation_name] = order_spin
+            self._register_parameter_hint(
+                order_spin, self._PARAMETER_HINTS["execution_order"]
+            )
+
+            configure_button = QPushButton("Configure")
+            configure_button.setCheckable(True)
+            configure_button.setObjectName("configureButton")
+            row.addWidget(configure_button)
+            self._operation_config_buttons[operation_name] = configure_button
+
+            if operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
+                force_rerun_checkbox = QCheckBox("Force rerun")
+                force_rerun_checkbox.setVisible(False)
+                force_rerun_checkbox.setEnabled(False)
+                force_rerun_checkbox.setToolTip(
+                    "Run this routine even when a matching completed run exists "
+                    "in provenance."
+                )
+                row.addWidget(force_rerun_checkbox)
+                self._operation_force_rerun_checkboxes[operation_name] = (
+                    force_rerun_checkbox
+                )
+
+            parent_layout.addLayout(row)
+
+            if operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
+                history_label = QLabel("Provenance: no successful run recorded yet.")
+                history_label.setObjectName("statusLabel")
+                history_label.setWordWrap(True)
+                history_label.setContentsMargins(24, 0, 0, 0)
+                parent_layout.addWidget(history_label)
+                self._operation_history_labels[operation_name] = history_label
+
+            checkbox.toggled.connect(self._on_operation_selection_changed)
+            order_spin.valueChanged.connect(self._on_operation_order_changed)
+            configure_button.clicked.connect(
+                lambda _checked=False,
+                op=operation_name: self._show_operation_configuration(op)
             )
 
         def _build_no_selection_panel(self) -> QWidget:
@@ -4125,6 +4213,8 @@ if HAS_PYQT6:
                 self._build_particle_parameter_rows(form)
             elif operation_name == "visualization":
                 self._build_visualization_parameter_rows(form)
+            elif operation_name == "mip_export":
+                self._build_mip_export_parameter_rows(form)
             else:
                 stub = QLabel(
                     "Advanced parameters for this operation are not exposed yet. "
@@ -4869,6 +4959,51 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["overlay_particle_detections"],
             )
 
+        def _build_mip_export_parameter_rows(self, form: QFormLayout) -> None:
+            """Add MIP-export parameter controls to a form.
+
+            Parameters
+            ----------
+            form : QFormLayout
+                Parent form layout receiving MIP-export controls.
+
+            Returns
+            -------
+            None
+                Widgets are created and attached in-place.
+            """
+            self._mip_position_mode_combo = QComboBox()
+            self._mip_position_mode_combo.addItem(
+                "Multi-position stack per time/channel",
+                "multi_position",
+            )
+            self._mip_position_mode_combo.addItem(
+                "Per-position files",
+                "per_position",
+            )
+            form.addRow("Position mode", self._mip_position_mode_combo)
+            self._register_parameter_hint(
+                self._mip_position_mode_combo,
+                self._PARAMETER_HINTS["mip_position_mode"],
+            )
+
+            self._mip_export_format_combo = QComboBox()
+            self._mip_export_format_combo.addItem("TIFF (uint16)", "tiff")
+            self._mip_export_format_combo.addItem("Zarr", "zarr")
+            form.addRow("Export format", self._mip_export_format_combo)
+            self._register_parameter_hint(
+                self._mip_export_format_combo,
+                self._PARAMETER_HINTS["mip_export_format"],
+            )
+
+            self._mip_output_directory_input = QLineEdit()
+            self._mip_output_directory_input.setPlaceholderText("Auto")
+            form.addRow("Output directory", self._mip_output_directory_input)
+            self._register_parameter_hint(
+                self._mip_output_directory_input,
+                self._PARAMETER_HINTS["mip_output_directory"],
+            )
+
         def _register_parameter_hint(self, widget: QWidget, message: str) -> None:
             """Register hover/focus help text for a widget.
 
@@ -5247,6 +5382,367 @@ if HAS_PYQT6:
             if self._parameter_help_label is not None:
                 self._parameter_help_label.setText(str(text))
 
+        def _refresh_dask_backend_summary(self) -> None:
+            """Refresh footer summary text for active Dask backend settings.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Footer summary text and tooltip are updated in-place.
+
+            Raises
+            ------
+            None
+                Errors are handled internally.
+            """
+            if self._dask_backend_summary_label is None:
+                return
+            summary = format_dask_backend_summary(self._dask_backend_config)
+            text = f"Dask backend: {summary}"
+            self._dask_backend_summary_label.setText(text)
+            self._dask_backend_summary_label.setToolTip(text)
+            self._refresh_dask_dashboard_button_state()
+
+        def _analysis_store_shape_tpczyx(
+            self,
+        ) -> Optional[Tuple[int, int, int, int, int, int]]:
+            """Estimate canonical store shape for LocalCluster recommendations.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            tuple[int, int, int, int, int, int], optional
+                Canonical ``(t, p, c, z, y, x)`` shape when available.
+
+            Raises
+            ------
+            None
+                Store lookup failures are handled internally.
+            """
+            store_path = str(self._base_config.file or "").strip()
+            if not store_path or not is_zarr_store_path(store_path):
+                return None
+            try:
+                root = zarr.open_group(store_path, mode="r")
+                if "data" not in root:
+                    return None
+                shape = tuple(getattr(root["data"], "shape", ()))
+            except Exception:
+                return None
+            if len(shape) != 6:
+                return None
+            try:
+                return (
+                    int(shape[0]),
+                    int(shape[1]),
+                    int(shape[2]),
+                    int(shape[3]),
+                    int(shape[4]),
+                    int(shape[5]),
+                )
+            except Exception:
+                return None
+
+        def _analysis_store_dtype_itemsize(self) -> Optional[int]:
+            """Return bytes-per-voxel for recommendation-aware backend tuning.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            int, optional
+                Data dtype itemsize in bytes when the canonical store is available.
+
+            Raises
+            ------
+            None
+                Store lookup failures are handled internally.
+            """
+            store_path = str(self._base_config.file or "").strip()
+            if not store_path or not is_zarr_store_path(store_path):
+                return None
+            try:
+                root = zarr.open_group(store_path, mode="r")
+                if "data" not in root:
+                    return None
+                dtype = getattr(root["data"], "dtype", None)
+                itemsize = int(getattr(dtype, "itemsize"))
+                return max(1, itemsize)
+            except Exception:
+                return None
+
+        def _on_edit_dask_backend(self) -> None:
+            """Open backend settings dialog and apply selected configuration.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Selected backend values are stored in-place.
+
+            Raises
+            ------
+            None
+                Validation and persistence errors are handled internally.
+            """
+            dialog = DaskBackendConfigDialog(
+                initial=self._dask_backend_config,
+                recommendation_shape_tpczyx=self._analysis_store_shape_tpczyx(),
+                recommendation_chunks_tpczyx=self._base_config.zarr_save.chunks_tpczyx(),
+                recommendation_dtype_itemsize=self._analysis_store_dtype_itemsize(),
+                parent=self,
+            )
+            result = dialog.exec()
+            if result != QDialog.DialogCode.Accepted or dialog.result_config is None:
+                return
+            self._dask_backend_config = dialog.result_config
+            _save_last_used_dask_backend_config(self._dask_backend_config)
+            self._refresh_dask_backend_summary()
+            self._set_status("Updated Dask backend settings.")
+
+        @staticmethod
+        def _normalize_dashboard_url(
+            raw_url: str,
+            *,
+            default_host: str = "127.0.0.1",
+        ) -> Optional[str]:
+            """Normalize dashboard address text into an HTTP/HTTPS URL.
+
+            Parameters
+            ----------
+            raw_url : str
+                Raw dashboard address text.
+            default_host : str, default="127.0.0.1"
+                Hostname used when only a port is supplied.
+
+            Returns
+            -------
+            str, optional
+                Normalized dashboard URL, or ``None`` when parsing fails.
+
+            Raises
+            ------
+            None
+                Invalid inputs are handled internally.
+            """
+            stripped = str(raw_url).strip()
+            if not stripped:
+                return None
+
+            if stripped.startswith("tcp://") or stripped.startswith("tls://"):
+                parsed_tcp = urlparse(stripped)
+                host = parsed_tcp.hostname
+                port = parsed_tcp.port
+                if host is None:
+                    return None
+                stripped = f"http://{host}:{port}" if port else f"http://{host}"
+            elif stripped.startswith(":"):
+                stripped = f"http://{default_host}{stripped}"
+            elif stripped.isdigit():
+                stripped = f"http://{default_host}:{stripped}"
+            elif "://" not in stripped:
+                stripped = f"http://{stripped}"
+
+            parsed = urlparse(stripped)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return None
+
+            path = parsed.path
+            if not path or path == "/":
+                path = "/status"
+
+            normalized = f"{parsed.scheme}://{parsed.netloc}{path}"
+            if parsed.query:
+                normalized = f"{normalized}?{parsed.query}"
+            if parsed.fragment:
+                normalized = f"{normalized}#{parsed.fragment}"
+            return normalized
+
+        def _dashboard_url_from_scheduler_file(
+            self,
+            scheduler_file: str,
+        ) -> Optional[str]:
+            """Resolve dashboard URL from a Dask scheduler file payload.
+
+            Parameters
+            ----------
+            scheduler_file : str
+                Path to the scheduler JSON file.
+
+            Returns
+            -------
+            str, optional
+                Dashboard URL when host and port can be inferred.
+
+            Raises
+            ------
+            None
+                Read/parse failures are handled internally.
+            """
+            path = Path(str(scheduler_file)).expanduser()
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+            if not isinstance(payload, dict):
+                return None
+
+            services = payload.get("services")
+            dashboard_service = None
+            if isinstance(services, dict):
+                dashboard_service = services.get("dashboard")
+            if isinstance(dashboard_service, str):
+                direct_url = self._normalize_dashboard_url(dashboard_service)
+                if direct_url is not None:
+                    return direct_url
+
+            try:
+                dashboard_port = (
+                    int(dashboard_service)
+                    if dashboard_service is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                dashboard_port = None
+
+            address = str(payload.get("address") or "").strip()
+            parsed_address = urlparse(address) if address else None
+            host = (
+                parsed_address.hostname
+                if parsed_address is not None
+                else None
+            ) or str(payload.get("host") or "").strip() or "127.0.0.1"
+
+            if dashboard_port is None:
+                return None
+            return self._normalize_dashboard_url(
+                f"{host}:{dashboard_port}",
+                default_host=host,
+            )
+
+        def _resolve_dask_dashboard_url(self) -> Optional[str]:
+            """Resolve dashboard URL for the currently selected backend mode.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            str, optional
+                Resolved dashboard URL when it can be inferred from settings.
+
+            Raises
+            ------
+            None
+                Parsing failures are handled internally.
+            """
+            mode = str(self._dask_backend_config.mode).strip().lower()
+            if mode == DASK_BACKEND_LOCAL_CLUSTER:
+                return self._normalize_dashboard_url("127.0.0.1:8787")
+            if mode == DASK_BACKEND_SLURM_CLUSTER:
+                return self._normalize_dashboard_url(
+                    self._dask_backend_config.slurm_cluster.dashboard_address,
+                )
+            if mode == DASK_BACKEND_SLURM_RUNNER:
+                scheduler_file = self._dask_backend_config.slurm_runner.scheduler_file
+                if not scheduler_file:
+                    return None
+                return self._dashboard_url_from_scheduler_file(scheduler_file)
+            return None
+
+        def _refresh_dask_dashboard_button_state(self) -> None:
+            """Refresh dashboard-button enabled state and tooltip text.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Button state and tooltip are updated in-place.
+
+            Raises
+            ------
+            None
+                Errors are handled internally.
+            """
+            if self._dask_dashboard_button is None:
+                return
+
+            dashboard_url = self._resolve_dask_dashboard_url()
+            if dashboard_url is None:
+                self._dask_dashboard_button.setEnabled(False)
+                self._dask_dashboard_button.setToolTip(
+                    "Dashboard URL unavailable for the current backend settings."
+                )
+                return
+
+            self._dask_dashboard_button.setEnabled(True)
+            self._dask_dashboard_button.setToolTip(f"Open {dashboard_url}")
+
+        def _on_open_dask_dashboard(self) -> None:
+            """Open the configured Dask dashboard URL in a web browser.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Browser-launch side effects only.
+
+            Raises
+            ------
+            None
+                Launch errors are handled via GUI warnings.
+            """
+            dashboard_url = self._resolve_dask_dashboard_url()
+            if dashboard_url is None:
+                QMessageBox.information(
+                    self,
+                    "Dashboard URL Unavailable",
+                    "Could not determine a dashboard URL from current Dask backend settings.",
+                )
+                self._set_status("Dashboard URL unavailable for current backend settings.")
+                return
+
+            try:
+                opened = bool(webbrowser.open_new_tab(dashboard_url))
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Dashboard Launch Failed",
+                    f"Could not open dashboard URL.\n\n{exc}",
+                )
+                self._set_status("Failed to launch the Dask dashboard browser tab.")
+                return
+
+            if not opened:
+                QMessageBox.warning(
+                    self,
+                    "Dashboard Launch Failed",
+                    f"Browser did not confirm opening:\n{dashboard_url}",
+                )
+                self._set_status("Browser did not confirm Dask dashboard launch.")
+                return
+
+            self._set_status(f"Opened Dask dashboard: {dashboard_url}")
+
         def _on_operation_selection_changed(self) -> None:
             """React to operation selection checkbox changes.
 
@@ -5281,6 +5777,7 @@ if HAS_PYQT6:
             self._set_shear_parameter_enabled_state()
             self._set_particle_parameter_enabled_state()
             self._set_visualization_parameter_enabled_state()
+            self._set_mip_export_parameter_enabled_state()
 
             if (
                 self._active_config_operation is not None
@@ -5716,6 +6213,27 @@ if HAS_PYQT6:
             self._visualization_position_label.setVisible(not show_all_positions)
             self._visualization_position_spin.setVisible(not show_all_positions)
 
+        def _set_mip_export_parameter_enabled_state(self) -> None:
+            """Enable/disable MIP-export widgets based on operation selection.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widget enabled states are updated in-place.
+            """
+            mip_enabled = self._operation_checkboxes["mip_export"].isChecked()
+            widgets = (
+                self._mip_position_mode_combo,
+                self._mip_export_format_combo,
+                self._mip_output_directory_input,
+            )
+            for widget in widgets:
+                widget.setEnabled(mip_enabled)
+
         def _hydrate(self, initial: WorkflowConfig) -> None:
             """Populate analysis selections from initial workflow values.
 
@@ -5747,9 +6265,13 @@ if HAS_PYQT6:
             visualization_params = dict(
                 normalized_parameters.get("visualization", self._visualization_defaults)
             )
+            mip_export_params = dict(
+                normalized_parameters.get("mip_export", self._mip_export_defaults)
+            )
 
             if self._store_label is not None:
                 self._store_label.setText(initial.file or "n/a")
+            self._refresh_dask_backend_summary()
 
             checkbox_defaults = {
                 "flatfield": bool(initial.flatfield),
@@ -5758,6 +6280,7 @@ if HAS_PYQT6:
                 "particle_detection": bool(initial.particle_detection),
                 "registration": bool(initial.registration),
                 "visualization": bool(initial.visualization),
+                "mip_export": bool(initial.mip_export),
             }
 
             for idx, operation_name in enumerate(self._OPERATION_KEYS):
@@ -6143,6 +6666,31 @@ if HAS_PYQT6:
                 bool(visualization_params.get("overlay_particle_detections", True))
             )
             self._set_visualization_position_selector_state()
+            mip_mode = (
+                str(mip_export_params.get("position_mode", "multi_position")).strip()
+                or "multi_position"
+            )
+            mip_mode_index = self._mip_position_mode_combo.findData(mip_mode)
+            if mip_mode_index < 0:
+                mip_mode_index = self._mip_position_mode_combo.findData(
+                    "multi_position"
+                )
+            if mip_mode_index < 0:
+                mip_mode_index = 0
+            self._mip_position_mode_combo.setCurrentIndex(mip_mode_index)
+
+            mip_format = (
+                str(mip_export_params.get("export_format", "tiff")).strip() or "tiff"
+            )
+            mip_format_index = self._mip_export_format_combo.findData(mip_format)
+            if mip_format_index < 0:
+                mip_format_index = self._mip_export_format_combo.findData("tiff")
+            if mip_format_index < 0:
+                mip_format_index = 0
+            self._mip_export_format_combo.setCurrentIndex(mip_format_index)
+            self._mip_output_directory_input.setText(
+                str(mip_export_params.get("output_directory", "") or "").strip()
+            )
 
             self._refresh_operation_provenance_statuses()
             self._on_operation_selection_changed()
@@ -6227,6 +6775,27 @@ if HAS_PYQT6:
                     color: #9cc6ff;
                     font-weight: 700;
                     font-size: 12px;
+                }
+                QTabWidget#analysisTabs::pane {
+                    border: 1px solid #2a3442;
+                    border-radius: 10px;
+                    background-color: #111925;
+                    top: -1px;
+                }
+                QTabWidget#analysisTabs QTabBar::tab {
+                    background-color: #0f1b2a;
+                    border: 1px solid #2a3442;
+                    border-bottom: none;
+                    padding: 8px 12px;
+                    margin-right: 4px;
+                    border-top-left-radius: 8px;
+                    border-top-right-radius: 8px;
+                    color: #9ab0ca;
+                }
+                QTabWidget#analysisTabs QTabBar::tab:selected {
+                    color: #f0f5ff;
+                    background-color: #182637;
+                    border-color: #2f81f7;
                 }
                 QGroupBox {
                     border: 1px solid #2a3442;
@@ -6626,6 +7195,39 @@ if HAS_PYQT6:
                 ),
             }
 
+        def _collect_mip_export_parameters(self) -> Dict[str, Any]:
+            """Collect MIP-export parameter values from widgets.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, Any]
+                MIP-export parameter mapping.
+            """
+            position_mode = str(
+                self._mip_position_mode_combo.currentData() or "multi_position"
+            ).strip()
+            export_format = str(
+                self._mip_export_format_combo.currentData() or "tiff"
+            ).strip()
+            return {
+                "chunk_basis": "3d",
+                "detect_2d_per_slice": False,
+                "use_map_overlap": False,
+                "overlap_zyx": [0, 0, 0],
+                "memory_overhead_factor": float(
+                    self._mip_export_defaults.get("memory_overhead_factor", 1.0)
+                ),
+                "position_mode": position_mode.lower() or "multi_position",
+                "export_format": export_format.lower() or "tiff",
+                "output_directory": str(
+                    self._mip_output_directory_input.text()
+                ).strip(),
+            }
+
         def _collect_operation_parameters(self, operation_name: str) -> Dict[str, Any]:
             """Collect parameter mapping for one operation.
 
@@ -6661,6 +7263,8 @@ if HAS_PYQT6:
                 defaults.update(self._collect_particle_parameters())
             elif operation_name == "visualization":
                 defaults.update(self._collect_visualization_parameters())
+            elif operation_name == "mip_export":
+                defaults.update(self._collect_mip_export_parameters())
             return defaults
 
         def _on_run(self) -> None:
@@ -6773,7 +7377,7 @@ if HAS_PYQT6:
             self.result_config = WorkflowConfig(
                 file=self._base_config.file,
                 prefer_dask=self._base_config.prefer_dask,
-                dask_backend=self._base_config.dask_backend,
+                dask_backend=self._dask_backend_config,
                 chunks=self._base_config.chunks,
                 flatfield=selected_flags["flatfield"],
                 deconvolution=selected_flags["deconvolution"],
@@ -6781,9 +7385,11 @@ if HAS_PYQT6:
                 particle_detection=selected_flags["particle_detection"],
                 registration=selected_flags["registration"],
                 visualization=selected_flags["visualization"],
+                mip_export=selected_flags["mip_export"],
                 zarr_save=self._base_config.zarr_save,
                 analysis_parameters=analysis_parameters,
             )
+            _save_last_used_dask_backend_config(self._dask_backend_config)
             sequence = self._selected_operations_in_sequence()
             sequence_text = " -> ".join(
                 self._OPERATION_LABELS[name] for name in sequence
@@ -6920,6 +7526,7 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         "shear_transform",
         "particle_detection",
         "registration",
+        "mip_export",
     ):
         params = dict(analysis_parameters.get(operation_name, {}))
         params["force_rerun"] = False
@@ -6936,6 +7543,7 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         particle_detection=False,
         registration=False,
         visualization=False,
+        mip_export=False,
         zarr_save=workflow.zarr_save,
         analysis_parameters=analysis_parameters,
     )

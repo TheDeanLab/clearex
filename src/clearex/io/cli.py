@@ -178,6 +178,14 @@ def create_parser() -> argparse.ArgumentParser:
         help="Visualization of the data with Neuroglancer",
     )
 
+    input_args.add_argument(
+        "--mip-export",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Export maximum-intensity projections (XY/XZ/YZ)",
+    )
+
     parser.add_argument(
         "-f",
         "--file",

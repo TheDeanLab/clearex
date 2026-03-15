@@ -50,6 +50,7 @@ def test_analysis_flags_are_parsed():
             "--particle-detection",
             "--registration",
             "--visualization",
+            "--mip-export",
             "--headless",
             "--no-dask",
         ]
@@ -60,5 +61,6 @@ def test_analysis_flags_are_parsed():
     assert args.particle_detection is True
     assert args.registration is True
     assert args.visualization is True
+    assert args.mip_export is True
     assert args.headless is True
     assert args.dask is False

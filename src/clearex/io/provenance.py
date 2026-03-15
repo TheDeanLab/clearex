@@ -331,6 +331,8 @@ def _selected_analyses(workflow: WorkflowConfig) -> list[str]:
         selected.append("registration")
     if workflow.visualization:
         selected.append("visualization")
+    if workflow.mip_export:
+        selected.append("mip_export")
     return selected
 
 
@@ -840,6 +842,7 @@ def persist_run_provenance(
         "particle_detection": workflow.particle_detection,
         "registration": workflow.registration,
         "visualization": workflow.visualization,
+        "mip_export": workflow.mip_export,
         "selected_analyses": _selected_analyses(workflow),
         "analysis_parameters": _to_jsonable(workflow.analysis_parameters),
         "analysis_output_policy": "latest_only",

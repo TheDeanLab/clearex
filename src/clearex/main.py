@@ -70,6 +70,9 @@ from clearex.flatfield.pipeline import (
 from clearex.visualization.pipeline import (
     run_visualization_analysis,
 )
+from clearex.mip_export.pipeline import (
+    run_mip_export_analysis,
+)
 from clearex.workflow import (
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
@@ -98,7 +101,7 @@ _ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
 }
 
 _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
-    {"flatfield", "deconvolution", "shear_transform", "particle_detection"}
+    {"flatfield", "deconvolution", "shear_transform", "particle_detection", "mip_export"}
 )
 _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
     {
@@ -107,6 +110,7 @@ _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
         "shear_transform",
         "particle_detection",
         "registration",
+        "mip_export",
     }
 )
 _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
@@ -121,6 +125,7 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "shear_transform": ("results/shear_transform/latest/data",),
     "particle_detection": ("results/particle_detection/latest/detections",),
     "registration": ("results/registration/latest/data",),
+    "mip_export": ("results/mip_export/latest",),
 }
 
 
@@ -300,6 +305,7 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         particle_detection=args.particle_detection,
         registration=args.registration,
         visualization=args.visualization,
+        mip_export=args.mip_export,
     )
 
 
@@ -813,6 +819,7 @@ def _run_workflow(
             particle_detection=workflow.particle_detection,
             registration=workflow.registration,
             visualization=workflow.visualization,
+            mip_export=workflow.mip_export,
             analysis_parameters=runtime_analysis_parameters,
         )
 
@@ -1593,6 +1600,113 @@ def _run_workflow(
                             "Visualization skipped (no Zarr/N5 store).",
                         )
                     continue
+
+                if operation_name == "mip_export":
+                    mip_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                        if not _zarr_component_exists(
+                            provenance_store_path,
+                            str(mip_parameters.get("input_source", "data")),
+                        ):
+                            logger.warning(
+                                "Requested MIP-export input component '%s' was "
+                                "not found. Falling back to 'data'.",
+                                mip_parameters.get("input_source", "data"),
+                            )
+                            mip_parameters["input_source"] = "data"
+                            runtime_analysis_parameters["mip_export"] = dict(
+                                mip_parameters
+                            )
+
+                        def _mip_export_progress(percent: int, message: str) -> None:
+                            """Map MIP-export progress into workflow-scale progress.
+
+                            Parameters
+                            ----------
+                            percent : int
+                                MIP-export progress percent.
+                            message : str
+                                Progress status text.
+
+                            Returns
+                            -------
+                            None
+                                Logger and progress-callback side effects only.
+                            """
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            logger.info(f"[mip_export] {int(percent)}% - {message}")
+                            _emit_analysis_progress(
+                                mapped,
+                                f"mip_export: {message}",
+                            )
+
+                        summary = run_mip_export_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=mip_parameters,
+                            client=analysis_client,
+                            progress_callback=_mip_export_progress,
+                        )
+                        output_records["mip_export"] = {
+                            "component": summary.component,
+                            "source_component": summary.source_component,
+                            "output_directory": summary.output_directory,
+                            "export_format": summary.export_format,
+                            "position_mode": summary.position_mode,
+                            "task_count": summary.task_count,
+                            "exported_files": summary.exported_files,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "MIP export completed: "
+                            f"component={summary.component}, "
+                            f"source={summary.source_component}, "
+                            f"format={summary.export_format}, "
+                            f"position_mode={summary.position_mode}, "
+                            f"files={summary.exported_files}, "
+                            f"output_directory={summary.output_directory}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "mip_export",
+                                "parameters": {
+                                    **mip_parameters,
+                                    "component": summary.component,
+                                    "source_component": summary.source_component,
+                                    "output_directory": summary.output_directory,
+                                    "export_format": summary.export_format,
+                                    "position_mode": summary.position_mode,
+                                    "task_count": summary.task_count,
+                                    "exported_files": summary.exported_files,
+                                    "projections": list(summary.projections),
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "MIP export complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "MIP export requires a canonical Zarr/N5 data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "mip_export",
+                                "parameters": {
+                                    **mip_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "MIP export skipped (no Zarr/N5 store).",
+                        )
+                    continue
         except Exception:
             logger.exception(
                 "Analysis operation '%s' failed (store=%s, requested_input=%s, "
@@ -1617,6 +1731,7 @@ def _run_workflow(
             particle_detection=workflow.particle_detection,
             registration=workflow.registration,
             visualization=workflow.visualization,
+            mip_export=workflow.mip_export,
             zarr_save=workflow.zarr_save,
             analysis_parameters=runtime_analysis_parameters,
         )

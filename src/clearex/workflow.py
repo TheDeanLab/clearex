@@ -53,6 +53,7 @@ ANALYSIS_OPERATION_ORDER = (
     "particle_detection",
     "registration",
     "visualization",
+    "mip_export",
 )
 
 DEFAULT_ZARR_CHUNKS_PTCZYX: ZarrAxisSpec = (1, 1, 1, 256, 256, 256)
@@ -191,6 +192,19 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "overlay_particle_detections": True,
         "particle_detection_component": "results/particle_detection/latest/detections",
         "launch_mode": "auto",
+    },
+    "mip_export": {
+        "execution_order": 7,
+        "input_source": "data",
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 1.0,
+        "position_mode": "multi_position",
+        "export_format": "tiff",
+        "output_directory": "",
     },
 }
 
@@ -812,6 +826,54 @@ def _normalize_visualization_parameters(
     return normalized
 
 
+def _normalize_mip_export_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize maximum-intensity projection export runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate MIP-export parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized MIP-export parameters.
+
+    Raises
+    ------
+    ValueError
+        If export mode values are unsupported.
+    """
+    normalized = _normalize_common_operation_parameters("mip_export", params)
+    normalized["chunk_basis"] = "3d"
+    normalized["detect_2d_per_slice"] = False
+    normalized["use_map_overlap"] = False
+    normalized["overlap_zyx"] = [0, 0, 0]
+
+    position_mode = (
+        str(normalized.get("position_mode", "multi_position")).strip().lower()
+        or "multi_position"
+    )
+    if position_mode not in {"multi_position", "per_position"}:
+        raise ValueError(
+            "mip_export position_mode must be 'multi_position' or 'per_position'."
+        )
+    normalized["position_mode"] = position_mode
+
+    export_format = (
+        str(normalized.get("export_format", "tiff")).strip().lower() or "tiff"
+    )
+    if export_format not in {"tiff", "zarr"}:
+        raise ValueError("mip_export export_format must be 'tiff' or 'zarr'.")
+    normalized["export_format"] = export_format
+    normalized["output_directory"] = str(
+        normalized.get("output_directory", "")
+    ).strip()
+    return normalized
+
+
 def normalize_analysis_operation_parameters(
     parameters: Optional[Dict[str, Dict[str, Any]]],
 ) -> Dict[str, Dict[str, Any]]:
@@ -866,6 +928,10 @@ def normalize_analysis_operation_parameters(
             merged[operation_name] = _normalize_visualization_parameters(
                 merged[operation_name]
             )
+        elif operation_name == "mip_export":
+            merged[operation_name] = _normalize_mip_export_parameters(
+                merged[operation_name]
+            )
         else:
             merged[operation_name] = _normalize_common_operation_parameters(
                 operation_name,
@@ -882,6 +948,7 @@ def selected_analysis_operations(
     particle_detection: bool,
     registration: bool,
     visualization: bool,
+    mip_export: bool,
 ) -> Tuple[str, ...]:
     """Collect enabled analysis operation names.
 
@@ -899,6 +966,8 @@ def selected_analysis_operations(
         Whether registration is enabled.
     visualization : bool
         Whether visualization is enabled.
+    mip_export : bool
+        Whether MIP export is enabled.
 
     Returns
     -------
@@ -918,6 +987,8 @@ def selected_analysis_operations(
         selected.append("registration")
     if visualization:
         selected.append("visualization")
+    if mip_export:
+        selected.append("mip_export")
     return tuple(selected)
 
 
@@ -929,6 +1000,7 @@ def resolve_analysis_execution_sequence(
     particle_detection: bool,
     registration: bool,
     visualization: bool,
+    mip_export: bool,
     analysis_parameters: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[str, ...]:
     """Resolve selected analyses into execution order.
@@ -947,6 +1019,8 @@ def resolve_analysis_execution_sequence(
         Whether registration is enabled.
     visualization : bool
         Whether visualization is enabled.
+    mip_export : bool
+        Whether MIP export is enabled.
     analysis_parameters : dict[str, dict[str, Any]], optional
         Candidate per-operation parameter mapping. The ``execution_order``
         field in each selected operation controls ordering.
@@ -965,6 +1039,7 @@ def resolve_analysis_execution_sequence(
         particle_detection=particle_detection,
         registration=registration,
         visualization=visualization,
+        mip_export=mip_export,
     )
     index_map = {name: idx for idx, name in enumerate(ANALYSIS_OPERATION_ORDER)}
     return tuple(
@@ -2548,6 +2623,8 @@ class WorkflowConfig:
         Flag indicating whether registration workflow should run.
     visualization : bool
         Flag indicating whether visualization workflow should run.
+    mip_export : bool
+        Flag indicating whether MIP-export workflow should run.
     zarr_save : ZarrSaveConfig
         Analysis-store chunking and pyramid configuration for saved Zarr data.
     analysis_parameters : dict[str, dict[str, Any]]
@@ -2564,6 +2641,7 @@ class WorkflowConfig:
     particle_detection: bool = False
     registration: bool = False
     visualization: bool = False
+    mip_export: bool = False
     zarr_save: ZarrSaveConfig = field(default_factory=ZarrSaveConfig)
     analysis_parameters: Dict[str, Dict[str, Any]] = field(
         default_factory=default_analysis_operation_parameters
@@ -2606,6 +2684,7 @@ class WorkflowConfig:
                 self.particle_detection,
                 self.registration,
                 self.visualization,
+                self.mip_export,
             )
         )
 
