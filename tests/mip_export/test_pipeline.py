@@ -234,3 +234,61 @@ def test_run_export_task_reads_multi_position_source_in_blocks(
     observed = np.asarray(tifffile.imread(str(result["path"])))
     np.testing.assert_array_equal(observed, expected)
     assert guarded.read_count > 1
+
+
+def test_run_mip_export_analysis_distributed_writes_expected_outputs(
+    tmp_path: Path,
+) -> None:
+    distributed = pytest.importorskip("dask.distributed")
+
+    store_path = tmp_path / "mip_distributed_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 2 * 1 * 4 * 6 * 8, dtype=np.uint16).reshape(
+        (1, 2, 1, 4, 6, 8)
+    )
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 2, 3, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    with distributed.LocalCluster(
+        n_workers=2,
+        threads_per_worker=1,
+        processes=False,
+        dashboard_address=None,
+    ) as cluster:
+        with distributed.Client(cluster) as client:
+            summary = run_mip_export_analysis(
+                zarr_path=store_path,
+                parameters={
+                    "input_source": "data",
+                    "position_mode": "per_position",
+                    "export_format": "zarr",
+                    "output_directory": str(tmp_path / "mip_distributed_outputs"),
+                },
+                client=client,
+            )
+
+    assert summary.export_format == "zarr"
+    assert summary.position_mode == "per_position"
+    assert summary.task_count == 6
+    assert summary.exported_files == 6
+
+    output_directory = Path(summary.output_directory)
+    xy_path = output_directory / "mip_xy_p0001_t0000_c0000.zarr"
+    xz_path = output_directory / "mip_xz_p0001_t0000_c0000.zarr"
+    yz_path = output_directory / "mip_yz_p0001_t0000_c0000.zarr"
+    assert xy_path.exists()
+    assert xz_path.exists()
+    assert yz_path.exists()
+
+    expected_source = data[0, 1, 0, :, :, :]
+    xy = np.asarray(zarr.open_group(str(xy_path), mode="r")["data"])
+    xz = np.asarray(zarr.open_group(str(xz_path), mode="r")["data"])
+    yz = np.asarray(zarr.open_group(str(yz_path), mode="r")["data"])
+    np.testing.assert_array_equal(xy, np.max(expected_source, axis=0))
+    np.testing.assert_array_equal(xz, np.max(expected_source, axis=1))
+    np.testing.assert_array_equal(yz, np.max(expected_source, axis=2))

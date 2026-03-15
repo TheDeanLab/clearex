@@ -77,6 +77,46 @@ class _MipExportTask:
 
 
 @dataclass(frozen=True)
+class _PlannedOutput:
+    """Execution plan metadata for one projection output file.
+
+    Attributes
+    ----------
+    task_index : int
+        Stable index of the projection task in submission order.
+    task : _MipExportTask
+        Projection export task definition.
+    axes : tuple[str, ...]
+        Output axis labels.
+    output_shape : tuple[int, ...]
+        Output array shape.
+    preserved_axes : tuple[int, ...]
+        Source-axis indices preserved in output order.
+    reduction_axis : int
+        Source-axis index reduced by max-projection.
+    reduction_block_size : int
+        Reduction-axis block length used for source reads.
+    tile_shape : tuple[int, ...]
+        Output tile shape used for distributed tile tasks.
+    output_tiles : tuple[tuple[slice, ...], ...]
+        Output tile slices.
+    output_path : pathlib.Path
+        Destination output path.
+    """
+
+    task_index: int
+    task: _MipExportTask
+    axes: tuple[str, ...]
+    output_shape: tuple[int, ...]
+    preserved_axes: tuple[int, ...]
+    reduction_axis: int
+    reduction_block_size: int
+    tile_shape: tuple[int, ...]
+    output_tiles: tuple[tuple[slice, ...], ...]
+    output_path: Path
+
+
+@dataclass(frozen=True)
 class MipExportSummary:
     """Summary metadata for one MIP-export run.
 
@@ -500,6 +540,33 @@ def _coerce_chunk_length(chunk_value: Any) -> int:
     return max(1, parsed)
 
 
+def _close_zarr_store(container: Any) -> None:
+    """Close a Zarr store handle when the backing store supports it.
+
+    Parameters
+    ----------
+    container : Any
+        Zarr group/array-like object exposing a ``store`` attribute.
+
+    Returns
+    -------
+    None
+        Store closure is best-effort.
+
+    Raises
+    ------
+    None
+        Errors during closure are intentionally ignored.
+    """
+    store = getattr(container, "store", None)
+    close_method = getattr(store, "close", None)
+    if callable(close_method):
+        try:
+            close_method()
+        except Exception:
+            return
+
+
 def _choose_reduction_block_size(
     *,
     source_array: Any,
@@ -665,6 +732,42 @@ def _iter_tile_slices(
     ]
 
 
+def _tile_slices_to_bounds(tile_slices: tuple[slice, ...]) -> tuple[tuple[int, int], ...]:
+    """Convert tile slices into serializable integer bounds.
+
+    Parameters
+    ----------
+    tile_slices : tuple[slice, ...]
+        Output tile slices.
+
+    Returns
+    -------
+    tuple[tuple[int, int], ...]
+        Tile bounds as ``((start, stop), ...)``.
+    """
+    return tuple(
+        (int(tile_slice.start), int(tile_slice.stop)) for tile_slice in tile_slices
+    )
+
+
+def _tile_bounds_to_slices(
+    tile_bounds: tuple[tuple[int, int], ...],
+) -> tuple[slice, ...]:
+    """Convert serialized tile bounds back into slices.
+
+    Parameters
+    ----------
+    tile_bounds : tuple[tuple[int, int], ...]
+        Tile bounds as ``((start, stop), ...)``.
+
+    Returns
+    -------
+    tuple[slice, ...]
+        Tile slices.
+    """
+    return tuple(slice(int(start), int(stop)) for start, stop in tile_bounds)
+
+
 def _max_reduce_into(
     current: Optional[np.ndarray],
     update: np.ndarray,
@@ -693,6 +796,182 @@ def _max_reduce_into(
         return update_arr
     np.maximum(current, update_arr, out=current)
     return current
+
+
+def _plan_projection_output(
+    *,
+    task_index: int,
+    task: _MipExportTask,
+    source_array: Any,
+    output_directory: Path,
+    export_format: str,
+    position_mode: str,
+) -> _PlannedOutput:
+    """Build execution metadata for one projection output.
+
+    Parameters
+    ----------
+    task_index : int
+        Stable projection-task index.
+    task : _MipExportTask
+        Projection export task.
+    source_array : Any
+        Source array in canonical ``(t, p, c, z, y, x)`` order.
+    output_directory : pathlib.Path
+        Base output directory for this run.
+    export_format : str
+        Export format identifier.
+    position_mode : str
+        Position mode identifier.
+
+    Returns
+    -------
+    _PlannedOutput
+        Planned output metadata.
+    """
+    axes = _projection_axes(
+        projection=str(task.projection),
+        position_mode=str(position_mode),
+    )
+    source_shape_tpczyx = tuple(int(value) for value in source_array.shape)
+    output_shape, preserved_axes, reduction_axis = _projection_layout(
+        shape_tpczyx=source_shape_tpczyx,
+        projection=str(task.projection),
+        position_mode=str(position_mode),
+    )
+    reduction_block_size = _choose_reduction_block_size(
+        source_array=source_array,
+        reduction_axis=int(reduction_axis),
+        preserved_shape=tuple(int(v) for v in output_shape),
+    )
+    tile_shape = _choose_preserved_tile_shape(
+        source_array=source_array,
+        preserved_axes=tuple(int(v) for v in preserved_axes),
+        preserved_shape=tuple(int(v) for v in output_shape),
+        reduction_block_size=int(reduction_block_size),
+    )
+    output_tiles = tuple(
+        _iter_tile_slices(
+            shape=tuple(int(v) for v in output_shape),
+            tile_shape=tuple(int(v) for v in tile_shape),
+        )
+    )
+    output_path = _build_output_path(
+        output_directory=Path(output_directory),
+        export_format=str(export_format),
+        task=task,
+    )
+    return _PlannedOutput(
+        task_index=int(task_index),
+        task=task,
+        axes=tuple(str(axis) for axis in axes),
+        output_shape=tuple(int(v) for v in output_shape),
+        preserved_axes=tuple(int(v) for v in preserved_axes),
+        reduction_axis=int(reduction_axis),
+        reduction_block_size=int(reduction_block_size),
+        tile_shape=tuple(int(v) for v in tile_shape),
+        output_tiles=output_tiles,
+        output_path=output_path,
+    )
+
+
+def _run_export_tile_task(
+    *,
+    zarr_path: str,
+    source_component: str,
+    position_mode: str,
+    task_index: int,
+    task: _MipExportTask,
+    tile_bounds: tuple[tuple[int, int], ...],
+) -> dict[str, Any]:
+    """Compute one projection tile for a projection-export task.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Canonical analysis-store path.
+    source_component : str
+        Source data component path.
+    position_mode : str
+        Position mode.
+    task_index : int
+        Stable projection-task index.
+    task : _MipExportTask
+        Projection task for this tile.
+    tile_bounds : tuple[tuple[int, int], ...]
+        Tile bounds as ``((start, stop), ...)``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Tile payload metadata including task index and output bounds.
+    """
+    root = zarr.open_group(str(zarr_path), mode="r")
+    try:
+        source_array = root[source_component]
+        source_shape_tpczyx = tuple(int(value) for value in source_array.shape)
+        output_shape, preserved_axes, reduction_axis = _projection_layout(
+            shape_tpczyx=source_shape_tpczyx,
+            projection=str(task.projection),
+            position_mode=str(position_mode),
+        )
+        output_slices = _tile_bounds_to_slices(tile_bounds)
+        tile_preserved_shape = tuple(
+            max(1, int(tile_slice.stop) - int(tile_slice.start))
+            for tile_slice in output_slices
+        )
+        # DO NOT REGRESS: size reduction blocks from tile shape, not full output
+        # shape. Full-shape sizing can collapse to tiny blocks and stall throughput.
+        reduction_block_size = _choose_reduction_block_size(
+            source_array=source_array,
+            reduction_axis=int(reduction_axis),
+            preserved_shape=tuple(int(v) for v in tile_preserved_shape),
+        )
+        reduction_ranges = _iter_block_ranges(
+            length=int(source_shape_tpczyx[int(reduction_axis)]),
+            block_size=int(reduction_block_size),
+        )
+        fixed_indices: dict[int, int] = {
+            0: int(task.t_index),
+            2: int(task.c_index),
+        }
+        if task.p_index is not None:
+            fixed_indices[1] = int(task.p_index)
+
+        chunk_slice_axes = tuple(
+            sorted(
+                (
+                    int(reduction_axis),
+                    *tuple(int(axis) for axis in preserved_axes),
+                )
+            )
+        )
+        reduce_axis_in_chunk = int(chunk_slice_axes.index(int(reduction_axis)))
+
+        reduced_tile: Optional[np.ndarray] = None
+        for red_start, red_stop in reduction_ranges:
+            source_selection: list[object] = [slice(None)] * 6
+            for axis_index, fixed_value in fixed_indices.items():
+                source_selection[int(axis_index)] = int(fixed_value)
+            source_selection[int(reduction_axis)] = slice(int(red_start), int(red_stop))
+            for source_axis, output_slice in zip(preserved_axes, output_slices):
+                source_selection[int(source_axis)] = slice(
+                    int(output_slice.start),
+                    int(output_slice.stop),
+                )
+            source_chunk = np.asarray(source_array[tuple(source_selection)])
+            reduced_tile = _max_reduce_into(
+                reduced_tile,
+                np.max(source_chunk, axis=int(reduce_axis_in_chunk)),
+            )
+
+        return {
+            "task_index": int(task_index),
+            "tile_bounds": [tuple(int(v) for v in bounds) for bounds in tile_bounds],
+            "tile": np.asarray(reduced_tile),
+        }
+    finally:
+        _close_zarr_store(root)
 
 
 def _chunkwise_projection_from_single_position(
@@ -982,16 +1261,19 @@ def _write_projection_output(
     if output_path.exists():
         shutil.rmtree(output_path)
     root = zarr.open_group(str(output_path), mode="w")
-    payload = np.asarray(projection)
-    root.create_dataset(
-        name="data",
-        data=payload,
-        chunks=_default_projection_chunks(tuple(int(v) for v in payload.shape)),
-        overwrite=True,
-    )
-    root["data"].attrs.update({"axes": [str(axis) for axis in axes]})
-    root.attrs.update({"axes": [str(axis) for axis in axes]})
-    return str(payload.dtype)
+    try:
+        payload = np.asarray(projection)
+        root.create_dataset(
+            name="data",
+            data=payload,
+            chunks=_default_projection_chunks(tuple(int(v) for v in payload.shape)),
+            overwrite=True,
+        )
+        root["data"].attrs.update({"axes": [str(axis) for axis in axes]})
+        root.attrs.update({"axes": [str(axis) for axis in axes]})
+        return str(payload.dtype)
+    finally:
+        _close_zarr_store(root)
 
 
 def _run_export_task(
@@ -1026,130 +1308,142 @@ def _run_export_task(
         Result metadata for manifest/provenance.
     """
     root = zarr.open_group(str(zarr_path), mode="r")
-    source_array = root[source_component]
-    axes = _projection_axes(
-        projection=str(task.projection),
-        position_mode=str(position_mode),
-    )
-    source_shape_tpczyx = tuple(int(value) for value in source_array.shape)
-    output_shape, preserved_axes, reduction_axis = _projection_layout(
-        shape_tpczyx=source_shape_tpczyx,
-        projection=str(task.projection),
-        position_mode=str(position_mode),
-    )
-    reduction_block_size = _choose_reduction_block_size(
-        source_array=source_array,
-        reduction_axis=int(reduction_axis),
-        preserved_shape=tuple(int(v) for v in output_shape),
-    )
-    tile_shape = _choose_preserved_tile_shape(
-        source_array=source_array,
-        preserved_axes=tuple(int(v) for v in preserved_axes),
-        preserved_shape=tuple(int(v) for v in output_shape),
-        reduction_block_size=int(reduction_block_size),
-    )
-    output_tiles = _iter_tile_slices(
-        shape=tuple(int(v) for v in output_shape),
-        tile_shape=tuple(int(v) for v in tile_shape),
-    )
-    reduction_ranges = _iter_block_ranges(
-        length=int(source_shape_tpczyx[int(reduction_axis)]),
-        block_size=int(reduction_block_size),
-    )
-    fixed_indices: dict[int, int] = {
-        0: int(task.t_index),
-        2: int(task.c_index),
-    }
-    if task.p_index is not None:
-        fixed_indices[1] = int(task.p_index)
-
-    chunk_slice_axes = tuple(
-        sorted(
-            (
-                int(reduction_axis),
-                *tuple(int(axis) for axis in preserved_axes),
-            )
+    output_root: Optional[Any] = None
+    try:
+        source_array = root[source_component]
+        axes = _projection_axes(
+            projection=str(task.projection),
+            position_mode=str(position_mode),
         )
-    )
-    reduce_axis_in_chunk = int(chunk_slice_axes.index(int(reduction_axis)))
-
-    output_path = _build_output_path(
-        output_directory=Path(output_directory),
-        export_format=str(export_format),
-        task=task,
-    )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if export_format == "tiff":
-        if output_path.exists():
-            try:
-                output_path.unlink()
-            except Exception:
-                shutil.rmtree(output_path)
-        output_target = tifffile.memmap(
-            str(output_path),
-            shape=tuple(int(v) for v in output_shape),
-            dtype=np.uint16,
-            bigtiff=True,
-            photometric="minisblack",
+        source_shape_tpczyx = tuple(int(value) for value in source_array.shape)
+        output_shape, preserved_axes, reduction_axis = _projection_layout(
+            shape_tpczyx=source_shape_tpczyx,
+            projection=str(task.projection),
+            position_mode=str(position_mode),
         )
-    else:
-        if output_path.exists():
-            shutil.rmtree(output_path)
-        output_root = zarr.open_group(str(output_path), mode="w")
-        output_target = output_root.create_dataset(
-            name="data",
-            shape=tuple(int(v) for v in output_shape),
-            chunks=_default_projection_chunks(
-                tuple(int(v) for v in output_shape)
+        tile_shape = _choose_preserved_tile_shape(
+            source_array=source_array,
+            preserved_axes=tuple(int(v) for v in preserved_axes),
+            preserved_shape=tuple(int(v) for v in output_shape),
+            reduction_block_size=_coerce_chunk_length(
+                getattr(source_array, "chunks", (1, 1, 1, 1, 1, 1))[int(reduction_axis)]
             ),
-            dtype=np.dtype(getattr(source_array, "dtype")),
-            overwrite=True,
         )
-        output_root["data"].attrs.update({"axes": [str(axis) for axis in axes]})
-        output_root.attrs.update({"axes": [str(axis) for axis in axes]})
+        output_tiles = _iter_tile_slices(
+            shape=tuple(int(v) for v in output_shape),
+            tile_shape=tuple(int(v) for v in tile_shape),
+        )
+        fixed_indices: dict[int, int] = {
+            0: int(task.t_index),
+            2: int(task.c_index),
+        }
+        if task.p_index is not None:
+            fixed_indices[1] = int(task.p_index)
 
-    for output_slices in output_tiles:
-        reduced_tile: Optional[np.ndarray] = None
-        for red_start, red_stop in reduction_ranges:
-            source_selection: list[object] = [slice(None)] * 6
-            for axis_index, fixed_value in fixed_indices.items():
-                source_selection[int(axis_index)] = int(fixed_value)
-            source_selection[int(reduction_axis)] = slice(
-                int(red_start), int(red_stop)
+        chunk_slice_axes = tuple(
+            sorted(
+                (
+                    int(reduction_axis),
+                    *tuple(int(axis) for axis in preserved_axes),
+                )
             )
-            for source_axis, output_slice in zip(preserved_axes, output_slices):
-                source_selection[int(source_axis)] = slice(
-                    int(output_slice.start),
-                    int(output_slice.stop),
+        )
+        reduce_axis_in_chunk = int(chunk_slice_axes.index(int(reduction_axis)))
+
+        output_path = _build_output_path(
+            output_directory=Path(output_directory),
+            export_format=str(export_format),
+            task=task,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if export_format == "tiff":
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                except Exception:
+                    shutil.rmtree(output_path)
+            output_target = tifffile.memmap(
+                str(output_path),
+                shape=tuple(int(v) for v in output_shape),
+                dtype=np.uint16,
+                bigtiff=True,
+                photometric="minisblack",
+            )
+        else:
+            if output_path.exists():
+                shutil.rmtree(output_path)
+            output_root = zarr.open_group(str(output_path), mode="w")
+            output_target = output_root.create_dataset(
+                name="data",
+                shape=tuple(int(v) for v in output_shape),
+                chunks=_default_projection_chunks(tuple(int(v) for v in output_shape)),
+                dtype=np.dtype(getattr(source_array, "dtype")),
+                overwrite=True,
+            )
+            output_root["data"].attrs.update({"axes": [str(axis) for axis in axes]})
+            output_root.attrs.update({"axes": [str(axis) for axis in axes]})
+
+        for output_slices in output_tiles:
+            tile_preserved_shape = tuple(
+                max(1, int(output_slice.stop) - int(output_slice.start))
+                for output_slice in output_slices
+            )
+            # DO NOT REGRESS: tile-local preserved shape is required for stable
+            # reduction block sizing and prevents apparent distributed stalls.
+            reduction_block_size = _choose_reduction_block_size(
+                source_array=source_array,
+                reduction_axis=int(reduction_axis),
+                preserved_shape=tuple(int(v) for v in tile_preserved_shape),
+            )
+            reduction_ranges = _iter_block_ranges(
+                length=int(source_shape_tpczyx[int(reduction_axis)]),
+                block_size=int(reduction_block_size),
+            )
+            reduced_tile: Optional[np.ndarray] = None
+            for red_start, red_stop in reduction_ranges:
+                source_selection: list[object] = [slice(None)] * 6
+                for axis_index, fixed_value in fixed_indices.items():
+                    source_selection[int(axis_index)] = int(fixed_value)
+                source_selection[int(reduction_axis)] = slice(
+                    int(red_start), int(red_stop)
+                )
+                for source_axis, output_slice in zip(preserved_axes, output_slices):
+                    source_selection[int(source_axis)] = slice(
+                        int(output_slice.start),
+                        int(output_slice.stop),
+                    )
+
+                source_chunk = np.asarray(source_array[tuple(source_selection)])
+                reduced_tile = _max_reduce_into(
+                    reduced_tile,
+                    np.max(source_chunk, axis=int(reduce_axis_in_chunk)),
                 )
 
-            source_chunk = np.asarray(source_array[tuple(source_selection)])
-            reduced_tile = _max_reduce_into(
-                reduced_tile,
-                np.max(source_chunk, axis=int(reduce_axis_in_chunk)),
-            )
+            tile_payload = np.asarray(reduced_tile)
+            if export_format == "tiff":
+                output_target[output_slices] = _to_uint16(tile_payload)
+            else:
+                output_target[output_slices] = tile_payload
 
-        tile_payload = np.asarray(reduced_tile)
         if export_format == "tiff":
-            output_target[output_slices] = _to_uint16(tile_payload)
+            output_target.flush()
+            stored_dtype = str(np.dtype(np.uint16))
         else:
-            output_target[output_slices] = tile_payload
-
-    if export_format == "tiff":
-        output_target.flush()
-        stored_dtype = str(np.dtype(np.uint16))
-    else:
-        stored_dtype = str(np.dtype(getattr(output_target, "dtype", source_array.dtype)))
-    return {
-        "path": str(output_path),
-        "projection": str(task.projection),
-        "t_index": int(task.t_index),
-        "c_index": int(task.c_index),
-        "p_index": int(task.p_index) if task.p_index is not None else None,
-        "axes": list(axes),
-        "dtype": str(stored_dtype),
-    }
+            stored_dtype = str(np.dtype(getattr(output_target, "dtype", source_array.dtype)))
+        return {
+            "path": str(output_path),
+            "projection": str(task.projection),
+            "t_index": int(task.t_index),
+            "c_index": int(task.c_index),
+            "p_index": int(task.p_index) if task.p_index is not None else None,
+            "axes": list(axes),
+            "dtype": str(stored_dtype),
+        }
+    finally:
+        if output_root is not None:
+            _close_zarr_store(output_root)
+        _close_zarr_store(root)
 
 
 def run_mip_export_analysis(
@@ -1222,92 +1516,229 @@ def run_mip_export_analysis(
     _emit(10, f"Prepared {total} projection export tasks")
 
     task_results: list[dict[str, Any]] = []
-    if client is None:
-        delayed_tasks = [
-            delayed(_run_export_task)(
-                zarr_path=str(zarr_path),
-                source_component=source_component,
-                output_directory=str(output_directory),
-                export_format=export_format,
-                position_mode=position_mode,
-                task=task,
-            )
-            for task in tasks
-        ]
-        _emit(15, "Running MIP-export tasks with local process scheduler")
-        if delayed_tasks:
-            computed = dask.compute(*delayed_tasks, scheduler="processes")
-            task_results = [dict(item) for item in computed]
-        _emit(95, "Completed MIP-export task execution")
-    else:
-        from dask.distributed import as_completed
-
-        thread_capacity = _estimate_worker_thread_capacity(client)
-        max_in_flight = max(16, int(thread_capacity) * 4)
-        _emit(
-            15,
-            "Submitting MIP-export tasks to Dask client "
-            f"(worker_threads={thread_capacity}, max_in_flight={max_in_flight})",
-        )
-        completed = 0
-        pending_count = 0
-        completion_queue = as_completed()
-
-        for task in tasks:
-            completion_queue.add(
-                client.submit(
-                    _run_export_task,
+    try:
+        if client is None:
+            delayed_tasks = [
+                delayed(_run_export_task)(
                     zarr_path=str(zarr_path),
                     source_component=source_component,
                     output_directory=str(output_directory),
                     export_format=export_format,
                     position_mode=position_mode,
                     task=task,
-                    pure=False,
                 )
+                for task in tasks
+            ]
+            _emit(15, "Running MIP-export tasks with local process scheduler")
+            if delayed_tasks:
+                computed = dask.compute(*delayed_tasks, scheduler="processes")
+                task_results = [dict(item) for item in computed]
+            _emit(95, "Completed MIP-export task execution")
+        else:
+            from dask.distributed import as_completed
+
+            thread_capacity = _estimate_worker_thread_capacity(client)
+            max_in_flight = max(64, int(thread_capacity) * 2)
+
+            planned_outputs = [
+                _plan_projection_output(
+                    task_index=int(task_index),
+                    task=task,
+                    source_array=source_array,
+                    output_directory=Path(output_directory),
+                    export_format=export_format,
+                    position_mode=position_mode,
+                )
+                for task_index, task in enumerate(tasks)
+            ]
+            tile_work_items: list[tuple[int, tuple[tuple[int, int], ...]]] = []
+            tiff_targets: dict[int, Any] = {}
+            stored_dtypes: dict[int, str] = {}
+
+            for planned in planned_outputs:
+                planned.output_path.parent.mkdir(parents=True, exist_ok=True)
+                if export_format == "tiff":
+                    if planned.output_path.exists():
+                        try:
+                            planned.output_path.unlink()
+                        except Exception:
+                            shutil.rmtree(planned.output_path)
+                    tiff_targets[int(planned.task_index)] = tifffile.memmap(
+                        str(planned.output_path),
+                        shape=tuple(int(v) for v in planned.output_shape),
+                        dtype=np.uint16,
+                        bigtiff=True,
+                        photometric="minisblack",
+                    )
+                    stored_dtypes[int(planned.task_index)] = str(np.dtype(np.uint16))
+                else:
+                    if planned.output_path.exists():
+                        shutil.rmtree(planned.output_path)
+                    output_root = zarr.open_group(str(planned.output_path), mode="w")
+                    try:
+                        zarr_chunks = tuple(
+                            max(1, min(int(length), int(chunk)))
+                            for length, chunk in zip(
+                                planned.output_shape, planned.tile_shape
+                            )
+                        )
+                        output_target = output_root.create_dataset(
+                            name="data",
+                            shape=tuple(int(v) for v in planned.output_shape),
+                            chunks=zarr_chunks,
+                            dtype=np.dtype(getattr(source_array, "dtype")),
+                            overwrite=True,
+                        )
+                        output_root["data"].attrs.update(
+                            {"axes": [str(axis) for axis in planned.axes]}
+                        )
+                        output_root.attrs.update(
+                            {"axes": [str(axis) for axis in planned.axes]}
+                        )
+                        stored_dtypes[int(planned.task_index)] = str(
+                            np.dtype(getattr(output_target, "dtype", source_array.dtype))
+                        )
+                    finally:
+                        _close_zarr_store(output_root)
+
+                tile_work_items.extend(
+                    [
+                        (
+                            int(planned.task_index),
+                            _tile_slices_to_bounds(tile_slices),
+                        )
+                        for tile_slices in planned.output_tiles
+                    ]
+                )
+            total_tile_tasks = int(len(tile_work_items))
+            _emit(
+                15,
+                "Submitting MIP-export tile tasks to Dask client "
+                f"(outputs={total}, tiles={total_tile_tasks}, "
+                f"worker_threads={thread_capacity}, max_in_flight={max_in_flight})",
             )
-            pending_count += 1
-            if pending_count < max_in_flight:
-                continue
-            completed_future = next(completion_queue)
-            task_results.append(dict(completed_future.result()))
-            pending_count -= 1
-            completed += 1
-            progress = 15 + int((completed / max(1, total)) * 80)
-            _emit(progress, f"Exported projection {completed}/{total}")
+            completed_tiles = 0
+            pending_count = 0
+            completion_queue = as_completed()
 
-        for completed_future in completion_queue:
-            task_results.append(dict(completed_future.result()))
-            completed += 1
-            progress = 15 + int((completed / max(1, total)) * 80)
-            _emit(progress, f"Exported projection {completed}/{total}")
+            for task_index, tile_bounds in tile_work_items:
+                planned = planned_outputs[int(task_index)]
+                completion_queue.add(
+                    client.submit(
+                        _run_export_tile_task,
+                        zarr_path=str(zarr_path),
+                        source_component=source_component,
+                        position_mode=position_mode,
+                        task_index=int(planned.task_index),
+                        task=planned.task,
+                        tile_bounds=tile_bounds,
+                        pure=False,
+                    )
+                )
+                pending_count += 1
+                if pending_count < max_in_flight:
+                    continue
+                completed_future = next(completion_queue)
+                tile_result = dict(completed_future.result())
+                result_task_index = int(tile_result["task_index"])
+                tile_payload = np.asarray(tile_result["tile"])
+                tile_slices = _tile_bounds_to_slices(
+                    tuple(
+                        (int(bounds[0]), int(bounds[1]))
+                        for bounds in tile_result["tile_bounds"]
+                    )
+                )
+                if export_format == "tiff":
+                    tiff_targets[int(result_task_index)][tile_slices] = _to_uint16(
+                        tile_payload
+                    )
+                else:
+                    planned = planned_outputs[int(result_task_index)]
+                    output_root = zarr.open_group(str(planned.output_path), mode="a")
+                    try:
+                        output_root["data"][tile_slices] = tile_payload
+                    finally:
+                        _close_zarr_store(output_root)
+                pending_count -= 1
+                completed_tiles += 1
+                progress = 15 + int((completed_tiles / max(1, total_tile_tasks)) * 80)
+                _emit(progress, f"Exported tile {completed_tiles}/{total_tile_tasks}")
 
+            for completed_future in completion_queue:
+                tile_result = dict(completed_future.result())
+                result_task_index = int(tile_result["task_index"])
+                tile_payload = np.asarray(tile_result["tile"])
+                tile_slices = _tile_bounds_to_slices(
+                    tuple(
+                        (int(bounds[0]), int(bounds[1]))
+                        for bounds in tile_result["tile_bounds"]
+                    )
+                )
+                if export_format == "tiff":
+                    tiff_targets[int(result_task_index)][tile_slices] = _to_uint16(
+                        tile_payload
+                    )
+                else:
+                    planned = planned_outputs[int(result_task_index)]
+                    output_root = zarr.open_group(str(planned.output_path), mode="a")
+                    try:
+                        output_root["data"][tile_slices] = tile_payload
+                    finally:
+                        _close_zarr_store(output_root)
+                completed_tiles += 1
+                progress = 15 + int((completed_tiles / max(1, total_tile_tasks)) * 80)
+                _emit(progress, f"Exported tile {completed_tiles}/{total_tile_tasks}")
+
+            for planned in planned_outputs:
+                task = planned.task
+                if export_format == "tiff":
+                    tiff_targets[int(planned.task_index)].flush()
+                task_results.append(
+                    {
+                        "path": str(planned.output_path),
+                        "projection": str(task.projection),
+                        "t_index": int(task.t_index),
+                        "c_index": int(task.c_index),
+                        "p_index": (
+                            int(task.p_index) if task.p_index is not None else None
+                        ),
+                        "axes": [str(axis) for axis in planned.axes],
+                        "dtype": str(stored_dtypes[int(planned.task_index)]),
+                    }
+                )
+    finally:
+        _close_zarr_store(root)
     task_results = sorted(task_results, key=lambda item: str(item.get("path", "")))
     exported_files = int(len(task_results))
 
     component = "results/mip_export/latest"
     root_w = zarr.open_group(str(zarr_path), mode="a")
-    results_group = root_w.require_group("results")
-    mip_group = results_group.require_group("mip_export")
-    if "latest" in mip_group:
-        del mip_group["latest"]
-    latest_group = mip_group.create_group("latest")
-    latest_group.attrs.update(
-        {
-            "storage_policy": "latest_only",
-            "source_component": source_component,
-            "export_format": export_format,
-            "position_mode": position_mode,
-            "output_directory": str(output_directory),
-            "task_count": total,
-            "exported_files": exported_files,
-            "projections": [str(value) for value in _PROJECTIONS],
-            "parameters": {str(key): value for key, value in dict(normalized).items()},
-            "manifest_preview": [
-                str(item.get("path", "")) for item in task_results[:128]
-            ],
-        }
-    )
+    try:
+        results_group = root_w.require_group("results")
+        mip_group = results_group.require_group("mip_export")
+        if "latest" in mip_group:
+            del mip_group["latest"]
+        latest_group = mip_group.create_group("latest")
+        latest_group.attrs.update(
+            {
+                "storage_policy": "latest_only",
+                "source_component": source_component,
+                "export_format": export_format,
+                "position_mode": position_mode,
+                "output_directory": str(output_directory),
+                "task_count": total,
+                "exported_files": exported_files,
+                "projections": [str(value) for value in _PROJECTIONS],
+                "parameters": {
+                    str(key): value for key, value in dict(normalized).items()
+                },
+                "manifest_preview": [
+                    str(item.get("path", "")) for item in task_results[:128]
+                ],
+            }
+        )
+    finally:
+        _close_zarr_store(root_w)
 
     register_latest_output_reference(
         zarr_path=zarr_path,
