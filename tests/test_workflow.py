@@ -123,6 +123,9 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
         assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 4
         assert cfg.analysis_parameters["particle_detection"]["input_source"] == "data"
+        assert "usegment3d" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["usegment3d"]["execution_order"] == 5
+        assert cfg.analysis_parameters["usegment3d"]["input_source"] == "data"
         assert cfg.analysis_parameters["visualization"]["show_all_positions"] is False
         assert cfg.analysis_parameters["visualization"]["position_index"] == 0
         assert cfg.analysis_parameters["visualization"]["use_multiscale"] is True
@@ -130,7 +133,7 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["visualization"]["keyframe_manifest_path"] == ""
         assert cfg.analysis_parameters["visualization"]["keyframe_layer_overrides"] == []
         assert "mip_export" in cfg.analysis_parameters
-        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 7
+        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 8
         assert cfg.analysis_parameters["mip_export"]["position_mode"] == "multi_position"
         assert cfg.analysis_parameters["mip_export"]["export_format"] == "tiff"
 
@@ -396,6 +399,25 @@ class TestWorkflowConfig:
         assert params["shear_xz"] == pytest.approx(np.tan(np.deg2rad(-10.0)))
         assert params["shear_yz"] == pytest.approx(0.0)
 
+    def test_normalizes_usegment3d_parameters(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "usegment3d": {
+                    "execution_order": "11",
+                    "input_source": "deconvolution",
+                    "memory_overhead_factor": "3.5",
+                    "overlap_zyx": [1, 2, 3],
+                    "force_rerun": 1,
+                }
+            }
+        )
+        params = cfg.analysis_parameters["usegment3d"]
+        assert params["execution_order"] == 11
+        assert params["input_source"] == "deconvolution"
+        assert params["memory_overhead_factor"] == 3.5
+        assert params["overlap_zyx"] == [1, 2, 3]
+        assert params["force_rerun"] is True
+
 
 class TestZarrSaveConfig:
     def test_default_tpczyx_conversion(self):
@@ -584,12 +606,13 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     assert normalized["deconvolution"]["execution_order"] == 2
     assert normalized["flatfield"]["execution_order"] == 1
     assert normalized["shear_transform"]["execution_order"] == 3
+    assert normalized["usegment3d"]["execution_order"] == 5
     assert normalized["visualization"]["input_source"] == "data"
     assert normalized["visualization"]["show_all_positions"] is False
     assert normalized["visualization"]["use_multiscale"] is True
     assert normalized["visualization"]["capture_keyframes"] is True
     assert normalized["visualization"]["keyframe_layer_overrides"] == []
-    assert normalized["mip_export"]["execution_order"] == 7
+    assert normalized["mip_export"]["execution_order"] == 8
     assert normalized["mip_export"]["position_mode"] == "multi_position"
     assert normalized["mip_export"]["export_format"] == "tiff"
 
@@ -600,6 +623,7 @@ def test_resolve_analysis_execution_sequence_uses_execution_order():
         deconvolution=True,
         shear_transform=True,
         particle_detection=True,
+        usegment3d=False,
         registration=True,
         visualization=False,
         mip_export=False,
@@ -626,6 +650,7 @@ def test_resolve_analysis_execution_sequence_includes_mip_export_last_by_default
         deconvolution=False,
         shear_transform=False,
         particle_detection=False,
+        usegment3d=False,
         registration=False,
         visualization=True,
         mip_export=True,
@@ -640,6 +665,7 @@ def test_analysis_operation_order_contains_expected_keys():
         "deconvolution",
         "shear_transform",
         "particle_detection",
+        "usegment3d",
         "registration",
         "visualization",
         "mip_export",

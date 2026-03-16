@@ -153,6 +153,14 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     input_args.add_argument(
+        "--usegment3d",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Run u-segment3d workflow",
+    )
+
+    input_args.add_argument(
         "--shear-transform",
         required=False,
         default=False,

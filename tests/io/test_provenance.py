@@ -57,6 +57,7 @@ def test_persist_run_provenance_hash_chain(tmp_path: Path):
         file=str(store_path),
         flatfield=True,
         deconvolution=True,
+        usegment3d=True,
         registration=True,
     )
     image_info = ImageInfo(
@@ -89,7 +90,9 @@ def test_persist_run_provenance_hash_chain(tmp_path: Path):
     assert record_1["workflow"]["dask_backend_summary"].startswith("LocalCluster")
     assert record_1["workflow"]["dask_backend"]["mode"] == "local_cluster"
     assert record_1["workflow"]["flatfield"] is True
+    assert record_1["workflow"]["usegment3d"] is True
     assert "flatfield" in record_1["workflow"]["selected_analyses"]
+    assert "usegment3d" in record_1["workflow"]["selected_analyses"]
     assert record_1["workflow"]["zarr_chunks_ptczyx"] == "p=1, t=1, c=1, z=256, y=256, x=256"
     assert "z=1,2,4,8" in record_1["workflow"]["zarr_pyramid_ptczyx"]
 

@@ -73,6 +73,40 @@ from clearex.visualization.pipeline import (
 from clearex.mip_export.pipeline import (
     run_mip_export_analysis,
 )
+try:
+    from clearex.usegment3d.pipeline import (
+        run_usegment3d_analysis,
+    )
+except ImportError:
+    def run_usegment3d_analysis(*, zarr_path, parameters, client, progress_callback):
+        """Fallback when the optional usegment3d runtime module is unavailable.
+
+        Parameters
+        ----------
+        zarr_path : str
+            Canonical analysis-store path.
+        parameters : dict[str, Any]
+            Runtime parameter mapping.
+        client : Any
+            Dask client handle.
+        progress_callback : callable
+            Progress callback.
+
+        Returns
+        -------
+        None
+            This fallback always raises before returning.
+
+        Raises
+        ------
+        RuntimeError
+            Always raised to indicate missing usegment3d implementation.
+        """
+        del zarr_path, parameters, client, progress_callback
+        raise RuntimeError(
+            "usegment3d analysis is unavailable: "
+            "could not import clearex.usegment3d.pipeline."
+        )
 from clearex.workflow import (
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
@@ -96,12 +130,20 @@ _ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
     "flatfield": "results/flatfield/latest/data",
     "deconvolution": "results/deconvolution/latest/data",
     "shear_transform": "results/shear_transform/latest/data",
+    "usegment3d": "results/usegment3d/latest/data",
     "registration": "results/registration/latest/data",
     "visualization": "data",
 }
 
 _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
-    {"flatfield", "deconvolution", "shear_transform", "particle_detection", "mip_export"}
+    {
+        "flatfield",
+        "deconvolution",
+        "shear_transform",
+        "particle_detection",
+        "usegment3d",
+        "mip_export",
+    }
 )
 _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
     {
@@ -109,6 +151,7 @@ _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
         "deconvolution",
         "shear_transform",
         "particle_detection",
+        "usegment3d",
         "registration",
         "mip_export",
     }
@@ -124,6 +167,7 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "deconvolution": ("results/deconvolution/latest/data",),
     "shear_transform": ("results/shear_transform/latest/data",),
     "particle_detection": ("results/particle_detection/latest/detections",),
+    "usegment3d": ("results/usegment3d/latest/data",),
     "registration": ("results/registration/latest/data",),
     "mip_export": ("results/mip_export/latest",),
 }
@@ -303,6 +347,7 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         deconvolution=args.deconvolution,
         shear_transform=args.shear_transform,
         particle_detection=args.particle_detection,
+        usegment3d=args.usegment3d,
         registration=args.registration,
         visualization=args.visualization,
         mip_export=args.mip_export,
@@ -477,15 +522,16 @@ def _configure_dask_backend(
         return None
 
     backend = workflow.dask_backend
+    workload_name = workload.strip().lower()
     logger.info(
         "Dask backend selection: "
-        f"{format_dask_backend_summary(backend)} (workload={workload})"
+        f"{format_dask_backend_summary(backend)} (workload={workload_name})"
     )
 
     try:
         if backend.mode == DASK_BACKEND_LOCAL_CLUSTER:
             local_cfg = backend.local_cluster
-            requested_processes = workload.strip().lower() == "analysis"
+            requested_processes = workload_name == "analysis"
             default_local_cfg = LocalClusterConfig()
             effective_n_workers = local_cfg.n_workers
             effective_threads_per_worker = local_cfg.threads_per_worker
@@ -510,6 +556,45 @@ def _configure_dask_backend(
                     f"memory_limit={effective_memory_limit}, "
                     f"gpus={recommendation.detected_gpu_count}."
                 )
+
+            if workload_name == "analysis":
+                gpu_worker_cap: Optional[int] = None
+                if bool(getattr(workflow, "usegment3d", False)):
+                    try:
+                        normalized_params = normalize_analysis_operation_parameters(
+                            workflow.analysis_parameters
+                        )
+                    except Exception:
+                        normalized_params = {}
+                    usegment3d_params = dict(normalized_params.get("usegment3d", {}))
+                    gpu_requested = bool(
+                        usegment3d_params.get("gpu", False)
+                        or usegment3d_params.get("require_gpu", False)
+                    )
+                    if gpu_requested:
+                        gpu_recommendation = recommend_local_cluster_config(
+                            chunks_tpczyx=workflow.zarr_save.chunks_tpczyx(),
+                        )
+                        detected_gpu_count = int(
+                            gpu_recommendation.detected_gpu_count
+                        )
+                        if detected_gpu_count > 0:
+                            gpu_worker_cap = max(1, detected_gpu_count)
+
+                if gpu_worker_cap is not None:
+                    requested_workers = (
+                        int(effective_n_workers)
+                        if effective_n_workers is not None
+                        else int(gpu_worker_cap)
+                    )
+                    if requested_workers > int(gpu_worker_cap):
+                        logger.info(
+                            "GPU-aware LocalCluster cap applied for analysis: "
+                            f"requested_workers={requested_workers}, "
+                            f"capped_workers={int(gpu_worker_cap)}."
+                        )
+                        effective_n_workers = int(gpu_worker_cap)
+
             effective_worker_count = (
                 int(effective_n_workers) if effective_n_workers is not None else 1
             )
@@ -817,6 +902,7 @@ def _run_workflow(
             deconvolution=workflow.deconvolution,
             shear_transform=workflow.shear_transform,
             particle_detection=workflow.particle_detection,
+            usegment3d=workflow.usegment3d,
             registration=workflow.registration,
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,
@@ -1441,7 +1527,125 @@ def _run_workflow(
                             "Particle detection skipped (no Zarr/N5 store).",
                         )
                     continue
-    
+
+                if operation_name == "usegment3d":
+                    usegment3d_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                        if not _zarr_component_exists(
+                            provenance_store_path,
+                            str(usegment3d_parameters.get("input_source", "data")),
+                        ):
+                            logger.warning(
+                                "Requested usegment3d input component '%s' was not "
+                                "found. Falling back to 'data'.",
+                                usegment3d_parameters.get("input_source", "data"),
+                            )
+                            usegment3d_parameters["input_source"] = "data"
+                            runtime_analysis_parameters["usegment3d"] = dict(
+                                usegment3d_parameters
+                            )
+
+                        progress_state = {"last_percent": -5}
+
+                        def _usegment3d_progress(percent: int, message: str) -> None:
+                            """Throttle usegment3d progress logs.
+
+                            Parameters
+                            ----------
+                            percent : int
+                                Progress percent.
+                            message : str
+                                Progress message.
+
+                            Returns
+                            -------
+                            None
+                                Logger side effects only.
+                            """
+                            last_percent = int(progress_state["last_percent"])
+                            if percent >= 100 or percent - last_percent >= 5:
+                                progress_state["last_percent"] = int(percent)
+                                logger.info(f"[usegment3d] {int(percent)}% - {message}")
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            _emit_analysis_progress(
+                                mapped,
+                                f"usegment3d: {message}",
+                            )
+
+                        summary = run_usegment3d_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=usegment3d_parameters,
+                            client=analysis_client,
+                            progress_callback=_usegment3d_progress,
+                        )
+                        usegment3d_component = str(
+                            getattr(summary, "component", "results/usegment3d/latest")
+                        )
+                        usegment3d_data_component = str(
+                            getattr(
+                                summary,
+                                "data_component",
+                                f"{usegment3d_component}/data",
+                            )
+                        )
+                        usegment3d_source_component = str(
+                            getattr(
+                                summary,
+                                "source_component",
+                                usegment3d_parameters.get("input_source", "data"),
+                            )
+                        )
+                        produced_components["usegment3d"] = usegment3d_data_component
+                        output_records["usegment3d"] = {
+                            "component": usegment3d_component,
+                            "data_component": usegment3d_data_component,
+                            "source_component": usegment3d_source_component,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "usegment3d completed: "
+                            f"component={usegment3d_component}, "
+                            f"data_component={usegment3d_data_component}, "
+                            f"source={usegment3d_source_component}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "usegment3d",
+                                "parameters": {
+                                    **usegment3d_parameters,
+                                    "component": usegment3d_component,
+                                    "data_component": usegment3d_data_component,
+                                    "source_component": usegment3d_source_component,
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "usegment3d complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "usegment3d requires a canonical Zarr/N5 data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "usegment3d",
+                                "parameters": {
+                                    **usegment3d_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "usegment3d skipped (no Zarr/N5 store).",
+                        )
+                    continue
+
                 if operation_name == "registration":
                     _emit_analysis_progress(
                         operation_start,
@@ -1735,6 +1939,7 @@ def _run_workflow(
             deconvolution=workflow.deconvolution,
             shear_transform=workflow.shear_transform,
             particle_detection=workflow.particle_detection,
+            usegment3d=workflow.usegment3d,
             registration=workflow.registration,
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,

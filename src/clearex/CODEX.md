@@ -34,7 +34,7 @@ This directory contains the runtime orchestration surface for ClearEx.
 
 - `_run_workflow(...)` now starts Dask backends lazily:
   - I/O backend starts only for Navigate `experiment.yml` materialization paths.
-  - Analysis backend starts only when selected operations need a client (`deconvolution`, `particle_detection`).
+  - Analysis backend starts only when selected operations need a client (`deconvolution`, `particle_detection`, `usegment3d`).
 - Visualization-only workflows should not create extra LocalCluster instances.
 - Local Dask dashboard binding now defaults to an ephemeral port (`dashboard_address=":0"`) to avoid recurring `8787` conflicts.
 - Navigate TIFF ingestion now stacks `Position*/CH*` collections into canonical
@@ -54,6 +54,16 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Detailed operational guidance for this area lives in
   `src/clearex/mip_export/README.md`.
 
+## Recent Runtime Updates (2026-03-16)
+
+- Added `uSegment3D` segmentation operation:
+  - workflow normalization + GUI controls now map to canonical runtime keys,
+  - distributed execution runs one task per `(t, p)` volume,
+  - latest output is persisted to `results/usegment3d/latest/data`,
+  - provenance references include GPU/tiling configuration and selected views.
+- Runtime uses optional dependency loading (`u-Segment3D`) and supports
+  `require_gpu` fail-fast behavior when CUDA is unavailable.
+
 ## Sequencing and Inputs
 
 - Operation order is driven by `analysis_parameters[<op>]["execution_order"]`.
@@ -66,8 +76,15 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Keep function signatures type hinted.
 - Use numpydoc docstrings for new/changed functions.
 
+## Ongoing GUI And Docs Hygiene
+
+- For every GUI change, run a theme audit and confirm all visible text elements use the ClearEx theme (labels, form labels, tab text, table headers/items, tooltips, and popup/dialog text).
+- Explicitly verify operation-parameter panels and their popup editors for text-theme consistency; do not rely on platform default colors.
+- Update user and developer documentation in the same change set whenever behavior, parameters, or workflow/provenance expectations change.
+- Treat documentation refresh as recurring maintenance, and regularly update docs to match the shipped UI/runtime behavior.
+
 ## Validation
 
 - `uv run ruff check src/clearex/main.py src/clearex/workflow.py`
 - `uv run pytest -q tests/test_main.py`
-- `uv run --with pytest --with requests python -m pytest -q tests/test_workflow.py tests/io/test_provenance.py`
+- `uv run --with pytest --with requests python -m pytest -q tests/test_workflow.py tests/io/test_provenance.py tests/usegment3d/test_pipeline.py`

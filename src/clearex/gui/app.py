@@ -883,6 +883,29 @@ def _popup_dialog_stylesheet() -> str:
             background-color: #2f81f7;
             color: #f8fbff;
         }
+        QTableWidget {
+            background-color: #0b1320;
+            color: #e6edf3;
+            border: 1px solid #2b3f58;
+            border-radius: 8px;
+            gridline-color: #2a3442;
+            selection-background-color: #2f81f7;
+            selection-color: #f8fbff;
+        }
+        QTableWidget::item {
+            color: #e6edf3;
+        }
+        QHeaderView::section {
+            background-color: #162538;
+            color: #9cc6ff;
+            border: 1px solid #2b3f58;
+            padding: 6px 8px;
+            font-weight: 600;
+        }
+        QTableCornerButton::section {
+            background-color: #162538;
+            border: 1px solid #2b3f58;
+        }
         QLineEdit::placeholder, QPlainTextEdit {
             color: #a6b7d0;
         }
@@ -3553,6 +3576,7 @@ if HAS_PYQT6:
             "deconvolution",
             "shear_transform",
             "particle_detection",
+            "usegment3d",
             "registration",
             "visualization",
             "mip_export",
@@ -3562,6 +3586,7 @@ if HAS_PYQT6:
             "deconvolution",
             "shear_transform",
             "particle_detection",
+            "usegment3d",
             "registration",
             "mip_export",
         )
@@ -3570,6 +3595,7 @@ if HAS_PYQT6:
             "deconvolution": "Deconvolution",
             "shear_transform": "Shearing",
             "particle_detection": "Particle Detection",
+            "usegment3d": "uSegment3D",
             "registration": "Registration",
             "visualization": "Visualization",
             "mip_export": "MIP Export",
@@ -3579,7 +3605,7 @@ if HAS_PYQT6:
                 "Preprocessing",
                 ("flatfield", "deconvolution", "shear_transform"),
             ),
-            ("Segmentation", ("particle_detection",)),
+            ("Segmentation", ("particle_detection", "usegment3d")),
             ("Postprocessing", ("registration",)),
             ("Export", ("visualization", "mip_export")),
         )
@@ -3587,12 +3613,66 @@ if HAS_PYQT6:
             "flatfield": "results/flatfield/latest/data",
             "deconvolution": "results/deconvolution/latest/data",
             "shear_transform": "results/shear_transform/latest/data",
+            "usegment3d": "results/usegment3d/latest/data",
             "registration": "results/registration/latest/data",
             "mip_export": "results/mip_export/latest",
         }
         _PARTICLE_DETECTION_OVERLAY_COMPONENT = (
             "results/particle_detection/latest/detections"
         )
+        _DEFAULT_USEGMENT3D_PARAMETERS: Dict[str, Any] = {
+            "execution_order": 5,
+            "input_source": "data",
+            "force_rerun": False,
+            "chunk_basis": "3d",
+            "detect_2d_per_slice": False,
+            "use_map_overlap": False,
+            "overlap_zyx": [12, 24, 24],
+            "memory_overhead_factor": 3.0,
+            "channel_index": 0,
+            "use_views": ["xy", "xz", "yz"],
+            "gpu": True,
+            "require_gpu": False,
+            "preprocess_factor": 1.0,
+            "preprocess_voxel_res_zyx": [1.0, 1.0, 1.0],
+            "preprocess_do_bg_correction": True,
+            "preprocess_bg_ds": 16,
+            "preprocess_bg_sigma": 5.0,
+            "preprocess_normalize_min": 2.0,
+            "preprocess_normalize_max": 99.8,
+            "cellpose_model_name": "cyto",
+            "cellpose_channels": "grayscale",
+            "cellpose_hist_norm": False,
+            "cellpose_ksize": 15,
+            "cellpose_use_auto_diameter": False,
+            "cellpose_best_diameter": None,
+            "cellpose_diameter_range": [10.0, 120.0, 2.5],
+            "cellpose_use_edge": True,
+            "cellpose_model_invert": False,
+            "cellpose_test_slice": None,
+            "aggregation_gradient_decay": 0.0,
+            "aggregation_n_iter": 200,
+            "aggregation_momenta": 0.98,
+            "aggregation_prob_threshold": None,
+            "aggregation_threshold_n_levels": 3,
+            "aggregation_threshold_level": 1,
+            "aggregation_min_prob_threshold": 0.0,
+            "aggregation_connected_min_area": 5,
+            "aggregation_connected_smooth_sigma": 1.0,
+            "aggregation_connected_thresh_factor": 0.0,
+            "aggregation_binary_fill_holes": False,
+            "aggregation_tile_mode": False,
+            "aggregation_tile_shape_zyx": [128, 256, 256],
+            "aggregation_tile_overlap_ratio": 0.25,
+            "n_cpu": None,
+            "postprocess_enable": True,
+            "postprocess_min_size": 200,
+            "postprocess_do_flow_remove": True,
+            "postprocess_flow_threshold": 0.85,
+            "postprocess_dtform_method": "cellpose_improve",
+            "postprocess_edt_fixed_point_percentile": 0.01,
+            "output_dtype": "uint32",
+        }
         _PARAMETER_HINTS: Dict[str, str] = {
             "input_source": (
                 "Input source controls which dataset this operation reads from. "
@@ -3779,6 +3859,74 @@ if HAS_PYQT6:
             "min_distance_sigma": (
                 "Minimum allowed separation in units of detected sigma for close-particle removal."
             ),
+            "usegment3d_channel": (
+                "Primary channel index used by uSegment3D segmentation."
+            ),
+            "usegment3d_views": (
+                "Comma-separated list of orthogonal views to evaluate (for example "
+                "xy,xz,yz)."
+            ),
+            "usegment3d_gpu": (
+                "Enable GPU-accelerated components when available."
+            ),
+            "usegment3d_require_gpu": (
+                "Fail this operation when no compatible GPU is available."
+            ),
+            "usegment3d_preprocess_min": (
+                "Lower intensity bound used during uSegment3D preprocessing normalization."
+            ),
+            "usegment3d_preprocess_max": (
+                "Upper intensity bound used during uSegment3D preprocessing normalization."
+            ),
+            "usegment3d_preprocess_bg_correction": (
+                "Enable low-frequency background correction before segmentation."
+            ),
+            "usegment3d_preprocess_factor": (
+                "Intensity scaling factor applied after preprocess normalization."
+            ),
+            "usegment3d_cellpose_model": (
+                "Cellpose model identifier used for intermediate mask inference."
+            ),
+            "usegment3d_cellpose_channels": (
+                "Cellpose channel interpretation mode ('grayscale' or 'color')."
+            ),
+            "usegment3d_cellpose_diameter": (
+                "Cellpose object diameter in pixels. Use 0 to allow automatic sizing."
+            ),
+            "usegment3d_cellpose_edge": (
+                "Enable Cellpose edge handling configuration for border-touching objects."
+            ),
+            "usegment3d_aggregation_decay": (
+                "Temporal/view aggregation decay factor used when fusing uSegment3D scores."
+            ),
+            "usegment3d_aggregation_iterations": (
+                "Number of aggregation refinement iterations for uSegment3D fusion."
+            ),
+            "usegment3d_aggregation_momentum": (
+                "Momentum term applied during iterative aggregation updates."
+            ),
+            "usegment3d_tile_mode": (
+                "Tile execution mode for segmentation. Use auto/manual to process by "
+                "tiles, or none for full-volume processing."
+            ),
+            "usegment3d_tile_shape": (
+                "Tile shape in (z, y, x) voxels when tile mode is enabled."
+            ),
+            "usegment3d_tile_overlap": (
+                "Tile overlap in (z, y, x) voxels when tile mode is enabled."
+            ),
+            "usegment3d_postprocess": (
+                "Enable uSegment3D postprocessing cleanup filters."
+            ),
+            "usegment3d_postprocess_min_size": (
+                "Minimum connected-component size retained during postprocessing."
+            ),
+            "usegment3d_postprocess_flow_threshold": (
+                "Cellpose flow-confidence threshold used in postprocessing."
+            ),
+            "usegment3d_postprocess_dtform": (
+                "Distance-transform formulation used in final postprocessing."
+            ),
             "execution_order": (
                 "Execution order controls when this operation runs relative to other selected operations."
             ),
@@ -3858,6 +4006,13 @@ if HAS_PYQT6:
             self._particle_defaults = dict(
                 self._operation_defaults.get("particle_detection", {})
             )
+            self._usegment3d_defaults = dict(
+                self._operation_defaults.get(
+                    "usegment3d",
+                    self._DEFAULT_USEGMENT3D_PARAMETERS,
+                )
+            )
+            self._operation_defaults["usegment3d"] = dict(self._usegment3d_defaults)
             self._visualization_defaults = dict(
                 self._operation_defaults.get("visualization", {})
             )
@@ -4069,6 +4224,15 @@ if HAS_PYQT6:
             self._particle_remove_close_checkbox.toggled.connect(
                 self._set_particle_parameter_enabled_state
             )
+            self._usegment3d_require_gpu_checkbox.toggled.connect(
+                self._set_usegment3d_parameter_enabled_state
+            )
+            self._usegment3d_tile_mode_combo.currentIndexChanged.connect(
+                self._set_usegment3d_parameter_enabled_state
+            )
+            self._usegment3d_postprocess_checkbox.toggled.connect(
+                self._set_usegment3d_parameter_enabled_state
+            )
             self._visualization_show_all_positions_checkbox.toggled.connect(
                 self._set_visualization_position_selector_state
             )
@@ -4227,6 +4391,8 @@ if HAS_PYQT6:
                 self._build_shear_parameter_rows(form)
             elif operation_name == "particle_detection":
                 self._build_particle_parameter_rows(form)
+            elif operation_name == "usegment3d":
+                self._build_usegment3d_parameter_rows(form)
             elif operation_name == "visualization":
                 self._build_visualization_parameter_rows(form)
             elif operation_name == "mip_export":
@@ -4920,6 +5086,310 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["min_distance_sigma"],
             )
 
+        def _build_usegment3d_parameter_rows(self, form: QFormLayout) -> None:
+            """Add uSegment3D parameter controls to a form.
+
+            Parameters
+            ----------
+            form : QFormLayout
+                Parent form layout receiving uSegment3D controls.
+
+            Returns
+            -------
+            None
+                Widgets are created and attached in-place.
+            """
+            runtime_section, runtime_form = self._build_parameter_section_card(
+                "uSegment3D Runtime"
+            )
+            self._usegment3d_channel_spin = QSpinBox()
+            self._usegment3d_channel_spin.setRange(0, 0)
+            runtime_form.addRow("channel", self._usegment3d_channel_spin)
+            self._register_parameter_hint(
+                self._usegment3d_channel_spin,
+                self._PARAMETER_HINTS["usegment3d_channel"],
+            )
+
+            self._usegment3d_views_input = QLineEdit()
+            self._usegment3d_views_input.setPlaceholderText("xy,xz,yz")
+            runtime_form.addRow("views", self._usegment3d_views_input)
+            self._register_parameter_hint(
+                self._usegment3d_views_input,
+                self._PARAMETER_HINTS["usegment3d_views"],
+            )
+
+            self._usegment3d_gpu_checkbox = QCheckBox("Use GPU")
+            runtime_form.addRow("GPU", self._usegment3d_gpu_checkbox)
+            self._register_parameter_hint(
+                self._usegment3d_gpu_checkbox,
+                self._PARAMETER_HINTS["usegment3d_gpu"],
+            )
+
+            self._usegment3d_require_gpu_checkbox = QCheckBox("Require GPU")
+            runtime_form.addRow("Require GPU", self._usegment3d_require_gpu_checkbox)
+            self._register_parameter_hint(
+                self._usegment3d_require_gpu_checkbox,
+                self._PARAMETER_HINTS["usegment3d_require_gpu"],
+            )
+            form.addRow(runtime_section)
+
+            preprocess_section, preprocess_form = self._build_parameter_section_card(
+                "Preprocess"
+            )
+            self._usegment3d_preprocess_min_spin = QDoubleSpinBox()
+            self._usegment3d_preprocess_min_spin.setDecimals(4)
+            self._usegment3d_preprocess_min_spin.setRange(-1_000_000_000.0, 1_000_000_000.0)
+            self._usegment3d_preprocess_min_spin.setSingleStep(0.1)
+            preprocess_form.addRow("min", self._usegment3d_preprocess_min_spin)
+            self._register_parameter_hint(
+                self._usegment3d_preprocess_min_spin,
+                self._PARAMETER_HINTS["usegment3d_preprocess_min"],
+            )
+
+            self._usegment3d_preprocess_max_spin = QDoubleSpinBox()
+            self._usegment3d_preprocess_max_spin.setDecimals(4)
+            self._usegment3d_preprocess_max_spin.setRange(-1_000_000_000.0, 1_000_000_000.0)
+            self._usegment3d_preprocess_max_spin.setSingleStep(0.1)
+            preprocess_form.addRow("max", self._usegment3d_preprocess_max_spin)
+            self._register_parameter_hint(
+                self._usegment3d_preprocess_max_spin,
+                self._PARAMETER_HINTS["usegment3d_preprocess_max"],
+            )
+
+            self._usegment3d_preprocess_bg_correction_checkbox = QCheckBox(
+                "Enable background correction"
+            )
+            preprocess_form.addRow(
+                "bg correction",
+                self._usegment3d_preprocess_bg_correction_checkbox,
+            )
+            self._register_parameter_hint(
+                self._usegment3d_preprocess_bg_correction_checkbox,
+                self._PARAMETER_HINTS["usegment3d_preprocess_bg_correction"],
+            )
+
+            self._usegment3d_preprocess_factor_spin = QDoubleSpinBox()
+            self._usegment3d_preprocess_factor_spin.setDecimals(4)
+            self._usegment3d_preprocess_factor_spin.setRange(0.0001, 1_000_000.0)
+            self._usegment3d_preprocess_factor_spin.setSingleStep(0.1)
+            preprocess_form.addRow("factor", self._usegment3d_preprocess_factor_spin)
+            self._register_parameter_hint(
+                self._usegment3d_preprocess_factor_spin,
+                self._PARAMETER_HINTS["usegment3d_preprocess_factor"],
+            )
+            form.addRow(preprocess_section)
+
+            cellpose_section, cellpose_form = self._build_parameter_section_card("Cellpose")
+            self._usegment3d_cellpose_model_combo = QComboBox()
+            self._usegment3d_cellpose_model_combo.addItem("cyto3", "cyto3")
+            self._usegment3d_cellpose_model_combo.addItem("cyto2", "cyto2")
+            self._usegment3d_cellpose_model_combo.addItem("nuclei", "nuclei")
+            self._usegment3d_cellpose_model_combo.addItem("cyto", "cyto")
+            self._usegment3d_cellpose_model_combo.addItem("custom", "custom")
+            cellpose_form.addRow("model", self._usegment3d_cellpose_model_combo)
+            self._register_parameter_hint(
+                self._usegment3d_cellpose_model_combo,
+                self._PARAMETER_HINTS["usegment3d_cellpose_model"],
+            )
+
+            self._usegment3d_cellpose_channels_input = QComboBox()
+            self._usegment3d_cellpose_channels_input.addItem("Grayscale", "grayscale")
+            self._usegment3d_cellpose_channels_input.addItem("Color", "color")
+            cellpose_form.addRow("channels", self._usegment3d_cellpose_channels_input)
+            self._register_parameter_hint(
+                self._usegment3d_cellpose_channels_input,
+                self._PARAMETER_HINTS["usegment3d_cellpose_channels"],
+            )
+
+            self._usegment3d_cellpose_diameter_spin = QDoubleSpinBox()
+            self._usegment3d_cellpose_diameter_spin.setDecimals(3)
+            self._usegment3d_cellpose_diameter_spin.setRange(0.0, 1_000_000.0)
+            self._usegment3d_cellpose_diameter_spin.setSingleStep(1.0)
+            cellpose_form.addRow("diameter", self._usegment3d_cellpose_diameter_spin)
+            self._register_parameter_hint(
+                self._usegment3d_cellpose_diameter_spin,
+                self._PARAMETER_HINTS["usegment3d_cellpose_diameter"],
+            )
+
+            self._usegment3d_cellpose_edge_checkbox = QCheckBox(
+                "Enable edge handling"
+            )
+            cellpose_form.addRow("edge", self._usegment3d_cellpose_edge_checkbox)
+            self._register_parameter_hint(
+                self._usegment3d_cellpose_edge_checkbox,
+                self._PARAMETER_HINTS["usegment3d_cellpose_edge"],
+            )
+            form.addRow(cellpose_section)
+
+            aggregation_section, aggregation_form = self._build_parameter_section_card(
+                "Aggregation"
+            )
+            self._usegment3d_aggregation_decay_spin = QDoubleSpinBox()
+            self._usegment3d_aggregation_decay_spin.setDecimals(4)
+            self._usegment3d_aggregation_decay_spin.setRange(0.0, 1.0)
+            self._usegment3d_aggregation_decay_spin.setSingleStep(0.01)
+            aggregation_form.addRow("decay", self._usegment3d_aggregation_decay_spin)
+            self._register_parameter_hint(
+                self._usegment3d_aggregation_decay_spin,
+                self._PARAMETER_HINTS["usegment3d_aggregation_decay"],
+            )
+
+            self._usegment3d_aggregation_iterations_spin = QSpinBox()
+            self._usegment3d_aggregation_iterations_spin.setRange(1, 10_000)
+            aggregation_form.addRow(
+                "iterations",
+                self._usegment3d_aggregation_iterations_spin,
+            )
+            self._register_parameter_hint(
+                self._usegment3d_aggregation_iterations_spin,
+                self._PARAMETER_HINTS["usegment3d_aggregation_iterations"],
+            )
+
+            self._usegment3d_aggregation_momentum_spin = QDoubleSpinBox()
+            self._usegment3d_aggregation_momentum_spin.setDecimals(4)
+            self._usegment3d_aggregation_momentum_spin.setRange(0.0, 1.0)
+            self._usegment3d_aggregation_momentum_spin.setSingleStep(0.01)
+            aggregation_form.addRow(
+                "momentum",
+                self._usegment3d_aggregation_momentum_spin,
+            )
+            self._register_parameter_hint(
+                self._usegment3d_aggregation_momentum_spin,
+                self._PARAMETER_HINTS["usegment3d_aggregation_momentum"],
+            )
+            form.addRow(aggregation_section)
+
+            tile_section, tile_form = self._build_parameter_section_card("Tiling")
+            self._usegment3d_tile_mode_combo = QComboBox()
+            self._usegment3d_tile_mode_combo.addItem("Auto", "auto")
+            self._usegment3d_tile_mode_combo.addItem("Manual", "manual")
+            self._usegment3d_tile_mode_combo.addItem("None", "none")
+            tile_form.addRow("mode", self._usegment3d_tile_mode_combo)
+            self._register_parameter_hint(
+                self._usegment3d_tile_mode_combo,
+                self._PARAMETER_HINTS["usegment3d_tile_mode"],
+            )
+
+            tile_shape_row = QHBoxLayout()
+            apply_compact_row_spacing(tile_shape_row)
+            self._usegment3d_tile_z_spin = QSpinBox()
+            self._usegment3d_tile_z_spin.setRange(1, 1_000_000)
+            self._usegment3d_tile_y_spin = QSpinBox()
+            self._usegment3d_tile_y_spin.setRange(1, 1_000_000)
+            self._usegment3d_tile_x_spin = QSpinBox()
+            self._usegment3d_tile_x_spin.setRange(1, 1_000_000)
+            tile_shape_row.addWidget(QLabel("z"))
+            tile_shape_row.addWidget(self._usegment3d_tile_z_spin)
+            tile_shape_row.addWidget(QLabel("y"))
+            tile_shape_row.addWidget(self._usegment3d_tile_y_spin)
+            tile_shape_row.addWidget(QLabel("x"))
+            tile_shape_row.addWidget(self._usegment3d_tile_x_spin)
+            tile_shape_widget = QWidget()
+            tile_shape_widget.setLayout(tile_shape_row)
+            tile_form.addRow("shape", tile_shape_widget)
+            self._register_parameter_hint(
+                self._usegment3d_tile_z_spin,
+                self._PARAMETER_HINTS["usegment3d_tile_shape"],
+            )
+            self._register_parameter_hint(
+                self._usegment3d_tile_y_spin,
+                self._PARAMETER_HINTS["usegment3d_tile_shape"],
+            )
+            self._register_parameter_hint(
+                self._usegment3d_tile_x_spin,
+                self._PARAMETER_HINTS["usegment3d_tile_shape"],
+            )
+
+            tile_overlap_row = QHBoxLayout()
+            apply_compact_row_spacing(tile_overlap_row)
+            self._usegment3d_tile_overlap_z_spin = QSpinBox()
+            self._usegment3d_tile_overlap_z_spin.setRange(0, 1_000_000)
+            self._usegment3d_tile_overlap_y_spin = QSpinBox()
+            self._usegment3d_tile_overlap_y_spin.setRange(0, 1_000_000)
+            self._usegment3d_tile_overlap_x_spin = QSpinBox()
+            self._usegment3d_tile_overlap_x_spin.setRange(0, 1_000_000)
+            tile_overlap_row.addWidget(QLabel("z"))
+            tile_overlap_row.addWidget(self._usegment3d_tile_overlap_z_spin)
+            tile_overlap_row.addWidget(QLabel("y"))
+            tile_overlap_row.addWidget(self._usegment3d_tile_overlap_y_spin)
+            tile_overlap_row.addWidget(QLabel("x"))
+            tile_overlap_row.addWidget(self._usegment3d_tile_overlap_x_spin)
+            tile_overlap_widget = QWidget()
+            tile_overlap_widget.setLayout(tile_overlap_row)
+            tile_form.addRow("overlap", tile_overlap_widget)
+            self._register_parameter_hint(
+                self._usegment3d_tile_overlap_z_spin,
+                self._PARAMETER_HINTS["usegment3d_tile_overlap"],
+            )
+            self._register_parameter_hint(
+                self._usegment3d_tile_overlap_y_spin,
+                self._PARAMETER_HINTS["usegment3d_tile_overlap"],
+            )
+            self._register_parameter_hint(
+                self._usegment3d_tile_overlap_x_spin,
+                self._PARAMETER_HINTS["usegment3d_tile_overlap"],
+            )
+            form.addRow(tile_section)
+
+            postprocess_section, postprocess_form = self._build_parameter_section_card(
+                "Postprocess"
+            )
+            self._usegment3d_postprocess_checkbox = QCheckBox(
+                "Enable postprocessing"
+            )
+            postprocess_form.addRow("enabled", self._usegment3d_postprocess_checkbox)
+            self._register_parameter_hint(
+                self._usegment3d_postprocess_checkbox,
+                self._PARAMETER_HINTS["usegment3d_postprocess"],
+            )
+
+            self._usegment3d_postprocess_min_size_spin = QSpinBox()
+            self._usegment3d_postprocess_min_size_spin.setRange(0, 1_000_000_000)
+            postprocess_form.addRow(
+                "min size",
+                self._usegment3d_postprocess_min_size_spin,
+            )
+            self._register_parameter_hint(
+                self._usegment3d_postprocess_min_size_spin,
+                self._PARAMETER_HINTS["usegment3d_postprocess_min_size"],
+            )
+
+            self._usegment3d_postprocess_flow_threshold_spin = QDoubleSpinBox()
+            self._usegment3d_postprocess_flow_threshold_spin.setDecimals(4)
+            self._usegment3d_postprocess_flow_threshold_spin.setRange(0.0001, 10.0)
+            self._usegment3d_postprocess_flow_threshold_spin.setSingleStep(0.05)
+            postprocess_form.addRow(
+                "flow threshold",
+                self._usegment3d_postprocess_flow_threshold_spin,
+            )
+            self._register_parameter_hint(
+                self._usegment3d_postprocess_flow_threshold_spin,
+                self._PARAMETER_HINTS["usegment3d_postprocess_flow_threshold"],
+            )
+
+            self._usegment3d_postprocess_dtform_combo = QComboBox()
+            self._usegment3d_postprocess_dtform_combo.addItem(
+                "Cellpose Improve",
+                "cellpose_improve",
+            )
+            self._usegment3d_postprocess_dtform_combo.addItem("EDT", "edt")
+            self._usegment3d_postprocess_dtform_combo.addItem("FMM", "fmm")
+            self._usegment3d_postprocess_dtform_combo.addItem("FMM Skeleton", "fmm_skel")
+            self._usegment3d_postprocess_dtform_combo.addItem(
+                "Cellpose Skeleton",
+                "cellpose_skel",
+            )
+            self._usegment3d_postprocess_dtform_combo.addItem("None (Disable)", "none")
+            postprocess_form.addRow(
+                "dtform",
+                self._usegment3d_postprocess_dtform_combo,
+            )
+            self._register_parameter_hint(
+                self._usegment3d_postprocess_dtform_combo,
+                self._PARAMETER_HINTS["usegment3d_postprocess_dtform"],
+            )
+            form.addRow(postprocess_section)
+
         def _build_visualization_parameter_rows(self, form: QFormLayout) -> None:
             """Add visualization parameter controls to a form.
 
@@ -5125,6 +5595,7 @@ if HAS_PYQT6:
             dialog.setMinimumWidth(900)
             dialog.setMinimumHeight(420)
             dialog.setModal(True)
+            dialog.setStyleSheet(_popup_dialog_stylesheet())
 
             root = QVBoxLayout(dialog)
             apply_popup_root_spacing(root)
@@ -6090,6 +6561,7 @@ if HAS_PYQT6:
             self._set_deconvolution_parameter_enabled_state()
             self._set_shear_parameter_enabled_state()
             self._set_particle_parameter_enabled_state()
+            self._set_usegment3d_parameter_enabled_state()
             self._set_visualization_parameter_enabled_state()
             self._set_mip_export_parameter_enabled_state()
 
@@ -6429,6 +6901,67 @@ if HAS_PYQT6:
             self._particle_overlap_x_spin.setEnabled(overlap_enabled)
             self._particle_min_distance_spin.setEnabled(close_enabled)
 
+        def _set_usegment3d_parameter_enabled_state(self) -> None:
+            """Enable/disable uSegment3D widgets based on selection and sub-options.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widget enabled states are updated in-place.
+            """
+            usegment_enabled = self._operation_checkboxes["usegment3d"].isChecked()
+            require_gpu = bool(self._usegment3d_require_gpu_checkbox.isChecked())
+            if require_gpu and not self._usegment3d_gpu_checkbox.isChecked():
+                self._usegment3d_gpu_checkbox.setChecked(True)
+
+            widgets = (
+                self._usegment3d_channel_spin,
+                self._usegment3d_views_input,
+                self._usegment3d_require_gpu_checkbox,
+                self._usegment3d_preprocess_min_spin,
+                self._usegment3d_preprocess_max_spin,
+                self._usegment3d_preprocess_bg_correction_checkbox,
+                self._usegment3d_preprocess_factor_spin,
+                self._usegment3d_cellpose_model_combo,
+                self._usegment3d_cellpose_channels_input,
+                self._usegment3d_cellpose_diameter_spin,
+                self._usegment3d_cellpose_edge_checkbox,
+                self._usegment3d_aggregation_decay_spin,
+                self._usegment3d_aggregation_iterations_spin,
+                self._usegment3d_aggregation_momentum_spin,
+                self._usegment3d_tile_mode_combo,
+                self._usegment3d_postprocess_checkbox,
+            )
+            for widget in widgets:
+                widget.setEnabled(usegment_enabled)
+
+            self._usegment3d_gpu_checkbox.setEnabled(
+                usegment_enabled and not require_gpu
+            )
+
+            tile_mode = str(self._usegment3d_tile_mode_combo.currentData() or "auto")
+            tile_mode = tile_mode.strip().lower() or "auto"
+            tile_widgets_enabled = usegment_enabled and tile_mode != "none"
+            self._usegment3d_tile_z_spin.setEnabled(tile_widgets_enabled)
+            self._usegment3d_tile_y_spin.setEnabled(tile_widgets_enabled)
+            self._usegment3d_tile_x_spin.setEnabled(tile_widgets_enabled)
+            self._usegment3d_tile_overlap_z_spin.setEnabled(tile_widgets_enabled)
+            self._usegment3d_tile_overlap_y_spin.setEnabled(tile_widgets_enabled)
+            self._usegment3d_tile_overlap_x_spin.setEnabled(tile_widgets_enabled)
+
+            postprocess_enabled = (
+                usegment_enabled and self._usegment3d_postprocess_checkbox.isChecked()
+            )
+            self._usegment3d_postprocess_min_size_spin.setEnabled(postprocess_enabled)
+            self._usegment3d_postprocess_flow_threshold_spin.setEnabled(
+                postprocess_enabled
+            )
+            self._usegment3d_postprocess_dtform_combo.setEnabled(postprocess_enabled)
+
         def _set_flatfield_parameter_enabled_state(self) -> None:
             """Enable/disable flatfield widgets based on selection and overlap mode.
 
@@ -6582,6 +7115,9 @@ if HAS_PYQT6:
             particle_params = dict(
                 normalized_parameters.get("particle_detection", self._particle_defaults)
             )
+            usegment3d_params = dict(
+                normalized_parameters.get("usegment3d", self._usegment3d_defaults)
+            )
             visualization_params = dict(
                 normalized_parameters.get("visualization", self._visualization_defaults)
             )
@@ -6598,6 +7134,7 @@ if HAS_PYQT6:
                 "deconvolution": bool(initial.deconvolution),
                 "shear_transform": bool(initial.shear_transform),
                 "particle_detection": bool(initial.particle_detection),
+                "usegment3d": bool(getattr(initial, "usegment3d", False)),
                 "registration": bool(initial.registration),
                 "visualization": bool(initial.visualization),
                 "mip_export": bool(initial.mip_export),
@@ -6686,6 +7223,7 @@ if HAS_PYQT6:
                     store_z_um = None
             self._visualization_position_spin.setMaximum(position_count - 1)
             self._particle_channel_spin.setMaximum(channel_count - 1)
+            self._usegment3d_channel_spin.setMaximum(channel_count - 1)
 
             self._flatfield_darkfield_checkbox.setChecked(
                 bool(flatfield_params.get("get_darkfield", False))
@@ -6967,6 +7505,230 @@ if HAS_PYQT6:
             self._particle_min_distance_spin.setValue(
                 float(particle_params.get("min_distance_sigma", 10.0))
             )
+
+            self._usegment3d_channel_spin.setValue(
+                max(
+                    0,
+                    min(
+                        int(self._usegment3d_channel_spin.maximum()),
+                        int(
+                            usegment3d_params.get(
+                                "channel_index",
+                                usegment3d_params.get("channel_index", 0),
+                            )
+                        ),
+                    ),
+                )
+            )
+            views_value = usegment3d_params.get(
+                "use_views",
+                self._usegment3d_defaults.get("use_views", ["xy", "xz", "yz"]),
+            )
+            if isinstance(views_value, (tuple, list)):
+                views_text = ",".join(str(item).strip() for item in views_value if str(item).strip())
+            else:
+                views_text = str(views_value or "").strip()
+            self._usegment3d_views_input.setText(views_text)
+            self._usegment3d_gpu_checkbox.setChecked(
+                bool(usegment3d_params.get("gpu", usegment3d_params.get("use_gpu", False)))
+            )
+            self._usegment3d_require_gpu_checkbox.setChecked(
+                bool(usegment3d_params.get("require_gpu", False))
+            )
+            self._usegment3d_preprocess_min_spin.setValue(
+                float(
+                    usegment3d_params.get(
+                        "preprocess_normalize_min",
+                        usegment3d_params.get("preprocess_min", 2.0),
+                    )
+                )
+            )
+            self._usegment3d_preprocess_max_spin.setValue(
+                float(
+                    usegment3d_params.get(
+                        "preprocess_normalize_max",
+                        usegment3d_params.get("preprocess_max", 99.8),
+                    )
+                )
+            )
+            self._usegment3d_preprocess_bg_correction_checkbox.setChecked(
+                bool(
+                    usegment3d_params.get(
+                        "preprocess_do_bg_correction",
+                        usegment3d_params.get(
+                            "preprocess_bg_correction",
+                            usegment3d_params.get("bg_correction", True),
+                        ),
+                    )
+                )
+            )
+            self._usegment3d_preprocess_factor_spin.setValue(
+                float(usegment3d_params.get("preprocess_factor", 1.0))
+            )
+            model_value = (
+                str(
+                    usegment3d_params.get(
+                        "cellpose_model_name",
+                        usegment3d_params.get("cellpose_model", "cyto"),
+                    )
+                ).strip()
+                or "cyto"
+            )
+            model_index = self._usegment3d_cellpose_model_combo.findData(model_value)
+            if model_index < 0:
+                self._usegment3d_cellpose_model_combo.addItem(model_value, model_value)
+                model_index = self._usegment3d_cellpose_model_combo.count() - 1
+            self._usegment3d_cellpose_model_combo.setCurrentIndex(model_index)
+            cellpose_channels_value = str(
+                usegment3d_params.get("cellpose_channels", "grayscale")
+            ).strip().lower()
+            if cellpose_channels_value not in {"grayscale", "color"}:
+                cellpose_channels_value = "grayscale"
+            channels_index = self._usegment3d_cellpose_channels_input.findData(
+                cellpose_channels_value
+            )
+            if channels_index < 0:
+                channels_index = self._usegment3d_cellpose_channels_input.findData(
+                    "grayscale"
+                )
+            if channels_index < 0:
+                channels_index = 0
+            self._usegment3d_cellpose_channels_input.setCurrentIndex(channels_index)
+            self._usegment3d_cellpose_diameter_spin.setValue(
+                float(
+                    usegment3d_params.get(
+                        "cellpose_best_diameter",
+                        usegment3d_params.get("cellpose_diameter", 0.0),
+                    )
+                    or 0.0
+                )
+            )
+            self._usegment3d_cellpose_edge_checkbox.setChecked(
+                bool(
+                    usegment3d_params.get(
+                        "cellpose_use_edge",
+                        usegment3d_params.get("cellpose_edge", True),
+                    )
+                )
+            )
+            self._usegment3d_aggregation_decay_spin.setValue(
+                float(
+                    usegment3d_params.get(
+                        "aggregation_gradient_decay",
+                        usegment3d_params.get("aggregation_decay", 0.0),
+                    )
+                )
+            )
+            self._usegment3d_aggregation_iterations_spin.setValue(
+                max(
+                    1,
+                    int(
+                        usegment3d_params.get(
+                            "aggregation_n_iter",
+                            usegment3d_params.get("aggregation_iterations", 200),
+                        )
+                    ),
+                )
+            )
+            self._usegment3d_aggregation_momentum_spin.setValue(
+                float(
+                    usegment3d_params.get(
+                        "aggregation_momenta",
+                        usegment3d_params.get("aggregation_momentum", 0.98),
+                    )
+                )
+            )
+            tile_mode_value = str(usegment3d_params.get("tile_mode", "")).strip().lower()
+            if tile_mode_value not in {"auto", "manual", "none"}:
+                tile_mode_value = (
+                    "auto" if bool(usegment3d_params.get("aggregation_tile_mode", False)) else "none"
+                )
+            tile_mode_index = self._usegment3d_tile_mode_combo.findData(tile_mode_value)
+            if tile_mode_index < 0:
+                tile_mode_index = self._usegment3d_tile_mode_combo.findData("auto")
+            if tile_mode_index < 0:
+                tile_mode_index = 0
+            self._usegment3d_tile_mode_combo.setCurrentIndex(tile_mode_index)
+            tile_shape = usegment3d_params.get(
+                "aggregation_tile_shape_zyx",
+                usegment3d_params.get(
+                    "tile_shape_zyx",
+                    usegment3d_params.get("tile_shape", [128, 256, 256]),
+                ),
+            )
+            if not isinstance(tile_shape, (tuple, list)) or len(tile_shape) != 3:
+                tile_shape = [128, 256, 256]
+            tile_shape_values = [
+                max(1, int(tile_shape[0])),
+                max(1, int(tile_shape[1])),
+                max(1, int(tile_shape[2])),
+            ]
+            self._usegment3d_tile_z_spin.setValue(tile_shape_values[0])
+            self._usegment3d_tile_y_spin.setValue(tile_shape_values[1])
+            self._usegment3d_tile_x_spin.setValue(tile_shape_values[2])
+
+            tile_overlap_ratio = float(
+                usegment3d_params.get("aggregation_tile_overlap_ratio", 0.25)
+            )
+            tile_overlap_ratio = max(0.0, min(tile_overlap_ratio, 0.99))
+            self._usegment3d_tile_overlap_z_spin.setValue(
+                max(0, int(round(tile_shape_values[0] * tile_overlap_ratio)))
+            )
+            self._usegment3d_tile_overlap_y_spin.setValue(
+                max(0, int(round(tile_shape_values[1] * tile_overlap_ratio)))
+            )
+            self._usegment3d_tile_overlap_x_spin.setValue(
+                max(0, int(round(tile_shape_values[2] * tile_overlap_ratio)))
+            )
+
+            postprocess_enabled = bool(
+                usegment3d_params.get(
+                    "postprocess_enable",
+                    usegment3d_params.get(
+                        "postprocess",
+                        usegment3d_params.get("postprocess_enabled", True),
+                    ),
+                )
+            )
+            self._usegment3d_postprocess_checkbox.setChecked(
+                postprocess_enabled
+            )
+            self._usegment3d_postprocess_min_size_spin.setValue(
+                max(0, int(usegment3d_params.get("postprocess_min_size", 200)))
+            )
+            self._usegment3d_postprocess_flow_threshold_spin.setValue(
+                float(
+                    usegment3d_params.get(
+                        "postprocess_flow_threshold",
+                        usegment3d_params.get("flow_threshold", 0.85),
+                    )
+                )
+            )
+            do_flow_remove = bool(
+                usegment3d_params.get("postprocess_do_flow_remove", postprocess_enabled)
+            )
+            dtform_value = (
+                str(
+                    usegment3d_params.get(
+                        "postprocess_dtform_method",
+                        usegment3d_params.get("postprocess_dtform", "cellpose_improve"),
+                    )
+                )
+                .strip()
+                .lower()
+                or "cellpose_improve"
+            )
+            if not do_flow_remove:
+                dtform_value = "none"
+            dtform_index = self._usegment3d_postprocess_dtform_combo.findData(dtform_value)
+            if dtform_index < 0:
+                self._usegment3d_postprocess_dtform_combo.addItem(
+                    dtform_value,
+                    dtform_value,
+                )
+                dtform_index = self._usegment3d_postprocess_dtform_combo.count() - 1
+            self._usegment3d_postprocess_dtform_combo.setCurrentIndex(dtform_index)
+
             self._visualization_show_all_positions_checkbox.setChecked(
                 bool(visualization_params.get("show_all_positions", False))
             )
@@ -7052,6 +7814,9 @@ if HAS_PYQT6:
                     color: #e6edf3;
                     font-family: "Avenir Next", "Helvetica Neue", "Arial", sans-serif;
                     font-size: 13px;
+                }
+                QLabel {
+                    color: #d9e2f1;
                 }
                 #headerCard {
                     background-color: #f0f2ef;
@@ -7177,6 +7942,29 @@ if HAS_PYQT6:
                     selection-color: #f8fbff;
                     border: 1px solid #2b3f58;
                     outline: 0;
+                }
+                QTableWidget {
+                    background-color: #101a29;
+                    color: #e6edf3;
+                    border: 1px solid #2b3f58;
+                    border-radius: 8px;
+                    gridline-color: #2a3442;
+                    selection-background-color: #2f81f7;
+                    selection-color: #f8fbff;
+                }
+                QTableWidget::item {
+                    color: #e6edf3;
+                }
+                QHeaderView::section {
+                    background-color: #162538;
+                    color: #9cc6ff;
+                    border: 1px solid #2b3f58;
+                    padding: 6px 8px;
+                    font-weight: 600;
+                }
+                QTableCornerButton::section {
+                    background-color: #162538;
+                    border: 1px solid #2b3f58;
                 }
                 QToolTip {
                     color: #e6edf3;
@@ -7484,6 +8272,141 @@ if HAS_PYQT6:
                 "min_distance_sigma": float(self._particle_min_distance_spin.value()),
             }
 
+        def _collect_usegment3d_parameters(self) -> Dict[str, Any]:
+            """Collect uSegment3D parameter values from widgets.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, Any]
+                uSegment3D parameter mapping.
+
+            Raises
+            ------
+            ValueError
+                If required parameter values are invalid.
+            """
+            views = self._split_csv_values(self._usegment3d_views_input.text())
+            if not views:
+                default_views = self._usegment3d_defaults.get(
+                    "use_views", ["xy", "xz", "yz"]
+                )
+                if isinstance(default_views, (tuple, list)):
+                    views = [str(item).strip() for item in default_views if str(item).strip()]
+                else:
+                    default_text = str(default_views or "").strip()
+                    views = [default_text] if default_text else ["xy", "xz", "yz"]
+            seen_views: set[str] = set()
+            normalized_views: list[str] = []
+            for item in views:
+                token = str(item).strip().lower()
+                if token not in {"xy", "xz", "yz"} or token in seen_views:
+                    continue
+                normalized_views.append(token)
+                seen_views.add(token)
+            if not normalized_views:
+                raise ValueError("uSegment3D views must include at least one of xy, xz, yz.")
+
+            channel = int(self._usegment3d_channel_spin.value())
+            gpu_enabled = bool(
+                self._usegment3d_gpu_checkbox.isChecked()
+                or self._usegment3d_require_gpu_checkbox.isChecked()
+            )
+            postprocess_enabled = bool(self._usegment3d_postprocess_checkbox.isChecked())
+            tile_mode = str(self._usegment3d_tile_mode_combo.currentData() or "auto")
+            tile_mode = tile_mode.strip().lower() or "auto"
+            tile_shape_zyx = [
+                int(self._usegment3d_tile_z_spin.value()),
+                int(self._usegment3d_tile_y_spin.value()),
+                int(self._usegment3d_tile_x_spin.value()),
+            ]
+            tile_overlap_zyx = [
+                int(self._usegment3d_tile_overlap_z_spin.value()),
+                int(self._usegment3d_tile_overlap_y_spin.value()),
+                int(self._usegment3d_tile_overlap_x_spin.value()),
+            ]
+            tile_ratio_candidates = [
+                (
+                    float(max(0, tile_overlap_zyx[idx]))
+                    / float(max(1, tile_shape_zyx[idx]))
+                )
+                for idx in range(3)
+            ]
+            tile_overlap_ratio = max(tile_ratio_candidates) if tile_ratio_candidates else 0.0
+            tile_overlap_ratio = max(0.0, min(tile_overlap_ratio, 0.99))
+            flow_threshold = float(self._usegment3d_postprocess_flow_threshold_spin.value())
+            dtform_value = str(
+                self._usegment3d_postprocess_dtform_combo.currentData() or "cellpose_improve"
+            ).strip()
+            dtform_value = dtform_value.lower() or "cellpose_improve"
+            do_flow_remove = bool(postprocess_enabled)
+            dtform_method = dtform_value
+            if dtform_value == "none":
+                do_flow_remove = False
+                dtform_method = "edt"
+
+            best_diameter = float(self._usegment3d_cellpose_diameter_spin.value())
+            if best_diameter <= 0:
+                best_diameter_value: Optional[float] = None
+                use_auto_diameter = True
+            else:
+                best_diameter_value = best_diameter
+                use_auto_diameter = False
+
+            return {
+                "channel_index": channel,
+                "chunk_basis": "3d",
+                "detect_2d_per_slice": False,
+                "use_map_overlap": False,
+                "overlap_zyx": list(self._usegment3d_defaults.get("overlap_zyx", [0, 0, 0])),
+                "memory_overhead_factor": float(
+                    self._usegment3d_defaults.get("memory_overhead_factor", 3.0)
+                ),
+                "use_views": list(normalized_views),
+                "gpu": gpu_enabled,
+                "require_gpu": bool(self._usegment3d_require_gpu_checkbox.isChecked()),
+                "preprocess_normalize_min": float(self._usegment3d_preprocess_min_spin.value()),
+                "preprocess_normalize_max": float(self._usegment3d_preprocess_max_spin.value()),
+                "preprocess_do_bg_correction": bool(
+                    self._usegment3d_preprocess_bg_correction_checkbox.isChecked()
+                ),
+                "preprocess_factor": float(self._usegment3d_preprocess_factor_spin.value()),
+                "cellpose_model_name": str(
+                    self._usegment3d_cellpose_model_combo.currentData() or "cyto"
+                ).strip()
+                or "cyto",
+                "cellpose_channels": str(
+                    self._usegment3d_cellpose_channels_input.currentData() or "grayscale"
+                ).strip()
+                or "grayscale",
+                "cellpose_best_diameter": best_diameter_value,
+                "cellpose_use_auto_diameter": use_auto_diameter,
+                "cellpose_use_edge": bool(self._usegment3d_cellpose_edge_checkbox.isChecked()),
+                "aggregation_gradient_decay": float(
+                    self._usegment3d_aggregation_decay_spin.value()
+                ),
+                "aggregation_n_iter": int(
+                    self._usegment3d_aggregation_iterations_spin.value()
+                ),
+                "aggregation_momenta": float(
+                    self._usegment3d_aggregation_momentum_spin.value()
+                ),
+                "tile_mode": tile_mode,
+                "aggregation_tile_mode": tile_mode != "none",
+                "aggregation_tile_shape_zyx": list(tile_shape_zyx),
+                "aggregation_tile_overlap_ratio": float(tile_overlap_ratio),
+                "postprocess_enable": postprocess_enabled,
+                "postprocess_min_size": int(
+                    self._usegment3d_postprocess_min_size_spin.value()
+                ),
+                "postprocess_do_flow_remove": do_flow_remove,
+                "postprocess_flow_threshold": flow_threshold,
+                "postprocess_dtform_method": dtform_method,
+            }
+
         def _collect_visualization_parameters(self) -> Dict[str, Any]:
             """Collect visualization parameter values from widgets.
 
@@ -7603,6 +8526,8 @@ if HAS_PYQT6:
                 defaults.update(self._collect_shear_parameters())
             elif operation_name == "particle_detection":
                 defaults.update(self._collect_particle_parameters())
+            elif operation_name == "usegment3d":
+                defaults.update(self._collect_usegment3d_parameters())
             elif operation_name == "visualization":
                 defaults.update(self._collect_visualization_parameters())
             elif operation_name == "mip_export":
@@ -7716,21 +8641,25 @@ if HAS_PYQT6:
                         )
                         return
 
-            self.result_config = WorkflowConfig(
-                file=self._base_config.file,
-                prefer_dask=self._base_config.prefer_dask,
-                dask_backend=self._dask_backend_config,
-                chunks=self._base_config.chunks,
-                flatfield=selected_flags["flatfield"],
-                deconvolution=selected_flags["deconvolution"],
-                shear_transform=selected_flags["shear_transform"],
-                particle_detection=selected_flags["particle_detection"],
-                registration=selected_flags["registration"],
-                visualization=selected_flags["visualization"],
-                mip_export=selected_flags["mip_export"],
-                zarr_save=self._base_config.zarr_save,
-                analysis_parameters=analysis_parameters,
-            )
+            workflow_kwargs: Dict[str, Any] = {
+                "file": self._base_config.file,
+                "prefer_dask": self._base_config.prefer_dask,
+                "dask_backend": self._dask_backend_config,
+                "chunks": self._base_config.chunks,
+                "flatfield": selected_flags["flatfield"],
+                "deconvolution": selected_flags["deconvolution"],
+                "shear_transform": selected_flags["shear_transform"],
+                "particle_detection": selected_flags["particle_detection"],
+                "registration": selected_flags["registration"],
+                "visualization": selected_flags["visualization"],
+                "mip_export": selected_flags["mip_export"],
+                "zarr_save": self._base_config.zarr_save,
+                "analysis_parameters": analysis_parameters,
+            }
+            dataclass_fields = getattr(WorkflowConfig, "__dataclass_fields__", {})
+            if "usegment3d" in dataclass_fields:
+                workflow_kwargs["usegment3d"] = selected_flags["usegment3d"]
+            self.result_config = WorkflowConfig(**workflow_kwargs)
             _save_last_used_dask_backend_config(self._dask_backend_config)
             sequence = self._selected_operations_in_sequence()
             sequence_text = " -> ".join(
@@ -7867,6 +8796,7 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         "deconvolution",
         "shear_transform",
         "particle_detection",
+        "usegment3d",
         "registration",
         "mip_export",
     ):
@@ -7874,21 +8804,25 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         params["force_rerun"] = False
         analysis_parameters[operation_name] = params
 
-    return WorkflowConfig(
-        file=workflow.file,
-        prefer_dask=workflow.prefer_dask,
-        dask_backend=workflow.dask_backend,
-        chunks=workflow.chunks,
-        flatfield=False,
-        deconvolution=False,
-        shear_transform=False,
-        particle_detection=False,
-        registration=False,
-        visualization=False,
-        mip_export=False,
-        zarr_save=workflow.zarr_save,
-        analysis_parameters=analysis_parameters,
-    )
+    workflow_kwargs: Dict[str, Any] = {
+        "file": workflow.file,
+        "prefer_dask": workflow.prefer_dask,
+        "dask_backend": workflow.dask_backend,
+        "chunks": workflow.chunks,
+        "flatfield": False,
+        "deconvolution": False,
+        "shear_transform": False,
+        "particle_detection": False,
+        "registration": False,
+        "visualization": False,
+        "mip_export": False,
+        "zarr_save": workflow.zarr_save,
+        "analysis_parameters": analysis_parameters,
+    }
+    dataclass_fields = getattr(WorkflowConfig, "__dataclass_fields__", {})
+    if "usegment3d" in dataclass_fields:
+        workflow_kwargs["usegment3d"] = False
+    return WorkflowConfig(**workflow_kwargs)
 
 
 def run_workflow_with_progress(

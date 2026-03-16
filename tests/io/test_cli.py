@@ -48,6 +48,7 @@ def test_analysis_flags_are_parsed():
             "--deconvolution",
             "--shear-transform",
             "--particle-detection",
+            "--usegment3d",
             "--registration",
             "--visualization",
             "--mip-export",
@@ -59,6 +60,7 @@ def test_analysis_flags_are_parsed():
     assert args.deconvolution is True
     assert args.shear_transform is True
     assert args.particle_detection is True
+    assert args.usegment3d is True
     assert args.registration is True
     assert args.visualization is True
     assert args.mip_export is True

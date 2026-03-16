@@ -23,7 +23,8 @@ dependencies = [
     "dask-jobqueue",
     "distributed==2025.1.0",
     "h5py",
-    "imagecodecs>=2025.11.11",
+    # u-Segment3D currently requires imagecodecs<2025.
+    "imagecodecs>=2024.9.22,<2025",
     "jupyterlab",
     "matplotlib",
     "napari>0.6.1",
@@ -44,6 +45,11 @@ dependencies = [
 decon = [
     "PyPetaKit5D",
     "psfmodels @ git+https://github.com/tlambert03/PSFmodels.git",
+]
+
+usegment3d = [
+    "u-Segment3D>=0.1.4,<0.2",
+    "cellpose<3",
 ]
 
 dev = [

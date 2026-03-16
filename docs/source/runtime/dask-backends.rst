@@ -38,6 +38,10 @@ Backend startup is lazy and workload-aware:
 For local mode, runtime can auto-recommend aggressive settings based on host
 CPU/memory/GPU context and canonical chunk sizing.
 
+For GPU-enabled uSegment3D analysis on ``local_cluster``, runtime applies an
+additional safety cap: worker count is limited to visible GPU count (1 worker
+per GPU) to reduce GPU overcommit and worker restarts.
+
 Where Backend Selection Happens
 -------------------------------
 

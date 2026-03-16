@@ -327,6 +327,8 @@ def _selected_analyses(workflow: WorkflowConfig) -> list[str]:
         selected.append("shear_transform")
     if workflow.particle_detection:
         selected.append("particle_detection")
+    if workflow.usegment3d:
+        selected.append("usegment3d")
     if workflow.registration:
         selected.append("registration")
     if workflow.visualization:
@@ -840,6 +842,7 @@ def persist_run_provenance(
         "deconvolution": workflow.deconvolution,
         "shear_transform": workflow.shear_transform,
         "particle_detection": workflow.particle_detection,
+        "usegment3d": workflow.usegment3d,
         "registration": workflow.registration,
         "visualization": workflow.visualization,
         "mip_export": workflow.mip_export,

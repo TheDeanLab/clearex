@@ -15,6 +15,7 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
 - Analysis operations available from the main entrypoint:
   - deconvolution (`results/deconvolution/latest/data`)
   - particle detection (`results/particle_detection/latest`)
+  - uSegment3D segmentation (`results/usegment3d/latest/data`)
   - visualization metadata (`results/visualization/latest`) with napari launch
   - registration workflow hook (currently initialized from CLI/GUI, but latest-output persistence is not yet wired like other analyses)
 - FAIR-style provenance records persisted in Zarr/N5 (`provenance/runs`) with append-only run history and hash chaining.
@@ -58,9 +59,10 @@ uv pip install -e .
 
 # Optional extras
 uv pip install -e ".[decon]"      # deconvolution stack (PyPetaKit5D + PSFmodels)
+uv pip install -e ".[usegment3d]" # uSegment3D segmentation stack
 uv pip install -e ".[dev]"        # tests/lint/dev tools
 uv pip install -e ".[docs]"       # docs build stack
-uv pip install -e ".[dev,docs,decon]"
+uv pip install -e ".[dev,docs,decon,usegment3d]"
 ```
 
 #### Windows (PowerShell)
@@ -76,9 +78,10 @@ uv pip install -e .
 
 # Optional extras
 uv pip install -e ".[decon]"
+uv pip install -e ".[usegment3d]"
 uv pip install -e ".[dev]"
 uv pip install -e ".[docs]"
-uv pip install -e ".[dev,docs,decon]"
+uv pip install -e ".[dev,docs,decon,usegment3d]"
 ```
 
 Alternative repo-aware install with lockfile:
@@ -132,7 +135,8 @@ clearex --help
 Current CLI usage:
 
 ```text
-usage: clearex [-h] [--deconvolution] [--particle-detection] [-r] [-v]
+usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
+               [--usegment3d] [--shear-transform] [-r] [-v] [--mip-export]
                [-f FILE] [--dask | --no-dask] [--chunks CHUNKS]
                [--gui | --no-gui] [--headless]
 ```
@@ -141,6 +145,7 @@ usage: clearex [-h] [--deconvolution] [--particle-detection] [-r] [-v]
 - `-f, --file`: Path to input image/store or Navigate `experiment.yml`.
 - `--deconvolution`: Run deconvolution workflow.
 - `--particle-detection`: Run particle detection workflow.
+- `--usegment3d`: Run uSegment3D segmentation workflow.
 - `-r, --registration`: Run registration workflow hook.
 - `-v, --visualization`: Run visualization workflow.
 - `--dask / --no-dask`: Enable/disable Dask-backed reading.
@@ -161,7 +166,7 @@ Run headless on a Navigate experiment:
 ```bash
 clearex --headless \
   --file /path/to/experiment.yml \
-  --deconvolution --particle-detection
+  --deconvolution --usegment3d --particle-detection
 ```
 
 Run headless particle detection on an existing canonical Zarr store:
@@ -182,7 +187,21 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
 - If `--file` points to Navigate `experiment.yml`, ClearEx resolves acquisition data and materializes a canonical store first.
 - For non-Zarr/N5 acquisition data, materialization target is `data_store.zarr` beside `experiment.yml`.
 - For Zarr/N5 acquisition data, ClearEx reuses the source store path in place.
-- Deconvolution, particle detection, and visualization operations run against canonical Zarr/N5 stores.
+- Deconvolution, particle detection, uSegment3D, and visualization operations run against canonical Zarr/N5 stores.
+- uSegment3D runs per `(t, p)` 3D volume and writes labels to `results/usegment3d/latest/data`.
+- GPU awareness:
+  - `gpu=True` requests GPU use for Cellpose/uSegment3D internals.
+  - `require_gpu=True` fails fast if CUDA is unavailable.
+  - For `LocalCluster` analysis runs with GPU-enabled uSegment3D, ClearEx
+    caps worker count to visible GPU count (1 worker per GPU) to reduce
+    worker churn from GPU overcommit.
+  - GPU execution still depends on the installed PyTorch/CUDA build supporting
+    the device architecture (for example, modern PyTorch wheels may not support
+    older Pascal GPUs like Tesla P100 `sm_60`).
+- Scalability notes:
+  - Distributed execution is parallelized over `(t, p)` volumes through Dask.
+  - Intra-volume scalability uses uSegment3D gradient-descent tiling (`aggregation_tile_*` parameters).
+  - Chunk-wise `map_overlap` stitching across labels is not yet enabled by default because label continuity/relabeling across chunk seams requires additional global reconciliation.
 - GUI setup currently requires Navigate `experiment.yml`/`experiment.yaml`.
 - If GUI cannot launch (for example no display), ClearEx logs a warning and falls back to headless execution.
 
@@ -205,6 +224,7 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
 - Latest analysis outputs:
   - `results/deconvolution/latest`
   - `results/particle_detection/latest`
+  - `results/usegment3d/latest`
   - `results/visualization/latest`
 - Provenance:
   - run records: `provenance/runs/<run_id>`

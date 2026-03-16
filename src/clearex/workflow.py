@@ -51,6 +51,7 @@ ANALYSIS_OPERATION_ORDER = (
     "deconvolution",
     "shear_transform",
     "particle_detection",
+    "usegment3d",
     "registration",
     "visualization",
     "mip_export",
@@ -168,8 +169,61 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "remove_close_particles": False,
         "min_distance_sigma": 10.0,
     },
-    "registration": {
+    "usegment3d": {
         "execution_order": 5,
+        "input_source": "data",
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": False,
+        "overlap_zyx": [12, 24, 24],
+        "memory_overhead_factor": 3.0,
+        "channel_index": 0,
+        "use_views": ["xy", "xz", "yz"],
+        "gpu": True,
+        "require_gpu": False,
+        "preprocess_factor": 1.0,
+        "preprocess_voxel_res_zyx": [1.0, 1.0, 1.0],
+        "preprocess_do_bg_correction": True,
+        "preprocess_bg_ds": 16,
+        "preprocess_bg_sigma": 5.0,
+        "preprocess_normalize_min": 2.0,
+        "preprocess_normalize_max": 99.8,
+        "cellpose_model_name": "cyto",
+        "cellpose_channels": "grayscale",
+        "cellpose_hist_norm": False,
+        "cellpose_ksize": 15,
+        "cellpose_use_auto_diameter": False,
+        "cellpose_best_diameter": None,
+        "cellpose_diameter_range": [10.0, 120.0, 2.5],
+        "cellpose_use_edge": True,
+        "cellpose_model_invert": False,
+        "cellpose_test_slice": None,
+        "aggregation_gradient_decay": 0.0,
+        "aggregation_n_iter": 200,
+        "aggregation_momenta": 0.98,
+        "aggregation_prob_threshold": None,
+        "aggregation_threshold_n_levels": 3,
+        "aggregation_threshold_level": 1,
+        "aggregation_min_prob_threshold": 0.0,
+        "aggregation_connected_min_area": 5,
+        "aggregation_connected_smooth_sigma": 1.0,
+        "aggregation_connected_thresh_factor": 0.0,
+        "aggregation_binary_fill_holes": False,
+        "aggregation_tile_mode": False,
+        "aggregation_tile_shape_zyx": [128, 256, 256],
+        "aggregation_tile_overlap_ratio": 0.25,
+        "n_cpu": None,
+        "postprocess_enable": True,
+        "postprocess_min_size": 200,
+        "postprocess_do_flow_remove": True,
+        "postprocess_flow_threshold": 0.85,
+        "postprocess_dtform_method": "cellpose_improve",
+        "postprocess_edt_fixed_point_percentile": 0.01,
+        "output_dtype": "uint32",
+    },
+    "registration": {
+        "execution_order": 6,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -179,7 +233,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "memory_overhead_factor": 2.5,
     },
     "visualization": {
-        "execution_order": 6,
+        "execution_order": 7,
         "input_source": "data",
         "chunk_basis": "2d",
         "detect_2d_per_slice": True,
@@ -197,7 +251,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "keyframe_layer_overrides": [],
     },
     "mip_export": {
-        "execution_order": 7,
+        "execution_order": 8,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -721,6 +775,407 @@ def _normalize_particle_detection_parameters(
     return normalized
 
 
+def _normalize_usegment3d_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize u-segment3d runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate usegment3d parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized usegment3d parameter mapping.
+
+    Raises
+    ------
+    ValueError
+        If required values are invalid.
+    """
+    normalized = _normalize_common_operation_parameters("usegment3d", params)
+    normalized["detect_2d_per_slice"] = False
+
+    channel_value = normalized.get("channel_index", normalized.get("channel", 0))
+    normalized["channel_index"] = max(0, int(channel_value))
+
+    raw_views = normalized.get("use_views", normalized.get("views", ["xy", "xz", "yz"]))
+    if isinstance(raw_views, str):
+        raw_tokens = _normalize_parameter_string_list(raw_views)
+    elif isinstance(raw_views, (tuple, list)):
+        raw_tokens = [str(value).strip() for value in raw_views]
+    else:
+        raw_tokens = []
+    view_order = ("xy", "xz", "yz")
+    seen_views: set[str] = set()
+    selected_views: list[str] = []
+    for token in raw_tokens:
+        view = str(token).strip().lower()
+        if view not in view_order or view in seen_views:
+            continue
+        selected_views.append(view)
+        seen_views.add(view)
+    if not selected_views:
+        raise ValueError("usegment3d use_views must include at least one of xy, xz, yz.")
+    normalized["use_views"] = selected_views
+
+    gpu_value = normalized.get("gpu", normalized.get("use_gpu", True))
+    normalized["gpu"] = bool(gpu_value)
+    normalized["require_gpu"] = bool(normalized.get("require_gpu", False))
+
+    normalized["preprocess_factor"] = float(normalized.get("preprocess_factor", 1.0))
+    if normalized["preprocess_factor"] <= 0:
+        raise ValueError("usegment3d preprocess_factor must be greater than zero.")
+
+    voxel_res = normalized.get("preprocess_voxel_res_zyx", [1.0, 1.0, 1.0])
+    if not isinstance(voxel_res, (tuple, list)) or len(voxel_res) != 3:
+        raise ValueError(
+            "usegment3d preprocess_voxel_res_zyx must define three values in (z, y, x) order."
+        )
+    voxel_res_zyx = [float(voxel_res[0]), float(voxel_res[1]), float(voxel_res[2])]
+    if any(value <= 0 for value in voxel_res_zyx):
+        raise ValueError(
+            "usegment3d preprocess_voxel_res_zyx values must be greater than zero."
+        )
+    normalized["preprocess_voxel_res_zyx"] = voxel_res_zyx
+
+    bg_correction = normalized.get(
+        "preprocess_do_bg_correction",
+        normalized.get(
+            "preprocess_bg_correction",
+            normalized.get("bg_correction", True),
+        ),
+    )
+    normalized["preprocess_do_bg_correction"] = bool(bg_correction)
+    normalized["preprocess_bg_ds"] = max(1, int(normalized.get("preprocess_bg_ds", 16)))
+    normalized["preprocess_bg_sigma"] = float(normalized.get("preprocess_bg_sigma", 5.0))
+    if normalized["preprocess_bg_sigma"] < 0:
+        raise ValueError("usegment3d preprocess_bg_sigma cannot be negative.")
+    normalized["preprocess_normalize_min"] = float(
+        normalized.get(
+            "preprocess_normalize_min",
+            normalized.get("preprocess_min", 2.0),
+        )
+    )
+    normalized["preprocess_normalize_max"] = float(
+        normalized.get(
+            "preprocess_normalize_max",
+            normalized.get("preprocess_max", 99.8),
+        )
+    )
+    if (
+        normalized["preprocess_normalize_min"] < 0
+        or normalized["preprocess_normalize_max"] > 100
+        or normalized["preprocess_normalize_min"]
+        >= normalized["preprocess_normalize_max"]
+    ):
+        raise ValueError(
+            "usegment3d preprocess normalization bounds must satisfy 0 <= min < max <= 100."
+        )
+
+    normalized["cellpose_model_name"] = (
+        str(
+            normalized.get(
+                "cellpose_model_name",
+                normalized.get("cellpose_model", "cyto"),
+            )
+        ).strip()
+        or "cyto"
+    )
+    cellpose_channels_raw = normalized.get("cellpose_channels", "grayscale")
+    if isinstance(cellpose_channels_raw, (tuple, list)):
+        if len(cellpose_channels_raw) == 2:
+            try:
+                parsed_pair = [int(cellpose_channels_raw[0]), int(cellpose_channels_raw[1])]
+            except (TypeError, ValueError):
+                parsed_pair = []
+            if parsed_pair == [0, 0]:
+                cellpose_channels = "grayscale"
+            elif len(parsed_pair) == 2:
+                cellpose_channels = "color"
+            else:
+                cellpose_channels = "grayscale"
+        else:
+            cellpose_channels = "grayscale"
+    else:
+        cellpose_channels_text = str(cellpose_channels_raw).strip().lower() or "grayscale"
+        if cellpose_channels_text in {"grayscale", "gray", "mono", "0,0", "[0,0]"}:
+            cellpose_channels = "grayscale"
+        elif cellpose_channels_text in {"color", "rgb", "2,1", "[2,1]"}:
+            cellpose_channels = "color"
+        else:
+            tokens = _normalize_parameter_string_list(cellpose_channels_text)
+            if len(tokens) == 2:
+                try:
+                    parsed_pair = [int(tokens[0]), int(tokens[1])]
+                except (TypeError, ValueError):
+                    parsed_pair = []
+                if parsed_pair == [0, 0]:
+                    cellpose_channels = "grayscale"
+                elif len(parsed_pair) == 2:
+                    cellpose_channels = "color"
+                else:
+                    raise ValueError(
+                        "usegment3d cellpose_channels must be 'grayscale' or 'color'."
+                    )
+            else:
+                raise ValueError(
+                    "usegment3d cellpose_channels must be 'grayscale' or 'color'."
+                )
+    normalized["cellpose_channels"] = cellpose_channels
+    normalized["cellpose_hist_norm"] = bool(normalized.get("cellpose_hist_norm", False))
+    normalized["cellpose_ksize"] = max(3, int(normalized.get("cellpose_ksize", 15)))
+
+    best_diameter = normalized.get(
+        "cellpose_best_diameter",
+        normalized.get("cellpose_diameter", None),
+    )
+    use_auto_diameter = bool(normalized.get("cellpose_use_auto_diameter", False))
+    if best_diameter in (None, "", 0, 0.0):
+        normalized["cellpose_best_diameter"] = None
+        if "cellpose_diameter" in normalized and not use_auto_diameter:
+            use_auto_diameter = True
+    else:
+        parsed_best_diameter = float(best_diameter)
+        if parsed_best_diameter <= 0:
+            raise ValueError("usegment3d cellpose_best_diameter must be positive.")
+        normalized["cellpose_best_diameter"] = parsed_best_diameter
+    normalized["cellpose_use_auto_diameter"] = bool(use_auto_diameter)
+
+    diameter_range = normalized.get("cellpose_diameter_range", [10.0, 120.0, 2.5])
+    if isinstance(diameter_range, str):
+        diameter_tokens = _normalize_parameter_float_list(diameter_range)
+    elif isinstance(diameter_range, (tuple, list)):
+        diameter_tokens = [float(value) for value in diameter_range]
+    else:
+        diameter_tokens = []
+    if len(diameter_tokens) != 3:
+        raise ValueError(
+            "usegment3d cellpose_diameter_range must define [min, max, step]."
+        )
+    diameter_min, diameter_max, diameter_step = diameter_tokens
+    if diameter_min <= 0 or diameter_max < diameter_min or diameter_step <= 0:
+        raise ValueError(
+            "usegment3d cellpose_diameter_range must satisfy min>0, max>=min, step>0."
+        )
+    normalized["cellpose_diameter_range"] = [
+        float(diameter_min),
+        float(diameter_max),
+        float(diameter_step),
+    ]
+    normalized["cellpose_use_edge"] = bool(
+        normalized.get("cellpose_use_edge", normalized.get("cellpose_edge", True))
+    )
+    normalized["cellpose_model_invert"] = bool(
+        normalized.get("cellpose_model_invert", False)
+    )
+    test_slice = normalized.get("cellpose_test_slice", None)
+    if test_slice in (None, ""):
+        normalized["cellpose_test_slice"] = None
+    else:
+        parsed_test_slice = int(test_slice)
+        if parsed_test_slice < 0:
+            raise ValueError("usegment3d cellpose_test_slice cannot be negative.")
+        normalized["cellpose_test_slice"] = parsed_test_slice
+
+    normalized["aggregation_gradient_decay"] = float(
+        normalized.get(
+            "aggregation_gradient_decay",
+            normalized.get("aggregation_decay", 0.0),
+        )
+    )
+    if normalized["aggregation_gradient_decay"] < 0:
+        raise ValueError("usegment3d aggregation_gradient_decay cannot be negative.")
+    normalized["aggregation_n_iter"] = max(
+        1,
+        int(
+            normalized.get(
+                "aggregation_n_iter",
+                normalized.get("aggregation_iterations", 200),
+            )
+        ),
+    )
+    normalized["aggregation_momenta"] = float(
+        normalized.get("aggregation_momenta", normalized.get("aggregation_momentum", 0.98))
+    )
+    if normalized["aggregation_momenta"] < 0 or normalized["aggregation_momenta"] > 1:
+        raise ValueError("usegment3d aggregation_momenta must be within [0, 1].")
+    probability_threshold = normalized.get("aggregation_prob_threshold", None)
+    if probability_threshold in (None, ""):
+        normalized["aggregation_prob_threshold"] = None
+    else:
+        parsed_probability_threshold = float(probability_threshold)
+        if parsed_probability_threshold <= 0 or parsed_probability_threshold >= 1:
+            raise ValueError(
+                "usegment3d aggregation_prob_threshold must satisfy 0 < value < 1."
+            )
+        normalized["aggregation_prob_threshold"] = parsed_probability_threshold
+    threshold_n_levels = max(2, int(normalized.get("aggregation_threshold_n_levels", 3)))
+    threshold_level = int(normalized.get("aggregation_threshold_level", 1))
+    if threshold_level < 0 or threshold_level >= threshold_n_levels - 1:
+        raise ValueError(
+            "usegment3d aggregation_threshold_level must be within [0, n_levels - 2]."
+        )
+    normalized["aggregation_threshold_n_levels"] = threshold_n_levels
+    normalized["aggregation_threshold_level"] = threshold_level
+    normalized["aggregation_min_prob_threshold"] = float(
+        normalized.get("aggregation_min_prob_threshold", 0.0)
+    )
+    if (
+        normalized["aggregation_min_prob_threshold"] < 0
+        or normalized["aggregation_min_prob_threshold"] >= 1
+    ):
+        raise ValueError(
+            "usegment3d aggregation_min_prob_threshold must satisfy 0 <= value < 1."
+        )
+    normalized["aggregation_connected_min_area"] = max(
+        1, int(normalized.get("aggregation_connected_min_area", 5))
+    )
+    normalized["aggregation_connected_smooth_sigma"] = float(
+        normalized.get("aggregation_connected_smooth_sigma", 1.0)
+    )
+    if normalized["aggregation_connected_smooth_sigma"] < 0:
+        raise ValueError(
+            "usegment3d aggregation_connected_smooth_sigma cannot be negative."
+        )
+    normalized["aggregation_connected_thresh_factor"] = float(
+        normalized.get("aggregation_connected_thresh_factor", 0.0)
+    )
+    normalized["aggregation_binary_fill_holes"] = bool(
+        normalized.get("aggregation_binary_fill_holes", False)
+    )
+
+    tile_mode_raw = str(normalized.get("tile_mode", "")).strip().lower()
+    if tile_mode_raw == "none":
+        aggregation_tile_mode = False
+    elif tile_mode_raw in {"auto", "manual"}:
+        aggregation_tile_mode = True
+    else:
+        aggregation_tile_mode = bool(normalized.get("aggregation_tile_mode", False))
+    normalized["aggregation_tile_mode"] = aggregation_tile_mode
+    normalized["aggregation_tile_shape_zyx"] = _normalize_parameter_int_triplet(
+        normalized.get(
+            "aggregation_tile_shape_zyx",
+            normalized.get(
+                "tile_shape_zyx",
+                normalized.get("tile_shape", [128, 256, 256]),
+            ),
+        ),
+        field_name="usegment3d aggregation_tile_shape_zyx",
+        default=(128, 256, 256),
+    )
+    tile_overlap_zyx = normalized.get(
+        "tile_overlap_zyx",
+        normalized.get("tile_overlap", [0, 0, 0]),
+    )
+    tile_overlap_ratio = normalized.get("aggregation_tile_overlap_ratio", None)
+    if tile_overlap_ratio in (None, ""):
+        if (
+            isinstance(tile_overlap_zyx, (tuple, list))
+            and len(tile_overlap_zyx) == 3
+            and all(int(v) >= 0 for v in tile_overlap_zyx)
+        ):
+            shape_zyx = normalized["aggregation_tile_shape_zyx"]
+            overlap_values = [max(0, int(v)) for v in tile_overlap_zyx]
+            ratio_candidates = [
+                (float(overlap_values[idx]) / float(shape_zyx[idx]))
+                if int(shape_zyx[idx]) > 0
+                else 0.0
+                for idx in range(3)
+            ]
+            tile_overlap_ratio = max(ratio_candidates) if ratio_candidates else 0.0
+        else:
+            tile_overlap_ratio = 0.25
+    normalized["aggregation_tile_overlap_ratio"] = float(tile_overlap_ratio)
+    if (
+        normalized["aggregation_tile_overlap_ratio"] < 0
+        or normalized["aggregation_tile_overlap_ratio"] >= 1
+    ):
+        raise ValueError(
+            "usegment3d aggregation_tile_overlap_ratio must satisfy 0 <= value < 1."
+        )
+    n_cpu = normalized.get("n_cpu", None)
+    if n_cpu in (None, ""):
+        normalized["n_cpu"] = None
+    else:
+        parsed_n_cpu = int(n_cpu)
+        if parsed_n_cpu <= 0:
+            raise ValueError("usegment3d n_cpu must be greater than zero when set.")
+        normalized["n_cpu"] = parsed_n_cpu
+
+    normalized["postprocess_enable"] = bool(
+        normalized.get(
+            "postprocess_enable",
+            normalized.get("postprocess", normalized.get("postprocess_enabled", True)),
+        )
+    )
+    normalized["postprocess_min_size"] = max(
+        0, int(normalized.get("postprocess_min_size", 200))
+    )
+    normalized["postprocess_do_flow_remove"] = bool(
+        normalized.get(
+            "postprocess_do_flow_remove",
+            normalized["postprocess_enable"],
+        )
+    )
+    normalized["postprocess_flow_threshold"] = float(
+        normalized.get(
+            "postprocess_flow_threshold",
+            normalized.get("flow_threshold", 0.85),
+        )
+    )
+    if normalized["postprocess_do_flow_remove"] and normalized["postprocess_flow_threshold"] <= 0:
+        raise ValueError("usegment3d postprocess_flow_threshold must be positive.")
+    dtform_method = (
+        str(
+            normalized.get(
+                "postprocess_dtform_method",
+                normalized.get("postprocess_dtform", "cellpose_improve"),
+            )
+        )
+        .strip()
+        .lower()
+        or "cellpose_improve"
+    )
+    if dtform_method == "cellpose":
+        dtform_method = "cellpose_improve"
+    elif dtform_method == "none":
+        normalized["postprocess_do_flow_remove"] = False
+        dtform_method = "edt"
+    if dtform_method not in {
+        "cellpose_improve",
+        "edt",
+        "fmm",
+        "fmm_skel",
+        "cellpose_skel",
+    }:
+        raise ValueError(
+            "usegment3d postprocess_dtform_method must be one of "
+            "cellpose_improve, edt, fmm, fmm_skel, cellpose_skel."
+        )
+    normalized["postprocess_dtform_method"] = dtform_method
+    normalized["postprocess_edt_fixed_point_percentile"] = float(
+        normalized.get("postprocess_edt_fixed_point_percentile", 0.01)
+    )
+    if (
+        normalized["postprocess_edt_fixed_point_percentile"] < 0
+        or normalized["postprocess_edt_fixed_point_percentile"] > 1
+    ):
+        raise ValueError(
+            "usegment3d postprocess_edt_fixed_point_percentile must be within [0, 1]."
+        )
+
+    output_dtype = (
+        str(normalized.get("output_dtype", "uint32")).strip().lower() or "uint32"
+    )
+    if output_dtype not in {"uint16", "uint32", "int32"}:
+        raise ValueError("usegment3d output_dtype must be uint16, uint32, or int32.")
+    normalized["output_dtype"] = output_dtype
+    return normalized
+
+
 def _normalize_shear_transform_parameters(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -1023,6 +1478,10 @@ def normalize_analysis_operation_parameters(
             merged[operation_name] = _normalize_particle_detection_parameters(
                 merged[operation_name]
             )
+        elif operation_name == "usegment3d":
+            merged[operation_name] = _normalize_usegment3d_parameters(
+                merged[operation_name]
+            )
         elif operation_name == "visualization":
             merged[operation_name] = _normalize_visualization_parameters(
                 merged[operation_name]
@@ -1045,6 +1504,7 @@ def selected_analysis_operations(
     deconvolution: bool,
     shear_transform: bool,
     particle_detection: bool,
+    usegment3d: bool,
     registration: bool,
     visualization: bool,
     mip_export: bool,
@@ -1061,6 +1521,8 @@ def selected_analysis_operations(
         Whether shear transform is enabled.
     particle_detection : bool
         Whether particle detection is enabled.
+    usegment3d : bool
+        Whether usegment3d segmentation is enabled.
     registration : bool
         Whether registration is enabled.
     visualization : bool
@@ -1082,6 +1544,8 @@ def selected_analysis_operations(
         selected.append("shear_transform")
     if particle_detection:
         selected.append("particle_detection")
+    if usegment3d:
+        selected.append("usegment3d")
     if registration:
         selected.append("registration")
     if visualization:
@@ -1097,6 +1561,7 @@ def resolve_analysis_execution_sequence(
     deconvolution: bool,
     shear_transform: bool,
     particle_detection: bool,
+    usegment3d: bool,
     registration: bool,
     visualization: bool,
     mip_export: bool,
@@ -1114,6 +1579,8 @@ def resolve_analysis_execution_sequence(
         Whether shear transform is enabled.
     particle_detection : bool
         Whether particle detection is enabled.
+    usegment3d : bool
+        Whether usegment3d segmentation is enabled.
     registration : bool
         Whether registration is enabled.
     visualization : bool
@@ -1136,6 +1603,7 @@ def resolve_analysis_execution_sequence(
         deconvolution=deconvolution,
         shear_transform=shear_transform,
         particle_detection=particle_detection,
+        usegment3d=usegment3d,
         registration=registration,
         visualization=visualization,
         mip_export=mip_export,
@@ -2718,6 +3186,8 @@ class WorkflowConfig:
         Flag indicating whether shear-transform workflow should run.
     particle_detection : bool
         Flag indicating whether particle detection workflow should run.
+    usegment3d : bool
+        Flag indicating whether usegment3d workflow should run.
     registration : bool
         Flag indicating whether registration workflow should run.
     visualization : bool
@@ -2738,6 +3208,7 @@ class WorkflowConfig:
     deconvolution: bool = False
     shear_transform: bool = False
     particle_detection: bool = False
+    usegment3d: bool = False
     registration: bool = False
     visualization: bool = False
     mip_export: bool = False
@@ -2781,6 +3252,7 @@ class WorkflowConfig:
                 self.deconvolution,
                 self.shear_transform,
                 self.particle_detection,
+                self.usegment3d,
                 self.registration,
                 self.visualization,
                 self.mip_export,

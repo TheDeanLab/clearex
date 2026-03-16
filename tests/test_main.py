@@ -113,6 +113,116 @@ def test_configure_dask_backend_uses_threads_for_single_worker_io(monkeypatch) -
     assert captured["processes"] is False
 
 
+def test_configure_dask_backend_caps_workers_for_gpu_usegment3d_analysis(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _DummyClient:
+        def close(self) -> None:
+            return None
+
+    def _fake_create_dask_client(**kwargs):
+        captured.update(kwargs)
+        return _DummyClient()
+
+    def _fake_recommend_local_cluster_config(**kwargs):
+        del kwargs
+        return SimpleNamespace(detected_gpu_count=2)
+
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        usegment3d=True,
+        analysis_parameters={
+            "usegment3d": {
+                "gpu": True,
+                "require_gpu": True,
+            }
+        },
+        dask_backend=DaskBackendConfig(
+            local_cluster=LocalClusterConfig(
+                n_workers=8,
+                threads_per_worker=1,
+                memory_limit="24GiB",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(main_module, "create_dask_client", _fake_create_dask_client)
+    monkeypatch.setattr(
+        main_module,
+        "recommend_local_cluster_config",
+        _fake_recommend_local_cluster_config,
+    )
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.configure_gpu_cap"),
+            exit_stack=stack,
+            workload="analysis",
+        )
+
+    assert client is not None
+    assert captured["n_workers"] == 2
+    assert captured["processes"] is True
+
+
+def test_configure_dask_backend_does_not_cap_workers_when_gpu_not_requested(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _DummyClient:
+        def close(self) -> None:
+            return None
+
+    def _fake_create_dask_client(**kwargs):
+        captured.update(kwargs)
+        return _DummyClient()
+
+    def _unexpected_recommendation(**kwargs):
+        del kwargs
+        raise AssertionError("GPU recommendation should not be queried.")
+
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        usegment3d=True,
+        analysis_parameters={
+            "usegment3d": {
+                "gpu": False,
+                "require_gpu": False,
+            }
+        },
+        dask_backend=DaskBackendConfig(
+            local_cluster=LocalClusterConfig(
+                n_workers=8,
+                threads_per_worker=1,
+                memory_limit="24GiB",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(main_module, "create_dask_client", _fake_create_dask_client)
+    monkeypatch.setattr(
+        main_module,
+        "recommend_local_cluster_config",
+        _unexpected_recommendation,
+    )
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.configure_gpu_no_cap"),
+            exit_stack=stack,
+            workload="analysis",
+        )
+
+    assert client is not None
+    assert captured["n_workers"] == 8
+    assert captured["processes"] is True
+
+
 def test_run_workflow_visualization_only_skips_analysis_dask_startup(
     monkeypatch,
 ) -> None:
@@ -153,6 +263,31 @@ def test_run_workflow_particle_detection_starts_analysis_dask_startup(
         particle_detection=True,
     )
     main_module._run_workflow(workflow=workflow, logger=_test_logger("clearex.test.main.particle"))
+
+    assert workloads == ["analysis"]
+
+
+def test_run_workflow_usegment3d_starts_analysis_dask_startup(
+    monkeypatch,
+) -> None:
+    workloads: list[str] = []
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack
+        workloads.append(str(workload))
+        return object()
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+
+    workflow = WorkflowConfig(
+        file=None,
+        prefer_dask=True,
+        usegment3d=True,
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.usegment3d"),
+    )
 
     assert workloads == ["analysis"]
 
@@ -341,6 +476,24 @@ def test_run_workflow_non_experiment_file_skips_io_dask_startup(
     main_module._run_workflow(workflow=workflow, logger=_test_logger("clearex.test.main.io_skip"))
 
     assert workloads == []
+
+
+def test_build_workflow_config_maps_usegment3d_flag() -> None:
+    args = SimpleNamespace(
+        file=None,
+        dask=True,
+        chunks=None,
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        usegment3d=True,
+        registration=False,
+        visualization=False,
+        mip_export=False,
+    )
+    workflow = main_module._build_workflow_config(args)
+    assert workflow.usegment3d is True
 
 
 def test_run_workflow_experiment_file_starts_io_dask_startup(
@@ -556,6 +709,166 @@ def test_run_workflow_force_rerun_ignores_matching_provenance(
     assert called["value"] is True
 
 
+def test_run_workflow_skips_matching_provenance_usegment3d(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_usegment3d.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.create_dataset(
+        name="results/usegment3d/latest/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        usegment3d=True,
+        analysis_parameters={
+            "usegment3d": {
+                "input_source": "data",
+                "force_rerun": False,
+            }
+        },
+    )
+
+    persist_run_provenance(
+        zarr_path=store_path,
+        workflow=workflow,
+        image_info=ImageInfo(
+            path=store_path,
+            shape=(1, 1, 1, 2, 2, 2),
+            dtype=np.uint16,
+            axes=["t", "p", "c", "z", "y", "x"],
+        ),
+        steps=[{"name": "usegment3d", "parameters": {}}],
+        repo_root=tmp_path,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _should_not_run(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("usegment3d should have been skipped by provenance match")
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(main_module, "run_usegment3d_analysis", _should_not_run)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.skip_match_usegment3d"),
+    )
+
+
+def test_run_workflow_chains_usegment3d_output_to_visualization(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_usegment3d_chain.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _fake_usegment3d(*, zarr_path, parameters, client, progress_callback):
+        del parameters, client, progress_callback
+        fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
+        latest = (
+            fake_root.require_group("results")
+            .require_group("usegment3d")
+            .require_group("latest")
+        )
+        latest.create_dataset(
+            name="data",
+            shape=(1, 1, 1, 2, 2, 2),
+            chunks=(1, 1, 1, 2, 2, 2),
+            dtype="uint16",
+            overwrite=True,
+        )
+        return SimpleNamespace(
+            component="results/usegment3d/latest",
+            data_component="results/usegment3d/latest/data",
+            source_component="data",
+        )
+
+    captured: dict[str, object] = {}
+
+    def _fake_visualization(*, zarr_path, parameters, progress_callback):
+        del zarr_path, progress_callback
+        captured["input_source"] = str(parameters["input_source"])
+        fake_root = main_module.zarr.open_group(str(store_path), mode="a")
+        latest = (
+            fake_root.require_group("results")
+            .require_group("visualization")
+            .require_group("latest")
+        )
+        latest.attrs["source_component"] = str(parameters["input_source"])
+        return SimpleNamespace(
+            component="results/visualization/latest",
+            source_component=str(parameters["input_source"]),
+            source_components=(str(parameters["input_source"]),),
+            position_index=0,
+            overlay_points_count=0,
+            launch_mode="in_process",
+            viewer_pid=None,
+            keyframe_manifest_path="",
+            keyframe_count=0,
+        )
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(main_module, "run_usegment3d_analysis", _fake_usegment3d)
+    monkeypatch.setattr(main_module, "run_visualization_analysis", _fake_visualization)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        usegment3d=True,
+        visualization=True,
+        analysis_parameters={
+            "usegment3d": {
+                "execution_order": 1,
+                "input_source": "data",
+            },
+            "visualization": {
+                "execution_order": 2,
+                "input_source": "usegment3d",
+            },
+        },
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.usegment3d_chain"),
+    )
+
+    assert captured["input_source"] == "results/usegment3d/latest/data"
+    latest_ref = dict(
+        main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
+            "latest_outputs"
+        ]["usegment3d"].attrs
+    )
+    assert latest_ref["component"] == "results/usegment3d/latest"
+
+
 def test_run_workflow_chains_flatfield_output_to_visualization(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -639,6 +952,8 @@ def test_run_workflow_chains_flatfield_output_to_visualization(
             overlay_points_count=0,
             launch_mode="in_process",
             viewer_pid=None,
+            keyframe_manifest_path="",
+            keyframe_count=0,
         )
 
     monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)

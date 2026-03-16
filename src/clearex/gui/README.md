@@ -25,6 +25,9 @@ This folder owns the PyQt6 UX in `app.py`.
   - `position_index` for multiposition datasets
   - multiscale loading toggle
   - particle-overlay toggle
+- Segmentation tab currently includes:
+  - `Particle Detection`
+  - `uSegment3D` (GPU toggle, view selection, Cellpose model settings, aggregation/tiling, and postprocess controls)
 
 ## Theme Requirements
 
