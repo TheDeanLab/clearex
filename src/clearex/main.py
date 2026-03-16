@@ -74,11 +74,13 @@ from clearex.visualization.pipeline import (
 from clearex.mip_export.pipeline import (
     run_mip_export_analysis,
 )
+
 try:
     from clearex.usegment3d.pipeline import (
         run_usegment3d_analysis,
     )
 except ImportError:
+
     def run_usegment3d_analysis(*, zarr_path, parameters, client, progress_callback):
         """Fallback when the optional usegment3d runtime module is unavailable.
 
@@ -108,6 +110,8 @@ except ImportError:
             "usegment3d analysis is unavailable: "
             "could not import clearex.usegment3d.pipeline."
         )
+
+
 from clearex.workflow import (
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
@@ -255,7 +259,7 @@ def _resolve_analysis_input_component(
 
 
 def _analysis_execution_requires_dask_client(
-    execution_sequence: tuple[str, ...]
+    execution_sequence: tuple[str, ...],
 ) -> bool:
     """Return whether selected operations require a distributed Dask client.
 
@@ -620,7 +624,9 @@ def _configure_dask_backend(
                 )
                 effective_n_workers = recommendation.config.n_workers
                 if local_cfg.threads_per_worker == default_local_cfg.threads_per_worker:
-                    effective_threads_per_worker = recommendation.config.threads_per_worker
+                    effective_threads_per_worker = (
+                        recommendation.config.threads_per_worker
+                    )
                 if (
                     str(local_cfg.memory_limit).strip().lower()
                     == str(default_local_cfg.memory_limit).strip().lower()
@@ -654,9 +660,7 @@ def _configure_dask_backend(
                         gpu_recommendation = recommend_local_cluster_config(
                             chunks_tpczyx=workflow.zarr_save.chunks_tpczyx(),
                         )
-                        detected_gpu_count = int(
-                            gpu_recommendation.detected_gpu_count
-                        )
+                        detected_gpu_count = int(gpu_recommendation.detected_gpu_count)
                         if detected_gpu_count > 0:
                             gpu_worker_cap = max(1, detected_gpu_count)
                             use_gpu_local_cluster = True
@@ -1078,8 +1082,10 @@ def _run_workflow(
                         )
                     else:
                         if bool(history.get("matches_parameters", False)):
-                            required_components = _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS.get(
-                                operation_name
+                            required_components = (
+                                _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS.get(
+                                    operation_name
+                                )
                             )
                             missing_components: list[str] = []
                             for component in required_components or ():
@@ -1144,7 +1150,9 @@ def _run_workflow(
 
                 if operation_name == "flatfield":
                     flatfield_parameters = dict(operation_parameters)
-                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
                         if not _zarr_component_exists(
                             provenance_store_path,
                             str(flatfield_parameters.get("input_source", "data")),
@@ -1158,19 +1166,19 @@ def _run_workflow(
                             runtime_analysis_parameters["flatfield"] = dict(
                                 flatfield_parameters
                             )
-    
+
                         progress_state = {"last_percent": -5}
-    
+
                         def _flatfield_progress(percent: int, message: str) -> None:
                             """Throttle flatfield progress logs.
-    
+
                             Parameters
                             ----------
                             percent : int
                                 Progress percent.
                             message : str
                                 Progress message.
-    
+
                             Returns
                             -------
                             None
@@ -1188,7 +1196,7 @@ def _run_workflow(
                                 mapped,
                                 f"flatfield: {message}",
                             )
-    
+
                         summary = run_flatfield_analysis(
                             zarr_path=provenance_store_path,
                             parameters=flatfield_parameters,
@@ -1269,10 +1277,12 @@ def _run_workflow(
                             "Flatfield correction skipped (no Zarr/N5 store).",
                         )
                     continue
-    
+
                 if operation_name == "deconvolution":
                     decon_parameters = dict(operation_parameters)
-                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
                         if not _zarr_component_exists(
                             provenance_store_path,
                             str(decon_parameters.get("input_source", "data")),
@@ -1286,19 +1296,19 @@ def _run_workflow(
                             runtime_analysis_parameters["deconvolution"] = dict(
                                 decon_parameters
                             )
-    
+
                         progress_state = {"last_percent": -5}
-    
+
                         def _decon_progress(percent: int, message: str) -> None:
                             """Throttle deconvolution progress logs.
-    
+
                             Parameters
                             ----------
                             percent : int
                                 Progress percent.
                             message : str
                                 Progress message.
-    
+
                             Returns
                             -------
                             None
@@ -1307,7 +1317,9 @@ def _run_workflow(
                             last_percent = int(progress_state["last_percent"])
                             if percent >= 100 or percent - last_percent >= 5:
                                 progress_state["last_percent"] = int(percent)
-                                logger.info(f"[deconvolution] {int(percent)}% - {message}")
+                                logger.info(
+                                    f"[deconvolution] {int(percent)}% - {message}"
+                                )
                             mapped = operation_start + int(
                                 (max(0, min(100, int(percent))) / 100)
                                 * max(1, operation_end - operation_start)
@@ -1316,7 +1328,7 @@ def _run_workflow(
                                 mapped,
                                 f"deconvolution: {message}",
                             )
-    
+
                         summary = run_deconvolution_analysis(
                             zarr_path=provenance_store_path,
                             parameters=decon_parameters,
@@ -1379,7 +1391,9 @@ def _run_workflow(
 
                 if operation_name == "shear_transform":
                     shear_parameters = dict(operation_parameters)
-                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
                         if not _zarr_component_exists(
                             provenance_store_path,
                             str(shear_parameters.get("input_source", "data")),
@@ -1472,7 +1486,9 @@ def _run_workflow(
                                     "output_chunks_tpczyx": list(
                                         summary.output_chunks_tpczyx
                                     ),
-                                    "voxel_size_um_zyx": list(summary.voxel_size_um_zyx),
+                                    "voxel_size_um_zyx": list(
+                                        summary.voxel_size_um_zyx
+                                    ),
                                     "applied_shear_xy": summary.applied_shear_xy,
                                     "applied_shear_xz": summary.applied_shear_xz,
                                     "applied_shear_yz": summary.applied_shear_yz,
@@ -1510,7 +1526,9 @@ def _run_workflow(
 
                 if operation_name == "particle_detection":
                     particle_parameters = dict(operation_parameters)
-                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
                         if not _zarr_component_exists(
                             provenance_store_path,
                             str(particle_parameters.get("input_source", "data")),
@@ -1524,19 +1542,19 @@ def _run_workflow(
                             runtime_analysis_parameters["particle_detection"] = dict(
                                 particle_parameters
                             )
-    
+
                         progress_state = {"last_percent": -5}
-    
+
                         def _particle_progress(percent: int, message: str) -> None:
                             """Throttle particle-detection progress logs.
-    
+
                             Parameters
                             ----------
                             percent : int
                                 Progress percent.
                             message : str
                                 Progress message.
-    
+
                             Returns
                             -------
                             None
@@ -1556,7 +1574,7 @@ def _run_workflow(
                                 mapped,
                                 f"particle_detection: {message}",
                             )
-    
+
                         summary = run_particle_detection_analysis(
                             zarr_path=provenance_store_path,
                             parameters=particle_parameters,
@@ -1614,7 +1632,9 @@ def _run_workflow(
 
                 if operation_name == "usegment3d":
                     usegment3d_parameters = dict(operation_parameters)
-                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
                         if not _zarr_component_exists(
                             provenance_store_path,
                             str(usegment3d_parameters.get("input_source", "data")),
@@ -1756,7 +1776,9 @@ def _run_workflow(
                         "Running registration workflow (input=%s).",
                         resolved_source,
                     )
-                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
                         logger.warning(
                             "Registration is enabled but is not yet integrated with "
                             "canonical 6D store inputs. Skipping registration."
@@ -1794,10 +1816,45 @@ def _run_workflow(
                             "Registration skipped (no Zarr/N5 store).",
                         )
                     continue
-    
+
                 if operation_name == "visualization":
                     visualization_parameters = dict(operation_parameters)
-                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    raw_volume_layers = visualization_parameters.get(
+                        "volume_layers", []
+                    )
+                    resolved_volume_layers: list[dict[str, Any]] = []
+                    if isinstance(raw_volume_layers, (tuple, list)):
+                        for raw_row in raw_volume_layers:
+                            if not isinstance(raw_row, dict):
+                                continue
+                            row = dict(raw_row)
+                            requested_component = str(
+                                row.get("component", row.get("source_component", ""))
+                            ).strip()
+                            if not requested_component:
+                                continue
+                            resolved_component = _resolve_analysis_input_component(
+                                requested_source=requested_component,
+                                produced_components=produced_components,
+                            )
+                            row["component"] = str(resolved_component)
+                            if "source_component" in row:
+                                row["source_component"] = str(resolved_component)
+                            resolved_volume_layers.append(row)
+                    if resolved_volume_layers:
+                        visualization_parameters["volume_layers"] = (
+                            resolved_volume_layers
+                        )
+                        first_component = (
+                            str(
+                                resolved_volume_layers[0].get("component", "data")
+                            ).strip()
+                            or "data"
+                        )
+                        visualization_parameters["input_source"] = first_component
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
                         if not _zarr_component_exists(
                             provenance_store_path,
                             str(visualization_parameters.get("input_source", "data")),
@@ -1808,20 +1865,77 @@ def _run_workflow(
                                 visualization_parameters.get("input_source", "data"),
                             )
                             visualization_parameters["input_source"] = "data"
+                            if (
+                                isinstance(
+                                    visualization_parameters.get("volume_layers"),
+                                    (tuple, list),
+                                )
+                                and visualization_parameters["volume_layers"]
+                            ):
+                                first_row = visualization_parameters["volume_layers"][0]
+                                if isinstance(first_row, dict):
+                                    first_row["component"] = "data"
                             runtime_analysis_parameters["visualization"] = dict(
                                 visualization_parameters
                             )
-    
+                        volume_layers_value = visualization_parameters.get(
+                            "volume_layers"
+                        )
+                        if isinstance(volume_layers_value, (tuple, list)):
+                            sanitized_volume_layers: list[dict[str, Any]] = []
+                            for row in volume_layers_value:
+                                if not isinstance(row, dict):
+                                    continue
+                                row_copy = dict(row)
+                                requested_component = (
+                                    str(
+                                        row_copy.get(
+                                            "component",
+                                            row_copy.get("source_component", ""),
+                                        )
+                                    ).strip()
+                                    or "data"
+                                )
+                                if not _zarr_component_exists(
+                                    provenance_store_path,
+                                    requested_component,
+                                ):
+                                    logger.warning(
+                                        "Requested visualization volume layer '%s' was "
+                                        "not found. Falling back to 'data'.",
+                                        requested_component,
+                                    )
+                                    requested_component = "data"
+                                row_copy["component"] = requested_component
+                                if "source_component" in row_copy:
+                                    row_copy["source_component"] = requested_component
+                                sanitized_volume_layers.append(row_copy)
+                            if sanitized_volume_layers:
+                                visualization_parameters["volume_layers"] = (
+                                    sanitized_volume_layers
+                                )
+                                visualization_parameters["input_source"] = (
+                                    str(
+                                        sanitized_volume_layers[0].get(
+                                            "component", "data"
+                                        )
+                                    ).strip()
+                                    or "data"
+                                )
+                            runtime_analysis_parameters["visualization"] = dict(
+                                visualization_parameters
+                            )
+
                         def _visualization_progress(percent: int, message: str) -> None:
                             """Map visualization progress into workflow-scale progress.
-    
+
                             Parameters
                             ----------
                             percent : int
                                 Visualization progress percent.
                             message : str
                                 Progress status text.
-    
+
                             Returns
                             -------
                             None
@@ -1836,7 +1950,7 @@ def _run_workflow(
                                 mapped,
                                 f"visualization: {message}",
                             )
-    
+
                         summary = run_visualization_analysis(
                             zarr_path=provenance_store_path,
                             parameters=visualization_parameters,
@@ -1846,10 +1960,14 @@ def _run_workflow(
                             "component": summary.component,
                             "source_component": summary.source_component,
                             "source_components": list(summary.source_components),
+                            "volume_layers": list(
+                                visualization_parameters.get("volume_layers", [])
+                            ),
                             "position_index": summary.position_index,
                             "overlay_points_count": summary.overlay_points_count,
                             "launch_mode": summary.launch_mode,
                             "viewer_pid": summary.viewer_pid,
+                            "renderer": dict(summary.renderer or {}),
                             "keyframe_manifest_path": summary.keyframe_manifest_path,
                             "keyframe_count": summary.keyframe_count,
                             "storage_policy": "latest_only",
@@ -1872,7 +1990,9 @@ def _run_workflow(
                                     **visualization_parameters,
                                     "component": summary.component,
                                     "source_component": summary.source_component,
-                                    "source_components": list(summary.source_components),
+                                    "source_components": list(
+                                        summary.source_components
+                                    ),
                                     "position_index": summary.position_index,
                                     "overlay_points_count": summary.overlay_points_count,
                                     "launch_mode": summary.launch_mode,
@@ -1914,7 +2034,9 @@ def _run_workflow(
 
                 if operation_name == "mip_export":
                     mip_parameters = dict(operation_parameters)
-                    if provenance_store_path and is_zarr_store_path(provenance_store_path):
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
                         if not _zarr_component_exists(
                             provenance_store_path,
                             str(mip_parameters.get("input_source", "data")),

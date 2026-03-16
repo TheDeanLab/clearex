@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 import math
 import os
 import subprocess
-from typing import Any, Dict, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union
 
 
 ChunkSpec = Optional[Union[int, Tuple[int, ...]]]
@@ -250,9 +250,11 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "overlay_particle_detections": True,
         "particle_detection_component": "results/particle_detection/latest/detections",
         "launch_mode": "auto",
+        "require_gpu_rendering": True,
         "capture_keyframes": True,
         "keyframe_manifest_path": "",
         "keyframe_layer_overrides": [],
+        "volume_layers": [],
     },
     "mip_export": {
         "execution_order": 8,
@@ -825,12 +827,9 @@ def _normalize_usegment3d_parameters(
         normalized.get("channel_indices", normalized.get("channels", []))
     )
     normalized_raw_indices = [max(0, int(value)) for value in raw_channel_indices]
-    if (
-        not normalized_raw_indices
-        or (
-            normalized_raw_indices == default_channel_indices
-            and primary_channel_index != default_primary_channel
-        )
+    if not normalized_raw_indices or (
+        normalized_raw_indices == default_channel_indices
+        and primary_channel_index != default_primary_channel
     ):
         raw_channel_indices = [float(primary_channel_index)]
     normalized_channel_indices: list[int] = []
@@ -873,8 +872,7 @@ def _normalize_usegment3d_parameters(
         output_reference_space = "native_level"
     else:
         raise ValueError(
-            "usegment3d output_reference_space must be one of "
-            "level0 or native_level."
+            "usegment3d output_reference_space must be one of level0 or native_level."
         )
     normalized["output_reference_space"] = output_reference_space
     normalized["save_native_labels"] = bool(
@@ -899,7 +897,9 @@ def _normalize_usegment3d_parameters(
         selected_views.append(view)
         seen_views.add(view)
     if not selected_views:
-        raise ValueError("usegment3d use_views must include at least one of xy, xz, yz.")
+        raise ValueError(
+            "usegment3d use_views must include at least one of xy, xz, yz."
+        )
     normalized["use_views"] = selected_views
 
     gpu_value = normalized.get("gpu", normalized.get("use_gpu", True))
@@ -931,7 +931,9 @@ def _normalize_usegment3d_parameters(
     )
     normalized["preprocess_do_bg_correction"] = bool(bg_correction)
     normalized["preprocess_bg_ds"] = max(1, int(normalized.get("preprocess_bg_ds", 16)))
-    normalized["preprocess_bg_sigma"] = float(normalized.get("preprocess_bg_sigma", 5.0))
+    normalized["preprocess_bg_sigma"] = float(
+        normalized.get("preprocess_bg_sigma", 5.0)
+    )
     if normalized["preprocess_bg_sigma"] < 0:
         raise ValueError("usegment3d preprocess_bg_sigma cannot be negative.")
     normalized["preprocess_normalize_min"] = float(
@@ -969,7 +971,10 @@ def _normalize_usegment3d_parameters(
     if isinstance(cellpose_channels_raw, (tuple, list)):
         if len(cellpose_channels_raw) == 2:
             try:
-                parsed_pair = [int(cellpose_channels_raw[0]), int(cellpose_channels_raw[1])]
+                parsed_pair = [
+                    int(cellpose_channels_raw[0]),
+                    int(cellpose_channels_raw[1]),
+                ]
             except (TypeError, ValueError):
                 parsed_pair = []
             if parsed_pair == [0, 0]:
@@ -981,7 +986,9 @@ def _normalize_usegment3d_parameters(
         else:
             cellpose_channels = "grayscale"
     else:
-        cellpose_channels_text = str(cellpose_channels_raw).strip().lower() or "grayscale"
+        cellpose_channels_text = (
+            str(cellpose_channels_raw).strip().lower() or "grayscale"
+        )
         if cellpose_channels_text in {"grayscale", "gray", "mono", "0,0", "[0,0]"}:
             cellpose_channels = "grayscale"
         elif cellpose_channels_text in {"color", "rgb", "2,1", "[2,1]"}:
@@ -1079,7 +1086,9 @@ def _normalize_usegment3d_parameters(
         ),
     )
     normalized["aggregation_momenta"] = float(
-        normalized.get("aggregation_momenta", normalized.get("aggregation_momentum", 0.98))
+        normalized.get(
+            "aggregation_momenta", normalized.get("aggregation_momentum", 0.98)
+        )
     )
     if normalized["aggregation_momenta"] < 0 or normalized["aggregation_momenta"] > 1:
         raise ValueError("usegment3d aggregation_momenta must be within [0, 1].")
@@ -1093,7 +1102,9 @@ def _normalize_usegment3d_parameters(
                 "usegment3d aggregation_prob_threshold must satisfy 0 < value < 1."
             )
         normalized["aggregation_prob_threshold"] = parsed_probability_threshold
-    threshold_n_levels = max(2, int(normalized.get("aggregation_threshold_n_levels", 3)))
+    threshold_n_levels = max(
+        2, int(normalized.get("aggregation_threshold_n_levels", 3))
+    )
     threshold_level = int(normalized.get("aggregation_threshold_level", 1))
     if threshold_level < 0 or threshold_level >= threshold_n_levels - 1:
         raise ValueError(
@@ -1207,7 +1218,10 @@ def _normalize_usegment3d_parameters(
             normalized.get("flow_threshold", 0.85),
         )
     )
-    if normalized["postprocess_do_flow_remove"] and normalized["postprocess_flow_threshold"] <= 0:
+    if (
+        normalized["postprocess_do_flow_remove"]
+        and normalized["postprocess_flow_threshold"] <= 0
+    ):
         raise ValueError("usegment3d postprocess_flow_threshold must be positive.")
     dtform_method = (
         str(
@@ -1378,9 +1392,7 @@ def _normalize_keyframe_layer_overrides(value: Any) -> list[Dict[str, Any]]:
     for raw_row in value:
         if not isinstance(raw_row, dict):
             continue
-        layer_name = str(
-            raw_row.get("layer_name", raw_row.get("layer", ""))
-        ).strip()
+        layer_name = str(raw_row.get("layer_name", raw_row.get("layer", ""))).strip()
         visible = _coerce_optional_bool(raw_row.get("visible"))
         colormap = str(raw_row.get("colormap", raw_row.get("lut", ""))).strip()
         rendering = str(raw_row.get("rendering", "")).strip()
@@ -1407,6 +1419,142 @@ def _normalize_keyframe_layer_overrides(value: Any) -> list[Dict[str, Any]]:
     return rows
 
 
+def _normalize_visualization_channels(value: Any) -> list[int]:
+    """Normalize channel-selection values for visualization layer rows.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate channel-selection value.
+
+    Returns
+    -------
+    list[int]
+        Unique non-negative channel indices in sorted order. Empty means
+        "all available channels".
+
+    Raises
+    ------
+    None
+        Invalid values return an empty list.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() in {"all", "auto"}:
+            return []
+        items = [part.strip() for part in text.split(",")]
+    elif isinstance(value, (tuple, list)):
+        items = list(value)
+    else:
+        items = [value]
+
+    parsed: list[int] = []
+    for item in items:
+        if item is None:
+            continue
+        try:
+            index = int(item)
+        except (TypeError, ValueError):
+            continue
+        if index < 0:
+            continue
+        parsed.append(int(index))
+    return sorted(set(parsed))
+
+
+def _coerce_optional_unit_interval_float(value: Any) -> Optional[float]:
+    """Coerce optional layer-opacity values into ``[0, 1]`` floats.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate opacity value.
+
+    Returns
+    -------
+    float, optional
+        Parsed opacity value, or ``None`` when unspecified/invalid.
+
+    Raises
+    ------
+    None
+        Invalid values return ``None``.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        opacity = float(text)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(opacity):
+        return None
+    return float(min(1.0, max(0.0, opacity)))
+
+
+def _normalize_visualization_volume_layers(value: Any) -> list[Dict[str, Any]]:
+    """Normalize visualization volume-layer configuration rows.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate list-like value containing layer rows.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Normalized layer rows with component, display, and multiscale policy
+        fields suitable for runtime use.
+
+    Raises
+    ------
+    None
+        Invalid rows are skipped.
+    """
+    if not isinstance(value, (tuple, list)):
+        return []
+
+    rows: list[Dict[str, Any]] = []
+    for raw_row in value:
+        if not isinstance(raw_row, Mapping):
+            continue
+        component = str(
+            raw_row.get("component", raw_row.get("source_component", ""))
+        ).strip()
+        if not component:
+            continue
+        layer_type = str(raw_row.get("layer_type", "image")).strip().lower() or "image"
+        if layer_type not in {"image", "labels"}:
+            layer_type = "image"
+        multiscale_policy = (
+            str(raw_row.get("multiscale_policy", "inherit")).strip().lower()
+            or "inherit"
+        )
+        if multiscale_policy not in {"inherit", "require", "auto_build", "off"}:
+            multiscale_policy = "inherit"
+        rows.append(
+            {
+                "component": component,
+                "name": str(raw_row.get("name", "")).strip(),
+                "layer_type": layer_type,
+                "channels": _normalize_visualization_channels(raw_row.get("channels")),
+                "visible": _coerce_optional_bool(raw_row.get("visible")),
+                "opacity": _coerce_optional_unit_interval_float(raw_row.get("opacity")),
+                "blending": str(raw_row.get("blending", "")).strip().lower(),
+                "colormap": str(
+                    raw_row.get("colormap", raw_row.get("lut", ""))
+                ).strip(),
+                "rendering": str(raw_row.get("rendering", "")).strip().lower(),
+                "multiscale_policy": multiscale_policy,
+            }
+        )
+    return rows
+
+
 def _normalize_visualization_parameters(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -1428,9 +1576,7 @@ def _normalize_visualization_parameters(
         If launch mode is unsupported.
     """
     normalized = _normalize_common_operation_parameters("visualization", params)
-    normalized["show_all_positions"] = bool(
-        normalized.get("show_all_positions", False)
-    )
+    normalized["show_all_positions"] = bool(normalized.get("show_all_positions", False))
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
     normalized["overlay_particle_detections"] = bool(
@@ -1445,13 +1591,37 @@ def _normalize_visualization_parameters(
         ).strip()
         or "results/particle_detection/latest/detections"
     )
-    normalized["capture_keyframes"] = bool(normalized.get("capture_keyframes", True))
-    normalized["keyframe_manifest_path"] = (
-        str(normalized.get("keyframe_manifest_path", "")).strip()
+    normalized["require_gpu_rendering"] = bool(
+        normalized.get("require_gpu_rendering", True)
     )
+    normalized["capture_keyframes"] = bool(normalized.get("capture_keyframes", True))
+    normalized["keyframe_manifest_path"] = str(
+        normalized.get("keyframe_manifest_path", "")
+    ).strip()
     normalized["keyframe_layer_overrides"] = _normalize_keyframe_layer_overrides(
         normalized.get("keyframe_layer_overrides", [])
     )
+    normalized["volume_layers"] = _normalize_visualization_volume_layers(
+        normalized.get("volume_layers", [])
+    )
+    if not normalized["volume_layers"]:
+        default_source = str(normalized.get("input_source", "data")).strip() or "data"
+        normalized["volume_layers"] = [
+            {
+                "component": default_source,
+                "name": "",
+                "layer_type": "image",
+                "channels": [],
+                "visible": None,
+                "opacity": None,
+                "blending": "",
+                "colormap": "",
+                "rendering": "",
+                "multiscale_policy": (
+                    "inherit" if bool(normalized.get("use_multiscale", True)) else "off"
+                ),
+            }
+        ]
     launch_mode = str(normalized.get("launch_mode", "auto")).strip().lower() or "auto"
     if launch_mode not in {"auto", "in_process", "subprocess"}:
         raise ValueError(
@@ -1498,8 +1668,7 @@ def _normalize_mip_export_parameters(
     normalized["position_mode"] = position_mode
 
     export_format_raw = (
-        str(normalized.get("export_format", "ome-tiff")).strip().lower()
-        or "ome-tiff"
+        str(normalized.get("export_format", "ome-tiff")).strip().lower() or "ome-tiff"
     )
     if export_format_raw in {"tiff", "ome-tiff", "ome_tiff", "ome.tiff"}:
         export_format = "ome-tiff"
@@ -1510,9 +1679,7 @@ def _normalize_mip_export_parameters(
             "mip_export export_format must be one of: ome-tiff, tiff, zarr."
         )
     normalized["export_format"] = export_format
-    normalized["output_directory"] = str(
-        normalized.get("output_directory", "")
-    ).strip()
+    normalized["output_directory"] = str(normalized.get("output_directory", "")).strip()
     return normalized
 
 
@@ -2877,11 +3044,7 @@ def recommend_local_cluster_config(
         probed_gpu_count, probed_gpu_memory_bytes = _detect_local_gpu_info()
     detected_gpu_count = max(
         0,
-        int(
-            probed_gpu_count
-            if gpu_count is None
-            else gpu_count
-        ),
+        int(probed_gpu_count if gpu_count is None else gpu_count),
     )
     if detected_gpu_count == 0:
         detected_gpu_memory_bytes: Optional[int] = None
@@ -2897,7 +3060,9 @@ def recommend_local_cluster_config(
         )
 
     itemsize = max(1, int(dtype_itemsize or 2))
-    effective_chunks = tuple(int(v) for v in (chunks_tpczyx or (1, 1, 1, 256, 256, 256)))
+    effective_chunks = tuple(
+        int(v) for v in (chunks_tpczyx or (1, 1, 1, 256, 256, 256))
+    )
     estimated_chunk_bytes = max(1, math.prod(effective_chunks) * itemsize)
     estimated_dataset_bytes: Optional[int] = None
     estimated_chunk_count: Optional[int] = None
@@ -3139,21 +3304,31 @@ def dask_backend_from_dict(payload: Any) -> DaskBackendConfig:
             SlurmClusterConfig(
                 workers=cluster_payload.get("workers", defaults.slurm_cluster.workers),
                 cores=cluster_payload.get("cores", defaults.slurm_cluster.cores),
-                processes=cluster_payload.get("processes", defaults.slurm_cluster.processes),
+                processes=cluster_payload.get(
+                    "processes", defaults.slurm_cluster.processes
+                ),
                 memory=cluster_payload.get("memory", defaults.slurm_cluster.memory),
                 local_directory=cluster_payload.get(
                     "local_directory",
                     defaults.slurm_cluster.local_directory,
                 ),
-                interface=cluster_payload.get("interface", defaults.slurm_cluster.interface),
-                walltime=cluster_payload.get("walltime", defaults.slurm_cluster.walltime),
-                job_name=cluster_payload.get("job_name", defaults.slurm_cluster.job_name),
+                interface=cluster_payload.get(
+                    "interface", defaults.slurm_cluster.interface
+                ),
+                walltime=cluster_payload.get(
+                    "walltime", defaults.slurm_cluster.walltime
+                ),
+                job_name=cluster_payload.get(
+                    "job_name", defaults.slurm_cluster.job_name
+                ),
                 queue=cluster_payload.get("queue", defaults.slurm_cluster.queue),
                 death_timeout=cluster_payload.get(
                     "death_timeout",
                     defaults.slurm_cluster.death_timeout,
                 ),
-                mail_user=cluster_payload.get("mail_user", defaults.slurm_cluster.mail_user),
+                mail_user=cluster_payload.get(
+                    "mail_user", defaults.slurm_cluster.mail_user
+                ),
                 job_extra_directives=tuple(
                     cluster_payload.get(
                         "job_extra_directives",

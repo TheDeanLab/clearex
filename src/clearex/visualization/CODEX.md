@@ -11,12 +11,19 @@ This folder owns napari-facing visualization workflows.
 
 - Visualization reads canonical 6D arrays in `(t, p, c, z, y, x)` order.
 - Default source is `data`.
+- Visualization can render multiple volume sources in one scene (`volume_layers`),
+  including image and labels layers.
 - Multiposition/channel rendering is only as complete as canonical `data`
   materialization. For Navigate TIFF inputs, verify ingestion stacked
   `Position*/CH*` files (otherwise visualization will only show one `p/c` slot).
 - Multiscale defaults to enabled and resolves levels from:
   - `data.attrs["pyramid_levels"]`, and
   - root attrs `data_pyramid_levels` for canonical base data.
+- Per-layer multiscale policy options:
+  - `inherit`: use existing levels when available (fallback single-scale),
+  - `require`: raise if multiscale levels are missing,
+  - `auto_build`: generate levels under `results/visualization_cache/pyramids/...`,
+  - `off`: force single-scale rendering.
 
 ## Overlay Behavior
 
@@ -44,6 +51,8 @@ This folder owns napari-facing visualization workflows.
   - per-channel contrast limits from `1st/95th` percentiles,
   - colormap order starts with `green`, `magenta`, `bop orange`, then high-contrast additions (`cyan`, `yellow`, `blue`, ...),
   - channel opacity decreases with channel count (1: `1.0`, 2: `0.9`, 3: `0.8`, floor `0.55`).
+- Labels layers are supported through napari `add_labels` and can be mixed with
+  image layers in the same viewer.
 - Scale resolution precedence is:
   1. explicit Zarr attrs (for example `scale_tpczyx`, `scale_tczyx`, `voxel_size_um_zyx`, `voxel_size_*`),
   2. `source_experiment` metadata (`timepoint_interval`, `step_size`, camera profile `fov_* / img_*`, then `pixel_size / zoom` with binning fallback),
@@ -87,6 +96,9 @@ This folder owns napari-facing visualization workflows.
 - Default manifest path is `<analysis_store>.visualization_keyframes.json`; override with `keyframe_manifest_path`.
 - GUI provides a popup keyframe layer table (`Layer/View Table...`) with columns:
   - `Layer`, `Visible`, `LUT/Colormap`, `Rendering`, `Annotation`.
+- GUI provides a popup volume-layer table (`Volume Layers...`) for component/type/channel/display/multiscale configuration.
+- Visualization probes napari OpenGL runtime and records renderer metadata (`vendor`, `renderer`, `version`).
+- `require_gpu_rendering=True` (default) raises when renderer hints indicate software GL (for example `llvmpipe`, `swiftshader`) or when GPU-backed OpenGL cannot be confirmed.
 - Latest visualization metadata includes:
   - `capture_keyframes`,
   - `keyframe_manifest_path` (when set),
@@ -96,5 +108,6 @@ This folder owns napari-facing visualization workflows.
 ## Provenance/Metadata
 
 - Visualization metadata is stored at `results/visualization/latest`.
+- Auto-built visualization pyramids are stored at `results/visualization_cache/pyramids`.
 - Latest-output provenance registration uses analysis key `visualization`.
 - Main workflow later backfills `run_id` after provenance run persistence.

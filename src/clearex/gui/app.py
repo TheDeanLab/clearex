@@ -715,7 +715,9 @@ def _extract_pixel_size_um_zyx(info: ImageInfo) -> Optional[tuple[float, float, 
     return _extract_pixel_size_um_zyx_from_metadata(info.metadata)
 
 
-def _format_pixel_size_um_zyx(pixel_size_um_zyx: Optional[tuple[float, float, float]]) -> str:
+def _format_pixel_size_um_zyx(
+    pixel_size_um_zyx: Optional[tuple[float, float, float]],
+) -> str:
     """Format physical voxel size for GUI labels.
 
     Parameters
@@ -1693,9 +1695,9 @@ if HAS_PYQT6:
             self._recommendation_shape_tpczyx = recommendation_shape_tpczyx
             self._recommendation_chunks_tpczyx = recommendation_chunks_tpczyx
             self._recommendation_dtype_itemsize = recommendation_dtype_itemsize
-            self._latest_local_recommendation: Optional[
-                LocalClusterRecommendation
-            ] = None
+            self._latest_local_recommendation: Optional[LocalClusterRecommendation] = (
+                None
+            )
 
             self._build_ui()
             self._hydrate(initial)
@@ -3930,9 +3932,7 @@ if HAS_PYQT6:
             "interpolation": (
                 "ANTsPy interpolation mode used during affine resampling."
             ),
-            "fill_value": (
-                "Fill value for non-overlapping output regions."
-            ),
+            "fill_value": ("Fill value for non-overlapping output regions."),
             "output_dtype": (
                 "Output dtype used for results/shear_transform/latest/data."
             ),
@@ -4003,9 +4003,7 @@ if HAS_PYQT6:
                 "When segmenting from a downsampled level and writing level-0 labels, "
                 "also save native-level labels to results/usegment3d/latest/data_native."
             ),
-            "usegment3d_gpu": (
-                "Enable GPU-accelerated components when available."
-            ),
+            "usegment3d_gpu": ("Enable GPU-accelerated components when available."),
             "usegment3d_require_gpu": (
                 "Fail this operation when no compatible GPU is available."
             ),
@@ -4084,6 +4082,16 @@ if HAS_PYQT6:
                 "particle detections already exist in the store or are selected "
                 "to run before visualization."
             ),
+            "require_gpu_rendering": (
+                "Fail visualization launch when napari reports a software OpenGL "
+                "renderer (for example llvmpipe/swiftshader) or when GPU "
+                "rendering cannot be confirmed."
+            ),
+            "volume_layers": (
+                "Configure image/labels volume overlays for napari. "
+                "Each row can select source component, type, channels, display "
+                "settings, and multiscale policy (inherit/require/auto_build/off)."
+            ),
             "keyframe_layer_overrides": (
                 "Optional per-layer keyframe overrides used in the manifest. "
                 "Each row can set layer visibility, LUT/colormap name, rendering "
@@ -4134,7 +4142,9 @@ if HAS_PYQT6:
             )
 
             self._operation_defaults = default_analysis_operation_parameters()
-            self._flatfield_defaults = dict(self._operation_defaults.get("flatfield", {}))
+            self._flatfield_defaults = dict(
+                self._operation_defaults.get("flatfield", {})
+            )
             self._decon_defaults = dict(
                 self._operation_defaults.get("deconvolution", {})
             )
@@ -4153,6 +4163,11 @@ if HAS_PYQT6:
             self._operation_defaults["usegment3d"] = dict(self._usegment3d_defaults)
             self._visualization_defaults = dict(
                 self._operation_defaults.get("visualization", {})
+            )
+            self._visualization_volume_layers: list[Dict[str, Any]] = (
+                self._normalize_visualization_volume_layers(
+                    self._visualization_defaults.get("volume_layers", [])
+                )
             )
             self._visualization_keyframe_layer_overrides: list[Dict[str, Any]] = (
                 self._normalize_visualization_layer_overrides(
@@ -4181,6 +4196,8 @@ if HAS_PYQT6:
             self._decon_measured_section: Optional[QFrame] = None
             self._decon_synthetic_section: Optional[QFrame] = None
             self._decon_light_sheet_section: Optional[QFrame] = None
+            self._visualization_volume_layers_button: Optional[QPushButton] = None
+            self._visualization_volume_layers_summary_label: Optional[QLabel] = None
             self._visualization_layer_table_button: Optional[QPushButton] = None
             self._visualization_layer_table_summary_label: Optional[QLabel] = None
 
@@ -4314,7 +4331,9 @@ if HAS_PYQT6:
             apply_footer_row_spacing(footer)
             status_stack = QVBoxLayout()
             apply_help_stack_spacing(status_stack)
-            self._status_label = QLabel("Configure selected analysis routines and click Run.")
+            self._status_label = QLabel(
+                "Configure selected analysis routines and click Run."
+            )
             self._status_label.setObjectName("statusLabel")
             self._status_label.setWordWrap(True)
             status_stack.addWidget(self._status_label)
@@ -4459,8 +4478,9 @@ if HAS_PYQT6:
             checkbox.toggled.connect(self._on_operation_selection_changed)
             order_spin.valueChanged.connect(self._on_operation_order_changed)
             configure_button.clicked.connect(
-                lambda _checked=False,
-                op=operation_name: self._show_operation_configuration(op)
+                lambda _checked=False, op=operation_name: (
+                    self._show_operation_configuration(op)
+                )
             )
 
         def _build_no_selection_panel(self) -> QWidget:
@@ -4600,9 +4620,7 @@ if HAS_PYQT6:
             None
                 Widgets are created and stored on ``self``.
             """
-            self._flatfield_darkfield_checkbox = QCheckBox(
-                "Estimate darkfield profile"
-            )
+            self._flatfield_darkfield_checkbox = QCheckBox("Estimate darkfield profile")
             form.addRow("", self._flatfield_darkfield_checkbox)
             self._register_parameter_hint(
                 self._flatfield_darkfield_checkbox,
@@ -4652,9 +4670,7 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["is_timelapse"],
             )
 
-            self._flatfield_use_overlap_checkbox = QCheckBox(
-                "Use map_overlap margins"
-            )
+            self._flatfield_use_overlap_checkbox = QCheckBox("Use map_overlap margins")
             form.addRow("", self._flatfield_use_overlap_checkbox)
             self._register_parameter_hint(
                 self._flatfield_use_overlap_checkbox,
@@ -5262,7 +5278,9 @@ if HAS_PYQT6:
             self._usegment3d_channel_container.setLayout(
                 self._usegment3d_channel_layout
             )
-            self._usegment3d_channel_scroll.setWidget(self._usegment3d_channel_container)
+            self._usegment3d_channel_scroll.setWidget(
+                self._usegment3d_channel_container
+            )
             self._usegment3d_channel_checkboxes: list[QCheckBox] = []
             runtime_form.addRow("channels", self._usegment3d_channel_scroll)
             self._register_parameter_hint(
@@ -5343,7 +5361,9 @@ if HAS_PYQT6:
             )
             self._usegment3d_preprocess_min_spin = QDoubleSpinBox()
             self._usegment3d_preprocess_min_spin.setDecimals(4)
-            self._usegment3d_preprocess_min_spin.setRange(-1_000_000_000.0, 1_000_000_000.0)
+            self._usegment3d_preprocess_min_spin.setRange(
+                -1_000_000_000.0, 1_000_000_000.0
+            )
             self._usegment3d_preprocess_min_spin.setSingleStep(0.1)
             preprocess_form.addRow("min", self._usegment3d_preprocess_min_spin)
             self._register_parameter_hint(
@@ -5353,7 +5373,9 @@ if HAS_PYQT6:
 
             self._usegment3d_preprocess_max_spin = QDoubleSpinBox()
             self._usegment3d_preprocess_max_spin.setDecimals(4)
-            self._usegment3d_preprocess_max_spin.setRange(-1_000_000_000.0, 1_000_000_000.0)
+            self._usegment3d_preprocess_max_spin.setRange(
+                -1_000_000_000.0, 1_000_000_000.0
+            )
             self._usegment3d_preprocess_max_spin.setSingleStep(0.1)
             preprocess_form.addRow("max", self._usegment3d_preprocess_max_spin)
             self._register_parameter_hint(
@@ -5384,7 +5406,9 @@ if HAS_PYQT6:
             )
             form.addRow(preprocess_section)
 
-            cellpose_section, cellpose_form = self._build_parameter_section_card("Cellpose")
+            cellpose_section, cellpose_form = self._build_parameter_section_card(
+                "Cellpose"
+            )
             self._usegment3d_cellpose_model_combo = QComboBox()
             self._usegment3d_cellpose_model_combo.addItem("cyto3", "cyto3")
             self._usegment3d_cellpose_model_combo.addItem("cyto2", "cyto2")
@@ -5416,9 +5440,7 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["usegment3d_cellpose_diameter"],
             )
 
-            self._usegment3d_cellpose_edge_checkbox = QCheckBox(
-                "Enable edge handling"
-            )
+            self._usegment3d_cellpose_edge_checkbox = QCheckBox("Enable edge handling")
             cellpose_form.addRow("edge", self._usegment3d_cellpose_edge_checkbox)
             self._register_parameter_hint(
                 self._usegment3d_cellpose_edge_checkbox,
@@ -5539,9 +5561,7 @@ if HAS_PYQT6:
             postprocess_section, postprocess_form = self._build_parameter_section_card(
                 "Postprocess"
             )
-            self._usegment3d_postprocess_checkbox = QCheckBox(
-                "Enable postprocessing"
-            )
+            self._usegment3d_postprocess_checkbox = QCheckBox("Enable postprocessing")
             postprocess_form.addRow("enabled", self._usegment3d_postprocess_checkbox)
             self._register_parameter_hint(
                 self._usegment3d_postprocess_checkbox,
@@ -5579,7 +5599,9 @@ if HAS_PYQT6:
             )
             self._usegment3d_postprocess_dtform_combo.addItem("EDT", "edt")
             self._usegment3d_postprocess_dtform_combo.addItem("FMM", "fmm")
-            self._usegment3d_postprocess_dtform_combo.addItem("FMM Skeleton", "fmm_skel")
+            self._usegment3d_postprocess_dtform_combo.addItem(
+                "FMM Skeleton", "fmm_skel"
+            )
             self._usegment3d_postprocess_dtform_combo.addItem(
                 "Cellpose Skeleton",
                 "cellpose_skel",
@@ -5616,7 +5638,9 @@ if HAS_PYQT6:
                 Checkbox widgets are replaced in-place.
             """
             count = max(1, int(channel_count))
-            selected_values = [] if selected_channels is None else list(selected_channels)
+            selected_values = (
+                [] if selected_channels is None else list(selected_channels)
+            )
             selected_set: set[int] = set()
             for value in selected_values:
                 parsed = max(0, min(count - 1, int(value)))
@@ -5713,6 +5737,30 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["use_multiscale"],
             )
 
+            self._visualization_require_gpu_checkbox = QCheckBox(
+                "Require GPU OpenGL renderer"
+            )
+            form.addRow("GPU rendering", self._visualization_require_gpu_checkbox)
+            self._register_parameter_hint(
+                self._visualization_require_gpu_checkbox,
+                self._PARAMETER_HINTS["require_gpu_rendering"],
+            )
+
+            self._visualization_volume_layers_button = QPushButton("Volume Layers...")
+            self._visualization_volume_layers_button.clicked.connect(
+                self._open_visualization_volume_layers_dialog
+            )
+            form.addRow("Volume layers", self._visualization_volume_layers_button)
+            self._register_parameter_hint(
+                self._visualization_volume_layers_button,
+                self._PARAMETER_HINTS["volume_layers"],
+            )
+
+            self._visualization_volume_layers_summary_label = QLabel()
+            self._visualization_volume_layers_summary_label.setWordWrap(True)
+            form.addRow("", self._visualization_volume_layers_summary_label)
+            self._refresh_visualization_volume_layers_summary()
+
             self._visualization_overlay_points_checkbox = QCheckBox(
                 "Overlay particle detections"
             )
@@ -5722,9 +5770,7 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["overlay_particle_detections"],
             )
 
-            self._visualization_layer_table_button = QPushButton(
-                "Layer/View Table..."
-            )
+            self._visualization_layer_table_button = QPushButton("Layer/View Table...")
             self._visualization_layer_table_button.clicked.connect(
                 self._open_visualization_layer_table_dialog
             )
@@ -5771,6 +5817,478 @@ if HAS_PYQT6:
             if text in {"0", "false", "no", "off"}:
                 return False
             return None
+
+        def _coerce_optional_unit_interval_float(self, value: Any) -> Optional[float]:
+            """Coerce optional opacity values into finite ``[0, 1]`` floats.
+
+            Parameters
+            ----------
+            value : Any
+                Candidate opacity value.
+
+            Returns
+            -------
+            float, optional
+                Parsed opacity value or ``None`` when unspecified.
+            """
+            if value is None:
+                return None
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                parsed = float(text)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(parsed):
+                return None
+            return float(min(1.0, max(0.0, parsed)))
+
+        def _normalize_visualization_channels(self, value: Any) -> list[int]:
+            """Normalize one layer's channel selection.
+
+            Parameters
+            ----------
+            value : Any
+                Candidate channel-selection value.
+
+            Returns
+            -------
+            list[int]
+                Unique sorted non-negative channel indices. Empty means all.
+            """
+            if value is None:
+                return []
+            if isinstance(value, str):
+                text = value.strip()
+                if not text or text.lower() in {"all", "auto"}:
+                    return []
+                items = [part.strip() for part in text.split(",")]
+            elif isinstance(value, (tuple, list)):
+                items = list(value)
+            else:
+                items = [value]
+
+            parsed: list[int] = []
+            for item in items:
+                if item is None:
+                    continue
+                try:
+                    index = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if index < 0:
+                    continue
+                parsed.append(int(index))
+            return sorted(set(parsed))
+
+        def _default_visualization_multiscale_policy(self) -> str:
+            """Return default per-layer multiscale policy from current controls."""
+            checkbox = getattr(self, "_visualization_multiscale_checkbox", None)
+            if isinstance(checkbox, QCheckBox) and checkbox.isChecked():
+                return "inherit"
+            return "off"
+
+        def _default_visualization_volume_layers(self) -> list[Dict[str, Any]]:
+            """Return default volume-layer rows derived from current input source."""
+            combo = self._operation_input_combos.get("visualization")
+            component = "data"
+            if combo is not None:
+                data = combo.currentData()
+                component = (
+                    str(data).strip() if data is not None else "data"
+                ) or "data"
+            return [
+                {
+                    "component": component,
+                    "name": "",
+                    "layer_type": "image",
+                    "channels": [],
+                    "visible": None,
+                    "opacity": None,
+                    "blending": "",
+                    "colormap": "",
+                    "rendering": "",
+                    "multiscale_policy": self._default_visualization_multiscale_policy(),
+                }
+            ]
+
+        def _normalize_visualization_volume_layers(
+            self,
+            value: Any,
+        ) -> list[Dict[str, Any]]:
+            """Normalize visualization volume-layer table rows.
+
+            Parameters
+            ----------
+            value : Any
+                Candidate list-like row payload.
+
+            Returns
+            -------
+            list[dict[str, Any]]
+                Normalized rows for visualization runtime configuration.
+            """
+            if not isinstance(value, (tuple, list)):
+                return []
+            rows: list[Dict[str, Any]] = []
+            for raw_row in value:
+                if not isinstance(raw_row, Mapping):
+                    continue
+                component = str(
+                    raw_row.get("component", raw_row.get("source_component", ""))
+                ).strip()
+                if not component:
+                    continue
+                layer_type = (
+                    str(raw_row.get("layer_type", "image")).strip().lower() or "image"
+                )
+                if layer_type not in {"image", "labels"}:
+                    layer_type = "image"
+                multiscale_policy = (
+                    str(raw_row.get("multiscale_policy", "inherit")).strip().lower()
+                    or "inherit"
+                )
+                if multiscale_policy not in {"inherit", "require", "auto_build", "off"}:
+                    multiscale_policy = "inherit"
+                rows.append(
+                    {
+                        "component": component,
+                        "name": str(raw_row.get("name", "")).strip(),
+                        "layer_type": layer_type,
+                        "channels": self._normalize_visualization_channels(
+                            raw_row.get("channels")
+                        ),
+                        "visible": self._coerce_optional_bool(raw_row.get("visible")),
+                        "opacity": self._coerce_optional_unit_interval_float(
+                            raw_row.get("opacity")
+                        ),
+                        "blending": str(raw_row.get("blending", "")).strip().lower(),
+                        "colormap": str(
+                            raw_row.get("colormap", raw_row.get("lut", ""))
+                        ).strip(),
+                        "rendering": str(raw_row.get("rendering", "")).strip().lower(),
+                        "multiscale_policy": multiscale_policy,
+                    }
+                )
+            return rows
+
+        def _sync_visualization_input_source_from_volume_layers(self) -> None:
+            """Align visualization input-source combo with first volume layer."""
+            if not self._visualization_volume_layers:
+                return
+            combo = self._operation_input_combos.get("visualization")
+            if combo is None:
+                return
+            component = (
+                str(
+                    self._visualization_volume_layers[0].get("component", "data")
+                ).strip()
+                or "data"
+            )
+            combo.blockSignals(True)
+            combo_index = combo.findData(component)
+            if combo_index < 0:
+                combo.addItem(f"Custom component ({component})", component)
+                combo_index = combo.count() - 1
+            combo.setCurrentIndex(combo_index)
+            combo.blockSignals(False)
+
+        def _refresh_visualization_volume_layers_summary(self) -> None:
+            """Refresh summary text for visualization volume-layer rows."""
+            label = self._visualization_volume_layers_summary_label
+            if label is None:
+                return
+            rows = list(self._visualization_volume_layers)
+            if not rows:
+                label.setText(
+                    "No volume layers configured; primary input source will be used."
+                )
+                return
+            type_counts: Dict[str, int] = {"image": 0, "labels": 0}
+            for row in rows:
+                layer_type = str(row.get("layer_type", "image")).strip().lower()
+                if layer_type not in type_counts:
+                    layer_type = "image"
+                type_counts[layer_type] += 1
+            label.setText(
+                f"{len(rows)} layer(s): {type_counts['image']} image, "
+                f"{type_counts['labels']} labels."
+            )
+            self._sync_visualization_input_source_from_volume_layers()
+
+        def _open_visualization_volume_layers_dialog(self) -> None:
+            """Open popup editor for visualization volume-layer rows."""
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Visualization Volume Layers")
+            dialog.setMinimumWidth(1160)
+            dialog.setMinimumHeight(460)
+            dialog.setModal(True)
+            dialog.setStyleSheet(_popup_dialog_stylesheet())
+
+            root = QVBoxLayout(dialog)
+            apply_popup_root_spacing(root)
+
+            helper = QLabel(
+                "Configure image/labels overlays for napari. "
+                "Use channels as comma-separated indices (leave blank for all)."
+            )
+            helper.setWordWrap(True)
+            root.addWidget(helper)
+
+            table = QTableWidget(dialog)
+            table.setColumnCount(10)
+            table.setHorizontalHeaderLabels(
+                (
+                    "Name",
+                    "Component",
+                    "Type",
+                    "Channels",
+                    "Visible",
+                    "Opacity",
+                    "Blending",
+                    "Colormap",
+                    "Rendering",
+                    "Multiscale",
+                )
+            )
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents)
+            table.verticalHeader().setVisible(False)
+            root.addWidget(table, stretch=1)
+
+            def _make_type_combo(current_value: str) -> QComboBox:
+                combo = QComboBox(table)
+                combo.addItem("Image", "image")
+                combo.addItem("Labels", "labels")
+                index = combo.findData(str(current_value).strip().lower() or "image")
+                combo.setCurrentIndex(index if index >= 0 else 0)
+                return combo
+
+            def _make_visible_combo(current_value: Optional[bool]) -> QComboBox:
+                combo = QComboBox(table)
+                combo.addItem("Auto", None)
+                combo.addItem("True", True)
+                combo.addItem("False", False)
+                index = combo.findData(current_value)
+                combo.setCurrentIndex(index if index >= 0 else 0)
+                return combo
+
+            def _make_multiscale_combo(current_value: str) -> QComboBox:
+                combo = QComboBox(table)
+                combo.addItem("Inherit", "inherit")
+                combo.addItem("Require", "require")
+                combo.addItem("Auto build", "auto_build")
+                combo.addItem("Off", "off")
+                index = combo.findData(str(current_value).strip().lower() or "inherit")
+                combo.setCurrentIndex(index if index >= 0 else 0)
+                return combo
+
+            def _append_row(row_data: Optional[Mapping[str, Any]] = None) -> None:
+                values = dict(row_data) if isinstance(row_data, Mapping) else {}
+                row_index = table.rowCount()
+                table.insertRow(row_index)
+
+                channels = self._normalize_visualization_channels(
+                    values.get("channels")
+                )
+                channels_text = ", ".join(str(value) for value in channels)
+                table.setItem(
+                    row_index,
+                    0,
+                    QTableWidgetItem(str(values.get("name", "")).strip()),
+                )
+                table.setItem(
+                    row_index,
+                    1,
+                    QTableWidgetItem(
+                        str(
+                            values.get("component", values.get("source_component", ""))
+                        ).strip()
+                    ),
+                )
+                table.setCellWidget(
+                    row_index,
+                    2,
+                    _make_type_combo(str(values.get("layer_type", "image"))),
+                )
+                table.setItem(row_index, 3, QTableWidgetItem(channels_text))
+                table.setCellWidget(
+                    row_index,
+                    4,
+                    _make_visible_combo(
+                        self._coerce_optional_bool(values.get("visible"))
+                    ),
+                )
+                opacity_value = self._coerce_optional_unit_interval_float(
+                    values.get("opacity")
+                )
+                table.setItem(
+                    row_index,
+                    5,
+                    QTableWidgetItem(
+                        "" if opacity_value is None else f"{float(opacity_value):.3f}"
+                    ),
+                )
+                table.setItem(
+                    row_index,
+                    6,
+                    QTableWidgetItem(str(values.get("blending", "")).strip()),
+                )
+                table.setItem(
+                    row_index,
+                    7,
+                    QTableWidgetItem(str(values.get("colormap", "")).strip()),
+                )
+                table.setItem(
+                    row_index,
+                    8,
+                    QTableWidgetItem(str(values.get("rendering", "")).strip()),
+                )
+                table.setCellWidget(
+                    row_index,
+                    9,
+                    _make_multiscale_combo(
+                        str(values.get("multiscale_policy", "inherit"))
+                    ),
+                )
+
+            rows_seed = (
+                list(self._visualization_volume_layers)
+                if self._visualization_volume_layers
+                else self._default_visualization_volume_layers()
+            )
+            for row in rows_seed:
+                _append_row(row)
+            if table.rowCount() == 0:
+                _append_row()
+
+            controls = QHBoxLayout()
+            add_row_button = QPushButton("Add Row", dialog)
+            remove_row_button = QPushButton("Remove Selected", dialog)
+            controls.addWidget(add_row_button)
+            controls.addWidget(remove_row_button)
+            controls.addStretch(1)
+            root.addLayout(controls)
+
+            add_row_button.clicked.connect(lambda: _append_row())
+
+            def _remove_selected_rows() -> None:
+                selected_indexes = table.selectionModel().selectedRows()
+                if not selected_indexes:
+                    return
+                for index in sorted(
+                    (idx.row() for idx in selected_indexes),
+                    reverse=True,
+                ):
+                    table.removeRow(int(index))
+                if table.rowCount() == 0:
+                    _append_row()
+
+            remove_row_button.clicked.connect(_remove_selected_rows)
+
+            button_box = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok
+                | QDialogButtonBox.StandardButton.Cancel,
+                Qt.Orientation.Horizontal,
+                dialog,
+            )
+            root.addWidget(button_box)
+            button_box.accepted.connect(dialog.accept)
+            button_box.rejected.connect(dialog.reject)
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            rows: list[Dict[str, Any]] = []
+            for row_index in range(table.rowCount()):
+                name_item = table.item(row_index, 0)
+                component_item = table.item(row_index, 1)
+                channels_item = table.item(row_index, 3)
+                opacity_item = table.item(row_index, 5)
+                blending_item = table.item(row_index, 6)
+                colormap_item = table.item(row_index, 7)
+                rendering_item = table.item(row_index, 8)
+                type_widget = table.cellWidget(row_index, 2)
+                visible_widget = table.cellWidget(row_index, 4)
+                multiscale_widget = table.cellWidget(row_index, 9)
+
+                component = (
+                    str(component_item.text()).strip()
+                    if isinstance(component_item, QTableWidgetItem)
+                    else ""
+                )
+                if not component:
+                    continue
+                row_payload: Dict[str, Any] = {
+                    "name": (
+                        str(name_item.text()).strip()
+                        if isinstance(name_item, QTableWidgetItem)
+                        else ""
+                    ),
+                    "component": component,
+                    "layer_type": (
+                        str(type_widget.currentData() or "image").strip().lower()
+                        if isinstance(type_widget, QComboBox)
+                        else "image"
+                    ),
+                    "channels": self._normalize_visualization_channels(
+                        channels_item.text()
+                        if isinstance(channels_item, QTableWidgetItem)
+                        else ""
+                    ),
+                    "visible": (
+                        self._coerce_optional_bool(visible_widget.currentData())
+                        if isinstance(visible_widget, QComboBox)
+                        else None
+                    ),
+                    "opacity": self._coerce_optional_unit_interval_float(
+                        opacity_item.text()
+                        if isinstance(opacity_item, QTableWidgetItem)
+                        else ""
+                    ),
+                    "blending": (
+                        str(blending_item.text()).strip().lower()
+                        if isinstance(blending_item, QTableWidgetItem)
+                        else ""
+                    ),
+                    "colormap": (
+                        str(colormap_item.text()).strip()
+                        if isinstance(colormap_item, QTableWidgetItem)
+                        else ""
+                    ),
+                    "rendering": (
+                        str(rendering_item.text()).strip().lower()
+                        if isinstance(rendering_item, QTableWidgetItem)
+                        else ""
+                    ),
+                    "multiscale_policy": (
+                        str(multiscale_widget.currentData() or "inherit")
+                        .strip()
+                        .lower()
+                        if isinstance(multiscale_widget, QComboBox)
+                        else "inherit"
+                    ),
+                }
+                rows.append(row_payload)
+
+            self._visualization_volume_layers = (
+                self._normalize_visualization_volume_layers(rows)
+            )
+            if not self._visualization_volume_layers:
+                self._visualization_volume_layers = (
+                    self._default_visualization_volume_layers()
+                )
+            self._refresh_visualization_volume_layers_summary()
 
         def _normalize_visualization_layer_overrides(
             self,
@@ -5914,7 +6432,9 @@ if HAS_PYQT6:
                 row_index = table.rowCount()
                 table.insertRow(row_index)
 
-                layer_name = str(values.get("layer_name", values.get("layer", ""))).strip()
+                layer_name = str(
+                    values.get("layer_name", values.get("layer", ""))
+                ).strip()
                 colormap = str(values.get("colormap", values.get("lut", ""))).strip()
                 rendering = str(values.get("rendering", "")).strip()
                 annotation = str(values.get("annotation", "")).strip()
@@ -6349,7 +6869,9 @@ if HAS_PYQT6:
                     continue
 
                 try:
-                    operation_params = self._collect_operation_parameters(operation_name)
+                    operation_params = self._collect_operation_parameters(
+                        operation_name
+                    )
                     normalized = normalize_analysis_operation_parameters(
                         {operation_name: operation_params}
                     )
@@ -6388,10 +6910,14 @@ if HAS_PYQT6:
                 if not has_successful_run:
                     history_label.setText("Provenance: no successful run recorded yet.")
                 elif matches_parameters:
-                    summary_bits = [f"run_id={matching_run_id}"] if matching_run_id else []
+                    summary_bits = (
+                        [f"run_id={matching_run_id}"] if matching_run_id else []
+                    )
                     if matching_ended:
                         summary_bits.append(f"ended={matching_ended}")
-                    summary_text = ", ".join(summary_bits) if summary_bits else "latest run"
+                    summary_text = (
+                        ", ".join(summary_bits) if summary_bits else "latest run"
+                    )
                     history_label.setText(
                         "Provenance: matching successful run exists "
                         f"({summary_text}); routine will be skipped unless Force rerun is enabled."
@@ -6400,7 +6926,9 @@ if HAS_PYQT6:
                     summary_bits = [f"run_id={latest_run_id}"] if latest_run_id else []
                     if latest_ended:
                         summary_bits.append(f"ended={latest_ended}")
-                    summary_text = ", ".join(summary_bits) if summary_bits else "latest run"
+                    summary_text = (
+                        ", ".join(summary_bits) if summary_bits else "latest run"
+                    )
                     history_label.setText(
                         "Provenance: successful run exists with different parameters "
                         f"({summary_text})."
@@ -6675,9 +7203,7 @@ if HAS_PYQT6:
 
             try:
                 dashboard_port = (
-                    int(dashboard_service)
-                    if dashboard_service is not None
-                    else None
+                    int(dashboard_service) if dashboard_service is not None else None
                 )
             except (TypeError, ValueError):
                 dashboard_port = None
@@ -6685,10 +7211,10 @@ if HAS_PYQT6:
             address = str(payload.get("address") or "").strip()
             parsed_address = urlparse(address) if address else None
             host = (
-                parsed_address.hostname
-                if parsed_address is not None
-                else None
-            ) or str(payload.get("host") or "").strip() or "127.0.0.1"
+                (parsed_address.hostname if parsed_address is not None else None)
+                or str(payload.get("host") or "").strip()
+                or "127.0.0.1"
+            )
 
             if dashboard_port is None:
                 return None
@@ -6783,7 +7309,9 @@ if HAS_PYQT6:
                     "Dashboard URL Unavailable",
                     "Could not determine a dashboard URL from current Dask backend settings.",
                 )
-                self._set_status("Dashboard URL unavailable for current backend settings.")
+                self._set_status(
+                    "Dashboard URL unavailable for current backend settings."
+                )
                 return
 
             try:
@@ -7227,9 +7755,12 @@ if HAS_PYQT6:
             )
 
             resolution_level = int(self._usegment3d_resolution_level_spin.value())
-            output_reference_space = str(
-                self._usegment3d_output_reference_combo.currentData() or "level0"
-            ).strip().lower() or "level0"
+            output_reference_space = (
+                str(self._usegment3d_output_reference_combo.currentData() or "level0")
+                .strip()
+                .lower()
+                or "level0"
+            )
             output_space_enabled = usegment_enabled and resolution_level > 0
             self._usegment3d_output_reference_combo.setEnabled(output_space_enabled)
             save_native_enabled = (
@@ -7323,6 +7854,15 @@ if HAS_PYQT6:
                 visualization_enabled and not show_all_positions
             )
             self._visualization_multiscale_checkbox.setEnabled(visualization_enabled)
+            self._visualization_require_gpu_checkbox.setEnabled(visualization_enabled)
+            if self._visualization_volume_layers_button is not None:
+                self._visualization_volume_layers_button.setEnabled(
+                    visualization_enabled
+                )
+            if self._visualization_volume_layers_summary_label is not None:
+                self._visualization_volume_layers_summary_label.setEnabled(
+                    visualization_enabled
+                )
             if not overlay_available:
                 self._visualization_overlay_points_checkbox.setChecked(False)
             self._visualization_overlay_points_checkbox.setEnabled(
@@ -7583,7 +8123,9 @@ if HAS_PYQT6:
             self._flatfield_working_size_spin.setValue(
                 max(1, int(flatfield_params.get("working_size", 128)))
             )
-            flatfield_fit_tile_shape = flatfield_params.get("fit_tile_shape_yx", [256, 256])
+            flatfield_fit_tile_shape = flatfield_params.get(
+                "fit_tile_shape_yx", [256, 256]
+            )
             if (
                 not isinstance(flatfield_fit_tile_shape, (tuple, list))
                 or len(flatfield_fit_tile_shape) != 2
@@ -7860,7 +8402,9 @@ if HAS_PYQT6:
                 self._usegment3d_defaults.get("use_views", ["xy", "xz", "yz"]),
             )
             if isinstance(views_value, (tuple, list)):
-                views_text = ",".join(str(item).strip() for item in views_value if str(item).strip())
+                views_text = ",".join(
+                    str(item).strip() for item in views_value if str(item).strip()
+                )
             else:
                 views_text = str(views_value or "").strip()
             self._usegment3d_views_input.setText(views_text)
@@ -7901,7 +8445,11 @@ if HAS_PYQT6:
                 bool(usegment3d_params.get("save_native_labels", False))
             )
             self._usegment3d_gpu_checkbox.setChecked(
-                bool(usegment3d_params.get("gpu", usegment3d_params.get("use_gpu", False)))
+                bool(
+                    usegment3d_params.get(
+                        "gpu", usegment3d_params.get("use_gpu", False)
+                    )
+                )
             )
             self._usegment3d_require_gpu_checkbox.setChecked(
                 bool(usegment3d_params.get("require_gpu", False))
@@ -7950,9 +8498,11 @@ if HAS_PYQT6:
                 self._usegment3d_cellpose_model_combo.addItem(model_value, model_value)
                 model_index = self._usegment3d_cellpose_model_combo.count() - 1
             self._usegment3d_cellpose_model_combo.setCurrentIndex(model_index)
-            cellpose_channels_value = str(
-                usegment3d_params.get("cellpose_channels", "grayscale")
-            ).strip().lower()
+            cellpose_channels_value = (
+                str(usegment3d_params.get("cellpose_channels", "grayscale"))
+                .strip()
+                .lower()
+            )
             if cellpose_channels_value not in {"grayscale", "color"}:
                 cellpose_channels_value = "grayscale"
             channels_index = self._usegment3d_cellpose_channels_input.findData(
@@ -8009,10 +8559,14 @@ if HAS_PYQT6:
                     )
                 )
             )
-            tile_mode_value = str(usegment3d_params.get("tile_mode", "")).strip().lower()
+            tile_mode_value = (
+                str(usegment3d_params.get("tile_mode", "")).strip().lower()
+            )
             if tile_mode_value not in {"auto", "manual", "none"}:
                 tile_mode_value = (
-                    "auto" if bool(usegment3d_params.get("aggregation_tile_mode", False)) else "none"
+                    "auto"
+                    if bool(usegment3d_params.get("aggregation_tile_mode", False))
+                    else "none"
                 )
             tile_mode_index = self._usegment3d_tile_mode_combo.findData(tile_mode_value)
             if tile_mode_index < 0:
@@ -8061,9 +8615,7 @@ if HAS_PYQT6:
                     ),
                 )
             )
-            self._usegment3d_postprocess_checkbox.setChecked(
-                postprocess_enabled
-            )
+            self._usegment3d_postprocess_checkbox.setChecked(postprocess_enabled)
             self._usegment3d_postprocess_min_size_spin.setValue(
                 max(0, int(usegment3d_params.get("postprocess_min_size", 200)))
             )
@@ -8091,7 +8643,9 @@ if HAS_PYQT6:
             )
             if not do_flow_remove:
                 dtform_value = "none"
-            dtform_index = self._usegment3d_postprocess_dtform_combo.findData(dtform_value)
+            dtform_index = self._usegment3d_postprocess_dtform_combo.findData(
+                dtform_value
+            )
             if dtform_index < 0:
                 self._usegment3d_postprocess_dtform_combo.addItem(
                     dtform_value,
@@ -8115,9 +8669,25 @@ if HAS_PYQT6:
             self._visualization_multiscale_checkbox.setChecked(
                 bool(visualization_params.get("use_multiscale", True))
             )
+            self._visualization_require_gpu_checkbox.setChecked(
+                bool(visualization_params.get("require_gpu_rendering", True))
+            )
             self._visualization_overlay_points_checkbox.setChecked(
                 bool(visualization_params.get("overlay_particle_detections", True))
             )
+            self._visualization_volume_layers = (
+                self._normalize_visualization_volume_layers(
+                    visualization_params.get(
+                        "volume_layers",
+                        self._visualization_defaults.get("volume_layers", []),
+                    )
+                )
+            )
+            if not self._visualization_volume_layers:
+                self._visualization_volume_layers = (
+                    self._default_visualization_volume_layers()
+                )
+            self._refresh_visualization_volume_layers_summary()
             self._visualization_keyframe_layer_overrides = (
                 self._normalize_visualization_layer_overrides(
                     visualization_params.get(
@@ -8540,16 +9110,10 @@ if HAS_PYQT6:
                     self._flatfield_blend_tiles_checkbox.isChecked()
                     and self._flatfield_use_overlap_checkbox.isChecked()
                 ),
-                "get_darkfield": bool(
-                    self._flatfield_darkfield_checkbox.isChecked()
-                ),
-                "smoothness_flatfield": float(
-                    self._flatfield_smoothness_spin.value()
-                ),
+                "get_darkfield": bool(self._flatfield_darkfield_checkbox.isChecked()),
+                "smoothness_flatfield": float(self._flatfield_smoothness_spin.value()),
                 "working_size": int(self._flatfield_working_size_spin.value()),
-                "is_timelapse": bool(
-                    self._flatfield_timelapse_checkbox.isChecked()
-                ),
+                "is_timelapse": bool(self._flatfield_timelapse_checkbox.isChecked()),
             }
 
         def _collect_shear_parameters(self) -> Dict[str, Any]:
@@ -8669,7 +9233,9 @@ if HAS_PYQT6:
                     "use_views", ["xy", "xz", "yz"]
                 )
                 if isinstance(default_views, (tuple, list)):
-                    views = [str(item).strip() for item in default_views if str(item).strip()]
+                    views = [
+                        str(item).strip() for item in default_views if str(item).strip()
+                    ]
                 else:
                     default_text = str(default_views or "").strip()
                     views = [default_text] if default_text else ["xy", "xz", "yz"]
@@ -8682,14 +9248,19 @@ if HAS_PYQT6:
                 normalized_views.append(token)
                 seen_views.add(token)
             if not normalized_views:
-                raise ValueError("uSegment3D views must include at least one of xy, xz, yz.")
+                raise ValueError(
+                    "uSegment3D views must include at least one of xy, xz, yz."
+                )
 
             selected_channel_indices = self._selected_usegment3d_channel_indices()
             channel = int(selected_channel_indices[0])
             input_resolution_level = int(self._usegment3d_resolution_level_spin.value())
-            output_reference_space = str(
-                self._usegment3d_output_reference_combo.currentData() or "level0"
-            ).strip().lower() or "level0"
+            output_reference_space = (
+                str(self._usegment3d_output_reference_combo.currentData() or "level0")
+                .strip()
+                .lower()
+                or "level0"
+            )
             if input_resolution_level <= 0:
                 output_reference_space = "level0"
             save_native_labels = bool(
@@ -8701,7 +9272,9 @@ if HAS_PYQT6:
                 self._usegment3d_gpu_checkbox.isChecked()
                 or self._usegment3d_require_gpu_checkbox.isChecked()
             )
-            postprocess_enabled = bool(self._usegment3d_postprocess_checkbox.isChecked())
+            postprocess_enabled = bool(
+                self._usegment3d_postprocess_checkbox.isChecked()
+            )
             tile_mode = str(self._usegment3d_tile_mode_combo.currentData() or "auto")
             tile_mode = tile_mode.strip().lower() or "auto"
             tile_shape_zyx = [
@@ -8721,11 +9294,16 @@ if HAS_PYQT6:
                 )
                 for idx in range(3)
             ]
-            tile_overlap_ratio = max(tile_ratio_candidates) if tile_ratio_candidates else 0.0
+            tile_overlap_ratio = (
+                max(tile_ratio_candidates) if tile_ratio_candidates else 0.0
+            )
             tile_overlap_ratio = max(0.0, min(tile_overlap_ratio, 0.99))
-            flow_threshold = float(self._usegment3d_postprocess_flow_threshold_spin.value())
+            flow_threshold = float(
+                self._usegment3d_postprocess_flow_threshold_spin.value()
+            )
             dtform_value = str(
-                self._usegment3d_postprocess_dtform_combo.currentData() or "cellpose_improve"
+                self._usegment3d_postprocess_dtform_combo.currentData()
+                or "cellpose_improve"
             ).strip()
             dtform_value = dtform_value.lower() or "cellpose_improve"
             do_flow_remove = bool(postprocess_enabled)
@@ -8748,7 +9326,9 @@ if HAS_PYQT6:
                 "chunk_basis": "3d",
                 "detect_2d_per_slice": False,
                 "use_map_overlap": False,
-                "overlap_zyx": list(self._usegment3d_defaults.get("overlap_zyx", [0, 0, 0])),
+                "overlap_zyx": list(
+                    self._usegment3d_defaults.get("overlap_zyx", [0, 0, 0])
+                ),
                 "memory_overhead_factor": float(
                     self._usegment3d_defaults.get("memory_overhead_factor", 3.0)
                 ),
@@ -8758,23 +9338,32 @@ if HAS_PYQT6:
                 "save_native_labels": bool(save_native_labels),
                 "gpu": gpu_enabled,
                 "require_gpu": bool(self._usegment3d_require_gpu_checkbox.isChecked()),
-                "preprocess_normalize_min": float(self._usegment3d_preprocess_min_spin.value()),
-                "preprocess_normalize_max": float(self._usegment3d_preprocess_max_spin.value()),
+                "preprocess_normalize_min": float(
+                    self._usegment3d_preprocess_min_spin.value()
+                ),
+                "preprocess_normalize_max": float(
+                    self._usegment3d_preprocess_max_spin.value()
+                ),
                 "preprocess_do_bg_correction": bool(
                     self._usegment3d_preprocess_bg_correction_checkbox.isChecked()
                 ),
-                "preprocess_factor": float(self._usegment3d_preprocess_factor_spin.value()),
+                "preprocess_factor": float(
+                    self._usegment3d_preprocess_factor_spin.value()
+                ),
                 "cellpose_model_name": str(
                     self._usegment3d_cellpose_model_combo.currentData() or "cyto"
                 ).strip()
                 or "cyto",
                 "cellpose_channels": str(
-                    self._usegment3d_cellpose_channels_input.currentData() or "grayscale"
+                    self._usegment3d_cellpose_channels_input.currentData()
+                    or "grayscale"
                 ).strip()
                 or "grayscale",
                 "cellpose_best_diameter": best_diameter_value,
                 "cellpose_use_auto_diameter": use_auto_diameter,
-                "cellpose_use_edge": bool(self._usegment3d_cellpose_edge_checkbox.isChecked()),
+                "cellpose_use_edge": bool(
+                    self._usegment3d_cellpose_edge_checkbox.isChecked()
+                ),
                 "aggregation_gradient_decay": float(
                     self._usegment3d_aggregation_decay_spin.value()
                 ),
@@ -8810,7 +9399,16 @@ if HAS_PYQT6:
                 Visualization parameter mapping.
             """
             overlay_enabled = self._is_particle_overlay_available()
+            volume_layers = self._normalize_visualization_volume_layers(
+                self._visualization_volume_layers
+            )
+            if not volume_layers:
+                volume_layers = self._default_visualization_volume_layers()
+            primary_component = (
+                str(volume_layers[0].get("component", "data")).strip() or "data"
+            )
             return {
+                "input_source": primary_component,
                 "chunk_basis": "2d",
                 "detect_2d_per_slice": True,
                 "use_map_overlap": False,
@@ -8824,6 +9422,9 @@ if HAS_PYQT6:
                 "position_index": int(self._visualization_position_spin.value()),
                 "use_multiscale": bool(
                     self._visualization_multiscale_checkbox.isChecked()
+                ),
+                "require_gpu_rendering": bool(
+                    self._visualization_require_gpu_checkbox.isChecked()
                 ),
                 "overlay_particle_detections": bool(
                     self._visualization_overlay_points_checkbox.isChecked()
@@ -8842,12 +9443,12 @@ if HAS_PYQT6:
                     self._visualization_defaults.get("capture_keyframes", True)
                 ),
                 "keyframe_manifest_path": str(
-                    self._visualization_defaults.get("keyframe_manifest_path", "")
-                    or ""
+                    self._visualization_defaults.get("keyframe_manifest_path", "") or ""
                 ).strip(),
                 "keyframe_layer_overrides": list(
                     self._visualization_keyframe_layer_overrides
                 ),
+                "volume_layers": list(volume_layers),
             }
 
         def _collect_mip_export_parameters(self) -> Dict[str, Any]:
@@ -8906,7 +9507,9 @@ if HAS_PYQT6:
             ) or "data"
             force_checkbox = self._operation_force_rerun_checkboxes.get(operation_name)
             defaults["force_rerun"] = (
-                bool(force_checkbox.isChecked()) if force_checkbox is not None else False
+                bool(force_checkbox.isChecked())
+                if force_checkbox is not None
+                else False
             )
             if operation_name == "flatfield":
                 defaults.update(self._collect_flatfield_parameters())
@@ -9106,10 +9709,7 @@ def launch_gui(
     settings_path = _resolve_dask_backend_settings_path(settings_directory)
     effective_initial = initial or WorkflowConfig()
     persisted_backend = _load_last_used_dask_backend_config(settings_path=settings_path)
-    if (
-        persisted_backend is not None
-        and _should_apply_persisted_dask_backend(initial)
-    ):
+    if persisted_backend is not None and _should_apply_persisted_dask_backend(initial):
         effective_initial = replace(effective_initial, dask_backend=persisted_backend)
 
     app = QApplication.instance()

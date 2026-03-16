@@ -73,6 +73,14 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Local GPU execution now supports a GPU-pinned `LocalCluster` mode via
   `create_dask_client(..., gpu_enabled=True)`, launching one worker per
   CUDA device with `GPU=1` worker resources for explicit task placement.
+- Visualization now supports multi-volume napari overlays:
+  - configurable `volume_layers` rows support image/labels overlays with
+    channel/display controls,
+  - GUI includes a popup `Volume Layers...` table for these rows,
+  - per-layer multiscale policies (`inherit`, `require`, `auto_build`, `off`)
+    are persisted in workflow parameters/provenance metadata,
+  - auto-built pyramids are cached under
+    `results/visualization_cache/pyramids/...`.
 
 ## Sequencing and Inputs
 

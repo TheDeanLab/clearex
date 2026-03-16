@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -42,6 +43,7 @@ import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 # Third Party Imports
+import dask
 import dask.array as da
 import numpy as np
 import zarr
@@ -54,6 +56,42 @@ from clearex.io.provenance import register_latest_output_reference
 ProgressCallback = Callable[[int, str], None]
 _AXIS_LABELS_TCZYX = ("t", "c", "z", "y", "x")
 _TPCZYX_TO_TCZYX = (0, 2, 3, 4, 5)
+_DEFAULT_PYRAMID_FACTORS_TPCZYX = (
+    (1,),
+    (1,),
+    (1,),
+    (1, 2, 4, 8),
+    (1, 2, 4, 8),
+    (1, 2, 4, 8),
+)
+_VOLUME_LAYER_MULTISCALE_POLICIES = frozenset(
+    {"inherit", "require", "auto_build", "off"}
+)
+_SOFTWARE_RENDERER_HINTS = (
+    "llvmpipe",
+    "softpipe",
+    "swiftshader",
+    "software rasterizer",
+    "gdi generic",
+)
+_GPU_VENDOR_HINTS = (
+    "nvidia",
+    "amd",
+    "ati",
+    "intel",
+    "apple",
+    "asahi",
+    "mesa dri",
+    "radeon",
+    "iris",
+    "adreno",
+    "mali",
+    "powervr",
+    "geforce",
+    "quadro",
+    "tesla",
+    "rtx",
+)
 
 
 @dataclass(frozen=True)
@@ -86,6 +124,8 @@ class VisualizationSummary:
         JSON path used to persist interactive keyframe selections.
     keyframe_count : int
         Number of captured keyframes written to the manifest.
+    renderer : dict[str, Any], optional
+        OpenGL renderer probe payload captured from napari context.
     """
 
     component: str
@@ -99,6 +139,7 @@ class VisualizationSummary:
     viewer_pid: Optional[int]
     keyframe_manifest_path: Optional[str] = None
     keyframe_count: int = 0
+    renderer: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +163,128 @@ class NapariLayerPayload:
     scale_tczyx: tuple[float, float, float, float, float]
     image_metadata: Dict[str, Any]
     points_metadata: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ResolvedVolumeLayer:
+    """Resolved visualization layer configuration for one source component.
+
+    Attributes
+    ----------
+    component : str
+        Base component path rendered by this layer.
+    source_components : tuple[str, ...]
+        Ordered component paths for multiscale rendering, including base level.
+    layer_type : str
+        Napari layer type: ``image`` or ``labels``.
+    channels : tuple[int, ...]
+        Requested channel indices. Empty means all available channels.
+    visible : bool, optional
+        Explicit visibility override, or ``None`` to use napari defaults.
+    opacity : float, optional
+        Explicit opacity override in ``[0, 1]``, or ``None`` for defaults.
+    blending : str
+        Optional napari blending mode override.
+    colormap : str
+        Optional colormap override for image layers.
+    rendering : str
+        Optional rendering-style override for image layers.
+    name : str
+        Optional layer base-name override.
+    multiscale_policy : str
+        Layer multiscale policy: ``inherit``, ``require``, ``auto_build``, or ``off``.
+    multiscale_status : str
+        Effective multiscale outcome: ``off``, ``existing``, ``auto_built``, or
+        ``single_scale``.
+    """
+
+    component: str
+    source_components: tuple[str, ...]
+    layer_type: str
+    channels: tuple[int, ...]
+    visible: Optional[bool]
+    opacity: Optional[float]
+    blending: str
+    colormap: str
+    rendering: str
+    name: str
+    multiscale_policy: str
+    multiscale_status: str
+
+
+def _decode_gl_string(value: Any) -> str:
+    """Decode OpenGL vendor/renderer/version strings into plain text."""
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return bytes(value).decode("utf-8", errors="ignore").strip()
+        except Exception:
+            return str(value).strip()
+    return str(value).strip()
+
+
+def _probe_napari_opengl_renderer(viewer: Any) -> Dict[str, Any]:
+    """Probe active napari OpenGL renderer metadata.
+
+    Parameters
+    ----------
+    viewer : Any
+        Napari viewer instance.
+
+    Returns
+    -------
+    dict[str, Any]
+        Renderer metadata with keys:
+        ``vendor``, ``renderer``, ``version``, ``software_renderer``,
+        ``gpu_renderer``, ``gpu_vendor_hint``, and optional ``error``.
+    """
+    vendor = ""
+    renderer = ""
+    version = ""
+    error_text = ""
+    try:
+        canvas = getattr(
+            getattr(getattr(viewer, "window", None), "qt_viewer", None),
+            "canvas",
+            None,
+        )
+        if canvas is None:
+            canvas = getattr(
+                getattr(getattr(viewer, "window", None), "_qt_viewer", None),
+                "canvas",
+                None,
+            )
+        if canvas is not None:
+            context = getattr(canvas, "context", None)
+            if context is not None and callable(getattr(context, "set_current", None)):
+                context.set_current()
+        from vispy.gloo import gl
+
+        vendor = _decode_gl_string(gl.glGetParameter(gl.GL_VENDOR))
+        renderer = _decode_gl_string(gl.glGetParameter(gl.GL_RENDERER))
+        version = _decode_gl_string(gl.glGetParameter(gl.GL_VERSION))
+    except Exception as exc:
+        error_text = str(exc)
+
+    combined = f"{vendor} {renderer}".strip().lower()
+    software_renderer = bool(
+        combined and any(hint in combined for hint in _SOFTWARE_RENDERER_HINTS)
+    )
+    gpu_vendor_hint = any(hint in combined for hint in _GPU_VENDOR_HINTS)
+    gpu_renderer = bool(combined) and not software_renderer and gpu_vendor_hint
+
+    payload: Dict[str, Any] = {
+        "vendor": vendor,
+        "renderer": renderer,
+        "version": version,
+        "software_renderer": bool(software_renderer),
+        "gpu_renderer": bool(gpu_renderer),
+        "gpu_vendor_hint": bool(gpu_vendor_hint),
+    }
+    if error_text:
+        payload["error"] = error_text
+    return payload
 
 
 def _sanitize_metadata_value(value: Any) -> Any:
@@ -155,10 +318,7 @@ def _sanitize_metadata_value(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return _sanitize_metadata_value(value.tolist())
     if isinstance(value, Mapping):
-        return {
-            str(key): _sanitize_metadata_value(item)
-            for key, item in value.items()
-        }
+        return {str(key): _sanitize_metadata_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_sanitize_metadata_value(item) for item in value]
     return str(value)
@@ -509,8 +669,12 @@ def _extract_scale_tczyx_from_navigate_raw(
     )
     lateral_from_fov = _first_positive_float(
         (
-            (fov_x / img_x) if fov_x is not None and img_x is not None and img_x > 0 else None,
-            (fov_y / img_y) if fov_y is not None and img_y is not None and img_y > 0 else None,
+            (fov_x / img_x)
+            if fov_x is not None and img_x is not None and img_x > 0
+            else None,
+            (fov_y / img_y)
+            if fov_y is not None and img_y is not None and img_y > 0
+            else None,
         )
     )
 
@@ -526,7 +690,9 @@ def _extract_scale_tczyx_from_navigate_raw(
     )
     lateral_from_pixel_zoom = None
     if pixel_size is not None and zoom is not None:
-        lateral_from_pixel_zoom = float(pixel_size / zoom * ((binning_x + binning_y) / 2.0))
+        lateral_from_pixel_zoom = float(
+            pixel_size / zoom * ((binning_x + binning_y) / 2.0)
+        )
 
     lateral_size = _first_positive_float(
         (
@@ -604,8 +770,7 @@ def _build_napari_layer_payload(
     *,
     zarr_path: Union[str, Path],
     root: zarr.hierarchy.Group,
-    source_component: str,
-    source_components: Sequence[str],
+    volume_layers: Sequence[ResolvedVolumeLayer],
     position_index: int,
     parameters: Mapping[str, Any],
     overlay_points_count: int,
@@ -619,10 +784,9 @@ def _build_napari_layer_payload(
         Zarr analysis-store path.
     root : zarr.hierarchy.Group
         Opened Zarr root group.
-    source_component : str
-        Base source component path.
-    source_components : sequence of str
-        Ordered multiscale source components.
+    volume_layers : sequence[ResolvedVolumeLayer]
+        Resolved volume-layer specifications. First row is treated as primary
+        source for metadata compatibility fields.
     position_index : int
         Selected position index.
     parameters : mapping[str, Any]
@@ -642,6 +806,12 @@ def _build_napari_layer_payload(
     KeyError
         If referenced source components are missing.
     """
+    if len(volume_layers) <= 0:
+        raise ValueError("Visualization requires at least one resolved volume layer.")
+
+    primary_layer = volume_layers[0]
+    source_component = str(primary_layer.component)
+    source_components = tuple(str(item) for item in primary_layer.source_components)
     root_attrs = dict(root.attrs)
     source_array = root[str(source_component)]
     source_attrs = dict(source_array.attrs)
@@ -658,6 +828,7 @@ def _build_napari_layer_payload(
         root=root,
         source_components=source_components,
     )
+    volume_layers_payload = _serialize_resolved_volume_layers(volume_layers)
 
     image_metadata_raw: Dict[str, Any] = {
         "schema": root_attrs.get("schema"),
@@ -666,6 +837,7 @@ def _build_napari_layer_payload(
         "scale_tczyx": [float(value) for value in scale_tczyx],
         "source_component": str(source_component),
         "source_components": [str(item) for item in source_components],
+        "volume_layers": volume_layers_payload,
         "position_index": int(position_index),
         "source_data_path": root_attrs.get("source_data_path"),
         "source_data_component": root_attrs.get("source_data_component"),
@@ -685,6 +857,7 @@ def _build_napari_layer_payload(
         "data_pyramid_levels": root_attrs.get("data_pyramid_levels"),
         "data_pyramid_factors_tpczyx": root_attrs.get("data_pyramid_factors_tpczyx"),
         "multiscale_levels": multiscale_levels,
+        "primary_multiscale_status": str(primary_layer.multiscale_status),
         "source_array_attrs": source_attrs,
         "root_attrs": root_attrs,
         "visualization_parameters": dict(parameters),
@@ -693,6 +866,7 @@ def _build_napari_layer_payload(
         "coordinate_axes_tczyx": list(_AXIS_LABELS_TCZYX),
         "scale_tczyx": [float(value) for value in scale_tczyx],
         "source_component": str(source_component),
+        "volume_layers": volume_layers_payload,
         "position_index": int(position_index),
         "overlay_points_count": int(overlay_points_count),
         "point_properties": [str(name) for name in point_property_names],
@@ -745,9 +919,7 @@ def _normalize_visualization_parameters(
         str(normalized.get("input_source", "data")).strip() or "data"
     )
     normalized["execution_order"] = max(1, int(normalized.get("execution_order", 1)))
-    normalized["show_all_positions"] = bool(
-        normalized.get("show_all_positions", False)
-    )
+    normalized["show_all_positions"] = bool(normalized.get("show_all_positions", False))
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
     normalized["overlay_particle_detections"] = bool(
@@ -762,13 +934,37 @@ def _normalize_visualization_parameters(
         ).strip()
         or "results/particle_detection/latest/detections"
     )
-    normalized["capture_keyframes"] = bool(normalized.get("capture_keyframes", True))
-    normalized["keyframe_manifest_path"] = (
-        str(normalized.get("keyframe_manifest_path", "")).strip()
+    normalized["require_gpu_rendering"] = bool(
+        normalized.get("require_gpu_rendering", True)
     )
+    normalized["capture_keyframes"] = bool(normalized.get("capture_keyframes", True))
+    normalized["keyframe_manifest_path"] = str(
+        normalized.get("keyframe_manifest_path", "")
+    ).strip()
     normalized["keyframe_layer_overrides"] = _normalize_keyframe_layer_overrides(
         normalized.get("keyframe_layer_overrides", [])
     )
+    normalized["volume_layers"] = _normalize_visualization_volume_layers(
+        normalized.get("volume_layers", [])
+    )
+    if not normalized["volume_layers"]:
+        default_source = str(normalized.get("input_source", "data")).strip() or "data"
+        normalized["volume_layers"] = [
+            {
+                "component": default_source,
+                "name": "",
+                "layer_type": "image",
+                "channels": [],
+                "visible": None,
+                "opacity": None,
+                "blending": "",
+                "colormap": "",
+                "rendering": "",
+                "multiscale_policy": (
+                    "inherit" if bool(normalized.get("use_multiscale", True)) else "off"
+                ),
+            }
+        ]
 
     launch_mode = str(normalized.get("launch_mode", "auto")).strip().lower() or "auto"
     if launch_mode not in {"auto", "in_process", "subprocess"}:
@@ -897,9 +1093,7 @@ def _normalize_keyframe_layer_overrides(value: Any) -> list[Dict[str, Any]]:
     for raw_row in value:
         if not isinstance(raw_row, Mapping):
             continue
-        layer_name = str(
-            raw_row.get("layer_name", raw_row.get("layer", ""))
-        ).strip()
+        layer_name = str(raw_row.get("layer_name", raw_row.get("layer", ""))).strip()
         visible = _coerce_optional_bool(raw_row.get("visible"))
         colormap = str(raw_row.get("colormap", raw_row.get("lut", ""))).strip()
         rendering = str(raw_row.get("rendering", "")).strip()
@@ -921,6 +1115,125 @@ def _normalize_keyframe_layer_overrides(value: Any) -> list[Dict[str, Any]]:
                 "colormap": colormap,
                 "rendering": rendering,
                 "annotation": annotation,
+            }
+        )
+    return rows
+
+
+def _coerce_optional_unit_interval_float(value: Any) -> Optional[float]:
+    """Coerce optional opacity values into finite ``[0, 1]`` floats.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate numeric opacity value.
+
+    Returns
+    -------
+    float, optional
+        Parsed opacity value in ``[0, 1]`` or ``None`` when unspecified.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = float(text)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(parsed):
+        return None
+    return float(min(1.0, max(0.0, parsed)))
+
+
+def _normalize_visualization_channels(value: Any) -> list[int]:
+    """Normalize one layer's channel-selection field.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate channel selection value.
+
+    Returns
+    -------
+    list[int]
+        Unique sorted non-negative channel indices. Empty means all channels.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() in {"all", "auto"}:
+            return []
+        items = [part.strip() for part in text.split(",")]
+    elif isinstance(value, (tuple, list)):
+        items = list(value)
+    else:
+        items = [value]
+
+    parsed: list[int] = []
+    for item in items:
+        if item is None:
+            continue
+        try:
+            index = int(item)
+        except (TypeError, ValueError):
+            continue
+        if index < 0:
+            continue
+        parsed.append(int(index))
+    return sorted(set(parsed))
+
+
+def _normalize_visualization_volume_layers(value: Any) -> list[Dict[str, Any]]:
+    """Normalize visualization layer rows used for volume overlays.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate list-like rows from runtime parameters.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Normalized layer rows.
+    """
+    if not isinstance(value, (tuple, list)):
+        return []
+
+    rows: list[Dict[str, Any]] = []
+    for raw_row in value:
+        if not isinstance(raw_row, Mapping):
+            continue
+        component = str(
+            raw_row.get("component", raw_row.get("source_component", ""))
+        ).strip()
+        if not component:
+            continue
+        layer_type = str(raw_row.get("layer_type", "image")).strip().lower() or "image"
+        if layer_type not in {"image", "labels"}:
+            layer_type = "image"
+        multiscale_policy = (
+            str(raw_row.get("multiscale_policy", "inherit")).strip().lower()
+            or "inherit"
+        )
+        if multiscale_policy not in _VOLUME_LAYER_MULTISCALE_POLICIES:
+            multiscale_policy = "inherit"
+        rows.append(
+            {
+                "component": component,
+                "name": str(raw_row.get("name", "")).strip(),
+                "layer_type": layer_type,
+                "channels": _normalize_visualization_channels(raw_row.get("channels")),
+                "visible": _coerce_optional_bool(raw_row.get("visible")),
+                "opacity": _coerce_optional_unit_interval_float(raw_row.get("opacity")),
+                "blending": str(raw_row.get("blending", "")).strip().lower(),
+                "colormap": str(
+                    raw_row.get("colormap", raw_row.get("lut", ""))
+                ).strip(),
+                "rendering": str(raw_row.get("rendering", "")).strip().lower(),
+                "multiscale_policy": multiscale_policy,
             }
         )
     return rows
@@ -1069,7 +1382,13 @@ def _serialize_layer_configuration(
             float(_safe_float(contrast_limits[1], default=1.0)),
         ]
 
-    for attr_name in ("gamma", "attenuation", "iso_threshold", "edge_width", "border_width"):
+    for attr_name in (
+        "gamma",
+        "attenuation",
+        "iso_threshold",
+        "edge_width",
+        "border_width",
+    ):
         if hasattr(layer, attr_name):
             payload[attr_name] = float(
                 _safe_float(getattr(layer, attr_name, 0.0), default=0.0)
@@ -1149,8 +1468,7 @@ def _capture_viewer_keyframe(
     if selection is not None:
         try:
             selected_layer_names = {
-                str(getattr(layer, "name", ""))
-                for layer in tuple(selection)
+                str(getattr(layer, "name", "")) for layer in tuple(selection)
             }
         except Exception:
             selected_layer_names = set()
@@ -1189,9 +1507,13 @@ def _capture_viewer_keyframe(
             ),
         },
         "dims": {
-            "current_step": [int(round(_safe_float(v, default=0.0))) for v in current_step_raw],
+            "current_step": [
+                int(round(_safe_float(v, default=0.0))) for v in current_step_raw
+            ],
             "axis_labels": [str(label) for label in axis_labels_raw],
-            "ndisplay": int(max(2, round(_safe_float(getattr(dims, "ndisplay", 3), default=3.0)))),
+            "ndisplay": int(
+                max(2, round(_safe_float(getattr(dims, "ndisplay", 3), default=3.0)))
+            ),
             "order": [int(round(_safe_float(v, default=0.0))) for v in dims_order_raw],
         },
         "viewer": {
@@ -1246,27 +1568,267 @@ def _write_keyframe_manifest(
     )
 
 
-def _resolve_multiscale_components(
+def _coerce_level_factors_level_major(
+    value: Any,
+) -> Optional[tuple[tuple[int, int, int, int, int, int], ...]]:
+    """Parse absolute pyramid factors from level-major payloads.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate payload where each row is one absolute factor tuple in
+        ``(t, p, c, z, y, x)`` order.
+
+    Returns
+    -------
+    tuple[tuple[int, int, int, int, int, int], ...], optional
+        Parsed level-major factors, or ``None`` when parsing fails.
+    """
+    if not isinstance(value, (tuple, list)):
+        return None
+    parsed_levels: list[tuple[int, int, int, int, int, int]] = []
+    for row in value:
+        if not isinstance(row, (tuple, list)) or len(row) != 6:
+            return None
+        parsed_row: list[int] = []
+        for item in row:
+            try:
+                factor = int(item)
+            except (TypeError, ValueError):
+                return None
+            if factor <= 0:
+                return None
+            parsed_row.append(int(factor))
+        parsed_levels.append(
+            (
+                int(parsed_row[0]),
+                int(parsed_row[1]),
+                int(parsed_row[2]),
+                int(parsed_row[3]),
+                int(parsed_row[4]),
+                int(parsed_row[5]),
+            )
+        )
+    if not parsed_levels:
+        return None
+    if any(int(value) != 1 for value in parsed_levels[0]):
+        return None
+    return tuple(parsed_levels)
+
+
+def _coerce_level_factors_axis_major(
+    value: Any,
+) -> Optional[tuple[tuple[int, int, int, int, int, int], ...]]:
+    """Parse absolute pyramid factors from axis-major payloads.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate payload where each axis provides one list of factors.
+
+    Returns
+    -------
+    tuple[tuple[int, int, int, int, int, int], ...], optional
+        Parsed absolute level factors, or ``None`` when parsing fails.
+    """
+    if not isinstance(value, (tuple, list)) or len(value) != 6:
+        return None
+
+    axis_levels: list[list[int]] = []
+    for axis_payload in value:
+        if not isinstance(axis_payload, (tuple, list)) or len(axis_payload) <= 0:
+            return None
+        parsed_axis: list[int] = []
+        for item in axis_payload:
+            try:
+                factor = int(item)
+            except (TypeError, ValueError):
+                return None
+            if factor <= 0:
+                return None
+            parsed_axis.append(int(factor))
+        if int(parsed_axis[0]) != 1:
+            return None
+        axis_levels.append(parsed_axis)
+
+    level_count = max(len(levels) for levels in axis_levels)
+    for axis_index in range(len(axis_levels)):
+        axis = axis_levels[axis_index]
+        if len(axis) >= level_count:
+            continue
+        axis_levels[axis_index] = axis + ([int(axis[-1])] * (level_count - len(axis)))
+
+    levels: list[tuple[int, int, int, int, int, int]] = []
+    for level_index in range(level_count):
+        levels.append(
+            (
+                int(axis_levels[0][level_index]),
+                int(axis_levels[1][level_index]),
+                int(axis_levels[2][level_index]),
+                int(axis_levels[3][level_index]),
+                int(axis_levels[4][level_index]),
+                int(axis_levels[5][level_index]),
+            )
+        )
+    if any(int(value) != 1 for value in levels[0]):
+        return None
+    return tuple(levels)
+
+
+def _resolve_visualization_pyramid_factors_tpczyx(
+    *,
+    root_attrs: Mapping[str, Any],
+    source_attrs: Mapping[str, Any],
+) -> tuple[tuple[int, int, int, int, int, int], ...]:
+    """Resolve absolute level factors used by visualization auto-build.
+
+    Parameters
+    ----------
+    root_attrs : mapping[str, Any]
+        Root-group attrs.
+    source_attrs : mapping[str, Any]
+        Source-array attrs.
+
+    Returns
+    -------
+    tuple[tuple[int, int, int, int, int, int], ...]
+        Absolute level factors in canonical order.
+    """
+    candidates = [
+        source_attrs.get("visualization_pyramid_factors_tpczyx"),
+        source_attrs.get("pyramid_factors_tpczyx"),
+        source_attrs.get("resolution_pyramid_factors_tpczyx"),
+        root_attrs.get("resolution_pyramid_factors_tpczyx"),
+        _DEFAULT_PYRAMID_FACTORS_TPCZYX,
+    ]
+    for candidate in candidates:
+        parsed_level_major = _coerce_level_factors_level_major(candidate)
+        if parsed_level_major is not None:
+            return parsed_level_major
+        parsed_axis_major = _coerce_level_factors_axis_major(candidate)
+        if parsed_axis_major is not None:
+            return parsed_axis_major
+    return ((1, 1, 1, 1, 1, 1),)
+
+
+def _downsample_tpczyx_by_stride(
+    array: da.Array,
+    factors_tpczyx: tuple[int, int, int, int, int, int],
+) -> da.Array:
+    """Create a nearest-neighbor strided downsampled view.
+
+    Parameters
+    ----------
+    array : dask.array.Array
+        Canonical ``(t, p, c, z, y, x)`` array.
+    factors_tpczyx : tuple[int, int, int, int, int, int]
+        Stride factors in canonical order.
+
+    Returns
+    -------
+    dask.array.Array
+        Strided view suitable for multiscale levels.
+    """
+    return array[
+        tuple(slice(None, None, max(1, int(factor))) for factor in factors_tpczyx)
+    ]
+
+
+def _resolve_level_chunks_tpczyx(
+    *,
+    source_chunks: Optional[Sequence[int]],
+    level_shape: Sequence[int],
+) -> tuple[int, int, int, int, int, int]:
+    """Resolve practical chunking for one generated multiscale level.
+
+    Parameters
+    ----------
+    source_chunks : sequence[int], optional
+        Source-array chunk shape.
+    level_shape : sequence[int]
+        Level array shape.
+
+    Returns
+    -------
+    tuple[int, int, int, int, int, int]
+        Chunk shape in canonical order.
+    """
+    normalized_shape = tuple(max(1, int(size)) for size in level_shape)
+    if source_chunks is None or len(tuple(source_chunks)) != 6:
+        return (
+            int(normalized_shape[0]),
+            int(normalized_shape[1]),
+            int(normalized_shape[2]),
+            int(normalized_shape[3]),
+            int(normalized_shape[4]),
+            int(normalized_shape[5]),
+        )
+    chunks = tuple(int(size) for size in source_chunks)
+    return (
+        int(max(1, min(normalized_shape[0], chunks[0]))),
+        int(max(1, min(normalized_shape[1], chunks[1]))),
+        int(max(1, min(normalized_shape[2], chunks[2]))),
+        int(max(1, min(normalized_shape[3], chunks[3]))),
+        int(max(1, min(normalized_shape[4], chunks[4]))),
+        int(max(1, min(normalized_shape[5], chunks[5]))),
+    )
+
+
+def _component_matches_shape_chunks(
+    *,
+    root: zarr.hierarchy.Group,
+    component: str,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+    chunks_tpczyx: tuple[int, int, int, int, int, int],
+) -> bool:
+    """Return whether an existing component matches shape/chunks exactly."""
+    try:
+        array = root[str(component)]
+    except Exception:
+        return False
+    array_shape = tuple(int(size) for size in tuple(getattr(array, "shape", tuple())))
+    if array_shape != tuple(int(v) for v in shape_tpczyx):
+        return False
+    array_chunks_raw = getattr(array, "chunks", None)
+    if array_chunks_raw is None:
+        return False
+    array_chunks = tuple(int(size) for size in tuple(array_chunks_raw))
+    return array_chunks == tuple(int(v) for v in chunks_tpczyx)
+
+
+def _visualization_multiscale_cache_prefix(source_component: str) -> str:
+    """Return deterministic cache prefix used for generated layer pyramids."""
+    component = str(source_component).strip() or "data"
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", component).strip("_")
+    if not safe_name:
+        safe_name = "data"
+    digest = hashlib.sha1(component.encode("utf-8")).hexdigest()[:10]
+    return f"results/visualization_cache/pyramids/{safe_name}_{digest}"
+
+
+def _collect_existing_multiscale_components(
     *,
     root: zarr.hierarchy.Group,
     source_component: str,
-    use_multiscale: bool,
 ) -> tuple[str, ...]:
-    """Resolve ordered multiscale component paths for a source image.
+    """Collect existing multiscale component paths for one source component.
 
     Parameters
     ----------
     root : zarr.hierarchy.Group
         Opened Zarr root group.
     source_component : str
-        Source component path.
-    use_multiscale : bool
-        Whether multiscale loading is enabled.
+        Base source component.
 
     Returns
     -------
     tuple[str, ...]
-        Ordered component paths, always including ``source_component``.
+        Ordered existing level components. Always includes base component.
+
+    Raises
+    ------
+    ValueError
+        If source component is missing or not canonical 6D.
     """
     try:
         source_array = root[source_component]
@@ -1281,25 +1843,30 @@ def _resolve_multiscale_components(
             f"Input component '{source_component}' is incompatible."
         )
 
-    if not use_multiscale:
-        return (source_component,)
-
-    candidates: list[str] = []
-    source_levels = source_array.attrs.get("pyramid_levels")
+    candidates: list[str] = [str(source_component)]
+    source_attrs = dict(source_array.attrs)
+    source_levels = source_attrs.get("pyramid_levels")
     if isinstance(source_levels, (tuple, list)):
         candidates.extend(str(item) for item in source_levels)
+    viz_levels = source_attrs.get("visualization_pyramid_levels")
+    if isinstance(viz_levels, (tuple, list)):
+        candidates.extend(str(item) for item in viz_levels)
 
-    if source_component == "data":
-        root_levels = root.attrs.get("data_pyramid_levels")
+    root_attrs = dict(root.attrs)
+    root_level_map = root_attrs.get("visualization_pyramid_levels_by_component")
+    if isinstance(root_level_map, Mapping):
+        mapped = root_level_map.get(str(source_component))
+        if isinstance(mapped, (tuple, list)):
+            candidates.extend(str(item) for item in mapped)
+    if str(source_component) == "data":
+        root_levels = root_attrs.get("data_pyramid_levels")
         if isinstance(root_levels, (tuple, list)):
             candidates.extend(str(item) for item in root_levels)
 
-    ordered: list[str] = [source_component]
-    ordered.extend(candidates)
-    unique: list[str] = []
-    for component in ordered:
+    ordered: list[str] = []
+    for component in candidates:
         text = str(component).strip()
-        if not text or text in unique:
+        if not text or text in ordered:
             continue
         try:
             array = root[text]
@@ -1307,8 +1874,327 @@ def _resolve_multiscale_components(
             continue
         if len(tuple(array.shape)) != 6:
             continue
-        unique.append(text)
-    return tuple(unique) if unique else (source_component,)
+        ordered.append(text)
+
+    return tuple(ordered) if ordered else (str(source_component),)
+
+
+def _build_visualization_multiscale_components(
+    *,
+    zarr_path: Union[str, Path],
+    root: zarr.hierarchy.Group,
+    source_component: str,
+    level_factors_tpczyx: tuple[tuple[int, int, int, int, int, int], ...],
+) -> tuple[str, ...]:
+    """Materialize generated multiscale levels for visualization.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Analysis store path.
+    root : zarr.hierarchy.Group
+        Opened root group (write-capable).
+    source_component : str
+        Base component path.
+    level_factors_tpczyx : tuple[tuple[int, int, int, int, int, int], ...]
+        Absolute level factors including base level.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered components including generated levels.
+    """
+    source_array = root[str(source_component)]
+    source_chunks = (
+        tuple(source_array.chunks) if source_array.chunks is not None else None
+    )
+    source_dtype = np.dtype(source_array.dtype)
+    level_paths: list[str] = [str(source_component)]
+    factor_payload: list[list[int]] = [
+        [int(value) for value in level_factors_tpczyx[0]]
+    ]
+    cache_prefix = _visualization_multiscale_cache_prefix(str(source_component))
+
+    prior_component = str(source_component)
+    prior_factors = tuple(int(value) for value in level_factors_tpczyx[0])
+    for level_index, absolute_factors in enumerate(level_factors_tpczyx[1:], start=1):
+        all_relative = all(
+            int(current) % int(previous) == 0
+            for current, previous in zip(absolute_factors, prior_factors, strict=False)
+        )
+        if all_relative:
+            relative_factors = (
+                int(absolute_factors[0] // prior_factors[0]),
+                int(absolute_factors[1] // prior_factors[1]),
+                int(absolute_factors[2] // prior_factors[2]),
+                int(absolute_factors[3] // prior_factors[3]),
+                int(absolute_factors[4] // prior_factors[4]),
+                int(absolute_factors[5] // prior_factors[5]),
+            )
+            source_level_component = str(prior_component)
+            downsample_factors = relative_factors
+        else:
+            source_level_component = str(source_component)
+            downsample_factors = (
+                int(absolute_factors[0]),
+                int(absolute_factors[1]),
+                int(absolute_factors[2]),
+                int(absolute_factors[3]),
+                int(absolute_factors[4]),
+                int(absolute_factors[5]),
+            )
+
+        level_component = f"{cache_prefix}/level_{level_index}"
+        source_level = da.from_zarr(str(zarr_path), component=source_level_component)
+        downsampled = _downsample_tpczyx_by_stride(source_level, downsample_factors)
+        level_shape = tuple(int(size) for size in tuple(downsampled.shape))
+        level_chunks = _resolve_level_chunks_tpczyx(
+            source_chunks=source_chunks,
+            level_shape=level_shape,
+        )
+
+        if not _component_matches_shape_chunks(
+            root=root,
+            component=level_component,
+            shape_tpczyx=(
+                int(level_shape[0]),
+                int(level_shape[1]),
+                int(level_shape[2]),
+                int(level_shape[3]),
+                int(level_shape[4]),
+                int(level_shape[5]),
+            ),
+            chunks_tpczyx=level_chunks,
+        ):
+            root.create_dataset(
+                name=level_component,
+                shape=level_shape,
+                chunks=level_chunks,
+                dtype=source_dtype.name,
+                overwrite=True,
+            )
+            with dask.config.set({"array.rechunk.method": "tasks"}):
+                rechunked = downsampled.rechunk(level_chunks)
+            da.to_zarr(
+                rechunked,
+                str(zarr_path),
+                component=level_component,
+                overwrite=True,
+                compute=True,
+            )
+
+        root[level_component].attrs.update(
+            {
+                "axes": ["t", "p", "c", "z", "y", "x"],
+                "pyramid_level": int(level_index),
+                "downsample_factors_tpczyx": [int(value) for value in absolute_factors],
+                "chunk_shape_tpczyx": [int(value) for value in level_chunks],
+                "source_component": str(source_level_component),
+                "generated_by": "visualization_multiscale_gate",
+            }
+        )
+
+        level_paths.append(level_component)
+        factor_payload.append([int(value) for value in absolute_factors])
+        prior_component = level_component
+        prior_factors = tuple(int(value) for value in absolute_factors)
+
+    root[str(source_component)].attrs["visualization_pyramid_levels"] = [
+        str(item) for item in level_paths
+    ]
+    root[str(source_component)].attrs["visualization_pyramid_factors_tpczyx"] = [
+        list(row) for row in factor_payload
+    ]
+
+    component_map = root.attrs.get("visualization_pyramid_levels_by_component")
+    if not isinstance(component_map, dict):
+        component_map = {}
+    component_map[str(source_component)] = [str(item) for item in level_paths]
+    root.attrs["visualization_pyramid_levels_by_component"] = _sanitize_metadata_value(
+        component_map
+    )
+    return tuple(str(item) for item in level_paths)
+
+
+def _resolve_multiscale_components(
+    *,
+    zarr_path: Union[str, Path],
+    root: zarr.hierarchy.Group,
+    source_component: str,
+    use_multiscale: bool,
+    multiscale_policy: str,
+) -> tuple[tuple[str, ...], str]:
+    """Resolve source multiscale levels with optional auto-generation.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Analysis store path.
+    root : zarr.hierarchy.Group
+        Opened root group.
+    source_component : str
+        Base source component path.
+    use_multiscale : bool
+        Global visualization multiscale toggle.
+    multiscale_policy : str
+        Layer policy (``inherit``, ``require``, ``auto_build``, ``off``).
+
+    Returns
+    -------
+    tuple[tuple[str, ...], str]
+        Ordered component paths and effective multiscale status.
+
+    Raises
+    ------
+    ValueError
+        If source component is invalid, or ``require`` is requested without
+        available/generated multiscale levels.
+    """
+    policy = str(multiscale_policy).strip().lower() or "inherit"
+    if policy not in _VOLUME_LAYER_MULTISCALE_POLICIES:
+        policy = "inherit"
+
+    existing = _collect_existing_multiscale_components(
+        root=root,
+        source_component=str(source_component),
+    )
+
+    if policy == "off":
+        return (str(source_component),), "off"
+
+    if policy == "inherit" and not bool(use_multiscale):
+        return (str(source_component),), "off"
+
+    if len(existing) > 1:
+        return tuple(str(item) for item in existing), "existing"
+
+    if policy == "require":
+        raise ValueError(
+            f"Visualization layer '{source_component}' requires multiscale levels, "
+            "but no pyramid was found."
+        )
+
+    if policy == "auto_build":
+        source_array = root[str(source_component)]
+        level_factors = _resolve_visualization_pyramid_factors_tpczyx(
+            root_attrs=dict(root.attrs),
+            source_attrs=dict(source_array.attrs),
+        )
+        built = _build_visualization_multiscale_components(
+            zarr_path=zarr_path,
+            root=root,
+            source_component=str(source_component),
+            level_factors_tpczyx=level_factors,
+        )
+        if len(built) > 1:
+            return tuple(str(item) for item in built), "auto_built"
+        return (str(source_component),), "single_scale"
+
+    return (str(source_component),), "single_scale"
+
+
+def _resolve_volume_layers(
+    *,
+    zarr_path: Union[str, Path],
+    root: zarr.hierarchy.Group,
+    parameters: Mapping[str, Any],
+) -> list[ResolvedVolumeLayer]:
+    """Resolve normalized runtime layer rows into concrete volume layers.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Analysis store path.
+    root : zarr.hierarchy.Group
+        Opened root group.
+    parameters : mapping[str, Any]
+        Normalized visualization parameters.
+
+    Returns
+    -------
+    list[ResolvedVolumeLayer]
+        Resolved layer rows ready for napari rendering.
+    """
+    rows = _normalize_visualization_volume_layers(parameters.get("volume_layers", []))
+    if not rows:
+        default_source = str(parameters.get("input_source", "data")).strip() or "data"
+        rows = [
+            {
+                "component": default_source,
+                "name": "",
+                "layer_type": "image",
+                "channels": [],
+                "visible": None,
+                "opacity": None,
+                "blending": "",
+                "colormap": "",
+                "rendering": "",
+                "multiscale_policy": (
+                    "inherit" if bool(parameters.get("use_multiscale", True)) else "off"
+                ),
+            }
+        ]
+
+    resolved: list[ResolvedVolumeLayer] = []
+    use_multiscale = bool(parameters.get("use_multiscale", True))
+    for row in rows:
+        component = str(row.get("component", "")).strip()
+        if not component:
+            continue
+        source_components, multiscale_status = _resolve_multiscale_components(
+            zarr_path=zarr_path,
+            root=root,
+            source_component=component,
+            use_multiscale=use_multiscale,
+            multiscale_policy=str(row.get("multiscale_policy", "inherit")),
+        )
+        resolved.append(
+            ResolvedVolumeLayer(
+                component=component,
+                source_components=tuple(str(item) for item in source_components),
+                layer_type=str(row.get("layer_type", "image")).strip().lower()
+                or "image",
+                channels=tuple(
+                    int(index)
+                    for index in _normalize_visualization_channels(row.get("channels"))
+                ),
+                visible=_coerce_optional_bool(row.get("visible")),
+                opacity=_coerce_optional_unit_interval_float(row.get("opacity")),
+                blending=str(row.get("blending", "")).strip().lower(),
+                colormap=str(row.get("colormap", "")).strip(),
+                rendering=str(row.get("rendering", "")).strip().lower(),
+                name=str(row.get("name", "")).strip(),
+                multiscale_policy=(
+                    str(row.get("multiscale_policy", "inherit")).strip().lower()
+                    or "inherit"
+                ),
+                multiscale_status=str(multiscale_status),
+            )
+        )
+    return resolved
+
+
+def _serialize_resolved_volume_layers(
+    volume_layers: Sequence[ResolvedVolumeLayer],
+) -> list[Dict[str, Any]]:
+    """Serialize resolved volume layers for metadata/provenance payloads."""
+    return [
+        {
+            "component": str(layer.component),
+            "source_components": [str(item) for item in layer.source_components],
+            "layer_type": str(layer.layer_type),
+            "channels": [int(value) for value in layer.channels],
+            "visible": layer.visible,
+            "opacity": layer.opacity,
+            "blending": str(layer.blending),
+            "colormap": str(layer.colormap),
+            "rendering": str(layer.rendering),
+            "name": str(layer.name),
+            "multiscale_policy": str(layer.multiscale_policy),
+            "multiscale_status": str(layer.multiscale_status),
+        }
+        for layer in volume_layers
+    ]
 
 
 def _safe_float(value: Any, *, default: float = 0.0) -> float:
@@ -1645,8 +2531,7 @@ def _launch_napari_subprocess(
 def _launch_napari_viewer(
     *,
     zarr_path: Union[str, Path],
-    source_components: Sequence[str],
-    source_component: str,
+    volume_layers: Sequence[ResolvedVolumeLayer],
     selected_positions: Sequence[int],
     points_by_position: Mapping[int, np.ndarray],
     point_properties_by_position: Mapping[int, Mapping[str, np.ndarray]],
@@ -1655,20 +2540,19 @@ def _launch_napari_viewer(
     scale_tczyx: Sequence[float],
     image_metadata: Mapping[str, Any],
     points_metadata: Mapping[str, Any],
+    require_gpu_rendering: bool,
     capture_keyframes: bool,
     keyframe_manifest_path: Optional[Union[str, Path]],
     keyframe_layer_overrides: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    """Open a napari viewer and render image + optional particle overlays.
+    """Open a napari viewer and render image/labels + optional overlays.
 
     Parameters
     ----------
     zarr_path : str or pathlib.Path
         Zarr analysis-store path.
-    source_components : sequence of str
-        Ordered source component paths for multiscale rendering.
-    source_component : str
-        Base source component path used for naming.
+    volume_layers : sequence[ResolvedVolumeLayer]
+        Resolved source layers to render in order.
     selected_positions : sequence of int
         Position indices selected from the ``p`` axis.
     points_by_position : mapping[int, numpy.ndarray]
@@ -1685,6 +2569,9 @@ def _launch_napari_viewer(
         Metadata payload attached to the image layer.
     points_metadata : mapping[str, Any]
         Metadata payload attached to the points layer.
+    require_gpu_rendering : bool
+        Whether to fail when napari does not report a GPU-backed OpenGL
+        renderer.
     capture_keyframes : bool
         Whether interactive keyframe capture hotkeys are enabled.
     keyframe_manifest_path : str or pathlib.Path, optional
@@ -1702,6 +2589,9 @@ def _launch_napari_viewer(
     ------
     ImportError
         If napari is unavailable.
+    RuntimeError
+        If ``require_gpu_rendering`` is enabled and the active OpenGL
+        renderer is not confirmed as GPU-backed.
     """
     import napari
 
@@ -1796,7 +2686,9 @@ def _launch_napari_viewer(
             stride = int(
                 max(
                     1,
-                    math.ceil((total_size / float(target_sample_size)) ** (1.0 / len(shape))),
+                    math.ceil(
+                        (total_size / float(target_sample_size)) ** (1.0 / len(shape))
+                    ),
                 )
             )
             sampled = sampled[tuple(slice(None, None, stride) for _ in shape)]
@@ -1840,6 +2732,36 @@ def _launch_napari_viewer(
     viewer = napari.Viewer(ndisplay=3, show=True)
     axis_labels_tuple = tuple(str(label) for label in axis_labels)
     axis_labels_applied = False
+    renderer_info = _probe_napari_opengl_renderer(viewer)
+    renderer_summary = (
+        f"{renderer_info.get('vendor', '')} {renderer_info.get('renderer', '')}".strip()
+        or "unknown"
+    )
+    print(f"[visualization] OpenGL renderer: {renderer_summary}")
+    software_renderer = bool(renderer_info.get("software_renderer", False))
+    gpu_renderer = bool(renderer_info.get("gpu_renderer", False))
+    if bool(require_gpu_rendering) and not gpu_renderer:
+        if software_renderer:
+            reason = (
+                "Napari OpenGL renderer appears to be software-based "
+                f"('{renderer_summary}')"
+            )
+        else:
+            probe_error = str(renderer_info.get("error", "")).strip()
+            if probe_error:
+                reason = (
+                    "Napari OpenGL renderer probe did not confirm GPU rendering "
+                    f"('{renderer_summary}'; error: {probe_error})"
+                )
+            else:
+                reason = (
+                    "Napari OpenGL renderer could not be confirmed as GPU-backed "
+                    f"('{renderer_summary}')"
+                )
+        raise RuntimeError(
+            f"{reason}. Disable visualization parameter "
+            "'require_gpu_rendering' to override."
+        )
 
     manifest_path: Optional[Path] = None
     if bool(capture_keyframes):
@@ -1854,82 +2776,139 @@ def _launch_napari_viewer(
     normalized_layer_overrides = _normalize_keyframe_layer_overrides(
         keyframe_layer_overrides
     )
+    if len(volume_layers) <= 0:
+        raise ValueError("Visualization requires at least one resolved volume layer.")
+    primary_layer = volume_layers[0]
+    primary_source_component = str(primary_layer.component)
+    primary_source_components = tuple(
+        str(item) for item in primary_layer.source_components
+    )
+    serialized_volume_layers = _serialize_resolved_volume_layers(volume_layers)
 
     selected = tuple(int(index) for index in selected_positions)
     multi_position = len(selected) > 1
     for position_index in selected:
-        level_arrays = [
-            da.from_zarr(str(zarr_path), component=component)[
-                :, position_index, :, :, :, :
-            ]
-            for component in source_components
-        ]
-        image_data: Any
-        is_multiscale = len(level_arrays) > 1
-        channel_count = int(level_arrays[0].shape[1]) if level_arrays else 1
-        channel_count = max(1, channel_count)
-        colormaps = _channel_colormap_cycle(channel_count)
-        channel_opacity = _default_channel_opacity(channel_count)
-
         affine_base = np.asarray(
             position_affines_tczyx.get(position_index, np.eye(6, dtype=np.float64)),
             dtype=np.float64,
         )
-        for channel_index in range(channel_count):
-            if is_multiscale:
-                image_data = [
-                    level[:, channel_index : channel_index + 1, :, :, :]
-                    for level in level_arrays
+        for layer in volume_layers:
+            level_arrays = [
+                da.from_zarr(str(zarr_path), component=str(component))[
+                    :, position_index, :, :, :, :
                 ]
-            else:
-                image_data = level_arrays[0][
-                    :, channel_index : channel_index + 1, :, :, :
-                ]
-
-            channel_affine = np.asarray(affine_base, dtype=np.float64).copy()
-
-            contrast_limits = _percentile_contrast_limits(
-                image_data[-1] if is_multiscale else image_data
-            )
-            image_layer_metadata = dict(image_metadata)
-            image_layer_metadata["position_index"] = int(position_index)
-            image_layer_metadata["channel_index"] = int(channel_index)
-            image_layer_metadata["channel_colormap"] = str(colormaps[channel_index])
-            image_layer_metadata["contrast_limits"] = [
-                float(contrast_limits[0]),
-                float(contrast_limits[1]),
+                for component in layer.source_components
             ]
-            layer_name = (
-                f"{source_component} (p={position_index}, c={channel_index})"
-                if channel_count > 1
-                else f"{source_component} (p={position_index})"
+            if not level_arrays:
+                continue
+            is_multiscale = len(level_arrays) > 1
+            channel_count = max(1, int(level_arrays[0].shape[1]))
+            requested_channels = tuple(
+                int(index)
+                for index in layer.channels
+                if 0 <= int(index) < channel_count
             )
+            channel_indices = requested_channels or tuple(range(channel_count))
+            channel_opacity_default = _default_channel_opacity(len(channel_indices))
+            effective_opacity = (
+                float(layer.opacity)
+                if layer.opacity is not None
+                else float(channel_opacity_default)
+            )
+            effective_visibility = (
+                bool(layer.visible) if layer.visible is not None else True
+            )
+            base_name = str(layer.name).strip() or str(layer.component)
+            effective_blending = str(layer.blending).strip().lower() or (
+                "translucent" if str(layer.layer_type) == "labels" else "additive"
+            )
+            default_rendering = str(layer.rendering).strip().lower() or "attenuated_mip"
+            colormaps = _channel_colormap_cycle(channel_count)
+            for channel_index in channel_indices:
+                layer_data: Any
+                if is_multiscale:
+                    layer_data = [
+                        level[:, channel_index : channel_index + 1, :, :, :]
+                        for level in level_arrays
+                    ]
+                else:
+                    layer_data = level_arrays[0][
+                        :, channel_index : channel_index + 1, :, :, :
+                    ]
 
-            viewer.add_image(
-                image_data,
-                multiscale=is_multiscale,
-                name=layer_name,
-                scale=scale,
-                affine=channel_affine,
-                metadata={
-                    str(key): value for key, value in image_layer_metadata.items()
-                },
-                colormap=str(colormaps[channel_index]),
-                opacity=float(channel_opacity),
-                blending="additive",
-                rendering="attenuated_mip",
-                contrast_limits=(
-                    float(contrast_limits[0]),
-                    float(contrast_limits[1]),
-                ),
-            )
-            if not axis_labels_applied:
-                try:
-                    if int(viewer.dims.ndim) == len(axis_labels_tuple):
-                        viewer.dims.axis_labels = axis_labels_tuple
-                        axis_labels_applied = True
-                except Exception:
-                    pass
+                layer_affine = np.asarray(affine_base, dtype=np.float64).copy()
+                layer_name = (
+                    f"{base_name} (p={position_index}, c={channel_index})"
+                    if (len(channel_indices) > 1 or channel_count > 1)
+                    else f"{base_name} (p={position_index})"
+                )
+                layer_metadata = dict(image_metadata)
+                layer_metadata["position_index"] = int(position_index)
+                layer_metadata["channel_index"] = int(channel_index)
+                layer_metadata["source_component"] = str(layer.component)
+                layer_metadata["source_components"] = [
+                    str(item) for item in layer.source_components
+                ]
+                layer_metadata["layer_type"] = str(layer.layer_type)
+                layer_metadata["multiscale_policy"] = str(layer.multiscale_policy)
+                layer_metadata["multiscale_status"] = str(layer.multiscale_status)
+                layer_metadata["volume_layers"] = serialized_volume_layers
+
+                if str(layer.layer_type) == "labels":
+                    viewer.add_labels(
+                        layer_data,
+                        multiscale=is_multiscale,
+                        name=layer_name,
+                        scale=scale,
+                        affine=layer_affine,
+                        metadata={
+                            str(key): value for key, value in layer_metadata.items()
+                        },
+                        opacity=float(
+                            layer.opacity if layer.opacity is not None else 0.7
+                        ),
+                        blending=effective_blending,
+                        visible=effective_visibility,
+                    )
+                else:
+                    contrast_limits = _percentile_contrast_limits(
+                        layer_data[-1] if is_multiscale else layer_data
+                    )
+                    selected_colormap = str(layer.colormap).strip() or str(
+                        colormaps[int(channel_index) % max(1, len(colormaps))]
+                    )
+                    layer_metadata["channel_colormap"] = selected_colormap
+                    layer_metadata["contrast_limits"] = [
+                        float(contrast_limits[0]),
+                        float(contrast_limits[1]),
+                    ]
+                    viewer.add_image(
+                        layer_data,
+                        multiscale=is_multiscale,
+                        name=layer_name,
+                        scale=scale,
+                        affine=layer_affine,
+                        metadata={
+                            str(key): value for key, value in layer_metadata.items()
+                        },
+                        colormap=selected_colormap,
+                        opacity=float(effective_opacity),
+                        blending=effective_blending,
+                        rendering=default_rendering,
+                        contrast_limits=(
+                            float(contrast_limits[0]),
+                            float(contrast_limits[1]),
+                        ),
+                        visible=effective_visibility,
+                    )
+
+                if not axis_labels_applied:
+                    try:
+                        if int(viewer.dims.ndim) == len(axis_labels_tuple):
+                            viewer.dims.axis_labels = axis_labels_tuple
+                            axis_labels_applied = True
+                    except Exception:
+                        pass
 
         points = np.asarray(
             points_by_position.get(
@@ -2017,14 +2996,25 @@ def _launch_napari_viewer(
         payload: Dict[str, Any] = {
             "schema_version": 1,
             "zarr_path": str(Path(zarr_path).expanduser().resolve()),
-            "source_component": str(source_component),
-            "source_components": [str(item) for item in source_components],
+            "source_component": str(primary_source_component),
+            "source_components": [str(item) for item in primary_source_components],
+            "volume_layers": serialized_volume_layers,
+            "renderer": dict(renderer_info),
             "selected_positions": [int(value) for value in selected],
             "axis_labels_tczyx": [str(label) for label in axis_labels_tuple],
             "scale_tczyx": [float(value) for value in scale],
             "viewer_type": (
                 "3d"
-                if int(max(2, round(_safe_float(getattr(viewer.dims, "ndisplay", 3), default=3.0))))
+                if int(
+                    max(
+                        2,
+                        round(
+                            _safe_float(
+                                getattr(viewer.dims, "ndisplay", 3), default=3.0
+                            )
+                        ),
+                    )
+                )
                 == 3
                 else "2d"
             ),
@@ -2061,8 +3051,7 @@ def _launch_napari_viewer(
             keyframes.append(keyframe)
             _persist_keyframes()
             _notify(
-                "Captured keyframe "
-                f"{int(keyframe['index']) + 1} at {manifest_path}."
+                f"Captured keyframe {int(keyframe['index']) + 1} at {manifest_path}."
             )
 
         def _pop_keyframe(_viewer: Any = None) -> None:
@@ -2115,7 +3104,9 @@ def _launch_napari_viewer(
 
         try:
             close_event = getattr(getattr(viewer, "events", None), "close", None)
-            if close_event is not None and callable(getattr(close_event, "connect", None)):
+            if close_event is not None and callable(
+                getattr(close_event, "connect", None)
+            ):
                 close_event.connect(lambda _event=None: _persist_keyframes())
         except Exception:
             pass
@@ -2134,8 +3125,11 @@ def _launch_napari_viewer(
     napari.run()
     _persist_keyframes()
     return {
-        "keyframe_manifest_path": str(manifest_path) if manifest_path is not None else None,
+        "keyframe_manifest_path": str(manifest_path)
+        if manifest_path is not None
+        else None,
         "keyframe_count": int(len(keyframes)),
+        "renderer": dict(renderer_info),
     }
 
 
@@ -2144,11 +3138,13 @@ def _save_visualization_metadata(
     zarr_path: Union[str, Path],
     source_component: str,
     source_components: Sequence[str],
+    volume_layers: Sequence[ResolvedVolumeLayer],
     position_index: int,
     selected_positions: Sequence[int],
     show_all_positions: bool,
     parameters: Mapping[str, Any],
     overlay_points_count: int,
+    renderer: Optional[Mapping[str, Any]],
     launch_mode: str,
     viewer_pid: Optional[int],
     keyframe_manifest_path: Optional[str],
@@ -2165,6 +3161,8 @@ def _save_visualization_metadata(
         Base source component rendered by napari.
     source_components : sequence of str
         Ordered source levels used for multiscale loading.
+    volume_layers : sequence[ResolvedVolumeLayer]
+        Resolved volume layers rendered for this run.
     position_index : int
         Reference ``p``-axis index.
     selected_positions : sequence of int
@@ -2175,6 +3173,8 @@ def _save_visualization_metadata(
         Effective visualization parameters.
     overlay_points_count : int
         Number of overlaid points.
+    renderer : mapping[str, Any], optional
+        OpenGL renderer probe payload.
     launch_mode : str
         Effective launch mode.
     viewer_pid : int, optional
@@ -2202,10 +3202,12 @@ def _save_visualization_metadata(
     payload: Dict[str, Any] = {
         "source_component": str(source_component),
         "source_components": [str(item) for item in source_components],
+        "volume_layers": _serialize_resolved_volume_layers(volume_layers),
         "position_index": int(position_index),
         "selected_positions": [int(value) for value in selected_positions],
         "show_all_positions": bool(show_all_positions),
         "overlay_points_count": int(overlay_points_count),
+        "renderer": _sanitize_metadata_value(dict(renderer or {})),
         "launch_mode": str(launch_mode),
         "parameters": {str(k): v for k, v in dict(parameters).items()},
         "storage_policy": "latest_only",
@@ -2262,20 +3264,24 @@ def run_visualization_analysis(
     ValueError
         If source component is missing or selected position is out of bounds.
     """
+
     def _emit(percent: int, message: str) -> None:
         if progress_callback is None:
             return
         progress_callback(int(percent), str(message))
 
     normalized = _normalize_visualization_parameters(parameters)
-    source_component = str(normalized.get("input_source", "data")).strip() or "data"
-
-    root = zarr.open_group(str(zarr_path), mode="r")
-    source_components = _resolve_multiscale_components(
+    root = zarr.open_group(str(zarr_path), mode="a")
+    volume_layers = _resolve_volume_layers(
+        zarr_path=zarr_path,
         root=root,
-        source_component=source_component,
-        use_multiscale=bool(normalized.get("use_multiscale", True)),
+        parameters=normalized,
     )
+    if len(volume_layers) <= 0:
+        raise ValueError("Visualization requires at least one valid volume layer.")
+    primary_layer = volume_layers[0]
+    source_component = str(primary_layer.component)
+    source_components = tuple(str(item) for item in primary_layer.source_components)
 
     source_array = root[source_component]
     source_shape = tuple(int(value) for value in source_array.shape)
@@ -2305,10 +3311,7 @@ def run_visualization_analysis(
             points_by_position[int(position_index)] = overlay_points
             point_properties_by_position[int(position_index)] = overlay_properties
     total_overlay_points = int(
-        sum(
-            int(np.asarray(points).shape[0])
-            for points in points_by_position.values()
-        )
+        sum(int(np.asarray(points).shape[0]) for points in points_by_position.values())
     )
     point_property_names = tuple(
         sorted(
@@ -2323,8 +3326,7 @@ def run_visualization_analysis(
     napari_payload = _build_napari_layer_payload(
         zarr_path=zarr_path,
         root=root,
-        source_component=source_component,
-        source_components=source_components,
+        volume_layers=volume_layers,
         position_index=reference_position_index,
         parameters=normalized,
         overlay_points_count=total_overlay_points,
@@ -2372,6 +3374,7 @@ def run_visualization_analysis(
     )
     keyframe_count = 0
     viewer_pid: Optional[int] = None
+    renderer_info: Dict[str, Any] = {}
     if effective_launch_mode == "subprocess":
         _emit(65, "Launching napari in a separate process")
         subprocess_parameters: Dict[str, Any] = {
@@ -2388,8 +3391,7 @@ def run_visualization_analysis(
         _emit(65, "Opening napari viewer")
         viewer_capture = _launch_napari_viewer(
             zarr_path=zarr_path,
-            source_components=source_components,
-            source_component=source_component,
+            volume_layers=volume_layers,
             selected_positions=selected_positions,
             points_by_position=points_by_position,
             point_properties_by_position=point_properties_by_position,
@@ -2398,6 +3400,7 @@ def run_visualization_analysis(
             scale_tczyx=napari_payload.scale_tczyx,
             image_metadata=napari_payload.image_metadata,
             points_metadata=napari_payload.points_metadata,
+            require_gpu_rendering=bool(normalized.get("require_gpu_rendering", True)),
             capture_keyframes=bool(normalized.get("capture_keyframes", True)),
             keyframe_manifest_path=keyframe_manifest_path,
             keyframe_layer_overrides=normalized.get("keyframe_layer_overrides", []),
@@ -2416,17 +3419,24 @@ def run_visualization_analysis(
                 )
             except (TypeError, ValueError):
                 keyframe_count = 0
+            renderer_candidate = viewer_capture.get("renderer")
+            if isinstance(renderer_candidate, Mapping):
+                renderer_info = {
+                    str(key): value for key, value in dict(renderer_candidate).items()
+                }
 
     _emit(90, "Writing visualization metadata")
     component = _save_visualization_metadata(
         zarr_path=zarr_path,
         source_component=source_component,
         source_components=source_components,
+        volume_layers=volume_layers,
         position_index=reference_position_index,
         selected_positions=selected_positions,
         show_all_positions=show_all_positions,
         parameters=normalized,
         overlay_points_count=total_overlay_points,
+        renderer=renderer_info,
         launch_mode=effective_launch_mode,
         viewer_pid=viewer_pid,
         keyframe_manifest_path=keyframe_manifest_path,
@@ -2446,6 +3456,7 @@ def run_visualization_analysis(
         viewer_pid=viewer_pid,
         keyframe_manifest_path=keyframe_manifest_path,
         keyframe_count=int(keyframe_count),
+        renderer=dict(renderer_info),
     )
 
 
