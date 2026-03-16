@@ -125,6 +125,7 @@ try:
         QCheckBox,
         QComboBox,
         QDialog,
+        QDialogButtonBox,
         QFileDialog,
         QFormLayout,
         QFrame,
@@ -143,6 +144,9 @@ try:
         QSizePolicy,
         QSpinBox,
         QStackedWidget,
+        QHeaderView,
+        QTableWidget,
+        QTableWidgetItem,
         QTabWidget,
         QVBoxLayout,
         QWidget,
@@ -3795,6 +3799,11 @@ if HAS_PYQT6:
                 "particle detections already exist in the store or are selected "
                 "to run before visualization."
             ),
+            "keyframe_layer_overrides": (
+                "Optional per-layer keyframe overrides used in the manifest. "
+                "Each row can set layer visibility, LUT/colormap name, rendering "
+                "style, and an annotation label for movie legends."
+            ),
             "mip_position_mode": (
                 "Choose whether each projection file contains all positions for a "
                 "(time, channel) pair, or writes separate files per position."
@@ -3852,6 +3861,11 @@ if HAS_PYQT6:
             self._visualization_defaults = dict(
                 self._operation_defaults.get("visualization", {})
             )
+            self._visualization_keyframe_layer_overrides: list[Dict[str, Any]] = (
+                self._normalize_visualization_layer_overrides(
+                    self._visualization_defaults.get("keyframe_layer_overrides", [])
+                )
+            )
             self._mip_export_defaults = dict(
                 self._operation_defaults.get("mip_export", {})
             )
@@ -3874,6 +3888,8 @@ if HAS_PYQT6:
             self._decon_measured_section: Optional[QFrame] = None
             self._decon_synthetic_section: Optional[QFrame] = None
             self._decon_light_sheet_section: Optional[QFrame] = None
+            self._visualization_layer_table_button: Optional[QPushButton] = None
+            self._visualization_layer_table_summary_label: Optional[QLabel] = None
 
             self._build_ui()
             self._apply_theme()
@@ -4958,6 +4974,304 @@ if HAS_PYQT6:
                 self._visualization_overlay_points_checkbox,
                 self._PARAMETER_HINTS["overlay_particle_detections"],
             )
+
+            self._visualization_layer_table_button = QPushButton(
+                "Layer/View Table..."
+            )
+            self._visualization_layer_table_button.clicked.connect(
+                self._open_visualization_layer_table_dialog
+            )
+            form.addRow("Keyframe table", self._visualization_layer_table_button)
+            self._register_parameter_hint(
+                self._visualization_layer_table_button,
+                self._PARAMETER_HINTS["keyframe_layer_overrides"],
+            )
+
+            self._visualization_layer_table_summary_label = QLabel()
+            self._visualization_layer_table_summary_label.setWordWrap(True)
+            form.addRow("", self._visualization_layer_table_summary_label)
+            self._refresh_visualization_layer_override_summary()
+
+        def _coerce_optional_bool(self, value: Any) -> Optional[bool]:
+            """Coerce a value into ``True``/``False``/``None``.
+
+            Parameters
+            ----------
+            value : Any
+                Candidate boolean-like value.
+
+            Returns
+            -------
+            bool, optional
+                Parsed boolean or ``None`` when unspecified.
+
+            Raises
+            ------
+            None
+                Invalid values return ``None``.
+            """
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return bool(value)
+            if isinstance(value, (int, float)):
+                return bool(int(value))
+            text = str(value).strip().lower()
+            if not text or text == "auto":
+                return None
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+            return None
+
+        def _normalize_visualization_layer_overrides(
+            self,
+            value: Any,
+        ) -> list[Dict[str, Any]]:
+            """Normalize visualization keyframe table rows.
+
+            Parameters
+            ----------
+            value : Any
+                Candidate list-like value.
+
+            Returns
+            -------
+            list[dict[str, Any]]
+                Normalized rows containing ``layer_name``, ``visible``,
+                ``colormap``, ``rendering``, and ``annotation``.
+
+            Raises
+            ------
+            None
+                Invalid rows are skipped.
+            """
+            if not isinstance(value, (tuple, list)):
+                return []
+
+            rows: list[Dict[str, Any]] = []
+            for raw_row in value:
+                if not isinstance(raw_row, Mapping):
+                    continue
+                layer_name = str(
+                    raw_row.get("layer_name", raw_row.get("layer", ""))
+                ).strip()
+                visible = self._coerce_optional_bool(raw_row.get("visible"))
+                colormap = str(raw_row.get("colormap", raw_row.get("lut", ""))).strip()
+                rendering = str(raw_row.get("rendering", "")).strip()
+                annotation = str(raw_row.get("annotation", "")).strip()
+                if not any(
+                    (
+                        layer_name,
+                        colormap,
+                        rendering,
+                        annotation,
+                        visible is not None,
+                    )
+                ):
+                    continue
+                rows.append(
+                    {
+                        "layer_name": layer_name,
+                        "visible": visible,
+                        "colormap": colormap,
+                        "rendering": rendering,
+                        "annotation": annotation,
+                    }
+                )
+            return rows
+
+        def _refresh_visualization_layer_override_summary(self) -> None:
+            """Refresh summary text for visualization keyframe table rows.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Summary label text is updated in-place.
+            """
+            label = self._visualization_layer_table_summary_label
+            if label is None:
+                return
+            rows = list(self._visualization_keyframe_layer_overrides)
+            if not rows:
+                label.setText("No keyframe layer overrides configured.")
+                return
+            annotation_count = sum(
+                1 for row in rows if str(row.get("annotation", "")).strip()
+            )
+            label.setText(
+                f"{len(rows)} override row(s), {annotation_count} annotation(s)."
+            )
+
+        def _open_visualization_layer_table_dialog(self) -> None:
+            """Open popup editor for visualization keyframe layer overrides.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Updates in-memory override rows when accepted.
+            """
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Visualization Keyframe Table")
+            dialog.setMinimumWidth(900)
+            dialog.setMinimumHeight(420)
+            dialog.setModal(True)
+
+            root = QVBoxLayout(dialog)
+            apply_popup_root_spacing(root)
+
+            helper = QLabel(
+                "Optional overrides recorded in keyframe manifests. "
+                "Use layer names as they appear in napari."
+            )
+            helper.setWordWrap(True)
+            root.addWidget(helper)
+
+            table = QTableWidget(dialog)
+            table.setColumnCount(5)
+            table.setHorizontalHeaderLabels(
+                ("Layer", "Visible", "LUT/Colormap", "Rendering", "Annotation")
+            )
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+            table.verticalHeader().setVisible(False)
+            root.addWidget(table, stretch=1)
+
+            def _make_visible_combo(current_value: Optional[bool]) -> QComboBox:
+                combo = QComboBox(table)
+                combo.addItem("Auto", None)
+                combo.addItem("True", True)
+                combo.addItem("False", False)
+                index = combo.findData(current_value)
+                if index < 0:
+                    index = 0
+                combo.setCurrentIndex(index)
+                return combo
+
+            def _append_row(row_data: Optional[Mapping[str, Any]] = None) -> None:
+                values = dict(row_data) if isinstance(row_data, Mapping) else {}
+                row_index = table.rowCount()
+                table.insertRow(row_index)
+
+                layer_name = str(values.get("layer_name", values.get("layer", ""))).strip()
+                colormap = str(values.get("colormap", values.get("lut", ""))).strip()
+                rendering = str(values.get("rendering", "")).strip()
+                annotation = str(values.get("annotation", "")).strip()
+                visible = self._coerce_optional_bool(values.get("visible"))
+
+                table.setItem(row_index, 0, QTableWidgetItem(layer_name))
+                table.setCellWidget(row_index, 1, _make_visible_combo(visible))
+                table.setItem(row_index, 2, QTableWidgetItem(colormap))
+                table.setItem(row_index, 3, QTableWidgetItem(rendering))
+                table.setItem(row_index, 4, QTableWidgetItem(annotation))
+
+            for row in self._visualization_keyframe_layer_overrides:
+                _append_row(row)
+            if table.rowCount() == 0:
+                _append_row()
+
+            controls = QHBoxLayout()
+            add_row_button = QPushButton("Add Row", dialog)
+            remove_row_button = QPushButton("Remove Selected", dialog)
+            controls.addWidget(add_row_button)
+            controls.addWidget(remove_row_button)
+            controls.addStretch(1)
+            root.addLayout(controls)
+
+            add_row_button.clicked.connect(lambda: _append_row())
+
+            def _remove_selected_rows() -> None:
+                selected_indexes = table.selectionModel().selectedRows()
+                if not selected_indexes:
+                    return
+                for index in sorted(
+                    (idx.row() for idx in selected_indexes),
+                    reverse=True,
+                ):
+                    table.removeRow(int(index))
+                if table.rowCount() == 0:
+                    _append_row()
+
+            remove_row_button.clicked.connect(_remove_selected_rows)
+
+            button_box = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok
+                | QDialogButtonBox.StandardButton.Cancel,
+                Qt.Orientation.Horizontal,
+                dialog,
+            )
+            root.addWidget(button_box)
+            button_box.accepted.connect(dialog.accept)
+            button_box.rejected.connect(dialog.reject)
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            rows: list[Dict[str, Any]] = []
+            for row_index in range(table.rowCount()):
+                layer_item = table.item(row_index, 0)
+                colormap_item = table.item(row_index, 2)
+                rendering_item = table.item(row_index, 3)
+                annotation_item = table.item(row_index, 4)
+                visible_widget = table.cellWidget(row_index, 1)
+                visible_value: Optional[bool] = None
+                if isinstance(visible_widget, QComboBox):
+                    visible_value = self._coerce_optional_bool(
+                        visible_widget.currentData()
+                    )
+
+                row_payload: Dict[str, Any] = {
+                    "layer_name": (
+                        str(layer_item.text()).strip()
+                        if isinstance(layer_item, QTableWidgetItem)
+                        else ""
+                    ),
+                    "visible": visible_value,
+                    "colormap": (
+                        str(colormap_item.text()).strip()
+                        if isinstance(colormap_item, QTableWidgetItem)
+                        else ""
+                    ),
+                    "rendering": (
+                        str(rendering_item.text()).strip()
+                        if isinstance(rendering_item, QTableWidgetItem)
+                        else ""
+                    ),
+                    "annotation": (
+                        str(annotation_item.text()).strip()
+                        if isinstance(annotation_item, QTableWidgetItem)
+                        else ""
+                    ),
+                }
+                if not any(
+                    (
+                        row_payload["layer_name"],
+                        row_payload["colormap"],
+                        row_payload["rendering"],
+                        row_payload["annotation"],
+                        row_payload["visible"] is not None,
+                    )
+                ):
+                    continue
+                rows.append(row_payload)
+
+            self._visualization_keyframe_layer_overrides = (
+                self._normalize_visualization_layer_overrides(rows)
+            )
+            self._refresh_visualization_layer_override_summary()
 
         def _build_mip_export_parameter_rows(self, form: QFormLayout) -> None:
             """Add MIP-export parameter controls to a form.
@@ -6183,6 +6497,12 @@ if HAS_PYQT6:
             self._visualization_overlay_points_checkbox.setEnabled(
                 visualization_enabled and overlay_available
             )
+            if self._visualization_layer_table_button is not None:
+                self._visualization_layer_table_button.setEnabled(visualization_enabled)
+            if self._visualization_layer_table_summary_label is not None:
+                self._visualization_layer_table_summary_label.setEnabled(
+                    visualization_enabled
+                )
             overlay_hint = self._PARAMETER_HINTS["overlay_particle_detections"]
             if not overlay_available:
                 overlay_hint = (
@@ -6665,6 +6985,18 @@ if HAS_PYQT6:
             self._visualization_overlay_points_checkbox.setChecked(
                 bool(visualization_params.get("overlay_particle_detections", True))
             )
+            self._visualization_keyframe_layer_overrides = (
+                self._normalize_visualization_layer_overrides(
+                    visualization_params.get(
+                        "keyframe_layer_overrides",
+                        self._visualization_defaults.get(
+                            "keyframe_layer_overrides",
+                            [],
+                        ),
+                    )
+                )
+            )
+            self._refresh_visualization_layer_override_summary()
             self._set_visualization_position_selector_state()
             mip_mode = (
                 str(mip_export_params.get("position_mode", "multi_position")).strip()
@@ -7192,6 +7524,16 @@ if HAS_PYQT6:
                 ),
                 "launch_mode": str(
                     self._visualization_defaults.get("launch_mode", "auto")
+                ),
+                "capture_keyframes": bool(
+                    self._visualization_defaults.get("capture_keyframes", True)
+                ),
+                "keyframe_manifest_path": str(
+                    self._visualization_defaults.get("keyframe_manifest_path", "")
+                    or ""
+                ).strip(),
+                "keyframe_layer_overrides": list(
+                    self._visualization_keyframe_layer_overrides
                 ),
             }
 

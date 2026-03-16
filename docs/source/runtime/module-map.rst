@@ -76,7 +76,8 @@ The following operations are wired into ``clearex.main``:
    * - Visualization
      - ``clearex.visualization.pipeline``
      - Integrated and executable; supports napari launch behavior and optional
-       overlays.
+       overlays, interactive keyframe capture, and persisted movie-ready
+       keyframe manifests.
    * - Registration
      - Registration modules under ``clearex.registration``
      - Selectable in workflow config, but canonical 6D-store integration in

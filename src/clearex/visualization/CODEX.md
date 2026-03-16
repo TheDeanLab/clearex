@@ -71,6 +71,28 @@ This folder owns napari-facing visualization workflows.
 - `launch_mode=auto` must choose subprocess mode off the main thread to avoid Qt/napari thread violations.
 - In CLI/main-thread contexts, `launch_mode=auto` should run in-process.
 
+
+## Keyframe Capture Contract
+
+- Visualization keyframe capture is enabled by default (`capture_keyframes=True`).
+- In the napari viewer:
+  - press `K` to capture a keyframe,
+  - press `Shift-K` to remove the most recent keyframe.
+- Keyframe manifests now record reproducible viewer state, including:
+  - camera angles/zoom/center/perspective,
+  - dims state (`current_step`, axis labels, order, and 2D/3D view type),
+  - layer order and selected/active layer names,
+  - per-layer display settings (visibility, opacity, blending, LUT/colormap, contrast limits, rendering mode, interpolation/depiction fields when available),
+  - optional per-layer `annotation` text from GUI overrides.
+- Default manifest path is `<analysis_store>.visualization_keyframes.json`; override with `keyframe_manifest_path`.
+- GUI provides a popup keyframe layer table (`Layer/View Table...`) with columns:
+  - `Layer`, `Visible`, `LUT/Colormap`, `Rendering`, `Annotation`.
+- Latest visualization metadata includes:
+  - `capture_keyframes`,
+  - `keyframe_manifest_path` (when set),
+  - `keyframe_count`,
+  - `keyframe_layer_overrides`.
+
 ## Provenance/Metadata
 
 - Visualization metadata is stored at `results/visualization/latest`.

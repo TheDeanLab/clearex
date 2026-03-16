@@ -186,6 +186,19 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
 - GUI setup currently requires Navigate `experiment.yml`/`experiment.yaml`.
 - If GUI cannot launch (for example no display), ClearEx logs a warning and falls back to headless execution.
 
+### Visualization Keyframes and Manifest
+- Keyframe capture is enabled by default during visualization (`capture_keyframes=True`).
+- In napari:
+  - Press `K` to capture a keyframe.
+  - Press `Shift-K` to remove the most recent keyframe.
+- Default keyframe manifest path is `<analysis_store>.visualization_keyframes.json` (override with `keyframe_manifest_path`).
+- Each keyframe stores reproducible viewer state for movie reconstruction, including:
+  - camera (angles, zoom, center, perspective),
+  - dims (`current_step`, axis labels, order, and 2D/3D display mode),
+  - layer order and selected/active layers,
+  - per-layer display state (visibility, LUT/colormap, rendering mode, blending, opacity, contrast, and transforms when available).
+- The GUI exposes a popup table (`Layer/View Table...`) to define optional per-layer overrides and `Annotation` labels that are embedded in the keyframe manifest.
+
 ## Output Layout (Canonical Store)
 - Base image data: `data`
 - Multiscale pyramid levels: `data_pyramid/level_*`

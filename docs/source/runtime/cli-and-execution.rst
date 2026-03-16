@@ -95,3 +95,32 @@ Execution progresses through these coarse stages:
 
 GUI execution uses explicit progress callbacks and per-run logging in the
 resolved workflow log directory.
+
+Visualization Keyframe Capture
+------------------------------
+
+When visualization launches napari, keyframe capture is enabled by default:
+
+- Press ``K`` to capture a keyframe.
+- Press ``Shift-K`` to remove the most recent keyframe.
+
+The keyframe manifest path defaults to:
+
+- ``<analysis_store>.visualization_keyframes.json``
+
+and can be overridden with ``keyframe_manifest_path`` in visualization
+parameters.
+
+Each keyframe stores enough state to recreate the current scene for movie
+generation, including:
+
+- camera values (angles, zoom, center, perspective),
+- dims state (current step, axis labels, order, and 2D/3D mode),
+- layer order and selected/active layers,
+- per-layer display configuration (visibility, LUT/colormap, rendering mode,
+  blending, opacity, contrast, and transforms when available).
+
+The GUI provides a popup editor (``Layer/View Table...``) for optional
+per-layer overrides with columns:
+
+- ``Layer``, ``Visible``, ``LUT/Colormap``, ``Rendering``, ``Annotation``.

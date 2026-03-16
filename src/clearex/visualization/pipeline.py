@@ -31,6 +31,7 @@ from __future__ import annotations
 # Standard Library Imports
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
@@ -81,6 +82,10 @@ class VisualizationSummary:
         Effective launch mode: ``in_process`` or ``subprocess``.
     viewer_pid : int, optional
         Spawned viewer process ID when subprocess launch mode is used.
+    keyframe_manifest_path : str, optional
+        JSON path used to persist interactive keyframe selections.
+    keyframe_count : int
+        Number of captured keyframes written to the manifest.
     """
 
     component: str
@@ -92,6 +97,8 @@ class VisualizationSummary:
     overlay_points_count: int
     launch_mode: str
     viewer_pid: Optional[int]
+    keyframe_manifest_path: Optional[str] = None
+    keyframe_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -755,6 +762,13 @@ def _normalize_visualization_parameters(
         ).strip()
         or "results/particle_detection/latest/detections"
     )
+    normalized["capture_keyframes"] = bool(normalized.get("capture_keyframes", True))
+    normalized["keyframe_manifest_path"] = (
+        str(normalized.get("keyframe_manifest_path", "")).strip()
+    )
+    normalized["keyframe_layer_overrides"] = _normalize_keyframe_layer_overrides(
+        normalized.get("keyframe_layer_overrides", [])
+    )
 
     launch_mode = str(normalized.get("launch_mode", "auto")).strip().lower() or "auto"
     if launch_mode not in {"auto", "in_process", "subprocess"}:
@@ -784,6 +798,452 @@ def _resolve_effective_launch_mode(requested_mode: str) -> str:
             return "in_process"
         return "subprocess"
     return mode
+
+
+def _resolve_keyframe_manifest_path(
+    *,
+    zarr_path: Union[str, Path],
+    parameters: Mapping[str, Any],
+) -> Optional[Path]:
+    """Resolve keyframe manifest JSON path from runtime parameters.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Zarr analysis-store path used as the default naming anchor.
+    parameters : mapping[str, Any]
+        Effective visualization parameters.
+
+    Returns
+    -------
+    pathlib.Path, optional
+        Absolute path where keyframes should be written. Returns ``None`` when
+        keyframe capture is disabled.
+
+    Raises
+    ------
+    None
+        Invalid or missing optional values fall back to defaults.
+    """
+    capture_keyframes = bool(parameters.get("capture_keyframes", True))
+    if not capture_keyframes:
+        return None
+
+    explicit_path = str(parameters.get("keyframe_manifest_path", "")).strip()
+    if explicit_path:
+        return Path(explicit_path).expanduser().resolve()
+
+    store_path = Path(zarr_path).expanduser().resolve()
+    return Path(f"{store_path}.visualization_keyframes.json")
+
+
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    """Coerce a value to ``True``/``False``/``None``.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate boolean value.
+
+    Returns
+    -------
+    bool, optional
+        Parsed boolean, or ``None`` when the value is unspecified.
+
+    Raises
+    ------
+    None
+        Invalid values return ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    text = str(value).strip().lower()
+    if not text or text == "auto":
+        return None
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _normalize_keyframe_layer_overrides(value: Any) -> list[Dict[str, Any]]:
+    """Normalize keyframe-layer override rows from runtime parameters.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate list-like value from visualization parameters.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Normalized rows with keys ``layer_name``, ``visible``, ``colormap``,
+        ``rendering``, and ``annotation``.
+
+    Raises
+    ------
+    None
+        Invalid rows are skipped.
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+
+    rows: list[Dict[str, Any]] = []
+    for raw_row in value:
+        if not isinstance(raw_row, Mapping):
+            continue
+        layer_name = str(
+            raw_row.get("layer_name", raw_row.get("layer", ""))
+        ).strip()
+        visible = _coerce_optional_bool(raw_row.get("visible"))
+        colormap = str(raw_row.get("colormap", raw_row.get("lut", ""))).strip()
+        rendering = str(raw_row.get("rendering", "")).strip()
+        annotation = str(raw_row.get("annotation", "")).strip()
+        if not any(
+            (
+                layer_name,
+                colormap,
+                rendering,
+                annotation,
+                visible is not None,
+            )
+        ):
+            continue
+        rows.append(
+            {
+                "layer_name": layer_name,
+                "visible": visible,
+                "colormap": colormap,
+                "rendering": rendering,
+                "annotation": annotation,
+            }
+        )
+    return rows
+
+
+def _serialize_colormap(colormap: Any) -> Optional[Dict[str, Any]]:
+    """Serialize napari colormap metadata for reproducible manifests.
+
+    Parameters
+    ----------
+    colormap : Any
+        Napari colormap object.
+
+    Returns
+    -------
+    dict[str, Any], optional
+        Serializable colormap payload when available.
+
+    Raises
+    ------
+    None
+        Missing attributes are ignored.
+    """
+    if colormap is None:
+        return None
+
+    payload: Dict[str, Any] = {
+        "name": str(getattr(colormap, "name", colormap)),
+    }
+    controls = getattr(colormap, "controls", None)
+    colors = getattr(colormap, "colors", None)
+    interpolation = getattr(colormap, "interpolation", None)
+    if controls is not None:
+        payload["controls"] = _sanitize_metadata_value(controls)
+    if colors is not None:
+        payload["colors"] = _sanitize_metadata_value(colors)
+    if interpolation is not None:
+        payload["interpolation"] = str(interpolation)
+    return _sanitize_metadata_value(payload)
+
+
+def _serialize_layer_attribute(value: Any) -> Any:
+    """Serialize a layer attribute while bounding manifest growth.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate attribute value.
+
+    Returns
+    -------
+    Any
+        Serializable value or a compact summary for large arrays/sequences.
+
+    Raises
+    ------
+    None
+        Invalid values are converted through metadata sanitization.
+    """
+    if isinstance(value, np.ndarray):
+        array = np.asarray(value)
+        if int(array.size) > 256:
+            return {
+                "truncated": True,
+                "shape": [int(dim) for dim in array.shape],
+                "dtype": str(array.dtype),
+            }
+        return _sanitize_metadata_value(array)
+    if isinstance(value, (list, tuple)) and len(value) > 256:
+        return {
+            "truncated": True,
+            "length": int(len(value)),
+        }
+    return _sanitize_metadata_value(value)
+
+
+def _serialize_layer_configuration(
+    layer: Any,
+    *,
+    order_index: int,
+    selected_layer_names: set[str],
+    active_layer_name: Optional[str],
+    override_by_layer_name: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Serialize a napari layer into movie-relevant display settings.
+
+    Parameters
+    ----------
+    layer : Any
+        Napari layer instance.
+    order_index : int
+        Layer index in viewer draw order.
+    selected_layer_names : set[str]
+        Names currently selected in the viewer layer list.
+    active_layer_name : str, optional
+        Active/primary selected layer name.
+    override_by_layer_name : mapping[str, mapping[str, Any]]
+        Optional row overrides keyed by layer name.
+
+    Returns
+    -------
+    dict[str, Any]
+        Layer display payload containing visibility, opacity, blending, and
+        image-specific properties when available.
+
+    Raises
+    ------
+    None
+        Missing attributes are ignored and omitted from the payload.
+    """
+    layer_name = str(getattr(layer, "name", ""))
+    payload: Dict[str, Any] = {
+        "name": layer_name,
+        "type": str(type(layer).__name__),
+        "order_index": int(max(0, order_index)),
+        "selected": bool(layer_name in selected_layer_names),
+        "active": bool(layer_name == active_layer_name),
+        "visible": bool(getattr(layer, "visible", True)),
+        "opacity": float(_safe_float(getattr(layer, "opacity", 1.0), default=1.0)),
+        "blending": str(getattr(layer, "blending", "opaque")),
+    }
+
+    annotation_row = override_by_layer_name.get(layer_name, {})
+    annotation = str(annotation_row.get("annotation", "")).strip()
+    if annotation:
+        payload["annotation"] = annotation
+
+    visible_override = _coerce_optional_bool(annotation_row.get("visible"))
+    if visible_override is not None:
+        payload["visible_override"] = bool(visible_override)
+    colormap_override = str(annotation_row.get("colormap", "")).strip()
+    if colormap_override:
+        payload["colormap_override"] = colormap_override
+    rendering_override = str(annotation_row.get("rendering", "")).strip()
+    if rendering_override:
+        payload["rendering_override"] = rendering_override
+
+    colormap_payload = _serialize_colormap(getattr(layer, "colormap", None))
+    if colormap_payload is not None:
+        payload["colormap"] = colormap_payload
+
+    contrast_limits = getattr(layer, "contrast_limits", None)
+    if isinstance(contrast_limits, (tuple, list)) and len(contrast_limits) >= 2:
+        payload["contrast_limits"] = [
+            float(_safe_float(contrast_limits[0], default=0.0)),
+            float(_safe_float(contrast_limits[1], default=1.0)),
+        ]
+
+    for attr_name in ("gamma", "attenuation", "iso_threshold", "edge_width", "border_width"):
+        if hasattr(layer, attr_name):
+            payload[attr_name] = float(
+                _safe_float(getattr(layer, attr_name, 0.0), default=0.0)
+            )
+    for attr_name in (
+        "rendering",
+        "depiction",
+        "interpolation",
+        "interpolation2d",
+        "interpolation3d",
+        "symbol",
+        "face_color",
+        "edge_color",
+        "border_color",
+    ):
+        if hasattr(layer, attr_name):
+            payload[attr_name] = _serialize_layer_attribute(
+                getattr(layer, attr_name, None)
+            )
+    for attr_name in ("size", "scale", "translate", "rotate", "shear"):
+        if hasattr(layer, attr_name):
+            payload[attr_name] = _serialize_layer_attribute(
+                getattr(layer, attr_name, None)
+            )
+
+    affine_value = getattr(layer, "affine", None)
+    if affine_value is not None:
+        affine_matrix = getattr(affine_value, "affine_matrix", None)
+        if affine_matrix is not None:
+            payload["affine_matrix"] = _serialize_layer_attribute(affine_matrix)
+        else:
+            payload["affine"] = _serialize_layer_attribute(affine_value)
+    return payload
+
+
+def _capture_viewer_keyframe(
+    *,
+    viewer: Any,
+    keyframe_index: int,
+    layer_overrides: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Capture camera/dim/layer state from a live napari viewer.
+
+    Parameters
+    ----------
+    viewer : Any
+        Napari viewer instance.
+    keyframe_index : int
+        Zero-based keyframe index.
+    layer_overrides : sequence of mapping[str, Any]
+        Optional layer-override rows from visualization parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Serializable keyframe payload.
+
+    Raises
+    ------
+    None
+        Attribute lookups are best-effort and fall back to defaults.
+    """
+    camera = getattr(viewer, "camera", None)
+    dims = getattr(viewer, "dims", None)
+    layer_list = getattr(viewer, "layers", None)
+    layers = tuple(layer_list) if layer_list is not None else tuple()
+    selection = getattr(layer_list, "selection", None)
+
+    angles_raw = tuple(getattr(camera, "angles", (0.0, 0.0, 0.0)))
+    center_raw = tuple(getattr(camera, "center", (0.0, 0.0, 0.0)))
+    current_step_raw = tuple(getattr(dims, "current_step", tuple()))
+    axis_labels_raw = tuple(getattr(dims, "axis_labels", tuple()))
+    dims_order_raw = tuple(getattr(dims, "order", tuple()))
+
+    selected_layer_names: set[str] = set()
+    active_layer_name: Optional[str] = None
+    if selection is not None:
+        try:
+            selected_layer_names = {
+                str(getattr(layer, "name", ""))
+                for layer in tuple(selection)
+            }
+        except Exception:
+            selected_layer_names = set()
+        try:
+            active_layer = getattr(selection, "active", None)
+            if active_layer is not None:
+                active_layer_name = str(getattr(active_layer, "name", ""))
+        except Exception:
+            active_layer_name = None
+
+    override_by_layer_name: Dict[str, Mapping[str, Any]] = {}
+    for row in _normalize_keyframe_layer_overrides(layer_overrides):
+        name = str(row.get("layer_name", "")).strip()
+        if name:
+            override_by_layer_name[name] = row
+
+    keyframe: Dict[str, Any] = {
+        "index": int(max(0, keyframe_index)),
+        "captured_at_utc": datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "camera": {
+            "angles": [
+                float(_safe_float(value, default=0.0)) for value in angles_raw[:3]
+            ],
+            "zoom": float(_safe_float(getattr(camera, "zoom", 1.0), default=1.0)),
+            "center": [
+                float(_safe_float(value, default=0.0)) for value in center_raw[:3]
+            ],
+            "perspective": float(
+                _safe_float(getattr(camera, "perspective", 0.0), default=0.0)
+            ),
+            "field_of_view": float(
+                _safe_float(getattr(camera, "fov", 0.0), default=0.0)
+            ),
+        },
+        "dims": {
+            "current_step": [int(round(_safe_float(v, default=0.0))) for v in current_step_raw],
+            "axis_labels": [str(label) for label in axis_labels_raw],
+            "ndisplay": int(max(2, round(_safe_float(getattr(dims, "ndisplay", 3), default=3.0)))),
+            "order": [int(round(_safe_float(v, default=0.0))) for v in dims_order_raw],
+        },
+        "viewer": {
+            "theme": str(getattr(viewer, "theme", "")),
+            "title": str(getattr(viewer, "title", "")),
+            "layer_order": [str(getattr(layer, "name", "")) for layer in layers],
+            "selected_layers": sorted(selected_layer_names),
+            "active_layer": active_layer_name,
+        },
+        "layers": [
+            _serialize_layer_configuration(
+                layer,
+                order_index=index,
+                selected_layer_names=selected_layer_names,
+                active_layer_name=active_layer_name,
+                override_by_layer_name=override_by_layer_name,
+            )
+            for index, layer in enumerate(layers)
+        ],
+    }
+    return _sanitize_metadata_value(keyframe)
+
+
+def _write_keyframe_manifest(
+    *,
+    manifest_path: Path,
+    payload: Mapping[str, Any],
+) -> None:
+    """Write the interactive keyframe manifest as JSON.
+
+    Parameters
+    ----------
+    manifest_path : pathlib.Path
+        Destination JSON path.
+    payload : mapping[str, Any]
+        Manifest payload containing keyframe snapshots.
+
+    Returns
+    -------
+    None
+        Writes the JSON file to disk.
+
+    Raises
+    ------
+    OSError
+        If output directories/files cannot be written.
+    """
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(_sanitize_metadata_value(dict(payload)), indent=2),
+        encoding="utf-8",
+    )
 
 
 def _resolve_multiscale_components(
@@ -1195,7 +1655,10 @@ def _launch_napari_viewer(
     scale_tczyx: Sequence[float],
     image_metadata: Mapping[str, Any],
     points_metadata: Mapping[str, Any],
-) -> None:
+    capture_keyframes: bool,
+    keyframe_manifest_path: Optional[Union[str, Path]],
+    keyframe_layer_overrides: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
     """Open a napari viewer and render image + optional particle overlays.
 
     Parameters
@@ -1222,11 +1685,18 @@ def _launch_napari_viewer(
         Metadata payload attached to the image layer.
     points_metadata : mapping[str, Any]
         Metadata payload attached to the points layer.
+    capture_keyframes : bool
+        Whether interactive keyframe capture hotkeys are enabled.
+    keyframe_manifest_path : str or pathlib.Path, optional
+        Destination JSON path used for writing keyframe selections.
+    keyframe_layer_overrides : sequence of mapping[str, Any]
+        Optional per-layer override rows, including annotation text.
 
     Returns
     -------
-    None
-        Viewer/event-loop side effects only.
+    dict[str, Any]
+        Viewer-capture summary with ``keyframe_manifest_path`` and
+        ``keyframe_count`` entries.
 
     Raises
     ------
@@ -1371,6 +1841,20 @@ def _launch_napari_viewer(
     axis_labels_tuple = tuple(str(label) for label in axis_labels)
     axis_labels_applied = False
 
+    manifest_path: Optional[Path] = None
+    if bool(capture_keyframes):
+        if keyframe_manifest_path is not None and str(keyframe_manifest_path).strip():
+            manifest_path = Path(keyframe_manifest_path).expanduser().resolve()
+        else:
+            manifest_path = _resolve_keyframe_manifest_path(
+                zarr_path=zarr_path,
+                parameters={"capture_keyframes": True},
+            )
+    keyframes: list[Dict[str, Any]] = []
+    normalized_layer_overrides = _normalize_keyframe_layer_overrides(
+        keyframe_layer_overrides
+    )
+
     selected = tuple(int(index) for index in selected_positions)
     multi_position = len(selected) > 1
     for position_index in selected:
@@ -1479,7 +1963,180 @@ def _launch_napari_viewer(
             border_width=0.2,
             blending="translucent",
         )
+
+    def _notify(message: str) -> None:
+        """Emit a keyframe-status message in logs and the napari UI.
+
+        Parameters
+        ----------
+        message : str
+            Status text.
+
+        Returns
+        -------
+        None
+            Viewer/logging side effects only.
+
+        Raises
+        ------
+        None
+            Notification failures are ignored.
+        """
+        text = str(message)
+        print(f"[visualization] {text}")
+        try:
+            viewer.status = text
+        except Exception:
+            pass
+        try:
+            from napari.utils.notifications import show_info
+
+            show_info(text)
+        except Exception:
+            pass
+
+    def _persist_keyframes() -> None:
+        """Persist the current keyframe manifest to disk.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Writes JSON payload when keyframe capture is enabled.
+
+        Raises
+        ------
+        None
+            Write failures are reported as viewer status and ignored.
+        """
+        if manifest_path is None:
+            return
+        payload: Dict[str, Any] = {
+            "schema_version": 1,
+            "zarr_path": str(Path(zarr_path).expanduser().resolve()),
+            "source_component": str(source_component),
+            "source_components": [str(item) for item in source_components],
+            "selected_positions": [int(value) for value in selected],
+            "axis_labels_tczyx": [str(label) for label in axis_labels_tuple],
+            "scale_tczyx": [float(value) for value in scale],
+            "viewer_type": (
+                "3d"
+                if int(max(2, round(_safe_float(getattr(viewer.dims, "ndisplay", 3), default=3.0))))
+                == 3
+                else "2d"
+            ),
+            "keyframe_layer_overrides": list(normalized_layer_overrides),
+            "keyframes": list(keyframes),
+        }
+        try:
+            _write_keyframe_manifest(manifest_path=manifest_path, payload=payload)
+        except OSError as exc:
+            _notify(f"Keyframe manifest write failed: {exc}")
+
+    if manifest_path is not None:
+        _persist_keyframes()
+
+        def _capture_keyframe(_viewer: Any = None) -> None:
+            """Capture and persist one viewer keyframe.
+
+            Parameters
+            ----------
+            _viewer : Any, optional
+                Ignored napari callback argument.
+
+            Returns
+            -------
+            None
+                Updates in-memory and on-disk keyframe state.
+            """
+            del _viewer
+            keyframe = _capture_viewer_keyframe(
+                viewer=viewer,
+                keyframe_index=len(keyframes),
+                layer_overrides=normalized_layer_overrides,
+            )
+            keyframes.append(keyframe)
+            _persist_keyframes()
+            _notify(
+                "Captured keyframe "
+                f"{int(keyframe['index']) + 1} at {manifest_path}."
+            )
+
+        def _pop_keyframe(_viewer: Any = None) -> None:
+            """Remove the most recent keyframe selection.
+
+            Parameters
+            ----------
+            _viewer : Any, optional
+                Ignored napari callback argument.
+
+            Returns
+            -------
+            None
+                Mutates in-memory and on-disk keyframe state.
+            """
+            del _viewer
+            if not keyframes:
+                _notify("No keyframes to remove.")
+                return
+            keyframes.pop()
+            _persist_keyframes()
+            _notify(f"Removed latest keyframe. Remaining: {len(keyframes)}.")
+
+        bind_key = getattr(viewer, "bind_key", None)
+        bound_hotkeys = 0
+        if callable(bind_key):
+            try:
+                bind_key("k", _capture_keyframe, overwrite=True)
+                bound_hotkeys += 1
+            except TypeError:
+                try:
+                    bind_key("k")(_capture_keyframe)
+                    bound_hotkeys += 1
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            try:
+                bind_key("Shift-K", _pop_keyframe, overwrite=True)
+                bound_hotkeys += 1
+            except TypeError:
+                try:
+                    bind_key("Shift-K")(_pop_keyframe)
+                    bound_hotkeys += 1
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        try:
+            close_event = getattr(getattr(viewer, "events", None), "close", None)
+            if close_event is not None and callable(getattr(close_event, "connect", None)):
+                close_event.connect(lambda _event=None: _persist_keyframes())
+        except Exception:
+            pass
+
+        if bound_hotkeys > 0:
+            _notify(
+                "Keyframe capture enabled. Press K to capture and Shift-K to remove "
+                f"the latest keyframe. Manifest: {manifest_path}."
+            )
+        else:
+            _notify(
+                "Keyframe capture manifest is enabled, but hotkeys could not be "
+                f"registered. Manifest: {manifest_path}."
+            )
+
     napari.run()
+    _persist_keyframes()
+    return {
+        "keyframe_manifest_path": str(manifest_path) if manifest_path is not None else None,
+        "keyframe_count": int(len(keyframes)),
+    }
 
 
 def _save_visualization_metadata(
@@ -1494,6 +2151,8 @@ def _save_visualization_metadata(
     overlay_points_count: int,
     launch_mode: str,
     viewer_pid: Optional[int],
+    keyframe_manifest_path: Optional[str],
+    keyframe_count: int,
     run_id: Optional[str] = None,
 ) -> str:
     """Persist visualization metadata in ``results/visualization/latest``.
@@ -1520,6 +2179,10 @@ def _save_visualization_metadata(
         Effective launch mode.
     viewer_pid : int, optional
         Viewer process ID when launched as subprocess.
+    keyframe_manifest_path : str, optional
+        JSON path where interactive keyframe selections were written.
+    keyframe_count : int
+        Number of captured keyframes.
     run_id : str, optional
         Optional provenance run identifier.
 
@@ -1547,9 +2210,16 @@ def _save_visualization_metadata(
         "parameters": {str(k): v for k, v in dict(parameters).items()},
         "storage_policy": "latest_only",
         "run_id": run_id,
+        "capture_keyframes": bool(parameters.get("capture_keyframes", True)),
+        "keyframe_count": int(max(0, keyframe_count)),
+        "keyframe_layer_overrides": _normalize_keyframe_layer_overrides(
+            parameters.get("keyframe_layer_overrides", [])
+        ),
     }
     if viewer_pid is not None:
         payload["viewer_pid"] = int(viewer_pid)
+    if keyframe_manifest_path is not None and str(keyframe_manifest_path).strip():
+        payload["keyframe_manifest_path"] = str(keyframe_manifest_path)
     latest_group.attrs.update(payload)
 
     register_latest_output_reference(
@@ -1693,19 +2363,30 @@ def run_visualization_analysis(
     effective_launch_mode = _resolve_effective_launch_mode(
         str(normalized.get("launch_mode", "auto"))
     )
+    keyframe_manifest = _resolve_keyframe_manifest_path(
+        zarr_path=zarr_path,
+        parameters=normalized,
+    )
+    keyframe_manifest_path: Optional[str] = (
+        str(keyframe_manifest) if keyframe_manifest is not None else None
+    )
+    keyframe_count = 0
     viewer_pid: Optional[int] = None
     if effective_launch_mode == "subprocess":
         _emit(65, "Launching napari in a separate process")
+        subprocess_parameters: Dict[str, Any] = {
+            **normalized,
+            "launch_mode": "in_process",
+        }
+        if keyframe_manifest_path is not None:
+            subprocess_parameters["keyframe_manifest_path"] = keyframe_manifest_path
         viewer_pid = _launch_napari_subprocess(
             zarr_path=zarr_path,
-            normalized_parameters={
-                **normalized,
-                "launch_mode": "in_process",
-            },
+            normalized_parameters=subprocess_parameters,
         )
     else:
         _emit(65, "Opening napari viewer")
-        _launch_napari_viewer(
+        viewer_capture = _launch_napari_viewer(
             zarr_path=zarr_path,
             source_components=source_components,
             source_component=source_component,
@@ -1717,7 +2398,24 @@ def run_visualization_analysis(
             scale_tczyx=napari_payload.scale_tczyx,
             image_metadata=napari_payload.image_metadata,
             points_metadata=napari_payload.points_metadata,
+            capture_keyframes=bool(normalized.get("capture_keyframes", True)),
+            keyframe_manifest_path=keyframe_manifest_path,
+            keyframe_layer_overrides=normalized.get("keyframe_layer_overrides", []),
         )
+        if isinstance(viewer_capture, Mapping):
+            keyframe_manifest_candidate = viewer_capture.get("keyframe_manifest_path")
+            if (
+                keyframe_manifest_candidate is not None
+                and str(keyframe_manifest_candidate).strip()
+            ):
+                keyframe_manifest_path = str(keyframe_manifest_candidate)
+            try:
+                keyframe_count = max(
+                    0,
+                    int(viewer_capture.get("keyframe_count", 0)),
+                )
+            except (TypeError, ValueError):
+                keyframe_count = 0
 
     _emit(90, "Writing visualization metadata")
     component = _save_visualization_metadata(
@@ -1731,6 +2429,8 @@ def run_visualization_analysis(
         overlay_points_count=total_overlay_points,
         launch_mode=effective_launch_mode,
         viewer_pid=viewer_pid,
+        keyframe_manifest_path=keyframe_manifest_path,
+        keyframe_count=keyframe_count,
         run_id=run_id,
     )
     _emit(100, "Visualization workflow complete")
@@ -1744,6 +2444,8 @@ def run_visualization_analysis(
         overlay_points_count=total_overlay_points,
         launch_mode=effective_launch_mode,
         viewer_pid=viewer_pid,
+        keyframe_manifest_path=keyframe_manifest_path,
+        keyframe_count=int(keyframe_count),
     )
 
 

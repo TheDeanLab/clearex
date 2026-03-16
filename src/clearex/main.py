@@ -1545,6 +1545,8 @@ def _run_workflow(
                             "overlay_points_count": summary.overlay_points_count,
                             "launch_mode": summary.launch_mode,
                             "viewer_pid": summary.viewer_pid,
+                            "keyframe_manifest_path": summary.keyframe_manifest_path,
+                            "keyframe_count": summary.keyframe_count,
                             "storage_policy": "latest_only",
                         }
                         logger.info(
@@ -1554,7 +1556,9 @@ def _run_workflow(
                             f"position={summary.position_index}, "
                             f"multiscale_levels={len(summary.source_components)}, "
                             f"overlay_points={summary.overlay_points_count}, "
-                            f"launch_mode={summary.launch_mode}."
+                            f"launch_mode={summary.launch_mode}, "
+                            f"keyframes={summary.keyframe_count}, "
+                            f"keyframe_manifest={summary.keyframe_manifest_path}."
                         )
                         step_records.append(
                             {
@@ -1568,6 +1572,8 @@ def _run_workflow(
                                     "overlay_points_count": summary.overlay_points_count,
                                     "launch_mode": summary.launch_mode,
                                     "viewer_pid": summary.viewer_pid,
+                                    "keyframe_manifest_path": summary.keyframe_manifest_path,
+                                    "keyframe_count": summary.keyframe_count,
                                 },
                             }
                         )

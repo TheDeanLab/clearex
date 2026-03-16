@@ -83,8 +83,16 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
         scale_tczyx,
         image_metadata,
         points_metadata,
+        capture_keyframes,
+        keyframe_manifest_path,
+        keyframe_layer_overrides,
     ) -> None:
-        del zarr_path, source_component, point_properties_by_position
+        del zarr_path
+        del source_component
+        del point_properties_by_position
+        del capture_keyframes
+        del keyframe_manifest_path
+        del keyframe_layer_overrides
         captured["source_components"] = tuple(source_components)
         captured["selected_positions"] = tuple(int(value) for value in selected_positions)
         captured["points_by_position"] = {
@@ -125,6 +133,8 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     assert summary.overlay_points_count == 1
     assert summary.launch_mode == "in_process"
     assert summary.viewer_pid is None
+    assert summary.keyframe_manifest_path == f"{store_path.resolve()}.visualization_keyframes.json"
+    assert summary.keyframe_count == 0
 
     assert captured["source_components"] == ("data", "data_pyramid/level_1")
     assert captured["selected_positions"] == (1,)
@@ -155,6 +165,10 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     assert latest_attrs["launch_mode"] == "in_process"
     assert latest_attrs["overlay_points_count"] == 1
     assert latest_attrs["source_components"] == ["data", "data_pyramid/level_1"]
+    assert latest_attrs["capture_keyframes"] is True
+    assert latest_attrs["keyframe_count"] == 0
+    assert latest_attrs["keyframe_manifest_path"] == summary.keyframe_manifest_path
+    assert latest_attrs["keyframe_layer_overrides"] == []
     assert (
         output_root["provenance"]["latest_outputs"]["visualization"].attrs["component"]
         == "results/visualization/latest"
@@ -204,13 +218,23 @@ def test_run_visualization_analysis_subprocess_launch(
     assert summary.position_index == 0
     assert summary.selected_positions == (0,)
     assert summary.show_all_positions is False
+    assert summary.keyframe_manifest_path == f"{store_path.resolve()}.visualization_keyframes.json"
+    assert summary.keyframe_count == 0
     assert captured["zarr_path"] == str(store_path)
     assert dict(captured["parameters"])["launch_mode"] == "in_process"
+    assert (
+        dict(captured["parameters"])["keyframe_manifest_path"]
+        == f"{store_path.resolve()}.visualization_keyframes.json"
+    )
+    assert dict(captured["parameters"])["keyframe_layer_overrides"] == []
 
     output_root = zarr.open_group(str(store_path), mode="r")
     latest_attrs = dict(output_root["results"]["visualization"]["latest"].attrs)
     assert latest_attrs["viewer_pid"] == 43210
     assert latest_attrs["launch_mode"] == "subprocess"
+    assert latest_attrs["capture_keyframes"] is True
+    assert latest_attrs["keyframe_count"] == 0
+    assert latest_attrs["keyframe_layer_overrides"] == []
 
 
 def test_run_visualization_analysis_rejects_invalid_position(tmp_path: Path) -> None:
@@ -292,6 +316,9 @@ def test_run_visualization_analysis_uses_experiment_spacing_when_available(
         scale_tczyx,
         image_metadata,
         points_metadata,
+        capture_keyframes,
+        keyframe_manifest_path,
+        keyframe_layer_overrides,
     ) -> None:
         del zarr_path
         del source_components
@@ -302,6 +329,9 @@ def test_run_visualization_analysis_uses_experiment_spacing_when_available(
         del position_affines_tczyx
         del axis_labels
         del points_metadata
+        del capture_keyframes
+        del keyframe_manifest_path
+        del keyframe_layer_overrides
         captured["scale_tczyx"] = tuple(float(value) for value in scale_tczyx)
         captured["image_metadata"] = dict(image_metadata)
 
@@ -356,6 +386,9 @@ def test_run_visualization_analysis_prefers_voxel_size_um_attrs(
         scale_tczyx,
         image_metadata,
         points_metadata,
+        capture_keyframes,
+        keyframe_manifest_path,
+        keyframe_layer_overrides,
     ) -> None:
         del zarr_path
         del source_components
@@ -367,6 +400,9 @@ def test_run_visualization_analysis_prefers_voxel_size_um_attrs(
         del axis_labels
         del image_metadata
         del points_metadata
+        del capture_keyframes
+        del keyframe_manifest_path
+        del keyframe_layer_overrides
         captured["scale_tczyx"] = tuple(float(value) for value in scale_tczyx)
 
     monkeypatch.setattr(
@@ -447,6 +483,9 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
         scale_tczyx,
         image_metadata,
         points_metadata,
+        capture_keyframes,
+        keyframe_manifest_path,
+        keyframe_layer_overrides,
     ) -> None:
         del zarr_path
         del source_components
@@ -456,6 +495,9 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
         del axis_labels
         del scale_tczyx
         del points_metadata
+        del capture_keyframes
+        del keyframe_manifest_path
+        del keyframe_layer_overrides
         captured["selected_positions"] = tuple(int(value) for value in selected_positions)
         captured["position_affines_tczyx"] = {
             int(key): np.asarray(value, dtype=np.float64)
@@ -571,6 +613,9 @@ def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
         scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
         image_metadata={},
         points_metadata={},
+        capture_keyframes=False,
+        keyframe_manifest_path=None,
+        keyframe_layer_overrides=[],
     )
 
     viewer = fake_napari.viewer
@@ -660,6 +705,9 @@ def test_launch_napari_viewer_three_channels_use_requested_default_colormaps(
         scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
         image_metadata={},
         points_metadata={},
+        capture_keyframes=False,
+        keyframe_manifest_path=None,
+        keyframe_layer_overrides=[],
     )
 
     viewer = fake_napari.viewer
@@ -730,6 +778,9 @@ def test_launch_napari_viewer_requests_3d_display_mode(
         scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
         image_metadata={},
         points_metadata={},
+        capture_keyframes=False,
+        keyframe_manifest_path=None,
+        keyframe_layer_overrides=[],
     )
 
     viewer = fake_napari.viewer
@@ -737,3 +788,150 @@ def test_launch_napari_viewer_requests_3d_display_mode(
     assert viewer.initial_ndisplay == 3
     assert len(viewer.image_calls) == 1
     assert viewer.image_calls[0]["rendering"] == "attenuated_mip"
+
+
+def test_launch_napari_viewer_keyframe_hotkeys_write_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = np.zeros((1, 1, 1, 3, 4, 5), dtype=np.uint16)
+
+    def _fake_from_zarr(_path: str, *, component: str):
+        assert component == "data"
+        return source
+
+    monkeypatch.setattr(visualization_pipeline.da, "from_zarr", _fake_from_zarr)
+
+    class _FakeCloseEvent:
+        def __init__(self) -> None:
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.ndim = 2
+            self.axis_labels = ("0", "1")
+            self.current_step = (0, 0, 0, 0, 0)
+            self.ndisplay = 3
+
+    class _FakeLayer:
+        def __init__(self, *, name: str, colormap: str | None = None) -> None:
+            self.name = name
+            self.visible = True
+            self.opacity = 1.0
+            self.blending = "opaque"
+            self.contrast_limits = (0.0, 1.0)
+            self.gamma = 1.0
+            self.rendering = "attenuated_mip"
+            if colormap is not None:
+                self.colormap = type("Colormap", (), {"name": colormap})()
+
+    class _FakeViewer:
+        def __init__(self, *, ndisplay: int, show: bool) -> None:
+            del ndisplay, show
+            self.camera = type(
+                "Camera",
+                (),
+                {
+                    "angles": (11.0, 22.0, 33.0),
+                    "zoom": 2.5,
+                    "center": (4.0, 5.0, 6.0),
+                },
+            )()
+            self.dims = _FakeDims()
+            self.layers = []
+            self.bound_keys: dict[str, object] = {}
+            self.events = type("Events", (), {"close": _FakeCloseEvent()})()
+            self.status = ""
+
+        def add_image(self, data, **kwargs):
+            del data
+            layer = _FakeLayer(
+                name=str(kwargs.get("name", "")),
+                colormap=str(kwargs.get("colormap", "")) or None,
+            )
+            layer.opacity = float(kwargs.get("opacity", 1.0))
+            layer.blending = str(kwargs.get("blending", "opaque"))
+            layer.contrast_limits = tuple(kwargs.get("contrast_limits", (0.0, 1.0)))
+            layer.rendering = str(kwargs.get("rendering", "attenuated_mip"))
+            self.layers.append(layer)
+            self.dims.ndim = 5
+            return layer
+
+        def add_points(self, data, **kwargs):
+            del data, kwargs
+            layer = _FakeLayer(name="Particle Detections")
+            layer.blending = "translucent"
+            layer.opacity = 0.5
+            self.layers.append(layer)
+            return layer
+
+        def bind_key(self, key: str, callback=None, overwrite: bool = False):
+            del overwrite
+            if callback is None:
+                def _decorator(func):
+                    self.bound_keys[str(key)] = func
+                    return func
+
+                return _decorator
+            self.bound_keys[str(key)] = callback
+            return callback
+
+    class _FakeNapari:
+        def __init__(self) -> None:
+            self.viewer: _FakeViewer | None = None
+
+        def Viewer(self, *, ndisplay: int, show: bool):
+            self.viewer = _FakeViewer(ndisplay=ndisplay, show=show)
+            return self.viewer
+
+        def run(self) -> None:
+            return None
+
+    fake_napari = _FakeNapari()
+    monkeypatch.setitem(sys.modules, "napari", fake_napari)
+
+    manifest_path = tmp_path / "viewer_keyframes.json"
+    summary = visualization_pipeline._launch_napari_viewer(
+        zarr_path=tmp_path / "analysis_store.zarr",
+        source_components=("data",),
+        source_component="data",
+        selected_positions=(0,),
+        points_by_position={0: np.asarray([[0, 0, 1, 2, 3]], dtype=np.float32)},
+        point_properties_by_position={},
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        axis_labels=("t", "c", "z", "y", "x"),
+        scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        image_metadata={},
+        points_metadata={},
+        capture_keyframes=True,
+        keyframe_manifest_path=manifest_path,
+        keyframe_layer_overrides=[],
+    )
+
+    viewer = fake_napari.viewer
+    assert viewer is not None
+    assert summary["keyframe_manifest_path"] == str(manifest_path)
+    assert summary["keyframe_count"] == 0
+    assert "k" in viewer.bound_keys
+    assert "Shift-K" in viewer.bound_keys
+
+    viewer.bound_keys["k"](viewer)
+    viewer.bound_keys["k"](viewer)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    assert payload["viewer_type"] == "3d"
+    assert payload["selected_positions"] == [0]
+    assert payload["keyframe_layer_overrides"] == []
+    assert len(payload["keyframes"]) == 2
+    assert payload["keyframes"][0]["camera"]["angles"] == [11.0, 22.0, 33.0]
+    assert payload["keyframes"][0]["dims"]["axis_labels"] == ["t", "c", "z", "y", "x"]
+    assert payload["keyframes"][0]["viewer"]["selected_layers"] == []
+    assert payload["keyframes"][0]["viewer"]["active_layer"] is None
+    assert payload["keyframes"][0]["layers"][0]["name"] == "data (p=0)"
+    assert payload["keyframes"][0]["layers"][0]["selected"] is False
+
+    viewer.bound_keys["Shift-K"](viewer)
+    payload_after_pop = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(payload_after_pop["keyframes"]) == 1

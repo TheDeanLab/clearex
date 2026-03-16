@@ -192,6 +192,9 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "overlay_particle_detections": True,
         "particle_detection_component": "results/particle_detection/latest/detections",
         "launch_mode": "auto",
+        "capture_keyframes": True,
+        "keyframe_manifest_path": "",
+        "keyframe_layer_overrides": [],
     },
     "mip_export": {
         "execution_order": 7,
@@ -779,6 +782,95 @@ def _normalize_shear_transform_parameters(
     return normalized
 
 
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    """Coerce a value into ``True``/``False``/``None``.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate boolean-like value.
+
+    Returns
+    -------
+    bool, optional
+        Parsed boolean, or ``None`` when unspecified.
+
+    Raises
+    ------
+    None
+        Invalid values return ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    text = str(value).strip().lower()
+    if not text or text == "auto":
+        return None
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _normalize_keyframe_layer_overrides(value: Any) -> list[Dict[str, Any]]:
+    """Normalize visualization keyframe layer override rows.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate list of row mappings.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Normalized rows containing ``layer_name``, ``visible``, ``colormap``,
+        ``rendering``, and ``annotation``.
+
+    Raises
+    ------
+    None
+        Invalid rows are skipped.
+    """
+    if not isinstance(value, (tuple, list)):
+        return []
+
+    rows: list[Dict[str, Any]] = []
+    for raw_row in value:
+        if not isinstance(raw_row, dict):
+            continue
+        layer_name = str(
+            raw_row.get("layer_name", raw_row.get("layer", ""))
+        ).strip()
+        visible = _coerce_optional_bool(raw_row.get("visible"))
+        colormap = str(raw_row.get("colormap", raw_row.get("lut", ""))).strip()
+        rendering = str(raw_row.get("rendering", "")).strip()
+        annotation = str(raw_row.get("annotation", "")).strip()
+        if not any(
+            (
+                layer_name,
+                colormap,
+                rendering,
+                annotation,
+                visible is not None,
+            )
+        ):
+            continue
+        rows.append(
+            {
+                "layer_name": layer_name,
+                "visible": visible,
+                "colormap": colormap,
+                "rendering": rendering,
+                "annotation": annotation,
+            }
+        )
+    return rows
+
+
 def _normalize_visualization_parameters(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -816,6 +908,13 @@ def _normalize_visualization_parameters(
             )
         ).strip()
         or "results/particle_detection/latest/detections"
+    )
+    normalized["capture_keyframes"] = bool(normalized.get("capture_keyframes", True))
+    normalized["keyframe_manifest_path"] = (
+        str(normalized.get("keyframe_manifest_path", "")).strip()
+    )
+    normalized["keyframe_layer_overrides"] = _normalize_keyframe_layer_overrides(
+        normalized.get("keyframe_layer_overrides", [])
     )
     launch_mode = str(normalized.get("launch_mode", "auto")).strip().lower() or "auto"
     if launch_mode not in {"auto", "in_process", "subprocess"}:

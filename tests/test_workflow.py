@@ -126,6 +126,9 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["visualization"]["show_all_positions"] is False
         assert cfg.analysis_parameters["visualization"]["position_index"] == 0
         assert cfg.analysis_parameters["visualization"]["use_multiscale"] is True
+        assert cfg.analysis_parameters["visualization"]["capture_keyframes"] is True
+        assert cfg.analysis_parameters["visualization"]["keyframe_manifest_path"] == ""
+        assert cfg.analysis_parameters["visualization"]["keyframe_layer_overrides"] == []
         assert "mip_export" in cfg.analysis_parameters
         assert cfg.analysis_parameters["mip_export"]["execution_order"] == 7
         assert cfg.analysis_parameters["mip_export"]["position_mode"] == "multi_position"
@@ -291,6 +294,17 @@ class TestWorkflowConfig:
                     "use_multiscale": 0,
                     "overlay_particle_detections": 1,
                     "launch_mode": "subprocess",
+                    "capture_keyframes": 0,
+                    "keyframe_manifest_path": " keyframes.json ",
+                    "keyframe_layer_overrides": [
+                        {
+                            "layer_name": "data (p=0, c=0)",
+                            "visible": "true",
+                            "colormap": "green",
+                            "rendering": "attenuated_mip",
+                            "annotation": "Nuclei",
+                        }
+                    ],
                 }
             }
         )
@@ -300,6 +314,17 @@ class TestWorkflowConfig:
         assert params["use_multiscale"] is False
         assert params["overlay_particle_detections"] is True
         assert params["launch_mode"] == "subprocess"
+        assert params["capture_keyframes"] is False
+        assert params["keyframe_manifest_path"] == "keyframes.json"
+        assert params["keyframe_layer_overrides"] == [
+            {
+                "layer_name": "data (p=0, c=0)",
+                "visible": True,
+                "colormap": "green",
+                "rendering": "attenuated_mip",
+                "annotation": "Nuclei",
+            }
+        ]
 
     def test_normalizes_mip_export_parameters(self):
         cfg = WorkflowConfig(
@@ -562,6 +587,8 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     assert normalized["visualization"]["input_source"] == "data"
     assert normalized["visualization"]["show_all_positions"] is False
     assert normalized["visualization"]["use_multiscale"] is True
+    assert normalized["visualization"]["capture_keyframes"] is True
+    assert normalized["visualization"]["keyframe_layer_overrides"] == []
     assert normalized["mip_export"]["execution_order"] == 7
     assert normalized["mip_export"]["position_mode"] == "multi_position"
     assert normalized["mip_export"]["export_format"] == "tiff"
