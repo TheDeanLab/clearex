@@ -263,6 +263,7 @@ def test_run_usegment3d_analysis_writes_latest_results(
     assert summary.data_component == "results/usegment3d/latest/data"
     assert summary.source_component == "data"
     assert summary.volumes_processed == 2
+    assert summary.channel_indices == (1,)
     assert summary.channel_index == 1
     assert summary.views == ("xy", "yz")
     assert summary.gpu_requested is True
@@ -276,11 +277,63 @@ def test_run_usegment3d_analysis_writes_latest_results(
 
     latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
     assert latest_ref["component"] == "results/usegment3d/latest"
+    assert latest_ref["metadata"].get("channel_indices", []) == [1]
     assert (
         latest_ref["metadata"].get("aggregation_tile_mode_effective")
         is latest_ref["metadata"].get("aggregation_tile_mode")
     )
     assert latest_ref["metadata"].get("dropped_parameter_keys", []) == []
+
+
+def test_run_usegment3d_analysis_supports_multiple_channels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "analysis_store_usegment3d_multi_channel.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 3, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    monkeypatch.setattr(
+        usegment_pipeline,
+        "_load_usegment3d_runtime",
+        lambda: (_FakeParameterModule(), _FakeRuntimeModule()),
+    )
+    monkeypatch.setattr(usegment_pipeline, "_is_gpu_available", lambda: False)
+
+    client = create_dask_client(n_workers=2, threads_per_worker=1, processes=False)
+    try:
+        summary = run_usegment3d_analysis(
+            zarr_path=store_path,
+            parameters={
+                "channel_indices": [0, 2],
+                "use_views": ["xy"],
+                "gpu": False,
+                "require_gpu": False,
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    assert summary.volumes_processed == 2
+    assert summary.channel_indices == (0, 2)
+    assert summary.channel_index == 0
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    labels = np.asarray(output_root["results"]["usegment3d"]["latest"]["data"])
+    assert tuple(labels.shape) == (1, 1, 2, 2, 2, 2)
+    assert int(labels.max()) == 1
+
+    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    metadata = dict(latest_ref.get("metadata", {}))
+    assert metadata.get("channel_indices") == [0, 2]
+    assert metadata.get("channels_processed") == 2
 
 
 def test_run_usegment3d_analysis_drops_unknown_parameters(

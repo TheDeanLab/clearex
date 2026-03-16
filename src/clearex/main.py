@@ -637,6 +637,7 @@ def _configure_dask_backend(
 
             if workload_name == "analysis":
                 gpu_worker_cap: Optional[int] = None
+                use_gpu_local_cluster = False
                 if bool(getattr(workflow, "usegment3d", False)):
                     try:
                         normalized_params = normalize_analysis_operation_parameters(
@@ -658,6 +659,7 @@ def _configure_dask_backend(
                         )
                         if detected_gpu_count > 0:
                             gpu_worker_cap = max(1, detected_gpu_count)
+                            use_gpu_local_cluster = True
 
                 if gpu_worker_cap is not None:
                     requested_workers = (
@@ -672,6 +674,8 @@ def _configure_dask_backend(
                             f"capped_workers={int(gpu_worker_cap)}."
                         )
                         effective_n_workers = int(gpu_worker_cap)
+            else:
+                use_gpu_local_cluster = False
 
             effective_worker_count = (
                 int(effective_n_workers) if effective_n_workers is not None else 1
@@ -688,10 +692,12 @@ def _configure_dask_backend(
                 processes=use_processes,
                 memory_limit=effective_memory_limit,
                 local_directory=local_cfg.local_directory,
+                gpu_enabled=use_gpu_local_cluster,
             )
             exit_stack.callback(client.close)
             logger.info(
-                f"Connected to LocalCluster backend (processes={use_processes})."
+                "Connected to LocalCluster backend "
+                f"(processes={use_processes}, gpu_mode={use_gpu_local_cluster})."
             )
             return client
 
@@ -1676,18 +1682,34 @@ def _run_workflow(
                                 usegment3d_parameters.get("input_source", "data"),
                             )
                         )
+                        usegment3d_channel_indices = [
+                            int(value)
+                            for value in list(
+                                getattr(
+                                    summary,
+                                    "channel_indices",
+                                    [getattr(summary, "channel_index", 0)],
+                                )
+                            )
+                        ]
+                        if not usegment3d_channel_indices:
+                            usegment3d_channel_indices = [
+                                int(getattr(summary, "channel_index", 0))
+                            ]
                         produced_components["usegment3d"] = usegment3d_data_component
                         output_records["usegment3d"] = {
                             "component": usegment3d_component,
                             "data_component": usegment3d_data_component,
                             "source_component": usegment3d_source_component,
+                            "channel_indices": list(usegment3d_channel_indices),
                             "storage_policy": "latest_only",
                         }
                         logger.info(
                             "usegment3d completed: "
                             f"component={usegment3d_component}, "
                             f"data_component={usegment3d_data_component}, "
-                            f"source={usegment3d_source_component}."
+                            f"source={usegment3d_source_component}, "
+                            f"channels={usegment3d_channel_indices}."
                         )
                         step_records.append(
                             {
@@ -1697,6 +1719,7 @@ def _run_workflow(
                                     "component": usegment3d_component,
                                     "data_component": usegment3d_data_component,
                                     "source_component": usegment3d_source_component,
+                                    "channel_indices": list(usegment3d_channel_indices),
                                 },
                             }
                         )

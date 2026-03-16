@@ -64,11 +64,15 @@ This directory contains the runtime orchestration surface for ClearEx.
   - optional `input_resolution_level` supports segmentation on pyramid levels,
   - `output_reference_space` can upsample labels back to level 0,
   - optional `save_native_labels` stores downsampled native labels alongside upsampled output,
-  - distributed execution runs one task per `(t, p)` volume,
+  - distributed execution runs one task per `(t, p, selected channel)` volume,
+  - GUI runtime controls now expose channel checkboxes and emit `channel_indices`,
   - latest output is persisted to `results/usegment3d/latest/data`,
   - provenance references include GPU/tiling configuration, resolution/output-space metadata, and selected views.
 - Runtime uses optional dependency loading (`u-Segment3D`) and supports
   `require_gpu` fail-fast behavior when CUDA is unavailable.
+- Local GPU execution now supports a GPU-pinned `LocalCluster` mode via
+  `create_dask_client(..., gpu_enabled=True)`, launching one worker per
+  CUDA device with `GPU=1` worker resources for explicit task placement.
 
 ## Sequencing and Inputs
 

@@ -189,7 +189,9 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
 - For Zarr/N5 acquisition data, ClearEx reuses the source store path in place.
 - Deconvolution, particle detection, uSegment3D, and visualization operations run against canonical Zarr/N5 stores.
 - MIP export writes TIFF outputs as OME-TIFF (`.tif`) with projection-aware physical pixel calibration (`PhysicalSizeX/Y`) derived from source `voxel_size_um_zyx`.
-- uSegment3D runs per `(t, p)` 3D volume and writes labels to `results/usegment3d/latest/data`.
+- uSegment3D runs per `(t, p, selected channel)` volume task and writes labels to `results/usegment3d/latest/data`.
+  - GUI channel checkboxes now support selecting multiple channels in one run (`channel_indices`).
+  - With GPU-aware `LocalCluster`, separate channel tasks can execute concurrently across GPUs.
   - `input_resolution_level` lets segmentation run on a selected pyramid level (for example `data_pyramid/level_1`).
   - `output_reference_space=level0` upsamples labels back to original resolution.
   - `save_native_labels=True` (when upsampling) also writes native-resolution labels to `results/usegment3d/latest/data_native`.
@@ -197,11 +199,16 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
   - `gpu=True` requests GPU use for Cellpose/uSegment3D internals.
   - `require_gpu=True` fails fast if CUDA is unavailable.
   - For `LocalCluster` analysis runs with GPU-enabled uSegment3D, ClearEx
-    caps worker count to visible GPU count (1 worker per GPU) to reduce
-    worker churn from GPU overcommit.
+    now launches a GPU-pinned worker pool (one process per visible GPU by
+    default) and advertises a `GPU=1` worker resource so segmentation tasks
+    stay on GPU workers.
+  - Local GPU mode can be controlled through `create_dask_client(..., gpu_enabled=True, gpu_device_ids=[...])`.
   - GPU execution still depends on the installed PyTorch/CUDA build supporting
     the device architecture (for example, modern PyTorch wheels may not support
     older Pascal GPUs like Tesla P100 `sm_60`).
+  - CuPy must match your CUDA major version (`cupy-cuda12x` for CUDA 12
+    environments, `cupy-cuda11x` for CUDA 11 environments). Worker startup
+    should expose NVRTC/CUDA runtime libraries on `LD_LIBRARY_PATH`.
 - Scalability notes:
   - Distributed execution is parallelized over `(t, p)` volumes through Dask.
   - Intra-volume scalability uses uSegment3D gradient-descent tiling (`aggregation_tile_*` parameters).

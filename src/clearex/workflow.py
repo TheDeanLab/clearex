@@ -178,6 +178,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "use_map_overlap": False,
         "overlap_zyx": [12, 24, 24],
         "memory_overhead_factor": 3.0,
+        "channel_indices": [0],
         "channel_index": 0,
         "use_views": ["xy", "xz", "yz"],
         "input_resolution_level": 0,
@@ -801,8 +802,49 @@ def _normalize_usegment3d_parameters(
     normalized = _normalize_common_operation_parameters("usegment3d", params)
     normalized["detect_2d_per_slice"] = False
 
-    channel_value = normalized.get("channel_index", normalized.get("channel", 0))
-    normalized["channel_index"] = max(0, int(channel_value))
+    default_usegment3d = DEFAULT_ANALYSIS_OPERATION_PARAMETERS.get("usegment3d", {})
+    default_channel_indices = [
+        max(0, int(value))
+        for value in _normalize_parameter_float_list(
+            default_usegment3d.get("channel_indices", [0])
+        )
+    ]
+    if not default_channel_indices:
+        default_channel_indices = [0]
+    default_primary_channel = max(
+        0,
+        int(default_usegment3d.get("channel_index", default_channel_indices[0])),
+    )
+    primary_channel_value = normalized.get(
+        "channel_index",
+        normalized.get("channel", default_primary_channel),
+    )
+    primary_channel_index = max(0, int(primary_channel_value))
+
+    raw_channel_indices = _normalize_parameter_float_list(
+        normalized.get("channel_indices", normalized.get("channels", []))
+    )
+    normalized_raw_indices = [max(0, int(value)) for value in raw_channel_indices]
+    if (
+        not normalized_raw_indices
+        or (
+            normalized_raw_indices == default_channel_indices
+            and primary_channel_index != default_primary_channel
+        )
+    ):
+        raw_channel_indices = [float(primary_channel_index)]
+    normalized_channel_indices: list[int] = []
+    seen_channel_indices: set[int] = set()
+    for value in raw_channel_indices:
+        parsed_value = max(0, int(value))
+        if parsed_value in seen_channel_indices:
+            continue
+        normalized_channel_indices.append(parsed_value)
+        seen_channel_indices.add(parsed_value)
+    if not normalized_channel_indices:
+        normalized_channel_indices = [0]
+    normalized["channel_indices"] = list(normalized_channel_indices)
+    normalized["channel_index"] = int(normalized_channel_indices[0])
 
     input_resolution_level = int(
         normalized.get(

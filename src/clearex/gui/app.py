@@ -3750,6 +3750,7 @@ if HAS_PYQT6:
             "use_map_overlap": False,
             "overlap_zyx": [12, 24, 24],
             "memory_overhead_factor": 3.0,
+            "channel_indices": [0],
             "channel_index": 0,
             "use_views": ["xy", "xz", "yz"],
             "input_resolution_level": 0,
@@ -3984,7 +3985,7 @@ if HAS_PYQT6:
                 "Minimum allowed separation in units of detected sigma for close-particle removal."
             ),
             "usegment3d_channel": (
-                "Primary channel index used by uSegment3D segmentation."
+                "Select one or more source channels for uSegment3D segmentation."
             ),
             "usegment3d_views": (
                 "Comma-separated list of orthogonal views to evaluate (for example "
@@ -5245,12 +5246,32 @@ if HAS_PYQT6:
             runtime_section, runtime_form = self._build_parameter_section_card(
                 "uSegment3D Runtime"
             )
-            self._usegment3d_channel_spin = QSpinBox()
-            self._usegment3d_channel_spin.setRange(0, 0)
-            runtime_form.addRow("channel", self._usegment3d_channel_spin)
+            self._usegment3d_channel_scroll = QScrollArea()
+            self._usegment3d_channel_scroll.setWidgetResizable(True)
+            self._usegment3d_channel_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self._usegment3d_channel_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            )
+            self._usegment3d_channel_scroll.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            self._usegment3d_channel_container = QWidget()
+            self._usegment3d_channel_layout = QHBoxLayout()
+            apply_compact_row_spacing(self._usegment3d_channel_layout)
+            self._usegment3d_channel_layout.setContentsMargins(0, 0, 0, 0)
+            self._usegment3d_channel_container.setLayout(
+                self._usegment3d_channel_layout
+            )
+            self._usegment3d_channel_scroll.setWidget(self._usegment3d_channel_container)
+            self._usegment3d_channel_checkboxes: list[QCheckBox] = []
+            runtime_form.addRow("channels", self._usegment3d_channel_scroll)
             self._register_parameter_hint(
-                self._usegment3d_channel_spin,
+                self._usegment3d_channel_scroll,
                 self._PARAMETER_HINTS["usegment3d_channel"],
+            )
+            self._rebuild_usegment3d_channel_checkboxes(
+                channel_count=1,
+                selected_channels=[0],
             )
 
             self._usegment3d_views_input = QLineEdit()
@@ -5573,6 +5594,78 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["usegment3d_postprocess_dtform"],
             )
             form.addRow(postprocess_section)
+
+        def _rebuild_usegment3d_channel_checkboxes(
+            self,
+            *,
+            channel_count: int,
+            selected_channels: Optional[Sequence[int]] = None,
+        ) -> None:
+            """Rebuild uSegment3D channel checkboxes for the detected channel count.
+
+            Parameters
+            ----------
+            channel_count : int
+                Number of source channels available in the selected dataset.
+            selected_channels : sequence[int], optional
+                Channel indices to mark selected.
+
+            Returns
+            -------
+            None
+                Checkbox widgets are replaced in-place.
+            """
+            count = max(1, int(channel_count))
+            selected_values = [] if selected_channels is None else list(selected_channels)
+            selected_set: set[int] = set()
+            for value in selected_values:
+                parsed = max(0, min(count - 1, int(value)))
+                selected_set.add(parsed)
+            if not selected_set:
+                selected_set = {0}
+
+            while self._usegment3d_channel_layout.count():
+                item = self._usegment3d_channel_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            self._usegment3d_channel_checkboxes = []
+
+            for channel_index in range(count):
+                checkbox = QCheckBox(f"C{channel_index}")
+                checkbox.setChecked(channel_index in selected_set)
+                self._usegment3d_channel_layout.addWidget(checkbox)
+                self._register_parameter_hint(
+                    checkbox,
+                    self._PARAMETER_HINTS["usegment3d_channel"],
+                )
+                self._usegment3d_channel_checkboxes.append(checkbox)
+            self._usegment3d_channel_layout.addStretch(1)
+
+        def _selected_usegment3d_channel_indices(self) -> list[int]:
+            """Return selected uSegment3D channel indices.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            list[int]
+                Selected channel indices in display order. Ensures at least one
+                selected channel when checkboxes are available.
+            """
+            selected = [
+                int(index)
+                for index, checkbox in enumerate(self._usegment3d_channel_checkboxes)
+                if checkbox.isChecked()
+            ]
+            if not selected:
+                if self._usegment3d_channel_checkboxes:
+                    self._usegment3d_channel_checkboxes[0].setChecked(True)
+                    return [0]
+                return [0]
+            return selected
 
         def _build_visualization_parameter_rows(self, form: QFormLayout) -> None:
             """Add visualization parameter controls to a form.
@@ -7106,7 +7199,7 @@ if HAS_PYQT6:
                 self._usegment3d_gpu_checkbox.setChecked(True)
 
             widgets = (
-                self._usegment3d_channel_spin,
+                self._usegment3d_channel_scroll,
                 self._usegment3d_views_input,
                 self._usegment3d_resolution_level_spin,
                 self._usegment3d_output_reference_combo,
@@ -7450,9 +7543,35 @@ if HAS_PYQT6:
                     store_z_um = None
             self._visualization_position_spin.setMaximum(position_count - 1)
             self._particle_channel_spin.setMaximum(channel_count - 1)
-            self._usegment3d_channel_spin.setMaximum(channel_count - 1)
             self._usegment3d_resolution_level_spin.setMaximum(
                 max(0, int(max_usegment3d_resolution_level))
+            )
+            requested_usegment_channels = usegment3d_params.get("channel_indices", [])
+            if isinstance(requested_usegment_channels, str):
+                requested_channel_values: list[Any] = self._split_csv_values(
+                    requested_usegment_channels
+                )
+            elif isinstance(requested_usegment_channels, (tuple, list)):
+                requested_channel_values = list(requested_usegment_channels)
+            else:
+                requested_channel_values = []
+            if not requested_channel_values:
+                requested_channel_values = [usegment3d_params.get("channel_index", 0)]
+            selected_usegment_channels: list[int] = []
+            selected_usegment_seen: set[int] = set()
+            for value in requested_channel_values:
+                try:
+                    parsed_channel = int(float(value))
+                except (TypeError, ValueError):
+                    continue
+                clamped_channel = max(0, min(channel_count - 1, parsed_channel))
+                if clamped_channel in selected_usegment_seen:
+                    continue
+                selected_usegment_seen.add(clamped_channel)
+                selected_usegment_channels.append(clamped_channel)
+            self._rebuild_usegment3d_channel_checkboxes(
+                channel_count=channel_count,
+                selected_channels=selected_usegment_channels,
             )
 
             self._flatfield_darkfield_checkbox.setChecked(
@@ -7736,20 +7855,6 @@ if HAS_PYQT6:
                 float(particle_params.get("min_distance_sigma", 10.0))
             )
 
-            self._usegment3d_channel_spin.setValue(
-                max(
-                    0,
-                    min(
-                        int(self._usegment3d_channel_spin.maximum()),
-                        int(
-                            usegment3d_params.get(
-                                "channel_index",
-                                usegment3d_params.get("channel_index", 0),
-                            )
-                        ),
-                    ),
-                )
-            )
             views_value = usegment3d_params.get(
                 "use_views",
                 self._usegment3d_defaults.get("use_views", ["xy", "xz", "yz"]),
@@ -8579,7 +8684,8 @@ if HAS_PYQT6:
             if not normalized_views:
                 raise ValueError("uSegment3D views must include at least one of xy, xz, yz.")
 
-            channel = int(self._usegment3d_channel_spin.value())
+            selected_channel_indices = self._selected_usegment3d_channel_indices()
+            channel = int(selected_channel_indices[0])
             input_resolution_level = int(self._usegment3d_resolution_level_spin.value())
             output_reference_space = str(
                 self._usegment3d_output_reference_combo.currentData() or "level0"
@@ -8637,6 +8743,7 @@ if HAS_PYQT6:
                 use_auto_diameter = False
 
             return {
+                "channel_indices": [int(value) for value in selected_channel_indices],
                 "channel_index": channel,
                 "chunk_basis": "3d",
                 "detect_2d_per_slice": False,

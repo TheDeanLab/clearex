@@ -144,6 +144,25 @@ def _write_bdv_xml(
     path.write_text(xml)
 
 
+def test_normalize_gpu_device_ids_deduplicates_and_strips() -> None:
+    values = [0, "1", " 1 ", "", "2", "0", "  "]
+    assert experiment_module._normalize_gpu_device_ids(values) == ["0", "1", "2"]
+
+
+def test_detect_visible_gpu_device_ids_parses_nvidia_smi(monkeypatch) -> None:
+    class _Result:
+        returncode = 0
+        stdout = "0\n1\n2\n"
+
+    monkeypatch.setattr(
+        experiment_module.subprocess,
+        "run",
+        lambda *args, **kwargs: _Result(),
+    )
+
+    assert experiment_module._detect_visible_gpu_device_ids() == ["0", "1", "2"]
+
+
 def test_is_navigate_experiment_file():
     assert is_navigate_experiment_file("experiment.yml") is True
     assert is_navigate_experiment_file("experiment.yaml") is True

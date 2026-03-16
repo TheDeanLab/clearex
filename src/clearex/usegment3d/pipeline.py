@@ -31,7 +31,7 @@ from __future__ import annotations
 # Standard Library Imports
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 # Third Party Imports
 import dask
@@ -67,9 +67,11 @@ class Usegment3dSummary:
     source_component : str
         Input source component used for segmentation.
     volumes_processed : int
-        Number of ``(t, p)`` volumes segmented.
+        Number of submitted segmentation tasks (``t``/``p``/selected-channel).
+    channel_indices : tuple[int, ...]
+        Source channel indices selected for this run.
     channel_index : int
-        Source channel index used by Cellpose/uSegment3D.
+        Backward-compatible primary channel index (first selected channel).
     views : tuple[str, ...]
         Views used for 2D-to-3D aggregation (subset of ``xy``, ``xz``, ``yz``).
     output_shape_tpczyx : tuple[int, int, int, int, int, int]
@@ -88,6 +90,7 @@ class Usegment3dSummary:
     data_component: str
     source_component: str
     volumes_processed: int
+    channel_indices: tuple[int, ...]
     channel_index: int
     views: tuple[str, ...]
     output_shape_tpczyx: tuple[int, int, int, int, int, int]
@@ -405,6 +408,8 @@ def _prepare_output_array(
     zarr_path: Union[str, Path],
     source_component: str,
     output_reference_component: str,
+    output_channel_count: int,
+    source_channel_indices: Sequence[int],
     save_native_labels: bool,
     parameters: Mapping[str, Any],
 ) -> tuple[
@@ -426,6 +431,10 @@ def _prepare_output_array(
         Effective source component path used for segmentation.
     output_reference_component : str
         Component path used to define final output shape/chunks.
+    output_channel_count : int
+        Number of output label channels (one per selected source channel).
+    source_channel_indices : sequence[int]
+        Source channel indices mapped to output channel slots.
     save_native_labels : bool
         Whether to also persist labels at the native input resolution.
     parameters : mapping[str, Any]
@@ -445,10 +454,11 @@ def _prepare_output_array(
     reference_shape = tuple(int(v) for v in reference.shape)
     reference_chunks = tuple(int(v) for v in reference.chunks)
 
+    channel_count = max(1, int(output_channel_count))
     output_shape = (
         int(reference_shape[0]),
         int(reference_shape[1]),
-        1,
+        channel_count,
         int(reference_shape[3]),
         int(reference_shape[4]),
         int(reference_shape[5]),
@@ -485,7 +495,7 @@ def _prepare_output_array(
         native_shape = (
             int(source_shape[0]),
             int(source_shape[1]),
-            1,
+            channel_count,
             int(source_shape[3]),
             int(source_shape[4]),
             int(source_shape[5]),
@@ -512,6 +522,7 @@ def _prepare_output_array(
             "source_component": str(source_component),
             "output_reference_component": str(output_reference_component),
             "native_data_component": native_data_component,
+            "source_channel_indices": [int(value) for value in source_channel_indices],
             "parameters": {str(key): value for key, value in dict(parameters).items()},
             "run_id": None,
         }
@@ -959,7 +970,8 @@ def _run_usegment3d_for_volume(
     output_target_shape_zyx: tuple[int, int, int],
     t_index: int,
     p_index: int,
-    channel_index: int,
+    source_channel_index: int,
+    output_channel_index: int,
     parameters: Mapping[str, Any],
 ) -> int:
     """Run uSegment3D segmentation for one ``(t, p)`` volume and write output.
@@ -980,8 +992,10 @@ def _run_usegment3d_for_volume(
         Time index.
     p_index : int
         Position index.
-    channel_index : int
-        Source channel index.
+    source_channel_index : int
+        Source channel index used as segmentation input.
+    output_channel_index : int
+        Channel index in the output label array.
     parameters : mapping[str, Any]
         Normalized runtime parameters.
 
@@ -1000,12 +1014,14 @@ def _run_usegment3d_for_volume(
     )
 
     volume_zyx = np.asarray(
-        source[int(t_index), int(p_index), int(channel_index), :, :, :],
+        source[int(t_index), int(p_index), int(source_channel_index), :, :, :],
         dtype=np.float32,
     )
     labels_native_zyx = _segment_volume(image_zyx=volume_zyx, parameters=parameters)
     if output_native is not None:
-        output_native[int(t_index), int(p_index), 0, :, :, :] = np.asarray(
+        output_native[
+            int(t_index), int(p_index), int(output_channel_index), :, :, :
+        ] = np.asarray(
             labels_native_zyx,
             dtype=output_native.dtype,
         )
@@ -1022,7 +1038,7 @@ def _run_usegment3d_for_volume(
         )
     else:
         labels_zyx = np.asarray(labels_native_zyx)
-    output[int(t_index), int(p_index), 0, :, :, :] = np.asarray(
+    output[int(t_index), int(p_index), int(output_channel_index), :, :, :] = np.asarray(
         labels_zyx,
         dtype=output.dtype,
     )
@@ -1166,12 +1182,29 @@ def run_usegment3d_analysis(
             f"source={source_shape[:2]}, reference={output_reference_shape[:2]}."
         )
 
-    channel_index = int(normalized.get("channel_index", 0))
-    if channel_index >= int(source_shape[2]):
-        raise ValueError(
-            f"uSegment3D channel_index={channel_index} is out of bounds "
-            f"for channel axis size {source_shape[2]}."
-        )
+    requested_channel_indices = list(
+        normalized.get("channel_indices", [normalized.get("channel_index", 0)])
+    )
+    if not requested_channel_indices:
+        requested_channel_indices = [int(normalized.get("channel_index", 0))]
+    channel_indices: list[int] = []
+    seen_channel_indices: set[int] = set()
+    for value in requested_channel_indices:
+        parsed = max(0, int(value))
+        if parsed in seen_channel_indices:
+            continue
+        if parsed >= int(source_shape[2]):
+            raise ValueError(
+                f"uSegment3D channel_index={parsed} is out of bounds "
+                f"for channel axis size {source_shape[2]}."
+            )
+        channel_indices.append(parsed)
+        seen_channel_indices.add(parsed)
+    if not channel_indices:
+        channel_indices = [0]
+    normalized["channel_indices"] = list(channel_indices)
+    normalized["channel_index"] = int(channel_indices[0])
+    channel_index = int(channel_indices[0])
 
     base_voxel_size_um_zyx = _extract_base_voxel_size_um_zyx(root)
     source_factor_zyx = _pyramid_factor_zyx_for_level(
@@ -1215,7 +1248,9 @@ def run_usegment3d_analysis(
     _emit(
         5,
         "Prepared uSegment3D inputs "
-        f"(source={source_component}, level={effective_resolution_level})",
+        "(source="
+        f"{source_component}, level={effective_resolution_level}, "
+        f"channels={channel_indices})",
     )
     (
         component,
@@ -1229,13 +1264,16 @@ def run_usegment3d_analysis(
         zarr_path=zarr_path,
         source_component=source_component,
         output_reference_component=output_reference_component,
+        output_channel_count=len(channel_indices),
+        source_channel_indices=channel_indices,
         save_native_labels=save_native_labels_effective,
         parameters=normalized,
     )
     _emit(10, "Initialized latest uSegment3D output dataset")
 
     work_items = [
-        (int(t_index), int(p_index))
+        (int(t_index), int(p_index), int(source_channel_index), int(output_channel_index))
+        for output_channel_index, source_channel_index in enumerate(channel_indices)
         for t_index in range(int(output_shape[0]))
         for p_index in range(int(output_shape[1]))
     ]
@@ -1252,6 +1290,8 @@ def run_usegment3d_analysis(
                 "requested_source_component": requested_source_component,
                 "output_reference_component": output_reference_component,
                 "volumes_processed": 0,
+                "channels_processed": 0,
+                "channel_indices": list(channel_indices),
                 "channel_index": channel_index,
                 "input_resolution_level": effective_resolution_level,
                 "requested_input_resolution_level": requested_resolution_level,
@@ -1282,6 +1322,7 @@ def run_usegment3d_analysis(
             data_component=data_component,
             source_component=source_component,
             volumes_processed=0,
+            channel_indices=tuple(int(value) for value in channel_indices),
             channel_index=channel_index,
             views=tuple(str(value) for value in list(normalized.get("use_views", []))),
             output_shape_tpczyx=output_shape,
@@ -1305,18 +1346,35 @@ def run_usegment3d_analysis(
                 ),
                 t_index=t_index,
                 p_index=p_index,
-                channel_index=channel_index,
+                source_channel_index=source_channel_index,
+                output_channel_index=output_channel_index,
                 parameters=normalized,
             )
-            for t_index, p_index in work_items
+            for t_index, p_index, source_channel_index, output_channel_index in work_items
         ]
         _emit(15, "Running uSegment3D tasks with local process scheduler")
         _ = dask.compute(*tasks, scheduler="processes")
-        _emit(95, f"Completed {total} uSegment3D volume tasks")
+        _emit(95, f"Completed {total} uSegment3D tasks")
     else:
         from dask.distributed import as_completed
 
         _emit(15, f"Submitting {total} uSegment3D tasks to Dask client")
+        submit_resources: Optional[Dict[str, float]] = None
+        if gpu_enabled:
+            try:
+                scheduler_info = client.scheduler_info()
+                worker_infos = scheduler_info.get("workers", {})
+                has_gpu_resources = any(
+                    float(
+                        dict(worker_info.get("resources", {})).get("GPU", 0.0)
+                    )
+                    >= 1.0
+                    for worker_info in worker_infos.values()
+                )
+            except Exception:
+                has_gpu_resources = False
+            if has_gpu_resources:
+                submit_resources = {"GPU": 1.0}
         shared_parameters = client.scatter(dict(normalized), broadcast=True)
         futures = [
             client.submit(
@@ -1332,11 +1390,13 @@ def run_usegment3d_analysis(
                 ),
                 t_index=t_index,
                 p_index=p_index,
-                channel_index=channel_index,
+                source_channel_index=source_channel_index,
+                output_channel_index=output_channel_index,
                 parameters=shared_parameters,
                 pure=False,
+                resources=submit_resources,
             )
-            for t_index, p_index in work_items
+            for t_index, p_index, source_channel_index, output_channel_index in work_items
         ]
         completed = 0
         for future in as_completed(futures):
@@ -1356,6 +1416,8 @@ def run_usegment3d_analysis(
             "requested_source_component": requested_source_component,
             "output_reference_component": output_reference_component,
             "volumes_processed": total,
+            "channels_processed": len(channel_indices),
+            "channel_indices": list(channel_indices),
             "channel_index": channel_index,
             "input_resolution_level": effective_resolution_level,
             "requested_input_resolution_level": requested_resolution_level,
@@ -1394,6 +1456,7 @@ def run_usegment3d_analysis(
         data_component=data_component,
         source_component=source_component,
         volumes_processed=total,
+        channel_indices=tuple(int(value) for value in channel_indices),
         channel_index=channel_index,
         views=tuple(str(value) for value in list(normalized.get("use_views", []))),
         output_shape_tpczyx=output_shape,

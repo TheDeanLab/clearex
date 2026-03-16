@@ -34,11 +34,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import islice, product
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Optional, Sequence, Union
 import json
 import math
 import os
 import re
+import subprocess
 import warnings
 import xml.etree.ElementTree as ET
 
@@ -4993,6 +4994,8 @@ def create_dask_client(
     memory_limit: Union[str, float] = "auto",
     local_directory: Optional[Union[str, Path]] = None,
     dashboard_address: Optional[str] = ":0",
+    gpu_enabled: bool = False,
+    gpu_device_ids: Optional[Sequence[Union[int, str]]] = None,
 ) -> "Client":
     """Create Dask distributed client (local default, cluster optional).
 
@@ -5014,6 +5017,13 @@ def create_dask_client(
     dashboard_address : str, optional, default=":0"
         Dashboard bind address for local mode. ``":0"`` requests an available
         ephemeral port to avoid collisions when multiple local clusters run.
+    gpu_enabled : bool, default=False
+        Whether to launch a GPU-pinned local cluster with one worker process
+        per assigned CUDA device.
+    gpu_device_ids : sequence of int or str, optional
+        Explicit CUDA device identifiers (for example ``[0, 1, 2, 3]``).
+        When omitted and ``gpu_enabled`` is true, devices are auto-detected
+        from ``nvidia-smi``.
 
     Returns
     -------
@@ -5030,6 +5040,81 @@ def create_dask_client(
     if scheduler_address:
         return Client(scheduler_address)
 
+    if gpu_enabled:
+        from dask.distributed import Nanny, Scheduler
+        from distributed.deploy.spec import SpecCluster
+
+        assigned_gpu_ids = _normalize_gpu_device_ids(gpu_device_ids)
+        if not assigned_gpu_ids:
+            assigned_gpu_ids = _detect_visible_gpu_device_ids()
+        if not assigned_gpu_ids:
+            raise RuntimeError(
+                "GPU-aware LocalCluster startup requested, but no CUDA devices "
+                "were detected via nvidia-smi."
+            )
+
+        worker_count = (
+            max(1, int(n_workers))
+            if n_workers is not None
+            else len(assigned_gpu_ids)
+        )
+        worker_gpu_ids = [
+            str(assigned_gpu_ids[idx % len(assigned_gpu_ids)])
+            for idx in range(worker_count)
+        ]
+        local_directory_text = (
+            str(local_directory) if local_directory is not None else None
+        )
+        cuda_library_paths = _detect_cuda_library_paths()
+        inherited_ld_library_path = str(os.environ.get("LD_LIBRARY_PATH", "")).strip()
+        if cuda_library_paths:
+            merged_entries = _deduplicate_library_path_entries(
+                [
+                    *cuda_library_paths,
+                    *(
+                        inherited_ld_library_path.split(":")
+                        if inherited_ld_library_path
+                        else []
+                    ),
+                ]
+            )
+            inherited_ld_library_path = ":".join(merged_entries)
+            os.environ["LD_LIBRARY_PATH"] = inherited_ld_library_path
+
+        workers: Dict[str, Dict[str, Any]] = {}
+        for worker_index, gpu_id in enumerate(worker_gpu_ids):
+            worker_env: Dict[str, str] = {
+                "CUDA_VISIBLE_DEVICES": str(gpu_id),
+                "CLEAREX_GPU_DEVICE_ID": str(gpu_id),
+                "CLEAREX_GPU_WORKER_INDEX": str(worker_index),
+            }
+            if cuda_library_paths:
+                worker_env["LD_LIBRARY_PATH"] = ":".join(cuda_library_paths)
+            elif inherited_ld_library_path:
+                worker_env["LD_LIBRARY_PATH"] = inherited_ld_library_path
+            options: Dict[str, Any] = {
+                "nthreads": max(1, int(threads_per_worker)),
+                "memory_limit": memory_limit,
+                "env": worker_env,
+                "resources": {"GPU": 1.0},
+            }
+            if local_directory_text:
+                options["local_directory"] = local_directory_text
+            workers[f"gpu-worker-{worker_index:02d}"] = {
+                "cls": Nanny,
+                "options": options,
+            }
+
+        scheduler_options: Dict[str, Any] = {}
+        if dashboard_address is not None:
+            scheduler_options["dashboard_address"] = dashboard_address
+        cluster = SpecCluster(
+            scheduler={"cls": Scheduler, "options": scheduler_options},
+            workers=workers,
+            asynchronous=False,
+        )
+        return Client(cluster)
+
     cluster = LocalCluster(
         n_workers=n_workers,
         threads_per_worker=threads_per_worker,
@@ -5039,6 +5124,143 @@ def create_dask_client(
         dashboard_address=dashboard_address,
     )
     return Client(cluster)
+
+
+def _normalize_gpu_device_ids(
+    gpu_device_ids: Optional[Sequence[Union[int, str]]],
+) -> list[str]:
+    """Normalize explicit CUDA device identifiers.
+
+    Parameters
+    ----------
+    gpu_device_ids : sequence[int | str], optional
+        Raw GPU identifiers from runtime config.
+
+    Returns
+    -------
+    list[str]
+        Distinct normalized device identifiers in original order.
+    """
+    if gpu_device_ids is None:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in gpu_device_ids:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+    return normalized
+
+
+def _detect_cuda_library_paths() -> list[str]:
+    """Return CUDA runtime library directories useful for worker environments.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list[str]
+        Existing library directories that contain CUDA runtime/NVRTC shared
+        objects. Returns an empty list when no candidate path is found.
+    """
+    candidate_dirs: list[Path] = []
+    try:
+        import nvidia.cuda_nvrtc  # type: ignore[import-not-found]
+
+        candidate_dirs.append(Path(nvidia.cuda_nvrtc.__file__).resolve().parent / "lib")
+    except Exception:
+        pass
+    try:
+        import nvidia.cuda_runtime  # type: ignore[import-not-found]
+
+        candidate_dirs.append(Path(nvidia.cuda_runtime.__file__).resolve().parent / "lib")
+    except Exception:
+        pass
+
+    discovered: list[str] = []
+    seen: set[str] = set()
+    for directory in candidate_dirs:
+        try:
+            resolved = directory.resolve()
+        except Exception:
+            continue
+        if not resolved.exists() or not resolved.is_dir():
+            continue
+        has_nvrtc = any(resolved.glob("libnvrtc.so*"))
+        has_cudart = any(resolved.glob("libcudart.so*"))
+        if not (has_nvrtc or has_cudart):
+            continue
+        text = str(resolved)
+        if text in seen:
+            continue
+        seen.add(text)
+        discovered.append(text)
+    return discovered
+
+
+def _deduplicate_library_path_entries(entries: Sequence[str]) -> list[str]:
+    """Deduplicate colon-separated library path entries while preserving order.
+
+    Parameters
+    ----------
+    entries : sequence of str
+        Candidate path entries.
+
+    Returns
+    -------
+    list[str]
+        Distinct non-empty normalized entries in first-seen order.
+    """
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in entries:
+        text = str(value).strip()
+        if not text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def _detect_visible_gpu_device_ids() -> list[str]:
+    """Detect locally visible CUDA device indices via ``nvidia-smi``.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list[str]
+        CUDA device indices as strings (for example ``["0", "1"]``).
+
+    Notes
+    -----
+    Detection failures are non-fatal and return an empty list.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return _normalize_gpu_device_ids(result.stdout.splitlines())
 
 
 def write_zyx_block(

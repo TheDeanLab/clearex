@@ -41,8 +41,11 @@ This folder contains ingestion, CLI, logging, and provenance logic.
 
 ## Dask Client Defaults
 
-- `create_dask_client(...)` local-mode startup now defaults to `dashboard_address=":0"`.
+- `create_dask_client(...)` local-mode startup defaults to `dashboard_address=":0"`.
 - This avoids noisy `Port 8787 is already in use` warnings when multiple local clusters are started over time.
+- For GPU-heavy analysis, `create_dask_client(..., gpu_enabled=True)` now starts a GPU-pinned local `SpecCluster` with one worker process per assigned CUDA device (`gpu_device_ids` optional).
+- GPU-pinned workers advertise `resources={"GPU": 1}` so callers can place GPU-bound tasks explicitly on GPU workers.
+- uSegment3D workload scaling now includes channel-level parallelism (`channel_indices`), so tasks can fan out across GPUs for multiple selected channels.
 - Callers can still override `dashboard_address` explicitly when fixed dashboard ports are required.
 
 ## Provenance Rules

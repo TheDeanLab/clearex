@@ -126,6 +126,7 @@ class TestWorkflowConfig:
         assert "usegment3d" in cfg.analysis_parameters
         assert cfg.analysis_parameters["usegment3d"]["execution_order"] == 5
         assert cfg.analysis_parameters["usegment3d"]["input_source"] == "data"
+        assert cfg.analysis_parameters["usegment3d"]["channel_indices"] == [0]
         assert cfg.analysis_parameters["usegment3d"]["input_resolution_level"] == 0
         assert (
             cfg.analysis_parameters["usegment3d"]["output_reference_space"]
@@ -424,6 +425,7 @@ class TestWorkflowConfig:
                     "input_source": "deconvolution",
                     "memory_overhead_factor": "3.5",
                     "overlap_zyx": [1, 2, 3],
+                    "channel_indices": "2,1,2",
                     "force_rerun": 1,
                     "input_resolution_level": "2",
                     "output_reference_space": "native",
@@ -436,6 +438,8 @@ class TestWorkflowConfig:
         assert params["input_source"] == "deconvolution"
         assert params["memory_overhead_factor"] == 3.5
         assert params["overlap_zyx"] == [1, 2, 3]
+        assert params["channel_indices"] == [2, 1]
+        assert params["channel_index"] == 2
         assert params["force_rerun"] is True
         assert params["input_resolution_level"] == 2
         assert params["output_reference_space"] == "native_level"
