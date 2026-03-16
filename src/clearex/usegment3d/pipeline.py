@@ -42,7 +42,10 @@ import zarr
 
 # Local Imports
 from clearex.io.provenance import register_latest_output_reference
-from clearex.workflow import normalize_analysis_operation_parameters
+from clearex.workflow import (
+    default_analysis_operation_parameters,
+    normalize_analysis_operation_parameters,
+)
 
 if TYPE_CHECKING:
     from dask.distributed import Client
@@ -94,6 +97,80 @@ class Usegment3dSummary:
     require_gpu: bool
 
 
+def _to_json_parameter_value(value: Any, *, field_name: str) -> Any:
+    """Convert parameter values to JSON-serializable scalar/list payloads.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate parameter value.
+    field_name : str
+        Parameter key used for error context.
+
+    Returns
+    -------
+    Any
+        JSON-safe scalar, ``None``, or list of JSON-safe values.
+
+    Raises
+    ------
+    ValueError
+        If value type is unsupported for parameter serialization.
+    """
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (tuple, list)):
+        return [
+            _to_json_parameter_value(item, field_name=field_name)
+            for item in list(value)
+        ]
+    raise ValueError(
+        "uSegment3D parameter "
+        f"'{field_name}' has unsupported type {type(value).__name__}."
+    )
+
+
+def _normalize_parameters_with_dropped_keys(
+    parameters: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Normalize and sanitize uSegment3D parameters for distributed transport.
+
+    Parameters
+    ----------
+    parameters : mapping[str, Any]
+        Candidate uSegment3D parameter mapping.
+
+    Returns
+    -------
+    tuple[dict[str, Any], tuple[str, ...]]
+        Sanitized parameter mapping and unsupported normalized keys that were
+        dropped before task submission.
+
+    Raises
+    ------
+    ValueError
+        If normalization fails due to invalid parameter values.
+    """
+    normalized_map = normalize_analysis_operation_parameters(
+        {"usegment3d": dict(parameters)}
+    )
+    normalized = dict(normalized_map.get("usegment3d", {}))
+    default_params = dict(default_analysis_operation_parameters().get("usegment3d", {}))
+    allowed_keys = set(default_params.keys())
+    dropped_keys = tuple(
+        sorted(str(key) for key in normalized.keys() if str(key) not in allowed_keys)
+    )
+    sanitized: dict[str, Any] = {}
+    for key in default_params.keys():
+        sanitized[str(key)] = _to_json_parameter_value(
+            normalized.get(str(key), default_params[str(key)]),
+            field_name=str(key),
+        )
+    return sanitized, dropped_keys
+
+
 def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize uSegment3D parameters using workflow canonical rules.
 
@@ -112,10 +189,8 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     ValueError
         If normalization fails due to invalid parameter values.
     """
-    normalized_map = normalize_analysis_operation_parameters(
-        {"usegment3d": dict(parameters)}
-    )
-    return dict(normalized_map.get("usegment3d", {}))
+    normalized, _ = _normalize_parameters_with_dropped_keys(parameters)
+    return normalized
 
 
 def _load_usegment3d_runtime() -> tuple[Any, Any]:
@@ -160,12 +235,187 @@ def _is_gpu_available() -> bool:
         return False
 
 
+def _extract_base_voxel_size_um_zyx(root: zarr.hierarchy.Group) -> tuple[float, float, float]:
+    """Extract base-level physical voxel size from Zarr metadata.
+
+    Parameters
+    ----------
+    root : zarr.hierarchy.Group
+        Root Zarr group.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Base voxel size in ``(z, y, x)`` microns.
+    """
+    root_voxel = root.attrs.get("voxel_size_um_zyx")
+    if isinstance(root_voxel, (tuple, list)) and len(root_voxel) >= 3:
+        try:
+            zyx = (
+                float(root_voxel[0]),
+                float(root_voxel[1]),
+                float(root_voxel[2]),
+            )
+            if all(value > 0 for value in zyx):
+                return zyx
+        except Exception:
+            pass
+
+    navigate = root.attrs.get("navigate_experiment")
+    if isinstance(navigate, Mapping):
+        try:
+            xy_um = float(navigate.get("xy_pixel_size_um", 1.0))
+            z_um = float(navigate.get("z_step_um", 1.0))
+            if xy_um > 0 and z_um > 0:
+                return (z_um, xy_um, xy_um)
+        except Exception:
+            pass
+
+    return (1.0, 1.0, 1.0)
+
+
+def _pyramid_factor_zyx_for_level(
+    root: zarr.hierarchy.Group,
+    *,
+    level: int,
+) -> tuple[float, float, float]:
+    """Return pyramid downsampling factors for one level in ``(z, y, x)``.
+
+    Parameters
+    ----------
+    root : zarr.hierarchy.Group
+        Root Zarr group.
+    level : int
+        Requested pyramid level.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Downsampling factors in ``(z, y, x)`` order.
+    """
+    if level <= 0:
+        return (1.0, 1.0, 1.0)
+
+    factors = root.attrs.get("data_pyramid_factors_tpczyx")
+    if isinstance(factors, (tuple, list)) and len(factors) > level:
+        level_entry = factors[level]
+        if isinstance(level_entry, (tuple, list)) and len(level_entry) >= 6:
+            try:
+                parsed = (
+                    max(1.0, float(level_entry[3])),
+                    max(1.0, float(level_entry[4])),
+                    max(1.0, float(level_entry[5])),
+                )
+                return parsed
+            except Exception:
+                pass
+
+    uniform = float(2**int(level))
+    return (uniform, uniform, uniform)
+
+
+def _component_level_suffix(component: str) -> Optional[int]:
+    """Parse trailing ``level_<n>`` suffix from a component path.
+
+    Parameters
+    ----------
+    component : str
+        Component path.
+
+    Returns
+    -------
+    int, optional
+        Parsed level integer if present and valid.
+    """
+    token = str(component).strip().split("/")[-1]
+    if not token.startswith("level_"):
+        return None
+    try:
+        level = int(token.split("_", maxsplit=1)[1])
+    except Exception:
+        return None
+    if level < 0:
+        return None
+    return level
+
+
+def _resolve_source_component_for_level(
+    *,
+    root: zarr.hierarchy.Group,
+    source_component: str,
+    input_resolution_level: int,
+) -> tuple[str, int]:
+    """Resolve effective input component for requested pyramid level.
+
+    Parameters
+    ----------
+    root : zarr.hierarchy.Group
+        Root Zarr group.
+    source_component : str
+        Requested base component path.
+    input_resolution_level : int
+        Requested resolution level (0 = full resolution).
+
+    Returns
+    -------
+    tuple[str, int]
+        ``(effective_component, effective_level)``.
+
+    Raises
+    ------
+    ValueError
+        If requested level/component cannot be resolved.
+    """
+    requested_component = str(source_component).strip() or "data"
+    requested_level = max(0, int(input_resolution_level))
+
+    if requested_component not in root:
+        raise ValueError(
+            f"uSegment3D input component '{requested_component}' was not found."
+        )
+    if requested_level <= 0:
+        return requested_component, 0
+
+    direct_level = _component_level_suffix(requested_component)
+    if direct_level is not None and direct_level == requested_level:
+        return requested_component, requested_level
+
+    candidate_components: list[str] = []
+    if requested_component == "data":
+        candidate_components.append(f"data_pyramid/level_{requested_level}")
+    elif requested_component.startswith("data_pyramid/level_"):
+        candidate_components.append(f"data_pyramid/level_{requested_level}")
+    candidate_components.append(
+        f"{requested_component}_pyramid/level_{requested_level}"
+    )
+
+    for candidate in candidate_components:
+        if candidate in root:
+            return candidate, requested_level
+
+    raise ValueError(
+        "uSegment3D input_resolution_level="
+        f"{requested_level} was requested for '{requested_component}', "
+        "but no matching pyramid component exists."
+    )
+
+
 def _prepare_output_array(
     *,
     zarr_path: Union[str, Path],
     source_component: str,
+    output_reference_component: str,
+    save_native_labels: bool,
     parameters: Mapping[str, Any],
-) -> tuple[str, str, tuple[int, int, int, int, int, int], tuple[int, int, int, int, int, int]]:
+) -> tuple[
+    str,
+    str,
+    tuple[int, int, int, int, int, int],
+    tuple[int, int, int, int, int, int],
+    Optional[str],
+    Optional[tuple[int, int, int, int, int, int]],
+    Optional[tuple[int, int, int, int, int, int]],
+]:
     """Create latest uSegment3D output dataset in canonical store.
 
     Parameters
@@ -173,35 +423,43 @@ def _prepare_output_array(
     zarr_path : str or pathlib.Path
         Path to canonical analysis store.
     source_component : str
-        Source component path.
+        Effective source component path used for segmentation.
+    output_reference_component : str
+        Component path used to define final output shape/chunks.
+    save_native_labels : bool
+        Whether to also persist labels at the native input resolution.
     parameters : mapping[str, Any]
         Normalized runtime parameters.
 
     Returns
     -------
-    tuple[str, str, tuple[int, int, int, int, int, int], tuple[int, int, int, int, int, int]]
-        ``(component, data_component, shape_tpczyx, chunks_tpczyx)``.
+    tuple[str, str, tuple[int, int, int, int, int, int], tuple[int, int, int, int, int, int], str, tuple[int, int, int, int, int, int], tuple[int, int, int, int, int, int]]
+        ``(component, data_component, shape_tpczyx, chunks_tpczyx,``
+        ``native_data_component, native_shape_tpczyx, native_chunks_tpczyx)``.
     """
     root = zarr.open_group(str(zarr_path), mode="a")
     source = root[source_component]
+    reference = root[output_reference_component]
     source_shape = tuple(int(v) for v in source.shape)
     source_chunks = tuple(int(v) for v in source.chunks)
+    reference_shape = tuple(int(v) for v in reference.shape)
+    reference_chunks = tuple(int(v) for v in reference.chunks)
 
     output_shape = (
-        int(source_shape[0]),
-        int(source_shape[1]),
+        int(reference_shape[0]),
+        int(reference_shape[1]),
         1,
-        int(source_shape[3]),
-        int(source_shape[4]),
-        int(source_shape[5]),
+        int(reference_shape[3]),
+        int(reference_shape[4]),
+        int(reference_shape[5]),
     )
     output_chunks = (
         1,
         1,
         1,
-        max(1, min(int(source_chunks[3]), int(output_shape[3]))),
-        max(1, min(int(source_chunks[4]), int(output_shape[4]))),
-        max(1, min(int(source_chunks[5]), int(output_shape[5]))),
+        max(1, min(int(reference_chunks[3]), int(output_shape[3]))),
+        max(1, min(int(reference_chunks[4]), int(output_shape[4]))),
+        max(1, min(int(reference_chunks[5]), int(output_shape[5]))),
     )
     output_dtype = np.dtype(str(parameters.get("output_dtype", "uint32")))
 
@@ -217,10 +475,43 @@ def _prepare_output_array(
         dtype=output_dtype,
         overwrite=True,
     )
+    native_data_component: Optional[str] = None
+    native_shape: Optional[tuple[int, int, int, int, int, int]] = None
+    native_chunks: Optional[tuple[int, int, int, int, int, int]] = None
+    should_save_native = bool(
+        save_native_labels and str(source_component) != str(output_reference_component)
+    )
+    if should_save_native:
+        native_shape = (
+            int(source_shape[0]),
+            int(source_shape[1]),
+            1,
+            int(source_shape[3]),
+            int(source_shape[4]),
+            int(source_shape[5]),
+        )
+        native_chunks = (
+            1,
+            1,
+            1,
+            max(1, min(int(source_chunks[3]), int(native_shape[3]))),
+            max(1, min(int(source_chunks[4]), int(native_shape[4]))),
+            max(1, min(int(source_chunks[5]), int(native_shape[5]))),
+        )
+        latest.create_dataset(
+            name="data_native",
+            shape=native_shape,
+            chunks=native_chunks,
+            dtype=output_dtype,
+            overwrite=True,
+        )
+        native_data_component = "results/usegment3d/latest/data_native"
     latest.attrs.update(
         {
             "storage_policy": "latest_only",
             "source_component": str(source_component),
+            "output_reference_component": str(output_reference_component),
+            "native_data_component": native_data_component,
             "parameters": {str(key): value for key, value in dict(parameters).items()},
             "run_id": None,
         }
@@ -245,6 +536,9 @@ def _prepare_output_array(
             int(output_chunks[4]),
             int(output_chunks[5]),
         ),
+        native_data_component,
+        native_shape,
+        native_chunks,
     )
 
 
@@ -661,6 +955,8 @@ def _run_usegment3d_for_volume(
     zarr_path: str,
     source_component: str,
     output_data_component: str,
+    output_native_data_component: Optional[str],
+    output_target_shape_zyx: tuple[int, int, int],
     t_index: int,
     p_index: int,
     channel_index: int,
@@ -676,6 +972,10 @@ def _run_usegment3d_for_volume(
         Input source component path.
     output_data_component : str
         Output label-array component path.
+    output_native_data_component : str, optional
+        Optional native-resolution label-array component path.
+    output_target_shape_zyx : tuple[int, int, int]
+        Final output target shape in ``(z, y, x)`` order.
     t_index : int
         Time index.
     p_index : int
@@ -693,12 +993,35 @@ def _run_usegment3d_for_volume(
     root = zarr.open_group(str(zarr_path), mode="a")
     source = root[source_component]
     output = root[output_data_component]
+    output_native = (
+        root[output_native_data_component]
+        if output_native_data_component is not None
+        else None
+    )
 
     volume_zyx = np.asarray(
         source[int(t_index), int(p_index), int(channel_index), :, :, :],
         dtype=np.float32,
     )
-    labels_zyx = _segment_volume(image_zyx=volume_zyx, parameters=parameters)
+    labels_native_zyx = _segment_volume(image_zyx=volume_zyx, parameters=parameters)
+    if output_native is not None:
+        output_native[int(t_index), int(p_index), 0, :, :, :] = np.asarray(
+            labels_native_zyx,
+            dtype=output_native.dtype,
+        )
+
+    target_shape = (
+        int(output_target_shape_zyx[0]),
+        int(output_target_shape_zyx[1]),
+        int(output_target_shape_zyx[2]),
+    )
+    if tuple(int(v) for v in labels_native_zyx.shape) != target_shape:
+        labels_zyx = _resize_labels_to_shape(
+            np.asarray(labels_native_zyx),
+            target_shape_zyx=target_shape,
+        )
+    else:
+        labels_zyx = np.asarray(labels_native_zyx)
     output[int(t_index), int(p_index), 0, :, :, :] = np.asarray(
         labels_zyx,
         dtype=output.dtype,
@@ -745,7 +1068,15 @@ def run_usegment3d_analysis(
             return
         progress_callback(int(percent), str(message))
 
-    normalized = _normalize_parameters(parameters)
+    normalized, dropped_parameter_keys = _normalize_parameters_with_dropped_keys(
+        parameters
+    )
+    if dropped_parameter_keys:
+        preview = ", ".join(dropped_parameter_keys[:4])
+        remaining = int(len(dropped_parameter_keys) - 4)
+        if remaining > 0:
+            preview = f"{preview}, +{remaining} more"
+        _emit(3, f"Ignoring unsupported uSegment3D keys: {preview}")
 
     gpu_requested = bool(normalized.get("gpu", False))
     require_gpu = bool(normalized.get("require_gpu", False))
@@ -759,18 +1090,80 @@ def run_usegment3d_analysis(
         _emit(2, "GPU requested but unavailable; running uSegment3D on CPU")
     normalized["gpu"] = gpu_enabled
 
-    root = zarr.open_group(str(zarr_path), mode="r")
-    source_component = str(normalized.get("input_source", "data")).strip() or "data"
-    if source_component not in root:
-        raise ValueError(
-            f"uSegment3D input component '{source_component}' was not found in {zarr_path}."
+    aggregation_tile_mode_requested = bool(
+        normalized.get("aggregation_tile_mode", False)
+    )
+    if client is not None and aggregation_tile_mode_requested:
+        normalized["aggregation_tile_mode"] = False
+        _emit(
+            12,
+            "Disabled uSegment3D tile multiprocessing under distributed execution",
         )
+    aggregation_tile_mode_effective = bool(
+        normalized.get("aggregation_tile_mode", False)
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    requested_source_component = (
+        str(normalized.get("input_source", "data")).strip() or "data"
+    )
+    if requested_source_component not in root:
+        raise ValueError(
+            "uSegment3D input component "
+            f"'{requested_source_component}' was not found in {zarr_path}."
+        )
+
+    requested_resolution_level = max(
+        0,
+        int(normalized.get("input_resolution_level", 0)),
+    )
+    source_component, effective_resolution_level = _resolve_source_component_for_level(
+        root=root,
+        source_component=requested_source_component,
+        input_resolution_level=requested_resolution_level,
+    )
     source = root[source_component]
     source_shape = tuple(int(v) for v in source.shape)
     if len(source_shape) != 6:
         raise ValueError(
             "uSegment3D requires canonical 6D data (t,p,c,z,y,x). "
             f"Input component '{source_component}' is incompatible."
+        )
+
+    output_reference_space = (
+        str(normalized.get("output_reference_space", "level0")).strip().lower()
+        or "level0"
+    )
+    if output_reference_space not in {"level0", "native_level"}:
+        raise ValueError(
+            "uSegment3D output_reference_space must be 'level0' or 'native_level'."
+        )
+    if output_reference_space == "level0" and effective_resolution_level > 0:
+        output_reference_component = requested_source_component
+        output_resolution_level = 0
+    else:
+        output_reference_component = source_component
+        output_resolution_level = effective_resolution_level
+
+    if output_reference_component not in root:
+        raise ValueError(
+            "uSegment3D output_reference_component "
+            f"'{output_reference_component}' was not found in {zarr_path}."
+        )
+    output_reference = root[output_reference_component]
+    output_reference_shape = tuple(int(v) for v in output_reference.shape)
+    if len(output_reference_shape) != 6:
+        raise ValueError(
+            "uSegment3D output reference must be canonical 6D data (t,p,c,z,y,x). "
+            f"Component '{output_reference_component}' is incompatible."
+        )
+    if (
+        int(source_shape[0]) != int(output_reference_shape[0])
+        or int(source_shape[1]) != int(output_reference_shape[1])
+    ):
+        raise ValueError(
+            "uSegment3D source/output-reference (t,p) dimensions must match. "
+            f"source={source_shape[:2]}, reference={output_reference_shape[:2]}."
         )
 
     channel_index = int(normalized.get("channel_index", 0))
@@ -780,29 +1173,73 @@ def run_usegment3d_analysis(
             f"for channel axis size {source_shape[2]}."
         )
 
-    _emit(5, "Prepared uSegment3D inputs")
-    component, data_component, output_shape, output_chunks = _prepare_output_array(
+    base_voxel_size_um_zyx = _extract_base_voxel_size_um_zyx(root)
+    source_factor_zyx = _pyramid_factor_zyx_for_level(
+        root,
+        level=effective_resolution_level,
+    )
+    output_factor_zyx = _pyramid_factor_zyx_for_level(
+        root,
+        level=output_resolution_level,
+    )
+    source_voxel_size_um_zyx = (
+        float(base_voxel_size_um_zyx[0] * source_factor_zyx[0]),
+        float(base_voxel_size_um_zyx[1] * source_factor_zyx[1]),
+        float(base_voxel_size_um_zyx[2] * source_factor_zyx[2]),
+    )
+    output_voxel_size_um_zyx = (
+        float(base_voxel_size_um_zyx[0] * output_factor_zyx[0]),
+        float(base_voxel_size_um_zyx[1] * output_factor_zyx[1]),
+        float(base_voxel_size_um_zyx[2] * output_factor_zyx[2]),
+    )
+
+    preprocess_voxel_res = list(
+        normalized.get("preprocess_voxel_res_zyx", [1.0, 1.0, 1.0])
+    )
+    if (
+        len(preprocess_voxel_res) == 3
+        and all(abs(float(value) - 1.0) <= 1e-8 for value in preprocess_voxel_res)
+    ):
+        normalized["preprocess_voxel_res_zyx"] = [
+            float(source_voxel_size_um_zyx[0]),
+            float(source_voxel_size_um_zyx[1]),
+            float(source_voxel_size_um_zyx[2]),
+        ]
+
+    save_native_labels_requested = bool(normalized.get("save_native_labels", False))
+    save_native_labels_effective = bool(
+        save_native_labels_requested
+        and output_reference_component != source_component
+    )
+
+    _emit(
+        5,
+        "Prepared uSegment3D inputs "
+        f"(source={source_component}, level={effective_resolution_level})",
+    )
+    (
+        component,
+        data_component,
+        output_shape,
+        output_chunks,
+        native_data_component,
+        native_shape,
+        native_chunks,
+    ) = _prepare_output_array(
         zarr_path=zarr_path,
         source_component=source_component,
+        output_reference_component=output_reference_component,
+        save_native_labels=save_native_labels_effective,
         parameters=normalized,
     )
     _emit(10, "Initialized latest uSegment3D output dataset")
 
-    tasks = [
-        delayed(_run_usegment3d_for_volume)(
-            zarr_path=str(zarr_path),
-            source_component=source_component,
-            output_data_component=data_component,
-            t_index=t_index,
-            p_index=p_index,
-            channel_index=channel_index,
-            parameters=normalized,
-        )
+    work_items = [
+        (int(t_index), int(p_index))
         for t_index in range(int(output_shape[0]))
         for p_index in range(int(output_shape[1]))
     ]
-
-    total = int(len(tasks))
+    total = int(len(work_items))
     if total == 0:
         register_latest_output_reference(
             zarr_path=zarr_path,
@@ -810,15 +1247,32 @@ def run_usegment3d_analysis(
             component=component,
             metadata={
                 "data_component": data_component,
+                "native_data_component": native_data_component,
                 "source_component": source_component,
+                "requested_source_component": requested_source_component,
+                "output_reference_component": output_reference_component,
                 "volumes_processed": 0,
                 "channel_index": channel_index,
+                "input_resolution_level": effective_resolution_level,
+                "requested_input_resolution_level": requested_resolution_level,
+                "output_resolution_level": output_resolution_level,
+                "output_reference_space": output_reference_space,
+                "save_native_labels_requested": save_native_labels_requested,
+                "save_native_labels_effective": save_native_labels_effective,
                 "views": list(normalized.get("use_views", ["xy", "xz", "yz"])),
                 "output_shape_tpczyx": list(output_shape),
                 "output_chunks_tpczyx": list(output_chunks),
+                "native_shape_tpczyx": list(native_shape) if native_shape else None,
+                "native_chunks_tpczyx": list(native_chunks) if native_chunks else None,
+                "base_voxel_size_um_zyx": list(base_voxel_size_um_zyx),
+                "source_voxel_size_um_zyx": list(source_voxel_size_um_zyx),
+                "output_voxel_size_um_zyx": list(output_voxel_size_um_zyx),
                 "gpu_requested": gpu_requested,
                 "gpu_enabled": gpu_enabled,
                 "require_gpu": require_gpu,
+                "aggregation_tile_mode_requested": aggregation_tile_mode_requested,
+                "aggregation_tile_mode_effective": aggregation_tile_mode_effective,
+                "dropped_parameter_keys": list(dropped_parameter_keys),
                 "parameters": {str(key): value for key, value in normalized.items()},
             },
         )
@@ -838,6 +1292,24 @@ def run_usegment3d_analysis(
         )
 
     if client is None:
+        tasks = [
+            delayed(_run_usegment3d_for_volume)(
+                zarr_path=str(zarr_path),
+                source_component=source_component,
+                output_data_component=data_component,
+                output_native_data_component=native_data_component,
+                output_target_shape_zyx=(
+                    int(output_shape[3]),
+                    int(output_shape[4]),
+                    int(output_shape[5]),
+                ),
+                t_index=t_index,
+                p_index=p_index,
+                channel_index=channel_index,
+                parameters=normalized,
+            )
+            for t_index, p_index in work_items
+        ]
         _emit(15, "Running uSegment3D tasks with local process scheduler")
         _ = dask.compute(*tasks, scheduler="processes")
         _emit(95, f"Completed {total} uSegment3D volume tasks")
@@ -845,7 +1317,27 @@ def run_usegment3d_analysis(
         from dask.distributed import as_completed
 
         _emit(15, f"Submitting {total} uSegment3D tasks to Dask client")
-        futures = client.compute(tasks)
+        shared_parameters = client.scatter(dict(normalized), broadcast=True)
+        futures = [
+            client.submit(
+                _run_usegment3d_for_volume,
+                zarr_path=str(zarr_path),
+                source_component=source_component,
+                output_data_component=data_component,
+                output_native_data_component=native_data_component,
+                output_target_shape_zyx=(
+                    int(output_shape[3]),
+                    int(output_shape[4]),
+                    int(output_shape[5]),
+                ),
+                t_index=t_index,
+                p_index=p_index,
+                channel_index=channel_index,
+                parameters=shared_parameters,
+                pure=False,
+            )
+            for t_index, p_index in work_items
+        ]
         completed = 0
         for future in as_completed(futures):
             _ = int(future.result())
@@ -859,22 +1351,39 @@ def run_usegment3d_analysis(
         component=component,
         metadata={
             "data_component": data_component,
+            "native_data_component": native_data_component,
             "source_component": source_component,
+            "requested_source_component": requested_source_component,
+            "output_reference_component": output_reference_component,
             "volumes_processed": total,
             "channel_index": channel_index,
+            "input_resolution_level": effective_resolution_level,
+            "requested_input_resolution_level": requested_resolution_level,
+            "output_resolution_level": output_resolution_level,
+            "output_reference_space": output_reference_space,
+            "save_native_labels_requested": save_native_labels_requested,
+            "save_native_labels_effective": save_native_labels_effective,
             "views": list(normalized.get("use_views", ["xy", "xz", "yz"])),
             "output_shape_tpczyx": list(output_shape),
             "output_chunks_tpczyx": list(output_chunks),
+            "native_shape_tpczyx": list(native_shape) if native_shape else None,
+            "native_chunks_tpczyx": list(native_chunks) if native_chunks else None,
+            "base_voxel_size_um_zyx": list(base_voxel_size_um_zyx),
+            "source_voxel_size_um_zyx": list(source_voxel_size_um_zyx),
+            "output_voxel_size_um_zyx": list(output_voxel_size_um_zyx),
             "gpu_requested": gpu_requested,
             "gpu_enabled": gpu_enabled,
             "require_gpu": require_gpu,
-            "aggregation_tile_mode": bool(normalized.get("aggregation_tile_mode", False)),
+            "aggregation_tile_mode": aggregation_tile_mode_effective,
+            "aggregation_tile_mode_requested": aggregation_tile_mode_requested,
+            "aggregation_tile_mode_effective": aggregation_tile_mode_effective,
             "aggregation_tile_shape_zyx": list(
                 normalized.get("aggregation_tile_shape_zyx", [128, 256, 256])
             ),
             "aggregation_tile_overlap_ratio": float(
                 normalized.get("aggregation_tile_overlap_ratio", 0.25)
             ),
+            "dropped_parameter_keys": list(dropped_parameter_keys),
             "parameters": {str(key): value for key, value in normalized.items()},
         },
     )

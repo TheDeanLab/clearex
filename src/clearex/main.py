@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 import argparse
 import logging
+import math
 
 
 # Third Party Imports
@@ -377,6 +378,78 @@ def _extract_axis_map(info: ImageInfo) -> Dict[str, int]:
     }
 
 
+def _coerce_positive_float(value: Any) -> Optional[float]:
+    """Parse a value into a finite positive float.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate numeric value.
+
+    Returns
+    -------
+    float, optional
+        Parsed finite positive float, otherwise ``None``.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    return float(parsed)
+
+
+def _extract_pixel_size_um_zyx(info: ImageInfo) -> Optional[tuple[float, float, float]]:
+    """Extract physical voxel size from ``ImageInfo``.
+
+    Parameters
+    ----------
+    info : ImageInfo
+        Loaded image metadata.
+
+    Returns
+    -------
+    tuple[float, float, float], optional
+        Physical voxel size in ``(z, y, x)`` microns.
+    """
+    raw_pixel_size = getattr(info, "pixel_size", None)
+    if isinstance(raw_pixel_size, (tuple, list)) and len(raw_pixel_size) >= 3:
+        z_um = _coerce_positive_float(raw_pixel_size[0])
+        y_um = _coerce_positive_float(raw_pixel_size[1])
+        x_um = _coerce_positive_float(raw_pixel_size[2])
+        if z_um is not None and y_um is not None and x_um is not None:
+            return (z_um, y_um, x_um)
+
+    metadata = info.metadata or {}
+    candidate_keys = (
+        "voxel_size_um_zyx",
+        "pixel_size_um_zyx",
+        "physical_pixel_size_zyx",
+        "pixel_size_zyx",
+    )
+    for key in candidate_keys:
+        candidate = metadata.get(key)
+        if not isinstance(candidate, (tuple, list)) or len(candidate) < 3:
+            continue
+        z_um = _coerce_positive_float(candidate[0])
+        y_um = _coerce_positive_float(candidate[1])
+        x_um = _coerce_positive_float(candidate[2])
+        if z_um is None or y_um is None or x_um is None:
+            continue
+        return (z_um, y_um, x_um)
+
+    navigate = metadata.get("navigate_experiment")
+    if isinstance(navigate, dict):
+        xy_um = _coerce_positive_float(navigate.get("xy_pixel_size_um"))
+        z_um = _coerce_positive_float(navigate.get("z_step_um"))
+        if xy_um is not None and z_um is not None:
+            return (z_um, xy_um, xy_um)
+    return None
+
+
 def _log_loaded_image(info: ImageInfo, logger: logging.Logger) -> None:
     """Log key image metadata after successful load.
 
@@ -415,7 +488,12 @@ def _log_loaded_image(info: ImageInfo, logger: logging.Logger) -> None:
     logger.info(f"Positions: {positions if positions is not None else 'n/a'}")
     logger.info(f"Time points: {time_points if time_points is not None else 'n/a'}")
     logger.info(f"Image size (XxYxZ): {image_size}")
-    logger.info(f"Pixel size (um): {getattr(info, 'pixel_size', None) or 'n/a'}")
+    voxel_size_um_zyx = _extract_pixel_size_um_zyx(info)
+    if voxel_size_um_zyx is None:
+        logger.info("Pixel size (um): n/a")
+    else:
+        z_um, y_um, x_um = voxel_size_um_zyx
+        logger.info(f"Pixel size (um): z={z_um:.6g}, y={y_um:.6g}, x={x_um:.6g}")
 
     if info.metadata:
         metadata_types = {

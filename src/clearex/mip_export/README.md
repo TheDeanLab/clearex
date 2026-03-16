@@ -19,7 +19,8 @@ ClearEx stores.
   - `per_position`: one file per `(projection, p, t, c)`.
   - `multi_position`: one file per `(projection, t, c)` with leading `p` axis.
 - `export_format`:
-  - `tiff`: output stored as `uint16`.
+  - `ome-tiff` (or legacy alias `tiff`): output stored as `uint16` with OME
+    physical pixel-size metadata (`PhysicalSizeX/Y`).
   - `zarr`: output dtype follows source/projection dtype.
 
 ## Execution Model
@@ -53,7 +54,7 @@ ClearEx stores.
   reduced axis and tile across preserved axes.
 - Read budget is controlled by `_MAX_REDUCTION_READ_BYTES` in `pipeline.py`.
 - Projection outputs are written incrementally:
-  - TIFF uses `tifffile.memmap(..., photometric="minisblack")`.
+  - OME-TIFF uses `tifffile.memmap(..., ome=True, metadata=...)`.
   - Zarr writes into a pre-created dataset by tile via reopened group handles
     to avoid excessive simultaneously open files.
 - This design prevents `np.asarray(source_array[..., :, :, :])` style

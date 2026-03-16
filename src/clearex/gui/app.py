@@ -619,6 +619,121 @@ def _format_optional_value(value: Optional[Any]) -> str:
     return str(value)
 
 
+def _coerce_positive_float(value: Any) -> Optional[float]:
+    """Parse a value into a finite positive float.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate numeric value.
+
+    Returns
+    -------
+    float, optional
+        Parsed finite positive float, otherwise ``None``.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    return float(parsed)
+
+
+def _extract_pixel_size_um_zyx_from_metadata(
+    metadata: Optional[Mapping[str, Any]],
+) -> Optional[tuple[float, float, float]]:
+    """Extract physical voxel size from metadata mappings.
+
+    Parameters
+    ----------
+    metadata : mapping[str, Any], optional
+        Metadata dictionary from image readers.
+
+    Returns
+    -------
+    tuple[float, float, float], optional
+        Voxel size in ``(z, y, x)`` microns when available.
+    """
+    if not metadata:
+        return None
+
+    candidate_keys = (
+        "voxel_size_um_zyx",
+        "pixel_size_um_zyx",
+        "physical_pixel_size_zyx",
+        "pixel_size_zyx",
+    )
+    for key in candidate_keys:
+        raw_value = metadata.get(key)
+        if not isinstance(raw_value, (tuple, list)) or len(raw_value) < 3:
+            continue
+        z_um = _coerce_positive_float(raw_value[0])
+        y_um = _coerce_positive_float(raw_value[1])
+        x_um = _coerce_positive_float(raw_value[2])
+        if z_um is None or y_um is None or x_um is None:
+            continue
+        return (z_um, y_um, x_um)
+
+    navigate = metadata.get("navigate_experiment")
+    if isinstance(navigate, Mapping):
+        xy_um = _coerce_positive_float(navigate.get("xy_pixel_size_um"))
+        z_um = _coerce_positive_float(navigate.get("z_step_um"))
+        if xy_um is not None and z_um is not None:
+            return (z_um, xy_um, xy_um)
+
+    xy_um = _coerce_positive_float(metadata.get("xy_pixel_size_um"))
+    z_um = _coerce_positive_float(metadata.get("z_step_um"))
+    if xy_um is not None and z_um is not None:
+        return (z_um, xy_um, xy_um)
+    return None
+
+
+def _extract_pixel_size_um_zyx(info: ImageInfo) -> Optional[tuple[float, float, float]]:
+    """Extract physical voxel size in microns from ``ImageInfo``.
+
+    Parameters
+    ----------
+    info : ImageInfo
+        Image metadata returned by an image reader.
+
+    Returns
+    -------
+    tuple[float, float, float], optional
+        Voxel size in ``(z, y, x)`` order when available.
+    """
+    raw_pixel_size = getattr(info, "pixel_size", None)
+    if isinstance(raw_pixel_size, (tuple, list)) and len(raw_pixel_size) >= 3:
+        z_um = _coerce_positive_float(raw_pixel_size[0])
+        y_um = _coerce_positive_float(raw_pixel_size[1])
+        x_um = _coerce_positive_float(raw_pixel_size[2])
+        if z_um is not None and y_um is not None and x_um is not None:
+            return (z_um, y_um, x_um)
+    return _extract_pixel_size_um_zyx_from_metadata(info.metadata)
+
+
+def _format_pixel_size_um_zyx(pixel_size_um_zyx: Optional[tuple[float, float, float]]) -> str:
+    """Format physical voxel size for GUI labels.
+
+    Parameters
+    ----------
+    pixel_size_um_zyx : tuple[float, float, float], optional
+        Voxel size in ``(z, y, x)`` microns.
+
+    Returns
+    -------
+    str
+        Display string for metadata panel.
+    """
+    if pixel_size_um_zyx is None:
+        return "n/a"
+    z_um, y_um, x_um = pixel_size_um_zyx
+    return f"z={z_um:.6g}, y={y_um:.6g}, x={x_um:.6g}"
+
+
 def _extract_axis_map(info: ImageInfo) -> Dict[str, int]:
     """Create an axis-to-size map from ``ImageInfo``.
 
@@ -717,6 +832,8 @@ def summarize_image_info(info: ImageInfo) -> Dict[str, str]:
         if len(key_names) > 8:
             metadata_keys += ", ..."
 
+    pixel_size_um_zyx = _extract_pixel_size_um_zyx(info)
+
     return {
         "path": str(info.path),
         "shape": _format_optional_value(info.shape),
@@ -726,7 +843,7 @@ def summarize_image_info(info: ImageInfo) -> Dict[str, str]:
         "positions": _format_optional_value(positions),
         "image_size": image_size,
         "time_points": _format_optional_value(time_points),
-        "pixel_size": _format_optional_value(getattr(info, "pixel_size", None)),
+        "pixel_size": _format_pixel_size_um_zyx(pixel_size_um_zyx),
         "metadata_keys": metadata_keys,
     }
 
@@ -760,6 +877,10 @@ def _apply_experiment_overrides(
     out["channels"] = str(experiment.channel_count)
     out["positions"] = str(experiment.multiposition_count)
     out["time_points"] = str(experiment.timepoints)
+    xy_um = _coerce_positive_float(experiment.xy_pixel_size_um)
+    z_um = _coerce_positive_float(experiment.z_step_um)
+    if xy_um is not None and z_um is not None:
+        out["pixel_size"] = _format_pixel_size_um_zyx((z_um, xy_um, xy_um))
     out["metadata_keys"] = (
         f"{summary.get('metadata_keys', 'n/a')} | file_type={experiment.file_type}"
     )
@@ -3631,6 +3752,9 @@ if HAS_PYQT6:
             "memory_overhead_factor": 3.0,
             "channel_index": 0,
             "use_views": ["xy", "xz", "yz"],
+            "input_resolution_level": 0,
+            "output_reference_space": "level0",
+            "save_native_labels": False,
             "gpu": True,
             "require_gpu": False,
             "preprocess_factor": 1.0,
@@ -3866,6 +3990,18 @@ if HAS_PYQT6:
                 "Comma-separated list of orthogonal views to evaluate (for example "
                 "xy,xz,yz)."
             ),
+            "usegment3d_resolution_level": (
+                "Input pyramid level used for segmentation (0 = full resolution). "
+                "Higher levels reduce memory/runtime."
+            ),
+            "usegment3d_output_reference_space": (
+                "Choose whether final labels are stored at level 0 (original "
+                "resolution) or native selected input level."
+            ),
+            "usegment3d_save_native_labels": (
+                "When segmenting from a downsampled level and writing level-0 labels, "
+                "also save native-level labels to results/usegment3d/latest/data_native."
+            ),
             "usegment3d_gpu": (
                 "Enable GPU-accelerated components when available."
             ),
@@ -3957,8 +4093,9 @@ if HAS_PYQT6:
                 "(time, channel) pair, or writes separate files per position."
             ),
             "mip_export_format": (
-                "Choose export file format. TIFF outputs are always written as uint16; "
-                "Zarr exports keep projection dtype."
+                "Choose export file format. OME-TIFF outputs are written as uint16 and "
+                "include physical pixel-size calibration metadata; Zarr exports keep "
+                "projection dtype."
             ),
             "mip_output_directory": (
                 "Optional export directory path. Leave empty to write under an "
@@ -4225,6 +4362,12 @@ if HAS_PYQT6:
                 self._set_particle_parameter_enabled_state
             )
             self._usegment3d_require_gpu_checkbox.toggled.connect(
+                self._set_usegment3d_parameter_enabled_state
+            )
+            self._usegment3d_resolution_level_spin.valueChanged.connect(
+                self._set_usegment3d_parameter_enabled_state
+            )
+            self._usegment3d_output_reference_combo.currentIndexChanged.connect(
                 self._set_usegment3d_parameter_enabled_state
             )
             self._usegment3d_tile_mode_combo.currentIndexChanged.connect(
@@ -5118,6 +5261,47 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["usegment3d_views"],
             )
 
+            self._usegment3d_resolution_level_spin = QSpinBox()
+            self._usegment3d_resolution_level_spin.setRange(0, 0)
+            runtime_form.addRow(
+                "resolution level",
+                self._usegment3d_resolution_level_spin,
+            )
+            self._register_parameter_hint(
+                self._usegment3d_resolution_level_spin,
+                self._PARAMETER_HINTS["usegment3d_resolution_level"],
+            )
+
+            self._usegment3d_output_reference_combo = QComboBox()
+            self._usegment3d_output_reference_combo.addItem(
+                "Level 0 (original)",
+                "level0",
+            )
+            self._usegment3d_output_reference_combo.addItem(
+                "Native selected level",
+                "native_level",
+            )
+            runtime_form.addRow(
+                "output space",
+                self._usegment3d_output_reference_combo,
+            )
+            self._register_parameter_hint(
+                self._usegment3d_output_reference_combo,
+                self._PARAMETER_HINTS["usegment3d_output_reference_space"],
+            )
+
+            self._usegment3d_save_native_labels_checkbox = QCheckBox(
+                "Save native-level labels"
+            )
+            runtime_form.addRow(
+                "native labels",
+                self._usegment3d_save_native_labels_checkbox,
+            )
+            self._register_parameter_hint(
+                self._usegment3d_save_native_labels_checkbox,
+                self._PARAMETER_HINTS["usegment3d_save_native_labels"],
+            )
+
             self._usegment3d_gpu_checkbox = QCheckBox("Use GPU")
             runtime_form.addRow("GPU", self._usegment3d_gpu_checkbox)
             self._register_parameter_hint(
@@ -5773,7 +5957,10 @@ if HAS_PYQT6:
             )
 
             self._mip_export_format_combo = QComboBox()
-            self._mip_export_format_combo.addItem("TIFF (uint16)", "tiff")
+            self._mip_export_format_combo.addItem(
+                "OME-TIFF (uint16 + calibration)",
+                "ome-tiff",
+            )
             self._mip_export_format_combo.addItem("Zarr", "zarr")
             form.addRow("Export format", self._mip_export_format_combo)
             self._register_parameter_hint(
@@ -6921,6 +7108,9 @@ if HAS_PYQT6:
             widgets = (
                 self._usegment3d_channel_spin,
                 self._usegment3d_views_input,
+                self._usegment3d_resolution_level_spin,
+                self._usegment3d_output_reference_combo,
+                self._usegment3d_save_native_labels_checkbox,
                 self._usegment3d_require_gpu_checkbox,
                 self._usegment3d_preprocess_min_spin,
                 self._usegment3d_preprocess_max_spin,
@@ -6942,6 +7132,21 @@ if HAS_PYQT6:
             self._usegment3d_gpu_checkbox.setEnabled(
                 usegment_enabled and not require_gpu
             )
+
+            resolution_level = int(self._usegment3d_resolution_level_spin.value())
+            output_reference_space = str(
+                self._usegment3d_output_reference_combo.currentData() or "level0"
+            ).strip().lower() or "level0"
+            output_space_enabled = usegment_enabled and resolution_level > 0
+            self._usegment3d_output_reference_combo.setEnabled(output_space_enabled)
+            save_native_enabled = (
+                usegment_enabled
+                and resolution_level > 0
+                and output_reference_space == "level0"
+            )
+            self._usegment3d_save_native_labels_checkbox.setEnabled(save_native_enabled)
+            if not save_native_enabled:
+                self._usegment3d_save_native_labels_checkbox.setChecked(False)
 
             tile_mode = str(self._usegment3d_tile_mode_combo.currentData() or "auto")
             tile_mode = tile_mode.strip().lower() or "auto"
@@ -7185,6 +7390,7 @@ if HAS_PYQT6:
 
             channel_count = 1
             position_count = 1
+            max_usegment3d_resolution_level = 0
             store_xy_um: Optional[float] = None
             store_z_um: Optional[float] = None
             if initial.file and is_zarr_store_path(initial.file):
@@ -7216,14 +7422,38 @@ if HAS_PYQT6:
                             if xy_value is not None and z_value is not None:
                                 store_xy_um = float(xy_value)
                                 store_z_um = float(z_value)
+                    if "data_pyramid" in root:
+                        data_pyramid_group = root["data_pyramid"]
+                        for key in data_pyramid_group.group_keys():
+                            token = str(key).strip().lower()
+                            if not token.startswith("level_"):
+                                continue
+                            try:
+                                parsed_level = int(token.split("_", maxsplit=1)[1])
+                            except Exception:
+                                continue
+                            max_usegment3d_resolution_level = max(
+                                max_usegment3d_resolution_level,
+                                max(0, int(parsed_level)),
+                            )
+                    factors = root.attrs.get("data_pyramid_factors_tpczyx")
+                    if isinstance(factors, (tuple, list)):
+                        max_usegment3d_resolution_level = max(
+                            max_usegment3d_resolution_level,
+                            max(0, int(len(factors) - 1)),
+                        )
                 except Exception:
                     position_count = 1
                     channel_count = 1
+                    max_usegment3d_resolution_level = 0
                     store_xy_um = None
                     store_z_um = None
             self._visualization_position_spin.setMaximum(position_count - 1)
             self._particle_channel_spin.setMaximum(channel_count - 1)
             self._usegment3d_channel_spin.setMaximum(channel_count - 1)
+            self._usegment3d_resolution_level_spin.setMaximum(
+                max(0, int(max_usegment3d_resolution_level))
+            )
 
             self._flatfield_darkfield_checkbox.setChecked(
                 bool(flatfield_params.get("get_darkfield", False))
@@ -7529,6 +7759,42 @@ if HAS_PYQT6:
             else:
                 views_text = str(views_value or "").strip()
             self._usegment3d_views_input.setText(views_text)
+            input_resolution_level = max(
+                0,
+                int(
+                    usegment3d_params.get(
+                        "input_resolution_level",
+                        usegment3d_params.get("resolution_level", 0),
+                    )
+                ),
+            )
+            self._usegment3d_resolution_level_spin.setValue(
+                min(
+                    int(self._usegment3d_resolution_level_spin.maximum()),
+                    int(input_resolution_level),
+                )
+            )
+            output_reference_space = (
+                str(usegment3d_params.get("output_reference_space", "level0"))
+                .strip()
+                .lower()
+                or "level0"
+            )
+            if output_reference_space not in {"level0", "native_level"}:
+                output_reference_space = "level0"
+            output_space_index = self._usegment3d_output_reference_combo.findData(
+                output_reference_space
+            )
+            if output_space_index < 0:
+                output_space_index = self._usegment3d_output_reference_combo.findData(
+                    "level0"
+                )
+            if output_space_index < 0:
+                output_space_index = 0
+            self._usegment3d_output_reference_combo.setCurrentIndex(output_space_index)
+            self._usegment3d_save_native_labels_checkbox.setChecked(
+                bool(usegment3d_params.get("save_native_labels", False))
+            )
             self._usegment3d_gpu_checkbox.setChecked(
                 bool(usegment3d_params.get("gpu", usegment3d_params.get("use_gpu", False)))
             )
@@ -7774,11 +8040,14 @@ if HAS_PYQT6:
             self._mip_position_mode_combo.setCurrentIndex(mip_mode_index)
 
             mip_format = (
-                str(mip_export_params.get("export_format", "tiff")).strip() or "tiff"
+                str(mip_export_params.get("export_format", "ome-tiff")).strip()
+                or "ome-tiff"
             )
+            if mip_format.lower() in {"tiff", "ome_tiff", "ome.tiff"}:
+                mip_format = "ome-tiff"
             mip_format_index = self._mip_export_format_combo.findData(mip_format)
             if mip_format_index < 0:
-                mip_format_index = self._mip_export_format_combo.findData("tiff")
+                mip_format_index = self._mip_export_format_combo.findData("ome-tiff")
             if mip_format_index < 0:
                 mip_format_index = 0
             self._mip_export_format_combo.setCurrentIndex(mip_format_index)
@@ -8311,6 +8580,17 @@ if HAS_PYQT6:
                 raise ValueError("uSegment3D views must include at least one of xy, xz, yz.")
 
             channel = int(self._usegment3d_channel_spin.value())
+            input_resolution_level = int(self._usegment3d_resolution_level_spin.value())
+            output_reference_space = str(
+                self._usegment3d_output_reference_combo.currentData() or "level0"
+            ).strip().lower() or "level0"
+            if input_resolution_level <= 0:
+                output_reference_space = "level0"
+            save_native_labels = bool(
+                self._usegment3d_save_native_labels_checkbox.isChecked()
+                and input_resolution_level > 0
+                and output_reference_space == "level0"
+            )
             gpu_enabled = bool(
                 self._usegment3d_gpu_checkbox.isChecked()
                 or self._usegment3d_require_gpu_checkbox.isChecked()
@@ -8366,6 +8646,9 @@ if HAS_PYQT6:
                     self._usegment3d_defaults.get("memory_overhead_factor", 3.0)
                 ),
                 "use_views": list(normalized_views),
+                "input_resolution_level": int(input_resolution_level),
+                "output_reference_space": str(output_reference_space),
+                "save_native_labels": bool(save_native_labels),
                 "gpu": gpu_enabled,
                 "require_gpu": bool(self._usegment3d_require_gpu_checkbox.isChecked()),
                 "preprocess_normalize_min": float(self._usegment3d_preprocess_min_spin.value()),
@@ -8476,7 +8759,7 @@ if HAS_PYQT6:
                 self._mip_position_mode_combo.currentData() or "multi_position"
             ).strip()
             export_format = str(
-                self._mip_export_format_combo.currentData() or "tiff"
+                self._mip_export_format_combo.currentData() or "ome-tiff"
             ).strip()
             return {
                 "chunk_basis": "3d",
@@ -8487,7 +8770,7 @@ if HAS_PYQT6:
                     self._mip_export_defaults.get("memory_overhead_factor", 1.0)
                 ),
                 "position_mode": position_mode.lower() or "multi_position",
-                "export_format": export_format.lower() or "tiff",
+                "export_format": export_format.lower() or "ome-tiff",
                 "output_directory": str(
                     self._mip_output_directory_input.text()
                 ).strip(),

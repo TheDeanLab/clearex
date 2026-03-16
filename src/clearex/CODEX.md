@@ -51,6 +51,9 @@ This directory contains the runtime orchestration surface for ClearEx.
   datasets.
 - `mip_export` now uses explicit best-effort Zarr-store closure around worker
   and driver read/write operations to reduce file-descriptor pressure.
+- `mip_export` TIFF outputs are now written as OME-TIFF with projection-aware
+  physical pixel calibration (`PhysicalSizeX/Y`) derived from source
+  `voxel_size_um_zyx` metadata.
 - Detailed operational guidance for this area lives in
   `src/clearex/mip_export/README.md`.
 
@@ -58,9 +61,12 @@ This directory contains the runtime orchestration surface for ClearEx.
 
 - Added `uSegment3D` segmentation operation:
   - workflow normalization + GUI controls now map to canonical runtime keys,
+  - optional `input_resolution_level` supports segmentation on pyramid levels,
+  - `output_reference_space` can upsample labels back to level 0,
+  - optional `save_native_labels` stores downsampled native labels alongside upsampled output,
   - distributed execution runs one task per `(t, p)` volume,
   - latest output is persisted to `results/usegment3d/latest/data`,
-  - provenance references include GPU/tiling configuration and selected views.
+  - provenance references include GPU/tiling configuration, resolution/output-space metadata, and selected views.
 - Runtime uses optional dependency loading (`u-Segment3D`) and supports
   `require_gpu` fail-fast behavior when CUDA is unavailable.
 

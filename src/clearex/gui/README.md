@@ -27,7 +27,7 @@ This folder owns the PyQt6 UX in `app.py`.
   - particle-overlay toggle
 - Segmentation tab currently includes:
   - `Particle Detection`
-  - `uSegment3D` (GPU toggle, view selection, Cellpose model settings, aggregation/tiling, and postprocess controls)
+  - `uSegment3D` (resolution-level selection, output-space/upscale controls, GPU toggle, view selection, Cellpose model settings, aggregation/tiling, and postprocess controls)
 
 ## Theme Requirements
 

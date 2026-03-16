@@ -54,6 +54,37 @@ _PROJECTIONS = ("xy", "xz", "yz")
 _MAX_REDUCTION_READ_BYTES = 128 * 1024 * 1024
 
 
+def _normalize_export_format(value: Any) -> str:
+    """Normalize MIP-export format aliases.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate format text.
+
+    Returns
+    -------
+    str
+        Canonical export format (`ome-tiff` or `zarr`).
+
+    Raises
+    ------
+    ValueError
+        If format text is unsupported.
+    """
+    text = str(value).strip().lower() or "ome-tiff"
+    if text in {"tiff", "ome-tiff", "ome_tiff", "ome.tiff"}:
+        return "ome-tiff"
+    if text == "zarr":
+        return "zarr"
+    raise ValueError("mip_export export_format must be one of: ome-tiff, tiff, zarr.")
+
+
+def _is_tiff_export_format(export_format: str) -> bool:
+    """Return whether export format should be written as OME-TIFF."""
+    return _normalize_export_format(export_format) == "ome-tiff"
+
+
 @dataclass(frozen=True)
 class _MipExportTask:
     """One MIP-export work item.
@@ -129,7 +160,7 @@ class MipExportSummary:
     output_directory : str
         Filesystem directory containing exported projection files.
     export_format : str
-        Export file format (``tiff`` or ``zarr``).
+        Export file format (``ome-tiff`` or ``zarr``).
     position_mode : str
         Export mode (``multi_position`` or ``per_position``).
     task_count : int
@@ -192,16 +223,145 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
         )
     normalized["position_mode"] = position_mode
 
-    export_format = (
-        str(normalized.get("export_format", "tiff")).strip().lower() or "tiff"
+    normalized["export_format"] = _normalize_export_format(
+        normalized.get("export_format", "ome-tiff")
     )
-    if export_format not in {"tiff", "zarr"}:
-        raise ValueError("mip_export export_format must be 'tiff' or 'zarr'.")
-    normalized["export_format"] = export_format
     normalized["output_directory"] = str(
         normalized.get("output_directory", "")
     ).strip()
     return normalized
+
+
+def _extract_voxel_size_um_zyx(
+    *,
+    root: zarr.Group,
+    source_component: str,
+) -> tuple[float, float, float]:
+    """Extract voxel size metadata in ``(z, y, x)`` order.
+
+    Parameters
+    ----------
+    root : zarr.Group
+        Open analysis-store root group.
+    source_component : str
+        Source component path.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Voxel sizes in microns for ``(z, y, x)``. Falls back to ``(1, 1, 1)``
+        when metadata is unavailable.
+    """
+    root_attrs = dict(root.attrs)
+    source_attrs: dict[str, Any] = {}
+    try:
+        source_attrs = dict(root[source_component].attrs)
+    except Exception:
+        source_attrs = {}
+
+    for attrs in (source_attrs, root_attrs):
+        voxel = attrs.get("voxel_size_um_zyx")
+        if not isinstance(voxel, (tuple, list)) or len(voxel) < 3:
+            continue
+        z_um = float(voxel[0])
+        y_um = float(voxel[1])
+        x_um = float(voxel[2])
+        if z_um > 0 and y_um > 0 and x_um > 0:
+            return z_um, y_um, x_um
+
+    for attrs in (source_attrs, root_attrs):
+        navigate = attrs.get("navigate_experiment")
+        if not isinstance(navigate, dict):
+            continue
+        xy_value = navigate.get("xy_pixel_size_um")
+        z_value = navigate.get("z_step_um")
+        if xy_value is None or z_value is None:
+            continue
+        xy_um = float(xy_value)
+        z_um = float(z_value)
+        if xy_um > 0 and z_um > 0:
+            return z_um, xy_um, xy_um
+
+    return 1.0, 1.0, 1.0
+
+
+def _projection_pixel_size_um(
+    *,
+    axes: tuple[str, ...],
+    voxel_size_um_zyx: tuple[float, float, float],
+) -> tuple[float, float]:
+    """Return output pixel calibration ``(PhysicalSizeY, PhysicalSizeX)``.
+
+    Parameters
+    ----------
+    axes : tuple[str, ...]
+        Output axis labels in array order.
+    voxel_size_um_zyx : tuple[float, float, float]
+        Source voxel size in ``(z, y, x)`` order.
+
+    Returns
+    -------
+    tuple[float, float]
+        Physical pixel sizes for output row/column axes in microns.
+    """
+    z_um, y_um, x_um = voxel_size_um_zyx
+    axis_to_um = {"z": float(z_um), "y": float(y_um), "x": float(x_um)}
+    if len(axes) < 2:
+        return 1.0, 1.0
+    row_axis = str(axes[-2]).lower()
+    col_axis = str(axes[-1]).lower()
+    physical_size_y = float(axis_to_um.get(row_axis, 1.0))
+    physical_size_x = float(axis_to_um.get(col_axis, 1.0))
+    return physical_size_y, physical_size_x
+
+
+def _ome_axes_for_output_shape(output_shape: tuple[int, ...]) -> str:
+    """Return OME-compatible axis string for projection outputs."""
+    if len(output_shape) == 2:
+        return "YX"
+    if len(output_shape) == 3:
+        return "QYX"
+    raise ValueError("mip_export OME-TIFF output must be 2D or 3D.")
+
+
+def _ome_metadata_for_projection_output(
+    *,
+    output_shape: tuple[int, ...],
+    axes: tuple[str, ...],
+    voxel_size_um_zyx: tuple[float, float, float],
+    image_name: str,
+) -> dict[str, Any]:
+    """Build OME metadata payload for one projection output.
+
+    Parameters
+    ----------
+    output_shape : tuple[int, ...]
+        Projection output shape.
+    axes : tuple[str, ...]
+        Output axis labels.
+    voxel_size_um_zyx : tuple[float, float, float]
+        Source voxel spacing in microns.
+    image_name : str
+        Image name for OME metadata.
+
+    Returns
+    -------
+    dict[str, Any]
+        Metadata mapping for ``tifffile`` OME serialization.
+    """
+    physical_size_y, physical_size_x = _projection_pixel_size_um(
+        axes=axes,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+    )
+    return {
+        "axes": _ome_axes_for_output_shape(tuple(int(v) for v in output_shape)),
+        "Name": str(image_name),
+        "PhysicalSizeX": float(physical_size_x),
+        "PhysicalSizeXUnit": "µm",
+        "PhysicalSizeY": float(physical_size_y),
+        "PhysicalSizeYUnit": "µm",
+        "SignificantBits": 16,
+    }
 
 
 def _estimate_worker_thread_capacity(client: "Client") -> int:
@@ -1212,7 +1372,7 @@ def _build_output_path(
     pathlib.Path
         Output file path.
     """
-    suffix = ".tif" if export_format == "tiff" else ".zarr"
+    suffix = ".tif" if _is_tiff_export_format(str(export_format)) else ".zarr"
     if task.p_index is None:
         filename = (
             f"mip_{task.projection}_t{int(task.t_index):04d}_c{int(task.c_index):04d}"
@@ -1232,6 +1392,7 @@ def _write_projection_output(
     projection: np.ndarray,
     export_format: str,
     axes: tuple[str, ...],
+    voxel_size_um_zyx: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> str:
     """Persist one projection output file.
 
@@ -1245,6 +1406,8 @@ def _write_projection_output(
         Export format.
     axes : tuple[str, ...]
         Axis labels for the output data.
+    voxel_size_um_zyx : tuple[float, float, float], default=(1.0, 1.0, 1.0)
+        Source voxel spacing used for OME-TIFF physical pixel calibration.
 
     Returns
     -------
@@ -1253,9 +1416,20 @@ def _write_projection_output(
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if export_format == "tiff":
+    if _is_tiff_export_format(export_format):
         payload = _to_uint16(np.asarray(projection))
-        tifffile.imwrite(str(output_path), payload, photometric="minisblack")
+        tifffile.imwrite(
+            str(output_path),
+            payload,
+            photometric="minisblack",
+            ome=True,
+            metadata=_ome_metadata_for_projection_output(
+                output_shape=tuple(int(v) for v in payload.shape),
+                axes=tuple(str(axis) for axis in axes),
+                voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+                image_name=str(output_path.stem),
+            ),
+        )
         return str(payload.dtype)
 
     if output_path.exists():
@@ -1284,6 +1458,7 @@ def _run_export_task(
     export_format: str,
     position_mode: str,
     task: _MipExportTask,
+    voxel_size_um_zyx: tuple[float, float, float],
 ) -> dict[str, Any]:
     """Execute one projection task and write output.
 
@@ -1301,6 +1476,8 @@ def _run_export_task(
         Export mode.
     task : _MipExportTask
         Projection task to execute.
+    voxel_size_um_zyx : tuple[float, float, float]
+        Source voxel spacing in ``(z, y, x)`` order.
 
     Returns
     -------
@@ -1357,7 +1534,7 @@ def _run_export_task(
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if export_format == "tiff":
+        if _is_tiff_export_format(export_format):
             if output_path.exists():
                 try:
                     output_path.unlink()
@@ -1369,6 +1546,13 @@ def _run_export_task(
                 dtype=np.uint16,
                 bigtiff=True,
                 photometric="minisblack",
+                ome=True,
+                metadata=_ome_metadata_for_projection_output(
+                    output_shape=tuple(int(v) for v in output_shape),
+                    axes=tuple(str(axis) for axis in axes),
+                    voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+                    image_name=str(output_path.stem),
+                ),
             )
         else:
             if output_path.exists():
@@ -1421,16 +1605,22 @@ def _run_export_task(
                 )
 
             tile_payload = np.asarray(reduced_tile)
-            if export_format == "tiff":
+            if _is_tiff_export_format(export_format):
                 output_target[output_slices] = _to_uint16(tile_payload)
             else:
                 output_target[output_slices] = tile_payload
 
-        if export_format == "tiff":
+        if _is_tiff_export_format(export_format):
             output_target.flush()
             stored_dtype = str(np.dtype(np.uint16))
+            physical_size_y_um, physical_size_x_um = _projection_pixel_size_um(
+                axes=tuple(str(axis) for axis in axes),
+                voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+            )
         else:
             stored_dtype = str(np.dtype(getattr(output_target, "dtype", source_array.dtype)))
+            physical_size_y_um = 1.0
+            physical_size_x_um = 1.0
         return {
             "path": str(output_path),
             "projection": str(task.projection),
@@ -1439,6 +1629,8 @@ def _run_export_task(
             "p_index": int(task.p_index) if task.p_index is not None else None,
             "axes": list(axes),
             "dtype": str(stored_dtype),
+            "physical_size_y_um": float(physical_size_y_um),
+            "physical_size_x_um": float(physical_size_x_um),
         }
     finally:
         if output_root is not None:
@@ -1498,6 +1690,10 @@ def run_mip_export_analysis(
             "mip_export requires canonical 6D data (t,p,c,z,y,x). "
             f"Input component '{source_component}' is incompatible."
         )
+    voxel_size_um_zyx = _extract_voxel_size_um_zyx(
+        root=root,
+        source_component=source_component,
+    )
 
     output_base_directory = _resolve_output_base_directory(
         zarr_path=zarr_path,
@@ -1526,6 +1722,7 @@ def run_mip_export_analysis(
                     export_format=export_format,
                     position_mode=position_mode,
                     task=task,
+                    voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
                 )
                 for task in tasks
             ]
@@ -1557,7 +1754,7 @@ def run_mip_export_analysis(
 
             for planned in planned_outputs:
                 planned.output_path.parent.mkdir(parents=True, exist_ok=True)
-                if export_format == "tiff":
+                if _is_tiff_export_format(export_format):
                     if planned.output_path.exists():
                         try:
                             planned.output_path.unlink()
@@ -1569,6 +1766,13 @@ def run_mip_export_analysis(
                         dtype=np.uint16,
                         bigtiff=True,
                         photometric="minisblack",
+                        ome=True,
+                        metadata=_ome_metadata_for_projection_output(
+                            output_shape=tuple(int(v) for v in planned.output_shape),
+                            axes=tuple(str(axis) for axis in planned.axes),
+                            voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+                            image_name=str(planned.output_path.stem),
+                        ),
                     )
                     stored_dtypes[int(planned.task_index)] = str(np.dtype(np.uint16))
                 else:
@@ -1648,7 +1852,7 @@ def run_mip_export_analysis(
                         for bounds in tile_result["tile_bounds"]
                     )
                 )
-                if export_format == "tiff":
+                if _is_tiff_export_format(export_format):
                     tiff_targets[int(result_task_index)][tile_slices] = _to_uint16(
                         tile_payload
                     )
@@ -1674,7 +1878,7 @@ def run_mip_export_analysis(
                         for bounds in tile_result["tile_bounds"]
                     )
                 )
-                if export_format == "tiff":
+                if _is_tiff_export_format(export_format):
                     tiff_targets[int(result_task_index)][tile_slices] = _to_uint16(
                         tile_payload
                     )
@@ -1691,8 +1895,12 @@ def run_mip_export_analysis(
 
             for planned in planned_outputs:
                 task = planned.task
-                if export_format == "tiff":
+                if _is_tiff_export_format(export_format):
                     tiff_targets[int(planned.task_index)].flush()
+                physical_size_y_um, physical_size_x_um = _projection_pixel_size_um(
+                    axes=tuple(str(axis) for axis in planned.axes),
+                    voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+                )
                 task_results.append(
                     {
                         "path": str(planned.output_path),
@@ -1704,6 +1912,8 @@ def run_mip_export_analysis(
                         ),
                         "axes": [str(axis) for axis in planned.axes],
                         "dtype": str(stored_dtypes[int(planned.task_index)]),
+                        "physical_size_y_um": float(physical_size_y_um),
+                        "physical_size_x_um": float(physical_size_x_um),
                     }
                 )
     finally:
@@ -1729,6 +1939,7 @@ def run_mip_export_analysis(
                 "task_count": total,
                 "exported_files": exported_files,
                 "projections": [str(value) for value in _PROJECTIONS],
+                "voxel_size_um_zyx": [float(v) for v in voxel_size_um_zyx],
                 "parameters": {
                     str(key): value for key, value in dict(normalized).items()
                 },
@@ -1752,6 +1963,7 @@ def run_mip_export_analysis(
             "task_count": total,
             "exported_files": exported_files,
             "projections": [str(value) for value in _PROJECTIONS],
+            "voxel_size_um_zyx": [float(v) for v in voxel_size_um_zyx],
         },
     )
     _emit(100, "MIP export complete")

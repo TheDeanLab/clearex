@@ -276,6 +276,205 @@ def test_run_usegment3d_analysis_writes_latest_results(
 
     latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
     assert latest_ref["component"] == "results/usegment3d/latest"
+    assert (
+        latest_ref["metadata"].get("aggregation_tile_mode_effective")
+        is latest_ref["metadata"].get("aggregation_tile_mode")
+    )
+    assert latest_ref["metadata"].get("dropped_parameter_keys", []) == []
+
+
+def test_run_usegment3d_analysis_drops_unknown_parameters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "analysis_store_usegment3d_drop_keys.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    monkeypatch.setattr(
+        usegment_pipeline,
+        "_load_usegment3d_runtime",
+        lambda: (_FakeParameterModule(), _FakeRuntimeModule()),
+    )
+    monkeypatch.setattr(usegment_pipeline, "_is_gpu_available", lambda: False)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        _ = run_usegment3d_analysis(
+            zarr_path=store_path,
+            parameters={
+                "channel_index": 0,
+                "use_views": ["xy"],
+                "gpu": False,
+                "require_gpu": False,
+                "nonstandard_blob": bytes(1024),
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    metadata = dict(latest_ref.get("metadata", {}))
+    assert "nonstandard_blob" not in metadata.get("parameters", {})
+    assert "nonstandard_blob" in metadata.get("dropped_parameter_keys", [])
+
+
+def test_run_usegment3d_disables_tile_multiprocessing_with_distributed_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "analysis_store_usegment3d_tile_mode.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    monkeypatch.setattr(
+        usegment_pipeline,
+        "_load_usegment3d_runtime",
+        lambda: (_FakeParameterModule(), _FakeRuntimeModule()),
+    )
+    monkeypatch.setattr(usegment_pipeline, "_is_gpu_available", lambda: False)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        _ = run_usegment3d_analysis(
+            zarr_path=store_path,
+            parameters={
+                "channel_index": 0,
+                "use_views": ["xy"],
+                "gpu": False,
+                "require_gpu": False,
+                "aggregation_tile_mode": True,
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    metadata = dict(latest_ref.get("metadata", {}))
+    assert metadata.get("aggregation_tile_mode_requested") is True
+    assert metadata.get("aggregation_tile_mode_effective") is False
+    assert metadata.get("aggregation_tile_mode") is False
+
+
+def test_run_usegment3d_analysis_segments_pyramid_level_and_upscales_to_level0(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "analysis_store_usegment3d_level_select.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 4, 4, 4),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    pyramid_group = root.require_group("data_pyramid")
+    pyramid_group.create_dataset(
+        name="level_1",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.attrs["voxel_size_um_zyx"] = [0.2, 0.1, 0.1]
+    root.attrs["data_pyramid_factors_tpczyx"] = [
+        [1, 1, 1, 1, 1, 1],
+        [1, 1, 1, 2, 2, 2],
+    ]
+
+    monkeypatch.setattr(
+        usegment_pipeline,
+        "_load_usegment3d_runtime",
+        lambda: (_FakeParameterModule(), _FakeRuntimeModule()),
+    )
+    monkeypatch.setattr(usegment_pipeline, "_is_gpu_available", lambda: False)
+
+    client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
+    try:
+        summary = run_usegment3d_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "input_resolution_level": 1,
+                "output_reference_space": "level0",
+                "save_native_labels": True,
+                "channel_index": 0,
+                "use_views": ["xy"],
+                "gpu": False,
+                "require_gpu": False,
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    assert summary.volumes_processed == 1
+    assert summary.source_component == "data_pyramid/level_1"
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    latest_group = output_root["results"]["usegment3d"]["latest"]
+    labels_level0 = np.asarray(latest_group["data"])
+    labels_native = np.asarray(latest_group["data_native"])
+    assert tuple(labels_level0.shape) == (1, 1, 1, 4, 4, 4)
+    assert tuple(labels_native.shape) == (1, 1, 1, 2, 2, 2)
+    assert int(labels_level0.max()) == 1
+    assert int(labels_native.max()) == 1
+
+    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    metadata = dict(latest_ref.get("metadata", {}))
+    assert metadata.get("source_component") == "data_pyramid/level_1"
+    assert metadata.get("requested_source_component") == "data"
+    assert metadata.get("output_reference_component") == "data"
+    assert metadata.get("input_resolution_level") == 1
+    assert metadata.get("output_resolution_level") == 0
+    assert metadata.get("output_reference_space") == "level0"
+    assert metadata.get("save_native_labels_effective") is True
+    assert metadata.get("source_voxel_size_um_zyx") == [0.4, 0.2, 0.2]
+    assert metadata.get("output_voxel_size_um_zyx") == [0.2, 0.1, 0.1]
+
+
+def test_run_usegment3d_analysis_rejects_missing_requested_resolution_level(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store_usegment3d_missing_level.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    with pytest.raises(ValueError, match="input_resolution_level"):
+        run_usegment3d_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "input_resolution_level": 2,
+                "channel_index": 0,
+                "gpu": False,
+                "require_gpu": False,
+            },
+            client=None,
+        )
 
 
 def test_run_usegment3d_analysis_rejects_invalid_channel(tmp_path: Path) -> None:

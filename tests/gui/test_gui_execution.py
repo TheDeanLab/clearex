@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import math
 import threading
+from pathlib import Path
 
 import clearex.gui.app as app_module
+from clearex.io.experiment import NavigateChannel, NavigateExperiment
 
 
 def _install_fake_gui_runtime(monkeypatch):
@@ -92,6 +94,87 @@ def _install_fake_gui_runtime(monkeypatch):
         raising=False,
     )
     return _FakeApplication, _FakeProgressDialog
+
+
+def test_summarize_image_info_extracts_pixel_size_from_voxel_size_metadata() -> None:
+    info = app_module.ImageInfo(
+        path=Path("/tmp/data_store.zarr"),
+        shape=(1, 1, 1, 10, 20, 30),
+        dtype="uint16",
+        axes="TPCZYX",
+        metadata={"voxel_size_um_zyx": [0.2, 0.1669921875, 0.1669921875]},
+    )
+
+    summary = app_module.summarize_image_info(info)
+
+    assert summary["pixel_size"] == "z=0.2, y=0.166992, x=0.166992"
+
+
+def test_summarize_image_info_extracts_pixel_size_from_navigate_metadata() -> None:
+    info = app_module.ImageInfo(
+        path=Path("/tmp/data_store.zarr"),
+        shape=(1, 1, 1, 10, 20, 30),
+        dtype="uint16",
+        axes="TPCZYX",
+        metadata={
+            "navigate_experiment": {
+                "xy_pixel_size_um": 0.15,
+                "z_step_um": 0.4,
+            }
+        },
+    )
+
+    summary = app_module.summarize_image_info(info)
+
+    assert summary["pixel_size"] == "z=0.4, y=0.15, x=0.15"
+
+
+def test_apply_experiment_overrides_populates_pixel_size_field() -> None:
+    summary = {
+        "path": "/tmp/source",
+        "shape": "1 x 1 x 1",
+        "dtype": "uint16",
+        "axes": "TPCZYX",
+        "channels": "1",
+        "positions": "1",
+        "image_size": "30 x 20 x 10",
+        "time_points": "1",
+        "pixel_size": "n/a",
+        "metadata_keys": "a,b",
+    }
+    experiment = NavigateExperiment(
+        path=Path("/tmp/experiment.yml"),
+        raw={},
+        save_directory=Path("/tmp"),
+        file_type="TIFF",
+        microscope_name="scope",
+        image_mode="z-stack",
+        timepoints=1,
+        number_z_steps=10,
+        y_pixels=20,
+        x_pixels=30,
+        multiposition_count=1,
+        selected_channels=[
+            NavigateChannel(
+                name="ch0",
+                laser=None,
+                laser_index=None,
+                exposure_ms=None,
+                is_selected=True,
+            )
+        ],
+        xy_pixel_size_um=0.12,
+        z_step_um=0.45,
+    )
+
+    updated = app_module._apply_experiment_overrides(
+        summary=summary,
+        experiment_path=Path("/tmp/experiment.yml"),
+        resolved_data_path=Path("/tmp/source"),
+        experiment=experiment,
+    )
+
+    assert updated["pixel_size"] == "z=0.45, y=0.12, x=0.12"
 
 
 def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(

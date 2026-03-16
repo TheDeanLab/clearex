@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
@@ -12,6 +13,18 @@ import zarr
 
 from clearex.mip_export import pipeline
 from clearex.mip_export.pipeline import run_mip_export_analysis
+
+
+def _ome_pixels_metadata(path: Path) -> tuple[dict[str, str], str]:
+    """Return OME Pixels attributes and series axes for one TIFF file."""
+    with tifffile.TiffFile(str(path)) as tif:
+        ome_xml = tif.ome_metadata
+        assert ome_xml is not None
+        ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
+        root = ET.fromstring(ome_xml)
+        pixels = root.find(".//ome:Pixels", ns)
+        assert pixels is not None
+        return dict(pixels.attrib), str(tif.series[0].axes)
 
 
 class _GuardedSourceArray:
@@ -61,7 +74,7 @@ class _GuardedSourceArray:
         return np.asarray(self._data[key])
 
 
-def test_run_mip_export_analysis_writes_uint16_tiff_outputs(
+def test_run_mip_export_analysis_writes_uint16_ome_tiff_outputs_with_calibration(
     tmp_path: Path,
 ) -> None:
     store_path = tmp_path / "mip_tiff_store.zarr"
@@ -76,6 +89,7 @@ def test_run_mip_export_analysis_writes_uint16_tiff_outputs(
         dtype="float32",
         overwrite=True,
     )
+    root["data"].attrs["voxel_size_um_zyx"] = [5.0, 2.0, 3.0]
 
     summary = run_mip_export_analysis(
         zarr_path=store_path,
@@ -89,7 +103,7 @@ def test_run_mip_export_analysis_writes_uint16_tiff_outputs(
     )
 
     assert summary.component == "results/mip_export/latest"
-    assert summary.export_format == "tiff"
+    assert summary.export_format == "ome-tiff"
     assert summary.position_mode == "per_position"
     assert summary.exported_files == 6
     output_directory = Path(summary.output_directory)
@@ -111,10 +125,25 @@ def test_run_mip_export_analysis_writes_uint16_tiff_outputs(
     np.testing.assert_array_equal(yz, np.max(expected_source, axis=2).astype(np.uint16))
     assert xy.dtype == np.uint16
 
+    xy_pixels, xy_axes = _ome_pixels_metadata(xy_path)
+    xz_pixels, xz_axes = _ome_pixels_metadata(xz_path)
+    yz_pixels, yz_axes = _ome_pixels_metadata(yz_path)
+    assert xy_axes == "YX"
+    assert xz_axes == "YX"
+    assert yz_axes == "YX"
+    assert xy_pixels["PhysicalSizeX"] == "3.0"
+    assert xy_pixels["PhysicalSizeY"] == "2.0"
+    assert xz_pixels["PhysicalSizeX"] == "3.0"
+    assert xz_pixels["PhysicalSizeY"] == "5.0"
+    assert yz_pixels["PhysicalSizeX"] == "2.0"
+    assert yz_pixels["PhysicalSizeY"] == "5.0"
+
     latest_attrs = dict(
         zarr.open_group(str(store_path), mode="r")["results"]["mip_export"]["latest"].attrs
     )
     assert latest_attrs["exported_files"] == 6
+    assert latest_attrs["export_format"] == "ome-tiff"
+    assert latest_attrs["voxel_size_um_zyx"] == [5.0, 2.0, 3.0]
     latest_ref_attrs = dict(
         zarr.open_group(str(store_path), mode="r")["provenance"]["latest_outputs"][
             "mip_export"
@@ -198,6 +227,7 @@ def test_run_export_task_reads_single_position_source_in_blocks(
         export_format="tiff",
         position_mode="per_position",
         task=task,
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
     )
 
     expected = np.max(data[0, 0, 0, :, :, :], axis=expected_axis).astype(np.uint16)
@@ -228,6 +258,7 @@ def test_run_export_task_reads_multi_position_source_in_blocks(
         export_format="tiff",
         position_mode="multi_position",
         task=task,
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
     )
 
     expected = np.max(data[0, :, 0, :, :, :], axis=1).astype(np.uint16)

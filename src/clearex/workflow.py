@@ -180,6 +180,9 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "memory_overhead_factor": 3.0,
         "channel_index": 0,
         "use_views": ["xy", "xz", "yz"],
+        "input_resolution_level": 0,
+        "output_reference_space": "level0",
+        "save_native_labels": False,
         "gpu": True,
         "require_gpu": False,
         "preprocess_factor": 1.0,
@@ -260,7 +263,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "overlap_zyx": [0, 0, 0],
         "memory_overhead_factor": 1.0,
         "position_mode": "multi_position",
-        "export_format": "tiff",
+        "export_format": "ome-tiff",
         "output_directory": "",
     },
 }
@@ -800,6 +803,42 @@ def _normalize_usegment3d_parameters(
 
     channel_value = normalized.get("channel_index", normalized.get("channel", 0))
     normalized["channel_index"] = max(0, int(channel_value))
+
+    input_resolution_level = int(
+        normalized.get(
+            "input_resolution_level",
+            normalized.get("resolution_level", 0),
+        )
+    )
+    if input_resolution_level < 0:
+        raise ValueError("usegment3d input_resolution_level must be >= 0.")
+    normalized["input_resolution_level"] = input_resolution_level
+
+    output_space_raw = (
+        str(
+            normalized.get(
+                "output_reference_space",
+                normalized.get("output_space", "level0"),
+            )
+        )
+        .strip()
+        .lower()
+        or "level0"
+    )
+    if output_space_raw in {"level0", "full", "full_resolution", "original"}:
+        output_reference_space = "level0"
+    elif output_space_raw in {"native", "native_level", "selected_level"}:
+        output_reference_space = "native_level"
+    else:
+        raise ValueError(
+            "usegment3d output_reference_space must be one of "
+            "level0 or native_level."
+        )
+    normalized["output_reference_space"] = output_reference_space
+    normalized["save_native_labels"] = bool(
+        bool(normalized.get("save_native_labels", False))
+        or bool(normalized.get("save_native", False))
+    )
 
     raw_views = normalized.get("use_views", normalized.get("views", ["xy", "xz", "yz"]))
     if isinstance(raw_views, str):
@@ -1416,11 +1455,18 @@ def _normalize_mip_export_parameters(
         )
     normalized["position_mode"] = position_mode
 
-    export_format = (
-        str(normalized.get("export_format", "tiff")).strip().lower() or "tiff"
+    export_format_raw = (
+        str(normalized.get("export_format", "ome-tiff")).strip().lower()
+        or "ome-tiff"
     )
-    if export_format not in {"tiff", "zarr"}:
-        raise ValueError("mip_export export_format must be 'tiff' or 'zarr'.")
+    if export_format_raw in {"tiff", "ome-tiff", "ome_tiff", "ome.tiff"}:
+        export_format = "ome-tiff"
+    elif export_format_raw == "zarr":
+        export_format = "zarr"
+    else:
+        raise ValueError(
+            "mip_export export_format must be one of: ome-tiff, tiff, zarr."
+        )
     normalized["export_format"] = export_format
     normalized["output_directory"] = str(
         normalized.get("output_directory", "")
