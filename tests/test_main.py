@@ -233,14 +233,18 @@ def test_run_workflow_visualization_only_skips_analysis_dask_startup(
         workloads.append(str(workload))
         return object()
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
 
     workflow = WorkflowConfig(
         file=None,
         prefer_dask=True,
         visualization=True,
     )
-    main_module._run_workflow(workflow=workflow, logger=_test_logger("clearex.test.main.visualization"))
+    main_module._run_workflow(
+        workflow=workflow, logger=_test_logger("clearex.test.main.visualization")
+    )
 
     assert workloads == []
 
@@ -255,14 +259,18 @@ def test_run_workflow_particle_detection_starts_analysis_dask_startup(
         workloads.append(str(workload))
         return object()
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
 
     workflow = WorkflowConfig(
         file=None,
         prefer_dask=True,
         particle_detection=True,
     )
-    main_module._run_workflow(workflow=workflow, logger=_test_logger("clearex.test.main.particle"))
+    main_module._run_workflow(
+        workflow=workflow, logger=_test_logger("clearex.test.main.particle")
+    )
 
     assert workloads == ["analysis"]
 
@@ -277,7 +285,9 @@ def test_run_workflow_usegment3d_starts_analysis_dask_startup(
         workloads.append(str(workload))
         return object()
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
 
     workflow = WorkflowConfig(
         file=None,
@@ -302,14 +312,18 @@ def test_run_workflow_shear_transform_starts_analysis_dask_startup(
         workloads.append(str(workload))
         return object()
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
 
     workflow = WorkflowConfig(
         file=None,
         prefer_dask=True,
         shear_transform=True,
     )
-    main_module._run_workflow(workflow=workflow, logger=_test_logger("clearex.test.main.shear"))
+    main_module._run_workflow(
+        workflow=workflow, logger=_test_logger("clearex.test.main.shear")
+    )
 
     assert workloads == ["analysis"]
 
@@ -324,7 +338,9 @@ def test_run_workflow_flatfield_starts_analysis_dask_startup(
         workloads.append(str(workload))
         return object()
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
 
     workflow = WorkflowConfig(
         file=None,
@@ -394,7 +410,9 @@ def test_run_workflow_logs_operation_context_on_flatfield_failure(
         del kwargs
         captured_messages.append(message % args if args else message)
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
     monkeypatch.setattr(main_module, "run_flatfield_analysis", _boom)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
     monkeypatch.setattr(logger, "exception", _capture_exception)
@@ -465,7 +483,9 @@ def test_run_workflow_non_experiment_file_skips_io_dask_startup(
         workloads.append(str(workload))
         return object()
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
     monkeypatch.setattr(main_module, "ImageOpener", _DummyOpener)
 
@@ -473,7 +493,9 @@ def test_run_workflow_non_experiment_file_skips_io_dask_startup(
         file=str(tmp_path / "input.tif"),
         prefer_dask=True,
     )
-    main_module._run_workflow(workflow=workflow, logger=_test_logger("clearex.test.main.io_skip"))
+    main_module._run_workflow(
+        workflow=workflow, logger=_test_logger("clearex.test.main.io_skip")
+    )
 
     assert workloads == []
 
@@ -488,12 +510,149 @@ def test_build_workflow_config_maps_usegment3d_flag() -> None:
         shear_transform=False,
         particle_detection=False,
         usegment3d=True,
+        channel_indices=None,
         registration=False,
         visualization=False,
         mip_export=False,
     )
     workflow = main_module._build_workflow_config(args)
     assert workflow.usegment3d is True
+
+
+def test_build_workflow_config_applies_persisted_dask_backend(monkeypatch) -> None:
+    args = SimpleNamespace(
+        file=None,
+        dask=True,
+        chunks=None,
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        usegment3d=True,
+        channel_indices=None,
+        registration=False,
+        visualization=False,
+        mip_export=False,
+    )
+
+    persisted = DaskBackendConfig(
+        local_cluster=LocalClusterConfig(
+            n_workers=4,
+            threads_per_worker=1,
+            memory_limit="150GiB",
+        )
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_load_persisted_dask_backend_config",
+        lambda: persisted,
+    )
+
+    workflow = main_module._build_workflow_config(args)
+    assert workflow.dask_backend.local_cluster.n_workers == 4
+    assert workflow.dask_backend.local_cluster.memory_limit == "150GiB"
+
+
+def test_build_workflow_config_maps_usegment3d_channel_indices() -> None:
+    args = SimpleNamespace(
+        file=None,
+        dask=True,
+        chunks=None,
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        usegment3d=True,
+        channel_indices="2,0,2",
+        registration=False,
+        visualization=False,
+        mip_export=False,
+    )
+    workflow = main_module._build_workflow_config(args)
+    params = workflow.analysis_parameters["usegment3d"]
+    assert params["channel_indices"] == [2, 0]
+    assert params["channel_index"] == 2
+    assert params["all_channels"] is False
+
+
+def test_build_workflow_config_maps_usegment3d_channel_indices_all() -> None:
+    args = SimpleNamespace(
+        file=None,
+        dask=True,
+        chunks=None,
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        usegment3d=True,
+        channel_indices="all",
+        registration=False,
+        visualization=False,
+        mip_export=False,
+    )
+    workflow = main_module._build_workflow_config(args)
+    params = workflow.analysis_parameters["usegment3d"]
+    assert params["all_channels"] is True
+
+
+def test_build_workflow_config_maps_usegment3d_input_resolution_level() -> None:
+    args = SimpleNamespace(
+        file=None,
+        dask=True,
+        chunks=None,
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        usegment3d=True,
+        channel_indices=None,
+        input_resolution_level=2,
+        registration=False,
+        visualization=False,
+        mip_export=False,
+    )
+    workflow = main_module._build_workflow_config(args)
+    params = workflow.analysis_parameters["usegment3d"]
+    assert params["input_resolution_level"] == 2
+
+
+def test_build_workflow_config_rejects_invalid_input_resolution_level() -> None:
+    args = SimpleNamespace(
+        file=None,
+        dask=True,
+        chunks=None,
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        usegment3d=True,
+        channel_indices=None,
+        input_resolution_level=-1,
+        registration=False,
+        visualization=False,
+        mip_export=False,
+    )
+    with pytest.raises(ValueError, match="--input-resolution-level"):
+        _ = main_module._build_workflow_config(args)
+
+
+def test_build_workflow_config_rejects_invalid_channel_indices() -> None:
+    args = SimpleNamespace(
+        file=None,
+        dask=True,
+        chunks=None,
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        usegment3d=True,
+        channel_indices="1,bad",
+        registration=False,
+        visualization=False,
+        mip_export=False,
+    )
+    with pytest.raises(ValueError, match="Invalid --channel-indices value"):
+        _ = main_module._build_workflow_config(args)
 
 
 def test_run_workflow_experiment_file_starts_io_dask_startup(
@@ -529,21 +688,31 @@ def test_run_workflow_experiment_file_starts_io_dask_startup(
         workloads.append(str(workload))
         return object()
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: True)
-    monkeypatch.setattr(main_module, "load_navigate_experiment", lambda path: experiment)
-    monkeypatch.setattr(main_module, "resolve_experiment_data_path", lambda experiment: source_path)
+    monkeypatch.setattr(
+        main_module, "load_navigate_experiment", lambda path: experiment
+    )
+    monkeypatch.setattr(
+        main_module, "resolve_experiment_data_path", lambda experiment: source_path
+    )
     monkeypatch.setattr(
         main_module,
         "materialize_experiment_data_store",
-        lambda *, experiment, source_path, chunks, pyramid_factors, client: materialized,
+        lambda *, experiment, source_path, chunks, pyramid_factors, client: (
+            materialized
+        ),
     )
 
     workflow = WorkflowConfig(
         file=str(tmp_path / "experiment.yml"),
         prefer_dask=True,
     )
-    main_module._run_workflow(workflow=workflow, logger=_test_logger("clearex.test.main.io_start"))
+    main_module._run_workflow(
+        workflow=workflow, logger=_test_logger("clearex.test.main.io_start")
+    )
 
     assert workloads == ["io"]
 
@@ -603,9 +772,13 @@ def test_run_workflow_skips_matching_provenance_analysis(
 
     def _should_not_run(*args, **kwargs):
         del args, kwargs
-        raise AssertionError("deconvolution should have been skipped by provenance match")
+        raise AssertionError(
+            "deconvolution should have been skipped by provenance match"
+        )
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
     monkeypatch.setattr(main_module, "run_deconvolution_analysis", _should_not_run)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
 
@@ -697,7 +870,9 @@ def test_run_workflow_force_rerun_ignores_matching_provenance(
             output_chunks_tpczyx=(1, 1, 1, 2, 2, 2),
         )
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
     monkeypatch.setattr(main_module, "run_deconvolution_analysis", _fake_deconvolution)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
 
@@ -762,7 +937,9 @@ def test_run_workflow_skips_matching_provenance_usegment3d(
         del args, kwargs
         raise AssertionError("usegment3d should have been skipped by provenance match")
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
     monkeypatch.setattr(main_module, "run_usegment3d_analysis", _should_not_run)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
 
@@ -834,7 +1011,9 @@ def test_run_workflow_chains_usegment3d_output_to_visualization(
             keyframe_count=0,
         )
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
     monkeypatch.setattr(main_module, "run_usegment3d_analysis", _fake_usegment3d)
     monkeypatch.setattr(main_module, "run_visualization_analysis", _fake_visualization)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
@@ -889,8 +1068,10 @@ def test_run_workflow_chains_flatfield_output_to_visualization(
     def _fake_flatfield(*, zarr_path, parameters, client, progress_callback):
         del parameters, client, progress_callback
         fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
-        latest = fake_root.require_group("results").require_group("flatfield").require_group(
-            "latest"
+        latest = (
+            fake_root.require_group("results")
+            .require_group("flatfield")
+            .require_group("latest")
         )
         latest.create_dataset(
             name="data",
@@ -956,7 +1137,9 @@ def test_run_workflow_chains_flatfield_output_to_visualization(
             keyframe_count=0,
         )
 
-    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_dask_backend)
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
     monkeypatch.setattr(main_module, "run_flatfield_analysis", _fake_flatfield)
     monkeypatch.setattr(main_module, "run_visualization_analysis", _fake_visualization)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)

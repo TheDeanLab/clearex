@@ -163,6 +163,84 @@ def test_detect_visible_gpu_device_ids_parses_nvidia_smi(monkeypatch) -> None:
     assert experiment_module._detect_visible_gpu_device_ids() == ["0", "1", "2"]
 
 
+def test_library_path_env_vars_for_platform_windows() -> None:
+    assert experiment_module._library_path_env_vars_for_platform(
+        os_name="nt",
+        platform="win32",
+    ) == ("PATH",)
+
+
+def test_library_path_env_vars_for_platform_linux() -> None:
+    assert experiment_module._library_path_env_vars_for_platform(
+        os_name="posix",
+        platform="linux",
+    ) == ("LD_LIBRARY_PATH",)
+
+
+def test_build_library_path_environment_updates_merges_discovered_and_inherited() -> None:
+    updates = experiment_module._build_library_path_environment_updates(
+        ["/cuda/runtime/lib", "/cuda/cudnn/lib"],
+        env={"LD_LIBRARY_PATH": "/cluster/custom/lib"},
+        env_var_names=("LD_LIBRARY_PATH",),
+    )
+    assert updates == {
+        "LD_LIBRARY_PATH": "/cuda/runtime/lib:/cuda/cudnn/lib:/cluster/custom/lib"
+    }
+
+
+def test_create_dask_client_gpu_worker_env_merges_inherited_library_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _DummyClient:
+        def __init__(self, cluster):
+            captured["cluster"] = cluster
+
+    class _DummyCluster:
+        pass
+
+    def _fake_spec_cluster(*, scheduler, workers, asynchronous):
+        captured["scheduler"] = scheduler
+        captured["workers"] = workers
+        captured["asynchronous"] = asynchronous
+        return _DummyCluster()
+
+    monkeypatch.setattr("distributed.deploy.spec.SpecCluster", _fake_spec_cluster)
+    monkeypatch.setattr("dask.distributed.Client", _DummyClient)
+    monkeypatch.setattr(
+        experiment_module,
+        "_normalize_gpu_device_ids",
+        lambda values: ["0"],
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "_detect_visible_gpu_device_ids",
+        lambda: ["0"],
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "_detect_cuda_library_paths",
+        lambda: ["/cuda/runtime/lib", "/cuda/cudnn/lib"],
+    )
+    path_env_var = experiment_module._library_path_env_vars_for_platform()[0]
+    monkeypatch.setenv(path_env_var, "/cluster/custom/lib")
+
+    _ = experiment_module.create_dask_client(
+        gpu_enabled=True,
+        n_workers=1,
+        threads_per_worker=1,
+        processes=True,
+    )
+
+    workers = dict(captured["workers"])
+    worker_options = dict(workers["gpu-worker-00"]["options"])
+    worker_env = dict(worker_options["env"])
+    assert worker_env[path_env_var] == (
+        "/cuda/runtime/lib:/cuda/cudnn/lib:/cluster/custom/lib"
+    )
+
+
 def test_is_navigate_experiment_file():
     assert is_navigate_experiment_file("experiment.yml") is True
     assert is_navigate_experiment_file("experiment.yaml") is True

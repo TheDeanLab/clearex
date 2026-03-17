@@ -136,7 +136,9 @@ Current CLI usage:
 
 ```text
 usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
-               [--usegment3d] [--shear-transform] [-r] [-v] [--mip-export]
+               [--usegment3d] [--channel-indices CHANNEL_INDICES]
+               [--input-resolution-level INPUT_RESOLUTION_LEVEL]
+               [--shear-transform] [-r] [-v] [--mip-export]
                [-f FILE] [--dask | --no-dask] [--chunks CHUNKS]
                [--gui | --no-gui] [--headless]
 ```
@@ -146,6 +148,8 @@ usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
 - `--deconvolution`: Run deconvolution workflow.
 - `--particle-detection`: Run particle detection workflow.
 - `--usegment3d`: Run uSegment3D segmentation workflow.
+- `--channel-indices`: uSegment3D channels to process (`0,1,2` or `all`).
+- `--input-resolution-level`: uSegment3D input pyramid level (`0`, `1`, ...).
 - `-r, --registration`: Run registration workflow hook.
 - `-v, --visualization`: Run visualization workflow.
 - `--dask / --no-dask`: Enable/disable Dask-backed reading.
@@ -167,6 +171,16 @@ Run headless on a Navigate experiment:
 clearex --headless \
   --file /path/to/experiment.yml \
   --deconvolution --usegment3d --particle-detection
+```
+
+Run headless uSegment3D on all channels:
+
+```bash
+clearex --headless \
+  --file /path/to/experiment.yml \
+  --usegment3d \
+  --channel-indices all \
+  --input-resolution-level 1
 ```
 
 Run headless particle detection on an existing canonical Zarr store:

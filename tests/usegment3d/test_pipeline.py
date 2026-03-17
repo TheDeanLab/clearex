@@ -112,13 +112,20 @@ class _FakeRuntimeModule:
         params: dict[str, object],
         basename: object,
         savefolder: object,
-    ) -> tuple[tuple[object, object, object, object], np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[
+        tuple[object, object, object, object], np.ndarray, np.ndarray, np.ndarray
+    ]:
         del params, basename, savefolder
         view_weight = {"xy": 1.0, "xz": 2.0, "yz": 3.0}.get(str(view), 1.0)
         shape = tuple(int(v) for v in img.shape[:3])
         probability = np.full(shape, view_weight, dtype=np.float32)
         flows = np.zeros((2, shape[0], shape[1], shape[2]), dtype=np.float32)
-        return (None, None, None, None), probability, flows, np.empty((0,), dtype=np.float32)
+        return (
+            (None, None, None, None),
+            probability,
+            flows,
+            np.empty((0,), dtype=np.float32),
+        )
 
     @staticmethod
     def aggregate_2D_to_3D_segmentation_direct_method(
@@ -174,7 +181,9 @@ class _CompatRuntimeModule:
         params: dict[str, object],
         basename: object,
         savefolder: object,
-    ) -> tuple[tuple[object, object, object, object], np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[
+        tuple[object, object, object, object], np.ndarray, np.ndarray, np.ndarray
+    ]:
         del basename, savefolder
         auto_flag = bool(params.get("use_Cellpose_auto_diameter", False))
         cls.auto_flags_seen.append(auto_flag)
@@ -184,7 +193,12 @@ class _CompatRuntimeModule:
         shape = tuple(int(v) for v in img.shape[:3])
         probability = np.full(shape, view_weight, dtype=np.float32)
         flows = np.zeros((2, shape[0], shape[1], shape[2]), dtype=np.float32)
-        return (None, None, None, None), probability, flows, np.empty((0,), dtype=np.float32)
+        return (
+            (None, None, None, None),
+            probability,
+            flows,
+            np.empty((0,), dtype=np.float32),
+        )
 
     @staticmethod
     def aggregate_2D_to_3D_segmentation_direct_method(
@@ -278,10 +292,9 @@ def test_run_usegment3d_analysis_writes_latest_results(
     latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
     assert latest_ref["component"] == "results/usegment3d/latest"
     assert latest_ref["metadata"].get("channel_indices", []) == [1]
-    assert (
-        latest_ref["metadata"].get("aggregation_tile_mode_effective")
-        is latest_ref["metadata"].get("aggregation_tile_mode")
-    )
+    assert latest_ref["metadata"].get("aggregation_tile_mode_effective") is latest_ref[
+        "metadata"
+    ].get("aggregation_tile_mode")
     assert latest_ref["metadata"].get("dropped_parameter_keys", []) == []
 
 
@@ -334,6 +347,58 @@ def test_run_usegment3d_analysis_supports_multiple_channels(
     metadata = dict(latest_ref.get("metadata", {}))
     assert metadata.get("channel_indices") == [0, 2]
     assert metadata.get("channels_processed") == 2
+
+
+def test_run_usegment3d_analysis_supports_all_channels_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "analysis_store_usegment3d_all_channels.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 3, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    monkeypatch.setattr(
+        usegment_pipeline,
+        "_load_usegment3d_runtime",
+        lambda: (_FakeParameterModule(), _FakeRuntimeModule()),
+    )
+    monkeypatch.setattr(usegment_pipeline, "_is_gpu_available", lambda: False)
+
+    client = create_dask_client(n_workers=3, threads_per_worker=1, processes=False)
+    try:
+        summary = run_usegment3d_analysis(
+            zarr_path=store_path,
+            parameters={
+                "all_channels": True,
+                "use_views": ["xy"],
+                "gpu": False,
+                "require_gpu": False,
+            },
+            client=client,
+        )
+    finally:
+        client.close()
+
+    assert summary.volumes_processed == 3
+    assert summary.channel_indices == (0, 1, 2)
+    assert summary.channel_index == 0
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    labels = np.asarray(output_root["results"]["usegment3d"]["latest"]["data"])
+    assert tuple(labels.shape) == (1, 1, 3, 2, 2, 2)
+    assert int(labels.max()) == 1
+
+    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    metadata = dict(latest_ref.get("metadata", {}))
+    assert metadata.get("channel_indices") == [0, 1, 2]
+    assert metadata.get("channels_processed") == 3
+    assert metadata.get("parameters", {}).get("all_channels") is True
 
 
 def test_run_usegment3d_analysis_drops_unknown_parameters(
@@ -574,6 +639,65 @@ def test_run_usegment3d_analysis_require_gpu_fails_without_gpu(
                 "require_gpu": True,
             },
             client=None,
+        )
+
+
+def test_run_usegment3d_analysis_raises_diagnostic_on_cancelled_distributed_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from distributed.client import FutureCancelledError
+
+    store_path = tmp_path / "analysis_store_usegment3d_cancelled.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    monkeypatch.setattr(
+        usegment_pipeline,
+        "_load_usegment3d_runtime",
+        lambda: (_FakeParameterModule(), _FakeRuntimeModule()),
+    )
+    monkeypatch.setattr(usegment_pipeline, "_is_gpu_available", lambda: True)
+    monkeypatch.setattr(
+        "dask.distributed.as_completed",
+        lambda futures: iter(futures),
+    )
+
+    class _CancelledFuture:
+        def result(self):
+            raise FutureCancelledError(
+                key="run",
+                reason="unknown",
+                msg=None,
+            )
+
+    class _DummyClient:
+        def scheduler_info(self) -> dict[str, object]:
+            return {
+                "workers": {
+                    "worker-0": {"resources": {"GPU": 1.0}, "nthreads": 1},
+                }
+            }
+
+        def submit(self, *args, **kwargs):
+            del args, kwargs
+            return _CancelledFuture()
+
+    with pytest.raises(RuntimeError, match="distributed task was cancelled"):
+        run_usegment3d_analysis(
+            zarr_path=store_path,
+            parameters={
+                "channel_index": 0,
+                "gpu": True,
+                "require_gpu": False,
+            },
+            client=_DummyClient(),
         )
 
 

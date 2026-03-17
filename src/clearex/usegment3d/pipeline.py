@@ -31,7 +31,16 @@ from __future__ import annotations
 # Standard Library Imports
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+)
 
 # Third Party Imports
 import dask
@@ -215,7 +224,7 @@ def _load_usegment3d_runtime() -> tuple[Any, Any]:
     except Exception as exc:  # pragma: no cover - optional dependency path
         raise RuntimeError(
             "uSegment3D runtime is unavailable. Install optional dependencies with "
-            "`uv pip install -e \".[usegment3d]\"` or `pip install u-Segment3D`."
+            '`uv pip install -e ".[usegment3d]"` or `pip install u-Segment3D`.'
         ) from exc
     return usegment3d_parameters, usegment3d_runtime
 
@@ -238,7 +247,47 @@ def _is_gpu_available() -> bool:
         return False
 
 
-def _extract_base_voxel_size_um_zyx(root: zarr.hierarchy.Group) -> tuple[float, float, float]:
+def _summarize_client_worker_state(client: "Client") -> str:
+    """Summarize current distributed worker state for failure diagnostics.
+
+    Parameters
+    ----------
+    client : dask.distributed.Client
+        Active distributed client.
+
+    Returns
+    -------
+    str
+        Concise worker/resource summary string.
+    """
+    try:
+        scheduler_info = client.scheduler_info()
+    except Exception as exc:
+        return (
+            "scheduler_info_unavailable="
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    worker_infos = dict(scheduler_info.get("workers", {}))
+    active_workers = len(worker_infos)
+    gpu_workers = sum(
+        1
+        for worker in worker_infos.values()
+        if float(dict(worker.get("resources", {})).get("GPU", 0.0)) >= 1.0
+    )
+    total_threads = sum(
+        max(0, int(worker.get("nthreads", 0))) for worker in worker_infos.values()
+    )
+    return (
+        f"active_workers={active_workers}, "
+        f"gpu_workers={gpu_workers}, "
+        f"total_threads={total_threads}"
+    )
+
+
+def _extract_base_voxel_size_um_zyx(
+    root: zarr.hierarchy.Group,
+) -> tuple[float, float, float]:
     """Extract base-level physical voxel size from Zarr metadata.
 
     Parameters
@@ -313,7 +362,7 @@ def _pyramid_factor_zyx_for_level(
             except Exception:
                 pass
 
-    uniform = float(2**int(level))
+    uniform = float(2 ** int(level))
     return (uniform, uniform, uniform)
 
 
@@ -553,7 +602,9 @@ def _prepare_output_array(
     )
 
 
-def _prepare_preprocess_params(parameters_module: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _prepare_preprocess_params(
+    parameters_module: Any, parameters: Mapping[str, Any]
+) -> dict[str, Any]:
     """Build preprocess parameter payload for uSegment3D.
 
     Parameters
@@ -589,7 +640,9 @@ def _prepare_preprocess_params(parameters_module: Any, parameters: Mapping[str, 
     return preprocess_params
 
 
-def _prepare_cellpose_params(parameters_module: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _prepare_cellpose_params(
+    parameters_module: Any, parameters: Mapping[str, Any]
+) -> dict[str, Any]:
     """Build Cellpose runtime parameter payload.
 
     Parameters
@@ -618,7 +671,9 @@ def _prepare_cellpose_params(parameters_module: Any, parameters: Mapping[str, An
     )
     cellpose_params["gpu"] = bool(parameters.get("gpu", False))
     cellpose_params["best_diam"] = parameters.get("cellpose_best_diameter", None)
-    cellpose_params["model_invert"] = bool(parameters.get("cellpose_model_invert", False))
+    cellpose_params["model_invert"] = bool(
+        parameters.get("cellpose_model_invert", False)
+    )
     cellpose_params["test_slice"] = parameters.get("cellpose_test_slice", None)
     diameter_range = list(parameters.get("cellpose_diameter_range", [10.0, 120.0, 2.5]))
     diameter_min, diameter_max, diameter_step = (
@@ -639,7 +694,9 @@ def _prepare_cellpose_params(parameters_module: Any, parameters: Mapping[str, An
     return cellpose_params
 
 
-def _prepare_aggregation_params(parameters_module: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _prepare_aggregation_params(
+    parameters_module: Any, parameters: Mapping[str, Any]
+) -> dict[str, Any]:
     """Build aggregation parameter payload for direct-method uSegment3D.
 
     Parameters
@@ -658,7 +715,9 @@ def _prepare_aggregation_params(parameters_module: Any, parameters: Mapping[str,
     aggregation_params = dict(parameters_module.get_2D_to_3D_aggregation_params())
 
     combine_cell_probs = dict(aggregation_params.get("combine_cell_probs", {}))
-    combine_cell_probs["prob_thresh"] = parameters.get("aggregation_prob_threshold", None)
+    combine_cell_probs["prob_thresh"] = parameters.get(
+        "aggregation_prob_threshold", None
+    )
     combine_cell_probs["threshold_n_levels"] = int(
         parameters.get("aggregation_threshold_n_levels", 3)
     )
@@ -717,7 +776,9 @@ def _prepare_aggregation_params(parameters_module: Any, parameters: Mapping[str,
     return aggregation_params
 
 
-def _prepare_postprocess_params(parameters_module: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _prepare_postprocess_params(
+    parameters_module: Any, parameters: Mapping[str, Any]
+) -> dict[str, Any]:
     """Build postprocess parameter payload for uSegment3D.
 
     Parameters
@@ -851,7 +912,9 @@ def _segment_volume(
     aggregation_params = _prepare_aggregation_params(parameters_module, parameters)
     postprocess_params = _prepare_postprocess_params(parameters_module, parameters)
 
-    preprocessed = runtime_module.preprocess_imgs(np.asarray(image_zyx), params=preprocess_params)
+    preprocessed = runtime_module.preprocess_imgs(
+        np.asarray(image_zyx), params=preprocess_params
+    )
     preprocessed_array = np.asarray(preprocessed)
 
     if preprocessed_array.ndim == 4 and preprocessed_array.shape[0] == 1:
@@ -869,7 +932,9 @@ def _segment_volume(
             f"{tuple(preprocessed_array.shape)}."
         )
 
-    views = tuple(str(value) for value in list(parameters.get("use_views", ["xy", "xz", "yz"])))
+    views = tuple(
+        str(value) for value in list(parameters.get("use_views", ["xy", "xz", "yz"]))
+    )
     probabilities_by_view: dict[str, np.ndarray] = {}
     gradients_by_view: dict[str, np.ndarray] = {}
     for view in views:
@@ -885,9 +950,8 @@ def _segment_volume(
             # Some cellpose/uSegment3D combinations return 3 values from model eval
             # instead of the 4-value shape expected by uSegment3D auto-diameter logic.
             # Retry once with explicit diameter to preserve compatibility.
-            if (
-                "not enough values to unpack" not in str(exc).lower()
-                or not bool(cellpose_params.get("use_Cellpose_auto_diameter", False))
+            if "not enough values to unpack" not in str(exc).lower() or not bool(
+                cellpose_params.get("use_Cellpose_auto_diameter", False)
             ):
                 raise
             fallback_params = dict(cellpose_params)
@@ -899,9 +963,7 @@ def _segment_volume(
                     dtype=np.float32,
                 ).ravel()
                 fallback_best_diam = (
-                    float(np.nanmedian(diam_range))
-                    if diam_range.size > 0
-                    else 30.0
+                    float(np.nanmedian(diam_range)) if diam_range.size > 0 else 30.0
                 )
                 if not np.isfinite(fallback_best_diam) or fallback_best_diam <= 0:
                     fallback_best_diam = 30.0
@@ -922,12 +984,14 @@ def _segment_volume(
         probabilities_by_view=probabilities_by_view,
         gradients_by_view=gradients_by_view,
     )
-    segmentation, (_, gradients3d) = runtime_module.aggregate_2D_to_3D_segmentation_direct_method(
-        probs=ordered_probs,
-        gradients=ordered_gradients,
-        params=aggregation_params,
-        savefolder=None,
-        basename=None,
+    segmentation, (_, gradients3d) = (
+        runtime_module.aggregate_2D_to_3D_segmentation_direct_method(
+            probs=ordered_probs,
+            gradients=ordered_gradients,
+            params=aggregation_params,
+            savefolder=None,
+            basename=None,
+        )
     )
     labels = np.asarray(segmentation)
 
@@ -1173,10 +1237,9 @@ def run_usegment3d_analysis(
             "uSegment3D output reference must be canonical 6D data (t,p,c,z,y,x). "
             f"Component '{output_reference_component}' is incompatible."
         )
-    if (
-        int(source_shape[0]) != int(output_reference_shape[0])
-        or int(source_shape[1]) != int(output_reference_shape[1])
-    ):
+    if int(source_shape[0]) != int(output_reference_shape[0]) or int(
+        source_shape[1]
+    ) != int(output_reference_shape[1]):
         raise ValueError(
             "uSegment3D source/output-reference (t,p) dimensions must match. "
             f"source={source_shape[:2]}, reference={output_reference_shape[:2]}."
@@ -1187,23 +1250,29 @@ def run_usegment3d_analysis(
     )
     if not requested_channel_indices:
         requested_channel_indices = [int(normalized.get("channel_index", 0))]
+    all_channels = bool(normalized.get("all_channels", False))
     channel_indices: list[int] = []
-    seen_channel_indices: set[int] = set()
-    for value in requested_channel_indices:
-        parsed = max(0, int(value))
-        if parsed in seen_channel_indices:
-            continue
-        if parsed >= int(source_shape[2]):
-            raise ValueError(
-                f"uSegment3D channel_index={parsed} is out of bounds "
-                f"for channel axis size {source_shape[2]}."
-            )
-        channel_indices.append(parsed)
-        seen_channel_indices.add(parsed)
+    if all_channels:
+        channel_indices = list(range(int(source_shape[2])))
+    else:
+        seen_channel_indices: set[int] = set()
+        for value in requested_channel_indices:
+            parsed = max(0, int(value))
+            if parsed in seen_channel_indices:
+                continue
+            if parsed >= int(source_shape[2]):
+                raise ValueError(
+                    f"uSegment3D channel_index={parsed} is out of bounds "
+                    f"for channel axis size {source_shape[2]}."
+                )
+            channel_indices.append(parsed)
+            seen_channel_indices.add(parsed)
     if not channel_indices:
         channel_indices = [0]
+        all_channels = False
     normalized["channel_indices"] = list(channel_indices)
     normalized["channel_index"] = int(channel_indices[0])
+    normalized["all_channels"] = bool(all_channels)
     channel_index = int(channel_indices[0])
 
     base_voxel_size_um_zyx = _extract_base_voxel_size_um_zyx(root)
@@ -1229,9 +1298,8 @@ def run_usegment3d_analysis(
     preprocess_voxel_res = list(
         normalized.get("preprocess_voxel_res_zyx", [1.0, 1.0, 1.0])
     )
-    if (
-        len(preprocess_voxel_res) == 3
-        and all(abs(float(value) - 1.0) <= 1e-8 for value in preprocess_voxel_res)
+    if len(preprocess_voxel_res) == 3 and all(
+        abs(float(value) - 1.0) <= 1e-8 for value in preprocess_voxel_res
     ):
         normalized["preprocess_voxel_res_zyx"] = [
             float(source_voxel_size_um_zyx[0]),
@@ -1241,8 +1309,7 @@ def run_usegment3d_analysis(
 
     save_native_labels_requested = bool(normalized.get("save_native_labels", False))
     save_native_labels_effective = bool(
-        save_native_labels_requested
-        and output_reference_component != source_component
+        save_native_labels_requested and output_reference_component != source_component
     )
 
     _emit(
@@ -1272,7 +1339,12 @@ def run_usegment3d_analysis(
     _emit(10, "Initialized latest uSegment3D output dataset")
 
     work_items = [
-        (int(t_index), int(p_index), int(source_channel_index), int(output_channel_index))
+        (
+            int(t_index),
+            int(p_index),
+            int(source_channel_index),
+            int(output_channel_index),
+        )
         for output_channel_index, source_channel_index in enumerate(channel_indices)
         for t_index in range(int(output_shape[0]))
         for p_index in range(int(output_shape[1]))
@@ -1357,6 +1429,7 @@ def run_usegment3d_analysis(
         _emit(95, f"Completed {total} uSegment3D tasks")
     else:
         from dask.distributed import as_completed
+        from distributed.client import FutureCancelledError
 
         _emit(15, f"Submitting {total} uSegment3D tasks to Dask client")
         submit_resources: Optional[Dict[str, float]] = None
@@ -1365,17 +1438,13 @@ def run_usegment3d_analysis(
                 scheduler_info = client.scheduler_info()
                 worker_infos = scheduler_info.get("workers", {})
                 has_gpu_resources = any(
-                    float(
-                        dict(worker_info.get("resources", {})).get("GPU", 0.0)
-                    )
-                    >= 1.0
+                    float(dict(worker_info.get("resources", {})).get("GPU", 0.0)) >= 1.0
                     for worker_info in worker_infos.values()
                 )
             except Exception:
                 has_gpu_resources = False
             if has_gpu_resources:
                 submit_resources = {"GPU": 1.0}
-        shared_parameters = client.scatter(dict(normalized), broadcast=True)
         futures = [
             client.submit(
                 _run_usegment3d_for_volume,
@@ -1392,7 +1461,7 @@ def run_usegment3d_analysis(
                 p_index=p_index,
                 source_channel_index=source_channel_index,
                 output_channel_index=output_channel_index,
-                parameters=shared_parameters,
+                parameters=dict(normalized),
                 pure=False,
                 resources=submit_resources,
             )
@@ -1400,7 +1469,14 @@ def run_usegment3d_analysis(
         ]
         completed = 0
         for future in as_completed(futures):
-            _ = int(future.result())
+            try:
+                _ = int(future.result())
+            except FutureCancelledError as exc:
+                raise RuntimeError(
+                    "uSegment3D distributed task was cancelled before completion. "
+                    "One or more Dask workers exited unexpectedly. "
+                    f"Current scheduler state: {_summarize_client_worker_state(client)}."
+                ) from exc
             completed += 1
             progress = 15 + int((completed / max(1, total)) * 80)
             _emit(progress, f"Processed uSegment3D volume {completed}/{total}")

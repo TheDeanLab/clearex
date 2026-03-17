@@ -159,6 +159,24 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run u-segment3d workflow",
     )
+    input_args.add_argument(
+        "--channel-indices",
+        type=str,
+        default=None,
+        help=(
+            "uSegment3D channels to process (comma-separated indices, "
+            "for example '0,1,2', or 'all')."
+        ),
+    )
+    input_args.add_argument(
+        "--input-resolution-level",
+        type=int,
+        default=None,
+        help=(
+            "uSegment3D input pyramid level (0=full resolution, 1=first "
+            "downsampled level, ...)."
+        ),
+    )
 
     input_args.add_argument(
         "--shear-transform",

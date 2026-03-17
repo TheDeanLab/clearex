@@ -66,3 +66,16 @@ def test_analysis_flags_are_parsed():
     assert args.mip_export is True
     assert args.headless is True
     assert args.dask is False
+
+
+def test_channel_indices_flag_accepts_indices_and_all():
+    args = create_parser().parse_args(["--channel-indices", "0,2,4"])
+    assert args.channel_indices == "0,2,4"
+
+    args = create_parser().parse_args(["--channel-indices", "all"])
+    assert args.channel_indices == "all"
+
+
+def test_input_resolution_level_flag_parses_integer():
+    args = create_parser().parse_args(["--input-resolution-level", "2"])
+    assert args.input_resolution_level == 2

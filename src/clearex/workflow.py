@@ -178,6 +178,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "use_map_overlap": False,
         "overlap_zyx": [12, 24, 24],
         "memory_overhead_factor": 3.0,
+        "all_channels": False,
         "channel_indices": [0],
         "channel_index": 0,
         "use_views": ["xy", "xz", "yz"],
@@ -803,6 +804,7 @@ def _normalize_usegment3d_parameters(
     """
     normalized = _normalize_common_operation_parameters("usegment3d", params)
     normalized["detect_2d_per_slice"] = False
+    normalized["all_channels"] = bool(normalized.get("all_channels", False))
 
     default_usegment3d = DEFAULT_ANALYSIS_OPERATION_PARAMETERS.get("usegment3d", {})
     default_channel_indices = [

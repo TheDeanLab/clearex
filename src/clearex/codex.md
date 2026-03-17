@@ -66,6 +66,8 @@ This directory contains the runtime orchestration surface for ClearEx.
   - optional `save_native_labels` stores downsampled native labels alongside upsampled output,
   - distributed execution runs one task per `(t, p, selected channel)` volume,
   - GUI runtime controls now expose channel checkboxes and emit `channel_indices`,
+  - headless CLI supports `--channel-indices` with `all` for full-channel runs,
+  - headless CLI supports `--input-resolution-level` for pyramid-level selection,
   - latest output is persisted to `results/usegment3d/latest/data`,
   - provenance references include GPU/tiling configuration, resolution/output-space metadata, and selected views.
 - Runtime uses optional dependency loading (`u-Segment3D`) and supports

@@ -31,8 +31,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 import argparse
+import json
 import logging
 import math
+import os
 
 
 # Third Party Imports
@@ -116,8 +118,10 @@ from clearex.workflow import (
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
     DASK_BACKEND_SLURM_RUNNER,
-    WorkflowConfig,
+    DaskBackendConfig,
     LocalClusterConfig,
+    WorkflowConfig,
+    dask_backend_from_dict,
     dask_backend_to_dict,
     format_dask_backend_summary,
     format_chunks,
@@ -139,6 +143,9 @@ _ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
     "registration": "results/registration/latest/data",
     "visualization": "data",
 }
+
+_CLEAREX_SETTINGS_DIR_NAME = ".clearex"
+_CLEAREX_DASK_BACKEND_SETTINGS_FILE = "dask_backend_settings.json"
 
 _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
     {
@@ -342,11 +349,70 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
     Raises
     ------
     ValueError
-        If the ``--chunks`` option cannot be parsed as valid positive integers.
+        If the ``--chunks`` option cannot be parsed as valid positive integers
+        or uSegment3D CLI overrides contain invalid values.
     """
+    usegment3d_analysis_parameters: Dict[str, Dict[str, Any]] = {}
+    input_resolution_level_arg = getattr(args, "input_resolution_level", None)
+    if input_resolution_level_arg is not None:
+        parsed_input_resolution_level = int(input_resolution_level_arg)
+        if parsed_input_resolution_level < 0:
+            raise ValueError(
+                "Invalid --input-resolution-level value. Level must be >= 0."
+            )
+        usegment3d_analysis_parameters.setdefault("usegment3d", {})[
+            "input_resolution_level"
+        ] = parsed_input_resolution_level
+
+    channel_indices_arg = getattr(args, "channel_indices", None)
+    if channel_indices_arg is not None and str(channel_indices_arg).strip():
+        channel_tokens = [
+            token.strip()
+            for token in str(channel_indices_arg).replace("\n", ",").split(",")
+            if token.strip()
+        ]
+        if len(channel_tokens) == 1 and channel_tokens[0].lower() in {"all", "*"}:
+            usegment3d_analysis_parameters.setdefault("usegment3d", {})[
+                "all_channels"
+            ] = True
+        else:
+            parsed_indices: list[int] = []
+            seen_indices: set[int] = set()
+            for token in channel_tokens:
+                try:
+                    index = int(token)
+                except ValueError as exc:
+                    raise ValueError(
+                        "Invalid --channel-indices value. Use comma-separated "
+                        "integers (for example '0,1,2') or 'all'."
+                    ) from exc
+                if index < 0:
+                    raise ValueError(
+                        "Invalid --channel-indices value. Channel indices must "
+                        "be non-negative."
+                    )
+                if index in seen_indices:
+                    continue
+                parsed_indices.append(index)
+                seen_indices.add(index)
+            if parsed_indices:
+                usegment3d_analysis_parameters.setdefault("usegment3d", {}).update(
+                    {
+                        "channel_indices": parsed_indices,
+                        "channel_index": int(parsed_indices[0]),
+                    }
+                )
+
+    persisted_dask_backend = _load_persisted_dask_backend_config()
+
     return WorkflowConfig(
         file=args.file,
         prefer_dask=args.dask,
+        dask_backend=(
+            persisted_dask_backend
+            if persisted_dask_backend is not None
+            else DaskBackendConfig()
+        ),
         chunks=parse_chunks(args.chunks),
         flatfield=args.flatfield,
         deconvolution=args.deconvolution,
@@ -356,7 +422,62 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         registration=args.registration,
         visualization=args.visualization,
         mip_export=args.mip_export,
+        analysis_parameters=usegment3d_analysis_parameters,
     )
+
+
+def _resolve_persisted_dask_backend_settings_path() -> Path:
+    """Resolve the user settings JSON path for persisted backend config.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    pathlib.Path
+        Full JSON path used for persisted Dask backend settings.
+    """
+    return (
+        Path.home()
+        / _CLEAREX_SETTINGS_DIR_NAME
+        / _CLEAREX_DASK_BACKEND_SETTINGS_FILE
+    ).expanduser()
+
+
+def _load_persisted_dask_backend_config() -> Optional[DaskBackendConfig]:
+    """Load persisted Dask backend settings for CLI/headless execution.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    DaskBackendConfig, optional
+        Persisted backend configuration when available and valid.
+
+    Notes
+    -----
+    Set ``CLEAREX_DISABLE_PERSISTED_DASK_BACKEND=1`` to ignore persisted
+    backend settings for the current process.
+    """
+    disabled = str(os.environ.get("CLEAREX_DISABLE_PERSISTED_DASK_BACKEND", "")).strip()
+    if disabled.lower() in {"1", "true", "yes", "on"}:
+        return None
+
+    settings_path = _resolve_persisted_dask_backend_settings_path()
+    if not settings_path.exists():
+        return None
+
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict) or not payload:
+        return None
+    return dask_backend_from_dict(payload)
 
 
 def _extract_axis_map(info: ImageInfo) -> Dict[str, int]:
@@ -1967,7 +2088,7 @@ def _run_workflow(
                             "overlay_points_count": summary.overlay_points_count,
                             "launch_mode": summary.launch_mode,
                             "viewer_pid": summary.viewer_pid,
-                            "renderer": dict(summary.renderer or {}),
+                            "renderer": dict(getattr(summary, "renderer", None) or {}),
                             "keyframe_manifest_path": summary.keyframe_manifest_path,
                             "keyframe_count": summary.keyframe_count,
                             "storage_policy": "latest_only",

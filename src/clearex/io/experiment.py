@@ -40,6 +40,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import warnings
 import xml.etree.ElementTree as ET
 
@@ -5066,20 +5067,11 @@ def create_dask_client(
             str(local_directory) if local_directory is not None else None
         )
         cuda_library_paths = _detect_cuda_library_paths()
-        inherited_ld_library_path = str(os.environ.get("LD_LIBRARY_PATH", "")).strip()
-        if cuda_library_paths:
-            merged_entries = _deduplicate_library_path_entries(
-                [
-                    *cuda_library_paths,
-                    *(
-                        inherited_ld_library_path.split(":")
-                        if inherited_ld_library_path
-                        else []
-                    ),
-                ]
-            )
-            inherited_ld_library_path = ":".join(merged_entries)
-            os.environ["LD_LIBRARY_PATH"] = inherited_ld_library_path
+        worker_library_env_updates = _build_library_path_environment_updates(
+            cuda_library_paths
+        )
+        for env_key, env_value in worker_library_env_updates.items():
+            os.environ[env_key] = env_value
 
         workers: Dict[str, Dict[str, Any]] = {}
         for worker_index, gpu_id in enumerate(worker_gpu_ids):
@@ -5088,10 +5080,7 @@ def create_dask_client(
                 "CLEAREX_GPU_DEVICE_ID": str(gpu_id),
                 "CLEAREX_GPU_WORKER_INDEX": str(worker_index),
             }
-            if cuda_library_paths:
-                worker_env["LD_LIBRARY_PATH"] = ":".join(cuda_library_paths)
-            elif inherited_ld_library_path:
-                worker_env["LD_LIBRARY_PATH"] = inherited_ld_library_path
+            worker_env.update(worker_library_env_updates)
             options: Dict[str, Any] = {
                 "nthreads": max(1, int(threads_per_worker)),
                 "memory_limit": memory_limit,
@@ -5154,8 +5143,105 @@ def _normalize_gpu_device_ids(
     return normalized
 
 
+def _library_path_env_vars_for_platform(
+    *,
+    os_name: Optional[str] = None,
+    platform: Optional[str] = None,
+) -> tuple[str, ...]:
+    """Return dynamic-library environment variable names for current platform.
+
+    Parameters
+    ----------
+    os_name : str, optional
+        Override for ``os.name`` used by tests.
+    platform : str, optional
+        Override for ``sys.platform`` used by tests.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered environment variable names used for runtime library lookup.
+    """
+    effective_os_name = str(os.name if os_name is None else os_name).strip().lower()
+    effective_platform = str(
+        sys.platform if platform is None else platform
+    ).strip().lower()
+    if effective_os_name == "nt":
+        return ("PATH",)
+    if effective_platform == "darwin":
+        return ("DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH")
+    return ("LD_LIBRARY_PATH",)
+
+
+def _split_library_path_entries(value: str) -> list[str]:
+    """Split a platform library-path string into normalized entries.
+
+    Parameters
+    ----------
+    value : str
+        Raw library-path text.
+
+    Returns
+    -------
+    list[str]
+        Non-empty path entries in input order.
+    """
+    text = str(value).strip()
+    if not text:
+        return []
+    return [entry.strip() for entry in text.split(os.pathsep) if entry.strip()]
+
+
+def _build_library_path_environment_updates(
+    discovered_paths: Sequence[str],
+    *,
+    env: Optional[Dict[str, str]] = None,
+    env_var_names: Optional[Sequence[str]] = None,
+) -> dict[str, str]:
+    """Build environment updates for runtime library search paths.
+
+    Parameters
+    ----------
+    discovered_paths : sequence of str
+        Candidate runtime library directories to prioritize.
+    env : dict[str, str], optional
+        Environment mapping source used for inherited path discovery.
+        Defaults to ``os.environ``.
+    env_var_names : sequence of str, optional
+        Explicit path variable names. Defaults to platform-appropriate
+        variables from :func:`_library_path_env_vars_for_platform`.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment updates keyed by selected path variable names.
+    """
+    effective_env = os.environ if env is None else env
+    selected_env_vars = tuple(
+        str(value).strip()
+        for value in (
+            _library_path_env_vars_for_platform()
+            if env_var_names is None
+            else tuple(env_var_names)
+        )
+        if str(value).strip()
+    )
+    inherited_entries: list[str] = []
+    for env_key in selected_env_vars:
+        inherited_entries.extend(
+            _split_library_path_entries(str(effective_env.get(env_key, "")))
+        )
+    merged_entries = _deduplicate_library_path_entries(
+        [*list(discovered_paths), *inherited_entries]
+    )
+    if not merged_entries:
+        return {}
+    joined = os.pathsep.join(merged_entries)
+    return {env_key: joined for env_key in selected_env_vars}
+
+
 def _detect_cuda_library_paths() -> list[str]:
-    """Return CUDA runtime library directories useful for worker environments.
+    """Return CUDA/cuDNN library directories useful for worker environments.
 
     Parameters
     ----------
@@ -5164,22 +5250,49 @@ def _detect_cuda_library_paths() -> list[str]:
     Returns
     -------
     list[str]
-        Existing library directories that contain CUDA runtime/NVRTC shared
-        objects. Returns an empty list when no candidate path is found.
+        Existing library directories that contain CUDA runtime, NVRTC, or
+        cuDNN shared objects. Returns an empty list when no candidate path is
+        found.
     """
     candidate_dirs: list[Path] = []
-    try:
-        import nvidia.cuda_nvrtc  # type: ignore[import-not-found]
+    nvidia_runtime_modules: tuple[str, ...] = (
+        "nvidia.cuda_nvrtc",
+        "nvidia.cuda_runtime",
+        "nvidia.cudnn",
+    )
+    for module_name in nvidia_runtime_modules:
+        try:
+            module = __import__(module_name, fromlist=["__file__"])
+            module_paths: list[Path] = []
+            module_file = getattr(module, "__file__", None)
+            if module_file:
+                module_paths.append(Path(str(module_file)).resolve().parent)
+            module_search_paths = getattr(module, "__path__", None)
+            if module_search_paths is not None:
+                module_paths.extend(
+                    Path(str(path_entry)).resolve()
+                    for path_entry in list(module_search_paths)
+                )
+        except Exception:
+            continue
+        for module_path in module_paths:
+            candidate_dirs.append(module_path / "lib")
+            candidate_dirs.append(module_path / "bin")
+    for env_key in ("CUDA_PATH", "CUDA_HOME", "CUDA_ROOT"):
+        root_text = str(os.environ.get(env_key, "")).strip()
+        if not root_text:
+            continue
+        root = Path(root_text)
+        candidate_dirs.append(root / "lib64")
+        candidate_dirs.append(root / "lib")
+        candidate_dirs.append(root / "bin")
 
-        candidate_dirs.append(Path(nvidia.cuda_nvrtc.__file__).resolve().parent / "lib")
-    except Exception:
-        pass
-    try:
-        import nvidia.cuda_runtime  # type: ignore[import-not-found]
-
-        candidate_dirs.append(Path(nvidia.cuda_runtime.__file__).resolve().parent / "lib")
-    except Exception:
-        pass
+    if os.name == "nt":
+        marker_patterns = ("cudart64*.dll", "nvrtc64*.dll", "cudnn*.dll")
+    elif sys.platform == "darwin":
+        marker_patterns = ("libcudart*.dylib", "libnvrtc*.dylib", "libcudnn*.dylib")
+    else:
+        marker_patterns = ("libcudart.so*", "libnvrtc.so*", "libcudnn*.so*")
 
     discovered: list[str] = []
     seen: set[str] = set()
@@ -5190,9 +5303,10 @@ def _detect_cuda_library_paths() -> list[str]:
             continue
         if not resolved.exists() or not resolved.is_dir():
             continue
-        has_nvrtc = any(resolved.glob("libnvrtc.so*"))
-        has_cudart = any(resolved.glob("libcudart.so*"))
-        if not (has_nvrtc or has_cudart):
+        has_runtime_lib = any(
+            any(resolved.glob(pattern)) for pattern in marker_patterns
+        )
+        if not has_runtime_lib:
             continue
         text = str(resolved)
         if text in seen:
@@ -5203,7 +5317,7 @@ def _detect_cuda_library_paths() -> list[str]:
 
 
 def _deduplicate_library_path_entries(entries: Sequence[str]) -> list[str]:
-    """Deduplicate colon-separated library path entries while preserving order.
+    """Deduplicate library path entries while preserving order.
 
     Parameters
     ----------
