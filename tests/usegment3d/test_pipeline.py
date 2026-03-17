@@ -235,6 +235,65 @@ class _CompatRuntimeModule:
         return np.asarray(segmentation, dtype=np.uint32), {}
 
 
+@pytest.mark.parametrize(
+    ("raw_line", "expected"),
+    [
+        (
+            "no CUDA. trying torch for normalizing",
+            "uSegment3D: CuPy CUDA normalization path unavailable; trying Torch backend.",
+        ),
+        (
+            "no gpu. falling back to CPU for resizing",
+            "uSegment3D: GPU resizing backends unavailable; falling back to CPU.",
+        ),
+        ("single channel", "single channel"),
+        ("   ", ""),
+    ],
+)
+def test_remap_usegment3d_runtime_stdout_line(
+    raw_line: str,
+    expected: str,
+) -> None:
+    assert (
+        usegment_pipeline._remap_usegment3d_runtime_stdout_line(raw_line) == expected
+    )
+
+
+class _PreprocessPrintRuntimeModule(_FakeRuntimeModule):
+    """Runtime stub that emits legacy fallback prints during preprocessing."""
+
+    @staticmethod
+    def preprocess_imgs(img: np.ndarray, params: dict[str, object]) -> np.ndarray:
+        del params
+        print("no CUDA. trying torch for normalizing")
+        print("single channel")
+        return np.asarray(img, dtype=np.float32)
+
+
+def test_segment_volume_rewrites_legacy_no_cuda_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        usegment_pipeline,
+        "_load_usegment3d_runtime",
+        lambda: (_FakeParameterModule(), _PreprocessPrintRuntimeModule()),
+    )
+    params = dict(usegment_pipeline._normalize_parameters({}))
+    _ = usegment_pipeline._segment_volume(
+        image_zyx=np.ones((4, 5, 6), dtype=np.float32),
+        parameters=params,
+    )
+
+    captured = capsys.readouterr()
+    assert (
+        "uSegment3D: CuPy CUDA normalization path unavailable; trying Torch backend."
+        in captured.out
+    )
+    assert "no CUDA. trying torch for normalizing" not in captured.out
+    assert "single channel" in captured.out
+
+
 def test_run_usegment3d_analysis_writes_latest_results(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

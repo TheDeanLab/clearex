@@ -41,6 +41,60 @@ def _test_logger(name: str) -> logging.Logger:
     return logger
 
 
+def test_resolve_log_directory_for_workflow_uses_parent_for_missing_navigate_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "acq" / "experiment.yml"
+    workflow = WorkflowConfig(file=str(experiment_path))
+    fake_experiment = SimpleNamespace(path=experiment_path)
+    missing_store_path = tmp_path / "acq" / "data_store.zarr"
+
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda _: True)
+    monkeypatch.setattr(
+        main_module,
+        "load_navigate_experiment",
+        lambda _: fake_experiment,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "resolve_experiment_data_path",
+        lambda _: tmp_path / "acq" / "raw_input.tif",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "resolve_data_store_path",
+        lambda *_args, **_kwargs: missing_store_path,
+    )
+
+    resolved = main_module._resolve_log_directory_for_workflow(workflow)
+
+    assert resolved == missing_store_path.parent.resolve()
+
+
+def test_resolve_log_directory_for_workflow_uses_parent_for_missing_zarr_path(
+    tmp_path: Path,
+) -> None:
+    missing_store_path = tmp_path / "new_store.zarr"
+    workflow = WorkflowConfig(file=str(missing_store_path))
+
+    resolved = main_module._resolve_log_directory_for_workflow(workflow)
+
+    assert resolved == tmp_path.resolve()
+
+
+def test_resolve_log_directory_for_workflow_keeps_existing_zarr_path(
+    tmp_path: Path,
+) -> None:
+    existing_store_path = tmp_path / "existing_store.zarr"
+    existing_store_path.mkdir(parents=True, exist_ok=True)
+    workflow = WorkflowConfig(file=str(existing_store_path))
+
+    resolved = main_module._resolve_log_directory_for_workflow(workflow)
+
+    assert resolved == existing_store_path.resolve()
+
+
 def test_configure_dask_backend_uses_processes_for_multiworker_io(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

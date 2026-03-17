@@ -29,7 +29,9 @@
 from __future__ import annotations
 
 # Standard Library Imports
+from contextlib import redirect_stdout
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -61,6 +63,21 @@ if TYPE_CHECKING:
 
 
 ProgressCallback = Callable[[int, str], None]
+
+_USEGMENT3D_RUNTIME_STDOUT_REMAP: Dict[str, str] = {
+    "no CUDA. trying torch for resizing": (
+        "uSegment3D: CuPy CUDA resizing path unavailable; trying Torch backend."
+    ),
+    "no CUDA. trying torch for normalizing": (
+        "uSegment3D: CuPy CUDA normalization path unavailable; trying Torch backend."
+    ),
+    "no gpu. falling back to CPU for resizing": (
+        "uSegment3D: GPU resizing backends unavailable; falling back to CPU."
+    ),
+    "no gpu. falling back to CPU for normalizing": (
+        "uSegment3D: GPU normalization backends unavailable; falling back to CPU."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -107,6 +124,62 @@ class Usegment3dSummary:
     gpu_requested: bool
     gpu_enabled: bool
     require_gpu: bool
+
+
+def _remap_usegment3d_runtime_stdout_line(line: str) -> str:
+    """Normalize uSegment3D runtime stdout lines for clearer GPU diagnostics.
+
+    Parameters
+    ----------
+    line : str
+        One stdout line emitted by ``segment3D`` runtime code.
+
+    Returns
+    -------
+    str
+        Clarified line text. Empty string indicates the input line was empty.
+    """
+    stripped = str(line).strip()
+    if not stripped:
+        return ""
+    return str(_USEGMENT3D_RUNTIME_STDOUT_REMAP.get(stripped, stripped))
+
+
+def _run_usegment3d_preprocess_with_stdout_bridge(
+    *,
+    runtime_module: Any,
+    image_zyx: np.ndarray,
+    preprocess_params: Mapping[str, Any],
+) -> Any:
+    """Run uSegment3D preprocessing and replay stdout with clarified messages.
+
+    Parameters
+    ----------
+    runtime_module : Any
+        Imported ``segment3D.usegment3d`` runtime module.
+    image_zyx : numpy.ndarray
+        Input source volume in ``(z, y, x)`` order.
+    preprocess_params : mapping[str, Any]
+        Parameter payload for ``runtime_module.preprocess_imgs``.
+
+    Returns
+    -------
+    Any
+        Preprocessed output returned by ``runtime_module.preprocess_imgs``.
+    """
+    stdout_buffer = StringIO()
+    with redirect_stdout(stdout_buffer):
+        preprocessed = runtime_module.preprocess_imgs(
+            np.asarray(image_zyx),
+            params=dict(preprocess_params),
+        )
+    captured_stdout = stdout_buffer.getvalue()
+    if captured_stdout:
+        for raw_line in captured_stdout.splitlines():
+            rendered_line = _remap_usegment3d_runtime_stdout_line(raw_line)
+            if rendered_line:
+                print(rendered_line, flush=True)
+    return preprocessed
 
 
 def _to_json_parameter_value(value: Any, *, field_name: str) -> Any:
@@ -912,8 +985,10 @@ def _segment_volume(
     aggregation_params = _prepare_aggregation_params(parameters_module, parameters)
     postprocess_params = _prepare_postprocess_params(parameters_module, parameters)
 
-    preprocessed = runtime_module.preprocess_imgs(
-        np.asarray(image_zyx), params=preprocess_params
+    preprocessed = _run_usegment3d_preprocess_with_stdout_bridge(
+        runtime_module=runtime_module,
+        image_zyx=np.asarray(image_zyx),
+        preprocess_params=preprocess_params,
     )
     preprocessed_array = np.asarray(preprocessed)
 

@@ -222,7 +222,9 @@ def _resolve_log_directory_for_workflow(workflow: WorkflowConfig) -> Path:
     Notes
     -----
     For Navigate ``experiment.yml`` inputs, logs are colocated with the
-    canonical data store path resolved by ingestion policy.
+    canonical data store path resolved by ingestion policy. When the resolved
+    store path is Zarr/N5 but does not exist yet, logs are written to the
+    parent directory so logging does not pre-create or depend on store layout.
     """
     if not workflow.file:
         return Path.cwd().resolve()
@@ -232,10 +234,18 @@ def _resolve_log_directory_for_workflow(workflow: WorkflowConfig) -> Path:
         experiment = load_navigate_experiment(selected)
         source_data_path = resolve_experiment_data_path(experiment)
         store_path = resolve_data_store_path(experiment, source_data_path)
+        if _is_zarr_like_path(store_path) and not store_path.exists():
+            return (
+                store_path.parent
+                if store_path.parent != Path("")
+                else Path.cwd().resolve()
+            )
         return store_path if _is_zarr_like_path(store_path) else store_path.parent
 
     if _is_zarr_like_path(selected):
-        return selected
+        if selected.exists():
+            return selected
+        return selected.parent if selected.parent != Path("") else Path.cwd().resolve()
     return selected.parent if selected.parent != Path("") else Path.cwd().resolve()
 
 
