@@ -52,6 +52,36 @@ if TYPE_CHECKING:
 ProgressCallback = Callable[[int, str], None]
 _PROJECTIONS = ("xy", "xz", "yz")
 _MAX_REDUCTION_READ_BYTES = 128 * 1024 * 1024
+_MAX_INTERPOLATION_BLOCK_BYTES = 64 * 1024 * 1024
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Coerce CLI/UI boolean-like values into ``bool``.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate value.
+
+    Returns
+    -------
+    bool
+        Parsed boolean value.
+
+    Raises
+    ------
+    None
+        Invalid values are coerced with Python truthiness rules.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
 
 
 def _normalize_export_format(value: Any) -> str:
@@ -226,6 +256,9 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     normalized["export_format"] = _normalize_export_format(
         normalized.get("export_format", "ome-tiff")
     )
+    normalized["resample_z_to_lateral"] = _coerce_bool(
+        normalized.get("resample_z_to_lateral", True)
+    )
     normalized["output_directory"] = str(
         normalized.get("output_directory", "")
     ).strip()
@@ -313,6 +346,262 @@ def _projection_pixel_size_um(
     physical_size_y = float(axis_to_um.get(row_axis, 1.0))
     physical_size_x = float(axis_to_um.get(col_axis, 1.0))
     return physical_size_y, physical_size_x
+
+
+def _effective_voxel_size_um_zyx_for_projection(
+    *,
+    axes: tuple[str, ...],
+    voxel_size_um_zyx: tuple[float, float, float],
+    resample_z_to_lateral: bool,
+) -> tuple[float, float, float]:
+    """Return effective voxel spacing after optional projection resampling.
+
+    Parameters
+    ----------
+    axes : tuple[str, ...]
+        Output axis labels in array order.
+    voxel_size_um_zyx : tuple[float, float, float]
+        Source voxel spacing in microns.
+    resample_z_to_lateral : bool
+        Whether projected outputs containing ``z`` should resample the ``z`` axis
+        to the in-plane lateral spacing.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Effective voxel spacing in ``(z, y, x)`` after projection-space
+        isotropic-lateral normalization.
+
+    Raises
+    ------
+    None
+        Non-positive spacing values disable resampling adjustments.
+    """
+    z_um, y_um, x_um = (float(v) for v in voxel_size_um_zyx)
+    if not bool(resample_z_to_lateral):
+        return (z_um, y_um, x_um)
+
+    labels = [str(axis).strip().lower() for axis in axes]
+    if "z" not in labels:
+        return (z_um, y_um, x_um)
+
+    lateral_labels = [label for label in labels if label in {"x", "y"}]
+    if not lateral_labels:
+        return (z_um, y_um, x_um)
+
+    target_label = str(lateral_labels[-1])
+    target_um = y_um if target_label == "y" else x_um
+    if target_um <= 0.0:
+        return (z_um, y_um, x_um)
+    return (float(target_um), y_um, x_um)
+
+
+def _resampled_axis_length(
+    *,
+    axis_length: int,
+    source_spacing_um: float,
+    target_spacing_um: float,
+) -> int:
+    """Return output axis length that preserves physical extent.
+
+    Parameters
+    ----------
+    axis_length : int
+        Source axis length.
+    source_spacing_um : float
+        Source pixel spacing along the axis.
+    target_spacing_um : float
+        Target pixel spacing along the axis.
+
+    Returns
+    -------
+    int
+        Target axis length.
+
+    Raises
+    ------
+    None
+        Invalid spacing inputs fall back to the source length.
+    """
+    length = max(1, int(axis_length))
+    source_um = float(source_spacing_um)
+    target_um = float(target_spacing_um)
+    if length <= 1 or source_um <= 0.0 or target_um <= 0.0:
+        return length
+    physical_extent_um = float(length - 1) * source_um
+    return max(1, int(np.round(physical_extent_um / target_um)) + 1)
+
+
+def _resample_axis_linear_to_uint16(
+    *,
+    source: np.ndarray,
+    destination: np.ndarray,
+    axis: int,
+) -> None:
+    """Linearly resample one axis and write into a uint16 destination array.
+
+    Parameters
+    ----------
+    source : numpy.ndarray
+        Source array.
+    destination : numpy.ndarray
+        Destination array. Must match ``source`` rank.
+    axis : int
+        Axis index to resample.
+
+    Returns
+    -------
+    None
+        Destination is written in place.
+
+    Raises
+    ------
+    ValueError
+        If source and destination ranks differ.
+    """
+    src = np.asarray(source)
+    dst = np.asarray(destination)
+    if src.ndim != dst.ndim:
+        raise ValueError("mip_export resampling requires matching array ranks.")
+
+    axis_index = int(axis)
+    src_len = int(src.shape[axis_index])
+    dst_len = int(dst.shape[axis_index])
+    src_moved = np.moveaxis(src, axis_index, 0)
+    dst_moved = np.moveaxis(dst, axis_index, 0)
+    src_flat = src_moved.reshape(src_len, -1)
+    dst_flat = dst_moved.reshape(dst_len, -1)
+
+    if dst_flat.size == 0:
+        return
+
+    if src_len <= 1:
+        repeated = np.repeat(src_flat[:1, :], repeats=dst_len, axis=0)
+        dst_flat[:, :] = _to_uint16(repeated)
+        return
+
+    sample_positions = np.linspace(0.0, float(src_len - 1), num=dst_len, dtype=np.float64)
+    lower = np.floor(sample_positions).astype(np.int64)
+    upper = np.minimum(lower + 1, src_len - 1)
+    weight_upper = (sample_positions - lower).astype(np.float32)
+    weight_lower = (1.0 - weight_upper).astype(np.float32)
+
+    estimated_cols = int(
+        max(
+            1,
+            _MAX_INTERPOLATION_BLOCK_BYTES
+            // max(1, 3 * dst_len * np.dtype(np.float32).itemsize),
+        )
+    )
+    block_cols = max(1, min(int(estimated_cols), int(src_flat.shape[1])))
+    for start in range(0, int(src_flat.shape[1]), int(block_cols)):
+        stop = min(int(src_flat.shape[1]), int(start + block_cols))
+        lower_block = src_flat[lower, start:stop].astype(np.float32, copy=False)
+        upper_block = src_flat[upper, start:stop].astype(np.float32, copy=False)
+        interpolated = (
+            lower_block * weight_lower[:, None] + upper_block * weight_upper[:, None]
+        )
+        dst_flat[:, start:stop] = _to_uint16(interpolated)
+
+
+def _resample_tiff_projection_z_axis_if_needed(
+    *,
+    output_path: Path,
+    axes: tuple[str, ...],
+    voxel_size_um_zyx: tuple[float, float, float],
+    resample_z_to_lateral: bool,
+) -> tuple[float, float, float]:
+    """Resample TIFF projection ``z`` axis to lateral spacing when required.
+
+    Parameters
+    ----------
+    output_path : pathlib.Path
+        Projection TIFF path.
+    axes : tuple[str, ...]
+        Output axis labels.
+    voxel_size_um_zyx : tuple[float, float, float]
+        Source voxel spacing in microns.
+    resample_z_to_lateral : bool
+        Whether to resample projections containing ``z``.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Effective voxel spacing in ``(z, y, x)`` after optional resampling.
+
+    Raises
+    ------
+    Exception
+        Propagates filesystem or TIFF I/O failures during rewrite.
+    """
+    effective_voxel_size_um_zyx = _effective_voxel_size_um_zyx_for_projection(
+        axes=tuple(str(axis) for axis in axes),
+        voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+        resample_z_to_lateral=bool(resample_z_to_lateral),
+    )
+    labels = [str(axis).strip().lower() for axis in axes]
+    if "z" not in labels:
+        return effective_voxel_size_um_zyx
+
+    z_axis_index = int(labels.index("z"))
+    source_z_um = float(voxel_size_um_zyx[0])
+    target_z_um = float(effective_voxel_size_um_zyx[0])
+    if np.isclose(source_z_um, target_z_um, rtol=1e-6, atol=1e-6):
+        return effective_voxel_size_um_zyx
+
+    source = tifffile.memmap(str(output_path), mode="r")
+    temp_path = output_path.with_name(f"{output_path.name}.tmp_resample.tif")
+    try:
+        source_shape = tuple(int(v) for v in np.asarray(source).shape)
+        output_z_len = _resampled_axis_length(
+            axis_length=int(source_shape[z_axis_index]),
+            source_spacing_um=float(source_z_um),
+            target_spacing_um=float(target_z_um),
+        )
+        if output_z_len == int(source_shape[z_axis_index]):
+            del source
+            return effective_voxel_size_um_zyx
+
+        output_shape = list(source_shape)
+        output_shape[z_axis_index] = int(output_z_len)
+        if temp_path.exists():
+            temp_path.unlink()
+        target = tifffile.memmap(
+            str(temp_path),
+            shape=tuple(int(v) for v in output_shape),
+            dtype=np.uint16,
+            bigtiff=True,
+            photometric="minisblack",
+            ome=True,
+            metadata=_ome_metadata_for_projection_output(
+                output_shape=tuple(int(v) for v in output_shape),
+                axes=tuple(str(axis) for axis in axes),
+                voxel_size_um_zyx=tuple(
+                    float(v) for v in effective_voxel_size_um_zyx
+                ),
+                image_name=str(output_path.stem),
+            ),
+        )
+        try:
+            _resample_axis_linear_to_uint16(
+                source=np.asarray(source),
+                destination=target,
+                axis=int(z_axis_index),
+            )
+            target.flush()
+        finally:
+            del target
+        del source
+        output_path.unlink()
+        temp_path.replace(output_path)
+        return effective_voxel_size_um_zyx
+    except Exception:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+        raise
 
 
 def _ome_axes_for_output_shape(output_shape: tuple[int, ...]) -> str:
@@ -1459,6 +1748,7 @@ def _run_export_task(
     position_mode: str,
     task: _MipExportTask,
     voxel_size_um_zyx: tuple[float, float, float],
+    resample_z_to_lateral: bool,
 ) -> dict[str, Any]:
     """Execute one projection task and write output.
 
@@ -1478,6 +1768,8 @@ def _run_export_task(
         Projection task to execute.
     voxel_size_um_zyx : tuple[float, float, float]
         Source voxel spacing in ``(z, y, x)`` order.
+    resample_z_to_lateral : bool
+        Whether to resample projection ``z`` axis to in-plane lateral spacing.
 
     Returns
     -------
@@ -1612,13 +1904,23 @@ def _run_export_task(
 
         if _is_tiff_export_format(export_format):
             output_target.flush()
-            stored_dtype = str(np.dtype(np.uint16))
-            physical_size_y_um, physical_size_x_um = _projection_pixel_size_um(
+            effective_voxel_size_um_zyx = _resample_tiff_projection_z_axis_if_needed(
+                output_path=output_path,
                 axes=tuple(str(axis) for axis in axes),
                 voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+                resample_z_to_lateral=bool(resample_z_to_lateral),
             )
+            stored_dtype = str(np.dtype(np.uint16))
         else:
             stored_dtype = str(np.dtype(getattr(output_target, "dtype", source_array.dtype)))
+            effective_voxel_size_um_zyx = tuple(float(v) for v in voxel_size_um_zyx)
+
+        if _is_tiff_export_format(export_format):
+            physical_size_y_um, physical_size_x_um = _projection_pixel_size_um(
+                axes=tuple(str(axis) for axis in axes),
+                voxel_size_um_zyx=tuple(float(v) for v in effective_voxel_size_um_zyx),
+            )
+        else:
             physical_size_y_um = 1.0
             physical_size_x_um = 1.0
         return {
@@ -1723,6 +2025,9 @@ def run_mip_export_analysis(
                     position_mode=position_mode,
                     task=task,
                     voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+                    resample_z_to_lateral=bool(
+                        normalized.get("resample_z_to_lateral", True)
+                    ),
                 )
                 for task in tasks
             ]
@@ -1895,12 +2200,30 @@ def run_mip_export_analysis(
 
             for planned in planned_outputs:
                 task = planned.task
+                effective_voxel_size_um_zyx = tuple(float(v) for v in voxel_size_um_zyx)
                 if _is_tiff_export_format(export_format):
                     tiff_targets[int(planned.task_index)].flush()
-                physical_size_y_um, physical_size_x_um = _projection_pixel_size_um(
-                    axes=tuple(str(axis) for axis in planned.axes),
-                    voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
-                )
+                    effective_voxel_size_um_zyx = (
+                        _resample_tiff_projection_z_axis_if_needed(
+                            output_path=Path(planned.output_path),
+                            axes=tuple(str(axis) for axis in planned.axes),
+                            voxel_size_um_zyx=tuple(
+                                float(v) for v in voxel_size_um_zyx
+                            ),
+                            resample_z_to_lateral=bool(
+                                normalized.get("resample_z_to_lateral", True)
+                            ),
+                        )
+                    )
+                    physical_size_y_um, physical_size_x_um = _projection_pixel_size_um(
+                        axes=tuple(str(axis) for axis in planned.axes),
+                        voxel_size_um_zyx=tuple(
+                            float(v) for v in effective_voxel_size_um_zyx
+                        ),
+                    )
+                else:
+                    physical_size_y_um = 1.0
+                    physical_size_x_um = 1.0
                 task_results.append(
                     {
                         "path": str(planned.output_path),

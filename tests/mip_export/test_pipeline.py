@@ -120,9 +120,26 @@ def test_run_mip_export_analysis_writes_uint16_ome_tiff_outputs_with_calibration
     xz = np.asarray(tifffile.imread(str(xz_path)))
     yz = np.asarray(tifffile.imread(str(yz_path)))
     expected_source = data[0, 1, 0, :, :, :]
-    np.testing.assert_array_equal(xy, np.max(expected_source, axis=0).astype(np.uint16))
-    np.testing.assert_array_equal(xz, np.max(expected_source, axis=1).astype(np.uint16))
-    np.testing.assert_array_equal(yz, np.max(expected_source, axis=2).astype(np.uint16))
+    xy_expected = np.max(expected_source, axis=0).astype(np.uint16)
+    xz_expected = np.max(expected_source, axis=1).astype(np.uint16)
+    yz_expected = np.max(expected_source, axis=2).astype(np.uint16)
+    np.testing.assert_array_equal(xy, xy_expected)
+    assert int(xz.shape[1]) == int(xz_expected.shape[1])
+    assert int(yz.shape[1]) == int(yz_expected.shape[1])
+    assert int(xz.shape[0]) == pipeline._resampled_axis_length(
+        axis_length=int(xz_expected.shape[0]),
+        source_spacing_um=5.0,
+        target_spacing_um=3.0,
+    )
+    assert int(yz.shape[0]) == pipeline._resampled_axis_length(
+        axis_length=int(yz_expected.shape[0]),
+        source_spacing_um=5.0,
+        target_spacing_um=2.0,
+    )
+    np.testing.assert_array_equal(xz[0, :], xz_expected[0, :])
+    np.testing.assert_array_equal(xz[-1, :], xz_expected[-1, :])
+    np.testing.assert_array_equal(yz[0, :], yz_expected[0, :])
+    np.testing.assert_array_equal(yz[-1, :], yz_expected[-1, :])
     assert xy.dtype == np.uint16
 
     xy_pixels, xy_axes = _ome_pixels_metadata(xy_path)
@@ -134,9 +151,9 @@ def test_run_mip_export_analysis_writes_uint16_ome_tiff_outputs_with_calibration
     assert xy_pixels["PhysicalSizeX"] == "3.0"
     assert xy_pixels["PhysicalSizeY"] == "2.0"
     assert xz_pixels["PhysicalSizeX"] == "3.0"
-    assert xz_pixels["PhysicalSizeY"] == "5.0"
+    assert xz_pixels["PhysicalSizeY"] == "3.0"
     assert yz_pixels["PhysicalSizeX"] == "2.0"
-    assert yz_pixels["PhysicalSizeY"] == "5.0"
+    assert yz_pixels["PhysicalSizeY"] == "2.0"
 
     latest_attrs = dict(
         zarr.open_group(str(store_path), mode="r")["results"]["mip_export"]["latest"].attrs
@@ -228,6 +245,7 @@ def test_run_export_task_reads_single_position_source_in_blocks(
         position_mode="per_position",
         task=task,
         voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        resample_z_to_lateral=False,
     )
 
     expected = np.max(data[0, 0, 0, :, :, :], axis=expected_axis).astype(np.uint16)
@@ -259,6 +277,7 @@ def test_run_export_task_reads_multi_position_source_in_blocks(
         position_mode="multi_position",
         task=task,
         voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        resample_z_to_lateral=False,
     )
 
     expected = np.max(data[0, :, 0, :, :, :], axis=1).astype(np.uint16)

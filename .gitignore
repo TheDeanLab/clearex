@@ -182,3 +182,4 @@ cython_debug/
 *.zip
 
 *downloaded_data*
+/job_*.out
