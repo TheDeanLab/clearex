@@ -100,7 +100,12 @@ def _write_bdv_xml(
     data_file_name: str,
     setup_channel_tile: dict[int, tuple[int, int]],
 ) -> None:
-    loader_key = "hdf5" if loader_format == "bdv.hdf5" else "n5"
+    if loader_format == "bdv.hdf5":
+        loader_key = "hdf5"
+    elif loader_format == "bdv.n5":
+        loader_key = "n5"
+    else:
+        loader_key = "zarr"
     setup_blocks = []
     for setup_index in sorted(setup_channel_tile):
         channel_index, tile_index = setup_channel_tile[setup_index]
@@ -1036,6 +1041,91 @@ def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
     _write_bdv_xml(
         tmp_path / "CH00_000000.xml",
         loader_format="bdv.n5",
+        data_file_name=source_path.name,
+        setup_channel_tile={
+            0: (0, 0),
+            1: (0, 1),
+            2: (1, 0),
+            3: (1, 1),
+        },
+    )
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert tuple(root["data"].shape) == (1, 2, 2, 2, 3, 4)
+    assert root.attrs["source_data_path"] == str(source_path.resolve())
+
+    for position_index in range(2):
+        for channel_index in range(2):
+            loaded = np.array(
+                root["data"][0, position_index, channel_index, :, :, :]
+            )
+            assert np.array_equal(loaded, expected_blocks[(position_index, channel_index)])
+
+
+def test_materialize_experiment_data_store_stacks_bdv_ome_zarr_setups(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="OME-ZARR",
+        is_multiposition=True,
+    )
+    _write_multipositions_sidecar(tmp_path / "multi_positions.yml", count=2)
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.ome.zarr"
+    source_root = zarr.open_group(str(source_path), mode="w")
+    expected_blocks = {
+        (0, 0): np.full((2, 3, 4), fill_value=12, dtype=np.uint16),
+        (1, 0): np.full((2, 3, 4), fill_value=22, dtype=np.uint16),
+        (0, 1): np.full((2, 3, 4), fill_value=32, dtype=np.uint16),
+        (1, 1): np.full((2, 3, 4), fill_value=42, dtype=np.uint16),
+    }
+    source_root.create_dataset(
+        "setup0/timepoint0/s0",
+        data=expected_blocks[(0, 0)],
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+    source_root.create_dataset(
+        "setup1/timepoint0/s0",
+        data=expected_blocks[(1, 0)],
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+    source_root.create_dataset(
+        "setup2/timepoint0/s0",
+        data=expected_blocks[(0, 1)],
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+    source_root.create_dataset(
+        "setup3/timepoint0/s0",
+        data=expected_blocks[(1, 1)],
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+    # Ensure extra setup groups not listed in XML are ignored.
+    source_root.create_dataset(
+        "setup99/timepoint0/s0",
+        data=np.zeros((2, 3, 4), dtype=np.uint16),
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+
+    # Navigate can write XML as CH00_000000.xml for OME-Zarr stores.
+    _write_bdv_xml(
+        tmp_path / "CH00_000000.xml",
+        loader_format="bdv.ome.zarr",
         data_file_name=source_path.name,
         setup_channel_tile={
             0: (0, 0),

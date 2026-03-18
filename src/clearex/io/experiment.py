@@ -910,7 +910,7 @@ def _parse_navigate_bdv_setup_index_map(
     Parameters
     ----------
     source_path : pathlib.Path
-        Source BDV data path (``.h5``/``.hdf5``/``.hdf`` or ``.n5``).
+        Source BDV data path (``.h5``/``.hdf5``/``.hdf``/``.n5``/``.zarr``).
 
     Returns
     -------
@@ -924,59 +924,140 @@ def _parse_navigate_bdv_setup_index_map(
     None
         Parsing is best-effort and falls back to ``None``.
     """
+    def _candidate_bdv_xml_paths(path: Path) -> list[Path]:
+        """Return candidate BDV XML sidecar paths for one source path.
+
+        Parameters
+        ----------
+        path : pathlib.Path
+            Source BDV container path.
+
+        Returns
+        -------
+        list[pathlib.Path]
+            Ordered XML candidate paths, deduplicated while preserving order.
+        """
+        candidates: list[Path] = []
+        candidates.append(path.with_suffix(".xml"))
+        candidates.append(path.parent / f"{path.name}.xml")
+
+        lower_name = path.name.lower()
+        for token in (".ome.zarr", ".zarr", ".n5", ".hdf5", ".hdf", ".h5"):
+            if not lower_name.endswith(token):
+                continue
+            stem = path.name[: -len(token)]
+            if stem:
+                candidates.append(path.parent / f"{stem}.xml")
+            break
+
+        ordered: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(candidate)
+        return ordered
+
+    def _loader_format_matches_source_suffix(*, suffix: str, image_format: str) -> bool:
+        """Return whether a BDV XML loader format matches the source suffix.
+
+        Parameters
+        ----------
+        suffix : str
+            Source path suffix.
+        image_format : str
+            XML ``ImageLoader`` format value.
+
+        Returns
+        -------
+        bool
+            ``True`` when ``image_format`` is compatible with ``suffix``.
+        """
+        normalized = str(image_format).strip().lower()
+        if suffix in {".h5", ".hdf5", ".hdf"}:
+            return normalized in {"bdv.hdf5", "bdv.h5", "bdv.hdf"}
+        if suffix == ".n5":
+            return normalized == "bdv.n5" or normalized.startswith("bdv.n5.")
+        if suffix == ".zarr":
+            if normalized in {
+                "bdv.zarr",
+                "bdv.ome.zarr",
+                "bdv.ngff",
+                "bdv.omezarr",
+                "bdv.omengff",
+                "ome.zarr",
+                "ome-zarr",
+                "ome.ngff",
+                "ome-ngff",
+                "ngff",
+                "zarr",
+            }:
+                return True
+            return (
+                normalized.startswith("bdv.zarr.")
+                or normalized.startswith("bdv.ome.zarr.")
+                or normalized.startswith("bdv.ngff.")
+                or normalized.startswith("ome.zarr.")
+                or normalized.startswith("ome.ngff.")
+            )
+        return False
+
     suffix = source_path.suffix.lower()
-    if suffix not in {".h5", ".hdf5", ".hdf", ".n5"}:
+    if suffix not in {".h5", ".hdf5", ".hdf", ".n5", ".zarr"}:
         return None
 
-    xml_path = source_path.with_suffix(".xml")
-    if not xml_path.exists():
-        return None
-
-    try:
-        root = ET.fromstring(xml_path.read_text())
-    except Exception:
-        return None
-
-    image_loader = root.find("SequenceDescription/ImageLoader")
-    if image_loader is None:
-        return None
-    image_format = str(image_loader.attrib.get("format", "")).strip().lower()
-
-    if suffix in {".h5", ".hdf5", ".hdf"} and image_format != "bdv.hdf5":
-        return None
-    if suffix == ".n5" and image_format != "bdv.n5":
-        return None
-
-    raw_entries: list[tuple[int, int, int]] = []
-    for view_setup in root.findall("SequenceDescription/ViewSetups/ViewSetup"):
-        setup_text = view_setup.findtext("id")
-        channel_text = view_setup.findtext("attributes/channel")
-        tile_text = view_setup.findtext("attributes/tile")
-        if setup_text is None or channel_text is None or tile_text is None:
+    xml_candidates = _candidate_bdv_xml_paths(source_path)
+    for xml_path in xml_candidates:
+        if not xml_path.exists():
             continue
         try:
-            setup_index = int(setup_text)
-            channel_index = int(channel_text)
-            tile_index = int(tile_text)
-        except ValueError:
+            root = ET.fromstring(xml_path.read_text())
+        except Exception:
             continue
-        raw_entries.append((setup_index, channel_index, tile_index))
 
-    if not raw_entries:
-        return None
+        image_loader = root.find("SequenceDescription/ImageLoader")
+        if image_loader is None:
+            continue
+        image_format = str(image_loader.attrib.get("format", ""))
+        if not _loader_format_matches_source_suffix(
+            suffix=suffix,
+            image_format=image_format,
+        ):
+            continue
 
-    channel_values = sorted({entry[1] for entry in raw_entries})
-    tile_values = sorted({entry[2] for entry in raw_entries})
-    channel_lookup = {value: idx for idx, value in enumerate(channel_values)}
-    tile_lookup = {value: idx for idx, value in enumerate(tile_values)}
+        raw_entries: list[tuple[int, int, int]] = []
+        for view_setup in root.findall("SequenceDescription/ViewSetups/ViewSetup"):
+            setup_text = view_setup.findtext("id")
+            channel_text = view_setup.findtext("attributes/channel")
+            tile_text = view_setup.findtext("attributes/tile")
+            if setup_text is None or channel_text is None or tile_text is None:
+                continue
+            try:
+                setup_index = int(setup_text)
+                channel_index = int(channel_text)
+                tile_index = int(tile_text)
+            except ValueError:
+                continue
+            raw_entries.append((setup_index, channel_index, tile_index))
 
-    return {
-        int(setup_index): (
-            int(tile_lookup[tile_index]),
-            int(channel_lookup[channel_index]),
-        )
-        for setup_index, channel_index, tile_index in raw_entries
-    }
+        if not raw_entries:
+            continue
+
+        channel_values = sorted({entry[1] for entry in raw_entries})
+        tile_values = sorted({entry[2] for entry in raw_entries})
+        channel_lookup = {value: idx for idx, value in enumerate(channel_values)}
+        tile_lookup = {value: idx for idx, value in enumerate(tile_values)}
+
+        return {
+            int(setup_index): (
+                int(tile_lookup[tile_index]),
+                int(channel_lookup[channel_index]),
+            )
+            for setup_index, channel_index, tile_index in raw_entries
+        }
+    return None
 
 
 def _open_navigate_bdv_collection_as_dask(
@@ -985,7 +1066,7 @@ def _open_navigate_bdv_collection_as_dask(
     source_path: Path,
     exit_stack: ExitStack,
 ) -> Optional[tuple[da.Array, AxesSpec, dict[str, Any]]]:
-    """Open Navigate BDV H5/N5 acquisitions as stacked ``(t, p, c, ...)``.
+    """Open Navigate BDV H5/N5/Zarr acquisitions as stacked ``(t, p, c, ...)``.
 
     Parameters
     ----------
@@ -1011,7 +1092,8 @@ def _open_navigate_bdv_collection_as_dask(
     suffix = source_path.suffix.lower()
     is_h5 = suffix in {".h5", ".hdf5", ".hdf"}
     is_n5 = suffix == ".n5" and _is_zarr_like_path(source_path)
-    if not is_h5 and not is_n5:
+    is_zarr = suffix == ".zarr" and _is_zarr_like_path(source_path)
+    if not is_h5 and not is_n5 and not is_zarr:
         return None
 
     setup_map = _parse_navigate_bdv_setup_index_map(source_path)
@@ -1147,13 +1229,13 @@ def _open_navigate_bdv_collection_as_dask(
             else:
                 if normalized_axes != base_axes:
                     raise ValueError(
-                        "Navigate BDV N5 collection has inconsistent source axes: "
+                        "Navigate BDV collection has inconsistent source axes: "
                         f"expected {base_axes}, got {normalized_axes} at "
                         f"t={time_index}, setup={setup_index}."
                     )
                 if source_shape != base_shape:
                     raise ValueError(
-                        "Navigate BDV N5 collection has inconsistent source shapes: "
+                        "Navigate BDV collection has inconsistent source shapes: "
                         f"expected {base_shape}, got {source_shape} at "
                         f"t={time_index}, setup={setup_index}."
                     )
@@ -1206,7 +1288,9 @@ def _open_navigate_bdv_collection_as_dask(
             int(value) for value in position_indices
         ],
         "source_collection_channel_indices": [int(value) for value in channel_indices],
-        "source_collection_type": "bdv_h5" if is_h5 else "bdv_n5",
+        "source_collection_type": (
+            "bdv_h5" if is_h5 else "bdv_n5" if is_n5 else "bdv_zarr"
+        ),
     }
     return source_array, source_axes, metadata
 
