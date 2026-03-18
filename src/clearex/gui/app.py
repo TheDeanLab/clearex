@@ -3929,6 +3929,30 @@ if HAS_PYQT6:
                 "degree-to-coefficient conversion) to "
                 "reduce empty-space growth after deskew."
             ),
+            "auto_estimate_shear_yz": (
+                "Estimate shear_yz_deg from left/right X-extreme source slabs before "
+                "running the full transform."
+            ),
+            "auto_estimate_extreme_fraction_x": (
+                "Fraction of X used at each extreme slab for auto-estimation. "
+                "Higher values improve robustness but increase pre-pass I/O."
+            ),
+            "auto_estimate_zy_stride": (
+                "Downsampling stride applied to Z and Y during auto-estimation."
+            ),
+            "auto_estimate_signal_fraction": (
+                "Foreground threshold fraction within local intensity range for "
+                "envelope fitting during auto-estimation."
+            ),
+            "auto_estimate_t_index": (
+                "Time index sampled for shear auto-estimation."
+            ),
+            "auto_estimate_p_index": (
+                "Position index sampled for shear auto-estimation."
+            ),
+            "auto_estimate_c_index": (
+                "Channel index sampled for shear auto-estimation."
+            ),
             "interpolation": (
                 "ANTsPy interpolation mode used during affine resampling."
             ),
@@ -5015,6 +5039,77 @@ if HAS_PYQT6:
             self._register_parameter_hint(
                 self._shear_auto_rotate_checkbox,
                 self._PARAMETER_HINTS["auto_rotate_from_shear"],
+            )
+
+            self._shear_auto_estimate_checkbox = QCheckBox(
+                "Estimate shear_yz from X extremes"
+            )
+            form.addRow("Auto estimate shear_yz", self._shear_auto_estimate_checkbox)
+            self._register_parameter_hint(
+                self._shear_auto_estimate_checkbox,
+                self._PARAMETER_HINTS["auto_estimate_shear_yz"],
+            )
+
+            self._shear_auto_estimate_fraction_spin = QDoubleSpinBox()
+            self._shear_auto_estimate_fraction_spin.setDecimals(4)
+            self._shear_auto_estimate_fraction_spin.setRange(0.0001, 0.5)
+            self._shear_auto_estimate_fraction_spin.setSingleStep(0.001)
+            form.addRow(
+                "auto_estimate_extreme_fraction_x",
+                self._shear_auto_estimate_fraction_spin,
+            )
+            self._register_parameter_hint(
+                self._shear_auto_estimate_fraction_spin,
+                self._PARAMETER_HINTS["auto_estimate_extreme_fraction_x"],
+            )
+
+            self._shear_auto_estimate_stride_spin = QSpinBox()
+            self._shear_auto_estimate_stride_spin.setRange(1, 64)
+            self._shear_auto_estimate_stride_spin.setSingleStep(1)
+            form.addRow("auto_estimate_zy_stride", self._shear_auto_estimate_stride_spin)
+            self._register_parameter_hint(
+                self._shear_auto_estimate_stride_spin,
+                self._PARAMETER_HINTS["auto_estimate_zy_stride"],
+            )
+
+            self._shear_auto_estimate_signal_fraction_spin = QDoubleSpinBox()
+            self._shear_auto_estimate_signal_fraction_spin.setDecimals(3)
+            self._shear_auto_estimate_signal_fraction_spin.setRange(0.0, 1.0)
+            self._shear_auto_estimate_signal_fraction_spin.setSingleStep(0.01)
+            form.addRow(
+                "auto_estimate_signal_fraction",
+                self._shear_auto_estimate_signal_fraction_spin,
+            )
+            self._register_parameter_hint(
+                self._shear_auto_estimate_signal_fraction_spin,
+                self._PARAMETER_HINTS["auto_estimate_signal_fraction"],
+            )
+
+            self._shear_auto_estimate_t_spin = QSpinBox()
+            self._shear_auto_estimate_t_spin.setRange(0, 9999)
+            self._shear_auto_estimate_t_spin.setSingleStep(1)
+            form.addRow("auto_estimate_t_index", self._shear_auto_estimate_t_spin)
+            self._register_parameter_hint(
+                self._shear_auto_estimate_t_spin,
+                self._PARAMETER_HINTS["auto_estimate_t_index"],
+            )
+
+            self._shear_auto_estimate_p_spin = QSpinBox()
+            self._shear_auto_estimate_p_spin.setRange(0, 9999)
+            self._shear_auto_estimate_p_spin.setSingleStep(1)
+            form.addRow("auto_estimate_p_index", self._shear_auto_estimate_p_spin)
+            self._register_parameter_hint(
+                self._shear_auto_estimate_p_spin,
+                self._PARAMETER_HINTS["auto_estimate_p_index"],
+            )
+
+            self._shear_auto_estimate_c_spin = QSpinBox()
+            self._shear_auto_estimate_c_spin.setRange(0, 9999)
+            self._shear_auto_estimate_c_spin.setSingleStep(1)
+            form.addRow("auto_estimate_c_index", self._shear_auto_estimate_c_spin)
+            self._register_parameter_hint(
+                self._shear_auto_estimate_c_spin,
+                self._PARAMETER_HINTS["auto_estimate_c_index"],
             )
 
             self._shear_rotation_x_spin = QDoubleSpinBox()
@@ -7653,6 +7748,13 @@ if HAS_PYQT6:
                 self._shear_xz_spin,
                 self._shear_yz_spin,
                 self._shear_auto_rotate_checkbox,
+                self._shear_auto_estimate_checkbox,
+                self._shear_auto_estimate_fraction_spin,
+                self._shear_auto_estimate_stride_spin,
+                self._shear_auto_estimate_signal_fraction_spin,
+                self._shear_auto_estimate_t_spin,
+                self._shear_auto_estimate_p_spin,
+                self._shear_auto_estimate_c_spin,
                 self._shear_rotation_x_spin,
                 self._shear_rotation_y_spin,
                 self._shear_rotation_z_spin,
@@ -8307,6 +8409,27 @@ if HAS_PYQT6:
             )
             self._shear_auto_rotate_checkbox.setChecked(
                 bool(shear_params.get("auto_rotate_from_shear", False))
+            )
+            self._shear_auto_estimate_checkbox.setChecked(
+                bool(shear_params.get("auto_estimate_shear_yz", False))
+            )
+            self._shear_auto_estimate_fraction_spin.setValue(
+                float(shear_params.get("auto_estimate_extreme_fraction_x", 0.03))
+            )
+            self._shear_auto_estimate_stride_spin.setValue(
+                max(1, int(shear_params.get("auto_estimate_zy_stride", 4)))
+            )
+            self._shear_auto_estimate_signal_fraction_spin.setValue(
+                float(shear_params.get("auto_estimate_signal_fraction", 0.10))
+            )
+            self._shear_auto_estimate_t_spin.setValue(
+                max(0, int(shear_params.get("auto_estimate_t_index", 0)))
+            )
+            self._shear_auto_estimate_p_spin.setValue(
+                max(0, int(shear_params.get("auto_estimate_p_index", 0)))
+            )
+            self._shear_auto_estimate_c_spin.setValue(
+                max(0, int(shear_params.get("auto_estimate_c_index", 0)))
             )
             self._shear_rotation_x_spin.setValue(
                 float(shear_params.get("rotation_deg_x", 0.0))
@@ -9157,6 +9280,21 @@ if HAS_PYQT6:
                 "auto_rotate_from_shear": bool(
                     self._shear_auto_rotate_checkbox.isChecked()
                 ),
+                "auto_estimate_shear_yz": bool(
+                    self._shear_auto_estimate_checkbox.isChecked()
+                ),
+                "auto_estimate_extreme_fraction_x": float(
+                    self._shear_auto_estimate_fraction_spin.value()
+                ),
+                "auto_estimate_zy_stride": int(
+                    self._shear_auto_estimate_stride_spin.value()
+                ),
+                "auto_estimate_signal_fraction": float(
+                    self._shear_auto_estimate_signal_fraction_spin.value()
+                ),
+                "auto_estimate_t_index": int(self._shear_auto_estimate_t_spin.value()),
+                "auto_estimate_p_index": int(self._shear_auto_estimate_p_spin.value()),
+                "auto_estimate_c_index": int(self._shear_auto_estimate_c_spin.value()),
                 "interpolation": interpolation.lower() or "linear",
                 "fill_value": float(self._shear_fill_value_spin.value()),
                 "output_dtype": output_dtype.lower() or "float32",

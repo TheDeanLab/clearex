@@ -58,6 +58,40 @@ _XYZ_FROM_ZYX = np.asarray(
     ],
     dtype=np.float64,
 )
+_AUTO_ESTIMATE_EXTREME_X_FRACTION_DEFAULT = 0.03
+_AUTO_ESTIMATE_ZY_STRIDE_DEFAULT = 4
+_AUTO_ESTIMATE_SIGNAL_FRACTION_DEFAULT = 0.10
+_AUTO_ESTIMATE_MIN_VALID_COLUMNS = 16
+_AUTO_ESTIMATE_MIN_FOREGROUND_PIXELS = 64
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Coerce boolean-like values into ``bool``.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate boolean-like value.
+
+    Returns
+    -------
+    bool
+        Parsed boolean value.
+
+    Raises
+    ------
+    None
+        Unrecognized values are coerced with Python truthiness semantics.
+    """
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
 
 
 @dataclass(frozen=True)
@@ -298,6 +332,202 @@ def _normalize_roi_padding(value: Any) -> tuple[int, int, int]:
     )
 
 
+def _fit_envelope_tilt_angle_deg(
+    *,
+    projection_zy: np.ndarray,
+    z_spacing_um: float,
+    y_spacing_um: float,
+    signal_fraction: float,
+) -> Optional[float]:
+    """Estimate dominant envelope tilt from one ``(z, y)`` projection.
+
+    Parameters
+    ----------
+    projection_zy : numpy.ndarray
+        Input projection in ``(z, y)`` order.
+    z_spacing_um : float
+        Physical spacing for the projection row axis.
+    y_spacing_um : float
+        Physical spacing for the projection column axis.
+    signal_fraction : float
+        Fraction of dynamic range used to derive the foreground threshold.
+
+    Returns
+    -------
+    float, optional
+        Estimated physical-space tilt angle in degrees. Returns ``None`` when
+        an envelope cannot be fit robustly.
+
+    Raises
+    ------
+    None
+        Invalid or degenerate inputs return ``None``.
+    """
+    image = np.asarray(projection_zy, dtype=np.float32)
+    if image.ndim != 2 or image.size == 0:
+        return None
+    finite = image[np.isfinite(image)]
+    if finite.size == 0:
+        return None
+
+    minimum = float(np.min(finite))
+    maximum = float(np.max(finite))
+    if not np.isfinite(minimum) or not np.isfinite(maximum) or maximum <= minimum:
+        return None
+
+    frac = float(signal_fraction)
+    threshold = minimum + (max(0.0, min(1.0, frac)) * (maximum - minimum))
+    mask = image > threshold
+    if int(np.count_nonzero(mask)) < int(_AUTO_ESTIMATE_MIN_FOREGROUND_PIXELS):
+        quantile_threshold = float(np.quantile(finite, 0.90))
+        mask = image >= quantile_threshold
+    if int(np.count_nonzero(mask)) < int(_AUTO_ESTIMATE_MIN_FOREGROUND_PIXELS):
+        return None
+
+    y_indices = np.where(np.any(mask, axis=0))[0]
+    if int(y_indices.size) < int(_AUTO_ESTIMATE_MIN_VALID_COLUMNS):
+        return None
+
+    top_z = np.full(y_indices.shape, np.nan, dtype=np.float64)
+    bottom_z = np.full(y_indices.shape, np.nan, dtype=np.float64)
+    for idx, y_index in enumerate(y_indices):
+        z_hits = np.where(mask[:, int(y_index)])[0]
+        if z_hits.size == 0:
+            continue
+        top_z[int(idx)] = float(z_hits[0])
+        bottom_z[int(idx)] = float(z_hits[-1])
+
+    envelope_angles: list[float] = []
+    for envelope in (top_z, bottom_z):
+        valid = np.isfinite(envelope)
+        if int(np.count_nonzero(valid)) < int(_AUTO_ESTIMATE_MIN_VALID_COLUMNS):
+            continue
+        y_fit = y_indices[valid].astype(np.float64)
+        z_fit = envelope[valid].astype(np.float64)
+        z_low, z_high = np.quantile(z_fit, [0.05, 0.95])
+        keep = (z_fit >= float(z_low)) & (z_fit <= float(z_high))
+        if int(np.count_nonzero(keep)) < int(_AUTO_ESTIMATE_MIN_VALID_COLUMNS):
+            continue
+        y_keep = y_fit[keep]
+        z_keep = z_fit[keep]
+        design = np.column_stack((y_keep, np.ones_like(y_keep)))
+        slope_px, _ = np.linalg.lstsq(design, z_keep, rcond=None)[0]
+        slope_um = float(slope_px) * float(z_spacing_um) / float(y_spacing_um)
+        envelope_angles.append(float(np.rad2deg(np.arctan(slope_um))))
+
+    if not envelope_angles:
+        return None
+    return float(np.median(np.asarray(envelope_angles, dtype=np.float64)))
+
+
+def _estimate_shear_yz_deg_from_source_extremes(
+    *,
+    source_array: Any,
+    voxel_size_um_zyx: tuple[float, float, float],
+    parameters: Mapping[str, Any],
+) -> Optional[float]:
+    """Estimate ``shear_yz_deg`` from YZ projections of X-extreme source slabs.
+
+    Parameters
+    ----------
+    source_array : Any
+        Source canonical array exposing ``shape`` and NumPy-style indexing.
+    voxel_size_um_zyx : tuple[float, float, float]
+        Source voxel spacing in microns for ``(z, y, x)``.
+    parameters : mapping[str, Any]
+        Normalized runtime parameter mapping.
+
+    Returns
+    -------
+    float, optional
+        Estimated ``shear_yz_deg`` value in physical-space degrees, or ``None``
+        when estimation fails.
+
+    Raises
+    ------
+    None
+        Invalid sampling settings or sparse signal return ``None``.
+    """
+    shape_tpczyx = tuple(int(v) for v in getattr(source_array, "shape", ()))
+    if len(shape_tpczyx) != 6:
+        return None
+    _, p_count, c_count, _, _, x_count = shape_tpczyx
+    if x_count <= 0:
+        return None
+
+    t_index = max(0, int(parameters.get("auto_estimate_t_index", 0)))
+    p_index = max(0, int(parameters.get("auto_estimate_p_index", 0)))
+    c_index = max(0, int(parameters.get("auto_estimate_c_index", 0)))
+    t_index = min(t_index, int(shape_tpczyx[0]) - 1)
+    p_index = min(p_index, int(p_count) - 1)
+    c_index = min(c_index, int(c_count) - 1)
+
+    x_fraction = float(
+        parameters.get(
+            "auto_estimate_extreme_fraction_x",
+            _AUTO_ESTIMATE_EXTREME_X_FRACTION_DEFAULT,
+        )
+    )
+    x_fraction = max(1e-6, min(0.5, x_fraction))
+    x_span = max(1, int(np.round(float(x_count) * float(x_fraction))))
+    x_span = min(int(x_count), int(x_span))
+
+    zy_stride = max(
+        1,
+        int(
+            parameters.get("auto_estimate_zy_stride", _AUTO_ESTIMATE_ZY_STRIDE_DEFAULT)
+        ),
+    )
+    signal_fraction = float(
+        parameters.get(
+            "auto_estimate_signal_fraction",
+            _AUTO_ESTIMATE_SIGNAL_FRACTION_DEFAULT,
+        )
+    )
+    signal_fraction = max(0.0, min(1.0, signal_fraction))
+
+    z_um, y_um, _ = (float(v) for v in voxel_size_um_zyx)
+    z_spacing_um = float(z_um) * float(zy_stride)
+    y_spacing_um = float(y_um) * float(zy_stride)
+
+    left_block = np.asarray(
+        source_array[
+            int(t_index),
+            int(p_index),
+            int(c_index),
+            :: int(zy_stride),
+            :: int(zy_stride),
+            0 : int(x_span),
+        ]
+    )
+    right_block = np.asarray(
+        source_array[
+            int(t_index),
+            int(p_index),
+            int(c_index),
+            :: int(zy_stride),
+            :: int(zy_stride),
+            int(x_count - x_span) : int(x_count),
+        ]
+    )
+
+    estimated_angles: list[float] = []
+    for slab in (left_block, right_block):
+        slab_zy = np.max(np.asarray(slab), axis=2)
+        angle = _fit_envelope_tilt_angle_deg(
+            projection_zy=np.asarray(slab_zy),
+            z_spacing_um=float(z_spacing_um),
+            y_spacing_um=float(y_spacing_um),
+            signal_fraction=float(signal_fraction),
+        )
+        if angle is None:
+            continue
+        estimated_angles.append(float(angle))
+    if not estimated_angles:
+        return None
+    return float(np.median(np.asarray(estimated_angles, dtype=np.float64)))
+
+
 def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize shear-transform runtime parameters.
 
@@ -314,7 +544,7 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     Raises
     ------
     ValueError
-        If interpolation mode or dtype is invalid.
+        If interpolation mode, dtype, or auto-estimation settings are invalid.
     """
     normalized = dict(parameters)
     normalized["execution_order"] = max(1, int(normalized.get("execution_order", 1)))
@@ -343,8 +573,54 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     normalized["rotation_deg_x"] = float(normalized.get("rotation_deg_x", 0.0))
     normalized["rotation_deg_y"] = float(normalized.get("rotation_deg_y", 0.0))
     normalized["rotation_deg_z"] = float(normalized.get("rotation_deg_z", 0.0))
-    normalized["auto_rotate_from_shear"] = bool(
+    normalized["auto_rotate_from_shear"] = _coerce_bool(
         normalized.get("auto_rotate_from_shear", False)
+    )
+    normalized["auto_estimate_shear_yz"] = _coerce_bool(
+        normalized.get("auto_estimate_shear_yz", False)
+    )
+    normalized["auto_estimate_extreme_fraction_x"] = float(
+        normalized.get(
+            "auto_estimate_extreme_fraction_x",
+            _AUTO_ESTIMATE_EXTREME_X_FRACTION_DEFAULT,
+        )
+    )
+    if (
+        normalized["auto_estimate_extreme_fraction_x"] <= 0.0
+        or normalized["auto_estimate_extreme_fraction_x"] > 0.5
+    ):
+        raise ValueError(
+            "shear_transform auto_estimate_extreme_fraction_x must be within (0, 0.5]."
+        )
+    normalized["auto_estimate_zy_stride"] = max(
+        1,
+        int(
+            normalized.get("auto_estimate_zy_stride", _AUTO_ESTIMATE_ZY_STRIDE_DEFAULT)
+        ),
+    )
+    normalized["auto_estimate_signal_fraction"] = float(
+        normalized.get(
+            "auto_estimate_signal_fraction", _AUTO_ESTIMATE_SIGNAL_FRACTION_DEFAULT
+        )
+    )
+    if (
+        normalized["auto_estimate_signal_fraction"] < 0.0
+        or normalized["auto_estimate_signal_fraction"] > 1.0
+    ):
+        raise ValueError(
+            "shear_transform auto_estimate_signal_fraction must be within [0, 1]."
+        )
+    normalized["auto_estimate_t_index"] = max(
+        0,
+        int(normalized.get("auto_estimate_t_index", 0)),
+    )
+    normalized["auto_estimate_p_index"] = max(
+        0,
+        int(normalized.get("auto_estimate_p_index", 0)),
+    )
+    normalized["auto_estimate_c_index"] = max(
+        0,
+        int(normalized.get("auto_estimate_c_index", 0)),
     )
     interpolation = (
         str(normalized.get("interpolation", "linear")).strip().lower() or "linear"
@@ -891,6 +1167,23 @@ def run_shear_transform_analysis(
         root=root,
         source_component=source_component,
     )
+    if bool(normalized.get("auto_estimate_shear_yz", False)):
+        _emit(3, "Estimating shear_yz_deg from x-extreme source slabs")
+        estimated_shear_yz_deg = _estimate_shear_yz_deg_from_source_extremes(
+            source_array=source_array,
+            voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+            parameters=normalized,
+        )
+        if estimated_shear_yz_deg is not None and np.isfinite(estimated_shear_yz_deg):
+            normalized["shear_yz_deg"] = float(estimated_shear_yz_deg)
+            normalized["shear_yz"] = float(np.tan(np.deg2rad(estimated_shear_yz_deg)))
+            _emit(
+                4,
+                "Auto-estimated shear_yz_deg="
+                f"{float(estimated_shear_yz_deg):.3f}",
+            )
+        else:
+            _emit(4, "Auto-estimation failed; using configured shear parameters")
     geometry = _resolve_affine_geometry(
         source_shape_zyx=(
             source_shape_tpczyx[3],

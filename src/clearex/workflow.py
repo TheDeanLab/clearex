@@ -143,6 +143,13 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "rotation_deg_y": 0.0,
         "rotation_deg_z": 0.0,
         "auto_rotate_from_shear": False,
+        "auto_estimate_shear_yz": False,
+        "auto_estimate_extreme_fraction_x": 0.03,
+        "auto_estimate_zy_stride": 4,
+        "auto_estimate_signal_fraction": 0.10,
+        "auto_estimate_t_index": 0,
+        "auto_estimate_p_index": 0,
+        "auto_estimate_c_index": 0,
         "interpolation": "linear",
         "fill_value": 0.0,
         "output_dtype": "float32",
@@ -1311,6 +1318,41 @@ def _normalize_shear_transform_parameters(
     normalized["rotation_deg_z"] = float(normalized.get("rotation_deg_z", 0.0))
     normalized["auto_rotate_from_shear"] = bool(
         normalized.get("auto_rotate_from_shear", False)
+    )
+    normalized["auto_estimate_shear_yz"] = bool(
+        normalized.get("auto_estimate_shear_yz", False)
+    )
+    normalized["auto_estimate_extreme_fraction_x"] = float(
+        normalized.get("auto_estimate_extreme_fraction_x", 0.03)
+    )
+    if (
+        normalized["auto_estimate_extreme_fraction_x"] <= 0.0
+        or normalized["auto_estimate_extreme_fraction_x"] > 0.5
+    ):
+        raise ValueError(
+            "shear_transform auto_estimate_extreme_fraction_x must be within (0, 0.5]."
+        )
+    normalized["auto_estimate_zy_stride"] = max(
+        1, int(normalized.get("auto_estimate_zy_stride", 4))
+    )
+    normalized["auto_estimate_signal_fraction"] = float(
+        normalized.get("auto_estimate_signal_fraction", 0.10)
+    )
+    if (
+        normalized["auto_estimate_signal_fraction"] < 0.0
+        or normalized["auto_estimate_signal_fraction"] > 1.0
+    ):
+        raise ValueError(
+            "shear_transform auto_estimate_signal_fraction must be within [0, 1]."
+        )
+    normalized["auto_estimate_t_index"] = max(
+        0, int(normalized.get("auto_estimate_t_index", 0))
+    )
+    normalized["auto_estimate_p_index"] = max(
+        0, int(normalized.get("auto_estimate_p_index", 0))
+    )
+    normalized["auto_estimate_c_index"] = max(
+        0, int(normalized.get("auto_estimate_c_index", 0))
     )
     interpolation = (
         str(normalized.get("interpolation", "linear")).strip().lower() or "linear"
