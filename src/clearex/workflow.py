@@ -1580,6 +1580,15 @@ def _normalize_visualization_volume_layers(value: Any) -> list[Dict[str, Any]]:
         )
         if multiscale_policy not in {"inherit", "require", "auto_build", "off"}:
             multiscale_policy = "inherit"
+        blending = str(raw_row.get("blending", "")).strip().lower()
+        if blending in {"auto", "default"}:
+            blending = ""
+        colormap = str(raw_row.get("colormap", raw_row.get("lut", ""))).strip()
+        if colormap.strip().lower() in {"auto", "default"}:
+            colormap = ""
+        rendering = str(raw_row.get("rendering", "")).strip().lower()
+        if rendering in {"auto", "default"}:
+            rendering = ""
         rows.append(
             {
                 "component": component,
@@ -1588,11 +1597,9 @@ def _normalize_visualization_volume_layers(value: Any) -> list[Dict[str, Any]]:
                 "channels": _normalize_visualization_channels(raw_row.get("channels")),
                 "visible": _coerce_optional_bool(raw_row.get("visible")),
                 "opacity": _coerce_optional_unit_interval_float(raw_row.get("opacity")),
-                "blending": str(raw_row.get("blending", "")).strip().lower(),
-                "colormap": str(
-                    raw_row.get("colormap", raw_row.get("lut", ""))
-                ).strip(),
-                "rendering": str(raw_row.get("rendering", "")).strip().lower(),
+                "blending": blending,
+                "colormap": colormap,
+                "rendering": rendering,
                 "multiscale_policy": multiscale_policy,
             }
         )
@@ -2935,7 +2942,8 @@ def _detect_local_gpu_info() -> tuple[int, Optional[int]]:
 
     Notes
     -----
-    Detection prefers NVML via ``pynvml`` and falls back to ``nvidia-smi``.
+    Detection prefers NVML via ``pynvml`` and falls back to ``nvidia-smi``,
+    ``torch.cuda``, and ``CUDA_VISIBLE_DEVICES``.
     Failure to query GPU information is non-fatal and returns ``(0, None)``.
     """
     try:
@@ -2971,28 +2979,64 @@ def _detect_local_gpu_info() -> tuple[int, Optional[int]]:
             timeout=2.0,
         )
     except Exception:
-        return 0, None
+        result = None
 
-    if result.returncode != 0:
-        return 0, None
+    if result is not None and int(result.returncode) == 0:
+        memories_mib: list[int] = []
+        for line in result.stdout.splitlines():
+            text = str(line).strip()
+            if not text:
+                continue
+            try:
+                parsed = int(float(text))
+            except ValueError:
+                continue
+            if parsed > 0:
+                memories_mib.append(parsed)
 
-    memories_mib: list[int] = []
-    for line in result.stdout.splitlines():
-        text = str(line).strip()
-        if not text:
-            continue
-        try:
-            parsed = int(float(text))
-        except ValueError:
-            continue
-        if parsed > 0:
-            memories_mib.append(parsed)
+        if memories_mib:
+            total_bytes = int(sum(memories_mib)) << 20
+            return len(memories_mib), (total_bytes if total_bytes > 0 else None)
 
-    if not memories_mib:
-        return 0, None
+    try:
+        import torch
 
-    total_bytes = int(sum(memories_mib)) << 20
-    return len(memories_mib), (total_bytes if total_bytes > 0 else None)
+        cuda_module = getattr(torch, "cuda", None)
+        if cuda_module is not None and callable(
+            getattr(cuda_module, "is_available", None)
+        ):
+            if bool(cuda_module.is_available()):
+                count = max(0, int(cuda_module.device_count()))
+                if count > 0:
+                    total_bytes = 0
+                    get_props = getattr(cuda_module, "get_device_properties", None)
+                    if callable(get_props):
+                        for index in range(count):
+                            try:
+                                props = get_props(index)
+                                total_bytes += max(
+                                    0,
+                                    int(getattr(props, "total_memory", 0)),
+                                )
+                            except Exception:
+                                continue
+                    return count, (int(total_bytes) if total_bytes > 0 else None)
+    except Exception:
+        pass
+
+    raw_visible_devices = str(os.environ.get("CUDA_VISIBLE_DEVICES", "")).strip()
+    if raw_visible_devices:
+        lowered = raw_visible_devices.lower()
+        if lowered not in {"-1", "none", "void", "nodevfiles"}:
+            visible_devices = [
+                token.strip()
+                for token in raw_visible_devices.split(",")
+                if token.strip()
+            ]
+            if visible_devices:
+                return len(visible_devices), None
+
+    return 0, None
 
 
 def _format_binary_size(num_bytes: int) -> str:

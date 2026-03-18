@@ -452,6 +452,7 @@ def test_build_input_source_options_includes_existing_store_outputs() -> None:
         available_store_output_components={
             "flatfield": "results/flatfield/latest/data",
         },
+        provenance_confirmed_operations=["flatfield"],
     )
 
     assert options[0] == ("data", "Raw data (data)")
@@ -493,6 +494,7 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
         available_store_output_components={
             "flatfield": "results/flatfield/latest/data",
         },
+        provenance_confirmed_operations=["flatfield"],
     )
 
     values = [value for value, _label in options]
@@ -501,6 +503,126 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
         "flatfield",
         "Flatfield Correction output (results/flatfield/latest/data)",
     ) in options
+
+
+def test_build_input_source_options_omits_unconfirmed_upstream_outputs() -> None:
+    options = app_module._build_input_source_options(
+        operation_name="visualization",
+        selected_order=["deconvolution", "visualization"],
+        operation_key_order=(
+            "flatfield",
+            "deconvolution",
+            "shear_transform",
+            "particle_detection",
+            "usegment3d",
+            "registration",
+            "visualization",
+        ),
+        operation_labels={
+            "flatfield": "Flatfield Correction",
+            "deconvolution": "Deconvolution",
+            "shear_transform": "Shear Transform",
+            "particle_detection": "Particle Detection",
+            "usegment3d": "uSegment3D",
+            "registration": "Registration",
+            "visualization": "Visualization",
+        },
+        operation_output_components={
+            "flatfield": "results/flatfield/latest/data",
+            "deconvolution": "results/deconvolution/latest/data",
+            "shear_transform": "results/shear_transform/latest/data",
+            "usegment3d": "results/usegment3d/latest/data",
+            "registration": "results/registration/latest/data",
+        },
+        available_store_output_components={
+            "deconvolution": "results/deconvolution/latest/data",
+        },
+        provenance_confirmed_operations=[],
+    )
+
+    values = [value for value, _ in options]
+    assert values == ["data"]
+
+
+def test_build_visualization_volume_layer_component_options_only_uses_confirmed() -> None:
+    options = app_module._build_visualization_volume_layer_component_options(
+        operation_key_order=(
+            "flatfield",
+            "deconvolution",
+            "shear_transform",
+            "particle_detection",
+            "usegment3d",
+            "registration",
+            "visualization",
+        ),
+        operation_labels={
+            "flatfield": "Flatfield Correction",
+            "deconvolution": "Deconvolution",
+            "shear_transform": "Shear Transform",
+            "particle_detection": "Particle Detection",
+            "usegment3d": "uSegment3D",
+            "registration": "Registration",
+            "visualization": "Visualization",
+        },
+        available_store_output_components={
+            "flatfield": "results/flatfield/latest/data",
+            "deconvolution": "results/deconvolution/latest/data",
+        },
+        provenance_confirmed_operations=["flatfield"],
+    )
+
+    assert options[0] == ("data", "Raw data (data)")
+    assert (
+        "results/flatfield/latest/data",
+        "Flatfield Correction output (results/flatfield/latest/data)",
+    ) in options
+    assert all(
+        component != "results/deconvolution/latest/data"
+        for component, _label in options
+    )
+
+
+def test_build_visualization_volume_layer_component_options_deduplicates_components() -> None:
+    options = app_module._build_visualization_volume_layer_component_options(
+        operation_key_order=("flatfield", "deconvolution", "visualization"),
+        operation_labels={
+            "flatfield": "Flatfield Correction",
+            "deconvolution": "Deconvolution",
+            "visualization": "Visualization",
+        },
+        available_store_output_components={
+            "flatfield": "results/shared/latest/data",
+            "deconvolution": "results/shared/latest/data",
+        },
+        provenance_confirmed_operations=["flatfield", "deconvolution"],
+    )
+
+    components = [component for component, _ in options]
+    assert components.count("results/shared/latest/data") == 1
+
+
+def test_available_visualization_blending_options_include_expected_values() -> None:
+    options = app_module._available_visualization_blending_options()
+
+    assert "translucent" in options
+    assert "additive" in options
+    assert "opaque" in options
+
+
+def test_available_visualization_rendering_options_include_expected_values() -> None:
+    options = app_module._available_visualization_rendering_options()
+
+    assert "mip" in options
+    assert "attenuated_mip" in options
+    assert "iso" in options
+
+
+def test_available_visualization_colormap_options_include_expected_values() -> None:
+    options = app_module._available_visualization_colormap_options()
+
+    assert "gray" in options
+    assert "green" in options
+    assert "magenta" in options
 
 
 def test_discover_available_operation_output_components(monkeypatch) -> None:
@@ -570,3 +692,55 @@ def test_shear_degree_conversion_matches_expected_tangent() -> None:
         rel_tol=0.0,
         abs_tol=1e-12,
     )
+
+
+def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    dialog_cls = app_module.AnalysisSelectionDialog
+    assert dialog_cls._OPERATION_LABELS["visualization"] == "Napari"
+    assert ("Visualization", ("visualization", "mip_export")) in dialog_cls._OPERATION_TABS
+
+
+def test_analysis_selection_dialog_detect_local_gpu_available(monkeypatch) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    class _Recommendation:
+        def __init__(self, detected_gpu_count: int) -> None:
+            self.detected_gpu_count = int(detected_gpu_count)
+
+    monkeypatch.setattr(
+        app_module,
+        "recommend_local_cluster_config",
+        lambda: _Recommendation(detected_gpu_count=0),
+    )
+    monkeypatch.delenv("VGL_DISPLAY", raising=False)
+    assert app_module.AnalysisSelectionDialog._detect_local_gpu_available() is False
+
+    monkeypatch.setattr(
+        app_module,
+        "recommend_local_cluster_config",
+        lambda: _Recommendation(detected_gpu_count=2),
+    )
+    assert app_module.AnalysisSelectionDialog._detect_local_gpu_available() is True
+
+
+def test_analysis_selection_dialog_detect_local_gpu_available_with_virtualgl_hint(
+    monkeypatch,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    class _Recommendation:
+        def __init__(self, detected_gpu_count: int) -> None:
+            self.detected_gpu_count = int(detected_gpu_count)
+
+    monkeypatch.setattr(
+        app_module,
+        "recommend_local_cluster_config",
+        lambda: _Recommendation(detected_gpu_count=0),
+    )
+    monkeypatch.setenv("VGL_DISPLAY", "EGL")
+    assert app_module.AnalysisSelectionDialog._detect_local_gpu_available() is True

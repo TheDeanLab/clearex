@@ -105,6 +105,7 @@ try:
         QEventLoop,
         QMimeData,
         QObject,
+        QPoint,
         QSize,
         QThread,
         Qt,
@@ -135,6 +136,7 @@ try:
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QMenu,
         QMessageBox,
         QPlainTextEdit,
         QProgressBar,
@@ -482,6 +484,7 @@ def _build_input_source_options(
     operation_labels: Mapping[str, str],
     operation_output_components: Mapping[str, str],
     available_store_output_components: Optional[Mapping[str, str]] = None,
+    provenance_confirmed_operations: Optional[Sequence[str]] = None,
 ) -> list[tuple[str, str]]:
     """Build GUI input-source options for one analysis operation.
 
@@ -499,6 +502,8 @@ def _build_input_source_options(
         Expected output component per operation.
     available_store_output_components : mapping[str, str], optional
         Existing outputs discovered in the selected store from prior runs.
+    provenance_confirmed_operations : sequence[str], optional
+        Operation keys with at least one successful provenance record.
 
     Returns
     -------
@@ -507,12 +512,23 @@ def _build_input_source_options(
     """
     options: list[tuple[str, str]] = [("data", "Raw data (data)")]
     option_values = {"data"}
+    available = available_store_output_components or {}
+    confirmed_operations = {
+        str(name).strip()
+        for name in (provenance_confirmed_operations or ())
+        if str(name).strip()
+    }
+
+    def _available_component(operation_key: str) -> str:
+        return str(available.get(operation_key, "")).strip()
 
     for upstream_name in selected_order:
         if upstream_name == operation_name:
             break
-        component = operation_output_components.get(upstream_name)
-        if not component or upstream_name in option_values:
+        if upstream_name in option_values or upstream_name not in confirmed_operations:
+            continue
+        component = _available_component(upstream_name)
+        if not component:
             continue
         label = operation_labels.get(
             upstream_name, upstream_name.replace("_", " ").title()
@@ -520,11 +536,12 @@ def _build_input_source_options(
         options.append((upstream_name, f"{label} output ({component})"))
         option_values.add(upstream_name)
 
-    available = available_store_output_components or {}
     for upstream_name in operation_key_order:
         if upstream_name == operation_name or upstream_name in option_values:
             continue
-        component = str(available.get(upstream_name, "")).strip()
+        if upstream_name not in confirmed_operations:
+            continue
+        component = _available_component(upstream_name)
         if not component:
             continue
         label = operation_labels.get(
@@ -534,6 +551,156 @@ def _build_input_source_options(
         option_values.add(upstream_name)
 
     return options
+
+
+def _build_visualization_volume_layer_component_options(
+    *,
+    operation_key_order: Sequence[str],
+    operation_labels: Mapping[str, str],
+    available_store_output_components: Optional[Mapping[str, str]] = None,
+    provenance_confirmed_operations: Optional[Sequence[str]] = None,
+) -> list[tuple[str, str]]:
+    """Build provenance-backed component options for visualization volume layers.
+
+    Parameters
+    ----------
+    operation_key_order : sequence of str
+        Canonical operation display order.
+    operation_labels : mapping[str, str]
+        Human-readable labels per operation.
+    available_store_output_components : mapping[str, str], optional
+        Existing output components discovered in the selected store.
+    provenance_confirmed_operations : sequence[str], optional
+        Operation keys with at least one successful provenance run.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Ordered ``(component_path, label)`` options. Includes raw ``data``
+        plus confirmed outputs currently present in the store.
+    """
+    options: list[tuple[str, str]] = [("data", "Raw data (data)")]
+    option_components = {"data"}
+    available = available_store_output_components or {}
+    confirmed_operations = {
+        str(name).strip()
+        for name in (provenance_confirmed_operations or ())
+        if str(name).strip()
+    }
+
+    for operation_name in operation_key_order:
+        if operation_name not in confirmed_operations:
+            continue
+        component = str(available.get(operation_name, "")).strip()
+        if not component or component in option_components:
+            continue
+        label = operation_labels.get(
+            operation_name,
+            operation_name.replace("_", " ").title(),
+        )
+        options.append((component, f"{label} output ({component})"))
+        option_components.add(component)
+    return options
+
+
+_FALLBACK_VISUALIZATION_BLENDINGS: tuple[str, ...] = (
+    "translucent",
+    "translucent_no_depth",
+    "additive",
+    "minimum",
+    "opaque",
+    "multiplicative",
+)
+_FALLBACK_VISUALIZATION_RENDERINGS: tuple[str, ...] = (
+    "translucent",
+    "additive",
+    "iso",
+    "mip",
+    "minip",
+    "attenuated_mip",
+    "average",
+)
+_FALLBACK_VISUALIZATION_COLORMAPS: tuple[str, ...] = (
+    "gray",
+    "green",
+    "magenta",
+    "cyan",
+    "yellow",
+    "red",
+    "blue",
+    "bop orange",
+    "viridis",
+    "magma",
+    "inferno",
+    "plasma",
+    "turbo",
+)
+
+
+def _deduplicate_non_empty_text(values: Sequence[Any]) -> list[str]:
+    """Return first-seen unique non-empty string values.
+
+    Parameters
+    ----------
+    values : sequence[Any]
+        Candidate values.
+
+    Returns
+    -------
+    list[str]
+        Unique non-empty string values in original order.
+    """
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
+
+
+def _available_visualization_blending_options() -> list[str]:
+    """Return selectable napari blending modes for visualization layers."""
+    try:
+        from napari.layers.base._base_constants import Blending
+
+        values = [str(getattr(item, "value", item)).strip() for item in Blending]
+        normalized = _deduplicate_non_empty_text(values)
+        if normalized:
+            return normalized
+    except Exception:
+        pass
+    return list(_FALLBACK_VISUALIZATION_BLENDINGS)
+
+
+def _available_visualization_rendering_options() -> list[str]:
+    """Return selectable napari image-rendering modes for visualization layers."""
+    try:
+        from napari.layers.image._image_constants import ImageRendering
+
+        values = [str(getattr(item, "value", item)).strip() for item in ImageRendering]
+        normalized = _deduplicate_non_empty_text(values)
+        if normalized:
+            return normalized
+    except Exception:
+        pass
+    return list(_FALLBACK_VISUALIZATION_RENDERINGS)
+
+
+def _available_visualization_colormap_options() -> list[str]:
+    """Return selectable napari colormap names for visualization layers."""
+    try:
+        from napari.utils.colormaps import AVAILABLE_COLORMAPS
+
+        keys = sorted(str(key).strip() for key in AVAILABLE_COLORMAPS.keys())
+        normalized = _deduplicate_non_empty_text(keys)
+        if normalized:
+            return normalized
+    except Exception:
+        pass
+    return list(_FALLBACK_VISUALIZATION_COLORMAPS)
 
 
 def _particle_overlay_available_for_visualization(
@@ -1427,6 +1594,80 @@ if HAS_PYQT6:
         event_loop.exec()
         splash.close()
         app.processEvents()
+
+    class _CurrentPageStackedWidget(QStackedWidget):
+        """QStackedWidget whose size hints follow only the active page."""
+
+        def hasHeightForWidth(self) -> bool:
+            """Return whether the active page supports height-for-width sizing.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            bool
+                ``True`` when the current page has height-for-width support.
+            """
+            current = self.currentWidget()
+            if current is None:
+                return super().hasHeightForWidth()
+            return bool(current.hasHeightForWidth())
+
+        def heightForWidth(self, width: int) -> int:
+            """Return preferred height for the active page at the given width.
+
+            Parameters
+            ----------
+            width : int
+                Proposed widget width in pixels.
+
+            Returns
+            -------
+            int
+                Preferred height for the current page.
+            """
+            current = self.currentWidget()
+            if current is None:
+                return super().heightForWidth(int(width))
+            if current.hasHeightForWidth():
+                return int(current.heightForWidth(int(width)))
+            return int(current.sizeHint().height())
+
+        def sizeHint(self) -> QSize:
+            """Return size hint for the current visible page.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            QSize
+                Size hint for the active page.
+            """
+            current = self.currentWidget()
+            if current is None:
+                return super().sizeHint()
+            return current.sizeHint()
+
+        def minimumSizeHint(self) -> QSize:
+            """Return minimum size hint for the current visible page.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            QSize
+                Minimum size hint for the active page.
+            """
+            current = self.currentWidget()
+            if current is None:
+                return super().minimumSizeHint()
+            return current.minimumSizeHint()
 
     class ZarrSaveConfigDialog(QDialog):
         """Dialog for configuring analysis-store Zarr chunking and pyramid factors.
@@ -3018,7 +3259,7 @@ if HAS_PYQT6:
                     background-color: #0c1118;
                     color: #e6edf3;
                     font-family: "Avenir Next", "Helvetica Neue", "Arial", sans-serif;
-                    font-size: 13px;
+                    font-size: 14px;
                 }
                 QLabel {
                     color: #d9e2f1;
@@ -3040,8 +3281,8 @@ if HAS_PYQT6:
                     color: #f0f5ff;
                 }
                 QLabel#subtitle {
-                    font-size: 13px;
-                    color: #a6b7d0;
+                    font-size: 14px;
+                    color: #b8c8dd;
                 }
                 QGroupBox {
                     border: 1px solid #2a3442;
@@ -3720,7 +3961,7 @@ if HAS_PYQT6:
             "particle_detection": "Particle Detection",
             "usegment3d": "uSegment3D",
             "registration": "Registration",
-            "visualization": "Visualization",
+            "visualization": "Napari",
             "mip_export": "MIP Export",
         }
         _OPERATION_TABS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -3730,7 +3971,7 @@ if HAS_PYQT6:
             ),
             ("Segmentation", ("particle_detection", "usegment3d")),
             ("Postprocessing", ("registration",)),
-            ("Export", ("visualization", "mip_export")),
+            ("Visualization", ("visualization", "mip_export")),
         )
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
             "flatfield": "results/flatfield/latest/data",
@@ -4151,8 +4392,9 @@ if HAS_PYQT6:
             """
             super().__init__()
             self.setWindowTitle("ClearEx Analysis")
-            self.setMinimumWidth(1280)
-            self.setMinimumHeight(760)
+            self.setMinimumWidth(1440)
+            self.setMinimumHeight(860)
+            self.resize(1520, 940)
 
             self._base_config = initial
             self._dask_backend_config: DaskBackendConfig = initial.dask_backend
@@ -4209,6 +4451,7 @@ if HAS_PYQT6:
             self._operation_force_rerun_checkboxes: Dict[str, QCheckBox] = {}
             self._operation_history_labels: Dict[str, QLabel] = {}
             self._operation_history_cache: Dict[str, Dict[str, Any]] = {}
+            self._operation_history_copy_payloads: Dict[str, str] = {}
             self._operation_panel_indices: Dict[str, int] = {}
             self._parameter_help_map: Dict[QObject, str] = {}
             self._active_config_operation: Optional[str] = None
@@ -4224,6 +4467,7 @@ if HAS_PYQT6:
             self._visualization_volume_layers_summary_label: Optional[QLabel] = None
             self._visualization_layer_table_button: Optional[QPushButton] = None
             self._visualization_layer_table_summary_label: Optional[QLabel] = None
+            self._local_gpu_available = self._detect_local_gpu_available()
 
             self._build_ui()
             self._apply_theme()
@@ -4324,7 +4568,7 @@ if HAS_PYQT6:
             parameters_layout = QVBoxLayout(parameters_group)
             apply_stack_spacing(parameters_layout)
 
-            self._operation_panel_stack = QStackedWidget()
+            self._operation_panel_stack = _CurrentPageStackedWidget()
             self._operation_panel_stack.addWidget(self._build_no_selection_panel())
             for operation_name in self._OPERATION_KEYS:
                 panel = self._build_operation_panel(operation_name)
@@ -4333,6 +4577,9 @@ if HAS_PYQT6:
             self._operation_panel_scroll = QScrollArea()
             self._operation_panel_scroll.setWidgetResizable(True)
             self._operation_panel_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self._operation_panel_scroll.setAlignment(
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+            )
             self._operation_panel_scroll.setWidget(self._operation_panel_stack)
             parameters_layout.addWidget(self._operation_panel_scroll, 1)
 
@@ -4492,12 +4739,24 @@ if HAS_PYQT6:
             parent_layout.addLayout(row)
 
             if operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
-                history_label = QLabel("Provenance: no successful run recorded yet.")
-                history_label.setObjectName("statusLabel")
-                history_label.setWordWrap(True)
+                history_label = QLabel("No Provenance Record")
+                history_label.setObjectName("provenanceStatusLabel")
+                history_label.setProperty("state", "missing")
                 history_label.setContentsMargins(24, 0, 0, 0)
+                history_label.setToolTip(
+                    "No successful provenance run recorded yet."
+                )
+                history_label.setContextMenuPolicy(
+                    Qt.ContextMenuPolicy.CustomContextMenu
+                )
+                history_label.customContextMenuRequested.connect(
+                    lambda pos, op=operation_name: (
+                        self._on_operation_history_context_menu(op, pos)
+                    )
+                )
                 parent_layout.addWidget(history_label)
                 self._operation_history_labels[operation_name] = history_label
+                self._operation_history_copy_payloads[operation_name] = ""
 
             checkbox.toggled.connect(self._on_operation_selection_changed)
             order_spin.valueChanged.connect(self._on_operation_order_changed)
@@ -4520,6 +4779,7 @@ if HAS_PYQT6:
                 Placeholder panel widget.
             """
             widget = QWidget()
+            widget.setObjectName("operationPanel")
             layout = QVBoxLayout(widget)
             apply_stack_spacing(layout)
             text = QLabel(
@@ -4527,9 +4787,9 @@ if HAS_PYQT6:
                 "its operation parameters."
             )
             text.setWordWrap(True)
+            text.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             text.setObjectName("parameterHint")
             layout.addWidget(text)
-            layout.addStretch(1)
             return widget
 
         def _build_operation_panel(self, operation_name: str) -> QWidget:
@@ -4546,6 +4806,7 @@ if HAS_PYQT6:
                 Parameter panel for the operation.
             """
             panel = QWidget()
+            panel.setObjectName("operationPanel")
             layout = QVBoxLayout(panel)
             apply_stack_spacing(layout)
 
@@ -4555,6 +4816,7 @@ if HAS_PYQT6:
             )
             profile.setObjectName("parameterHint")
             profile.setWordWrap(True)
+            profile.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             layout.addWidget(profile)
 
             form = QFormLayout()
@@ -4595,7 +4857,6 @@ if HAS_PYQT6:
                 form.addRow("Details", stub)
 
             layout.addLayout(form)
-            layout.addStretch(1)
             return panel
 
         def _build_parameter_section_card(
@@ -5358,6 +5619,7 @@ if HAS_PYQT6:
                 "uSegment3D Runtime"
             )
             self._usegment3d_channel_scroll = QScrollArea()
+            self._usegment3d_channel_scroll.setObjectName("usegment3dChannelScroll")
             self._usegment3d_channel_scroll.setWidgetResizable(True)
             self._usegment3d_channel_scroll.setFrameShape(QFrame.Shape.NoFrame)
             self._usegment3d_channel_scroll.setHorizontalScrollBarPolicy(
@@ -5367,6 +5629,7 @@ if HAS_PYQT6:
                 Qt.ScrollBarPolicy.ScrollBarAlwaysOff
             )
             self._usegment3d_channel_container = QWidget()
+            self._usegment3d_channel_container.setObjectName("usegment3dChannelContainer")
             self._usegment3d_channel_layout = QHBoxLayout()
             apply_compact_row_spacing(self._usegment3d_channel_layout)
             self._usegment3d_channel_layout.setContentsMargins(0, 0, 0, 0)
@@ -6046,6 +6309,17 @@ if HAS_PYQT6:
                 )
                 if multiscale_policy not in {"inherit", "require", "auto_build", "off"}:
                     multiscale_policy = "inherit"
+                blending = str(raw_row.get("blending", "")).strip().lower()
+                if blending in {"auto", "default"}:
+                    blending = ""
+                colormap = str(
+                    raw_row.get("colormap", raw_row.get("lut", ""))
+                ).strip()
+                if colormap.strip().lower() in {"auto", "default"}:
+                    colormap = ""
+                rendering = str(raw_row.get("rendering", "")).strip().lower()
+                if rendering in {"auto", "default"}:
+                    rendering = ""
                 rows.append(
                     {
                         "component": component,
@@ -6058,11 +6332,9 @@ if HAS_PYQT6:
                         "opacity": self._coerce_optional_unit_interval_float(
                             raw_row.get("opacity")
                         ),
-                        "blending": str(raw_row.get("blending", "")).strip().lower(),
-                        "colormap": str(
-                            raw_row.get("colormap", raw_row.get("lut", ""))
-                        ).strip(),
-                        "rendering": str(raw_row.get("rendering", "")).strip().lower(),
+                        "blending": blending,
+                        "colormap": colormap,
+                        "rendering": rendering,
                         "multiscale_policy": multiscale_policy,
                     }
                 )
@@ -6116,7 +6388,7 @@ if HAS_PYQT6:
             """Open popup editor for visualization volume-layer rows."""
             dialog = QDialog(self)
             dialog.setWindowTitle("Visualization Volume Layers")
-            dialog.setMinimumWidth(1160)
+            dialog.setMinimumWidth(1240)
             dialog.setMinimumHeight(460)
             dialog.setModal(True)
             dialog.setStyleSheet(_popup_dialog_stylesheet())
@@ -6149,20 +6421,133 @@ if HAS_PYQT6:
             )
             header = table.horizontalHeader()
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents)
-            table.verticalHeader().setVisible(False)
+            table.setColumnWidth(1, 280)
+            table.setColumnWidth(6, 150)
+            table.setColumnWidth(7, 140)
+            table.setColumnWidth(8, 150)
+            vertical_header = table.verticalHeader()
+            vertical_header.setVisible(False)
+            vertical_header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            row_height = max(36, int(table.fontMetrics().height()) + 16)
+            vertical_header.setDefaultSectionSize(row_height)
             root.addWidget(table, stretch=1)
 
+            component_options = self._visualization_volume_layer_component_options()
+            blending_options = _available_visualization_blending_options()
+            colormap_options = _available_visualization_colormap_options()
+            rendering_options = _available_visualization_rendering_options()
+            combo_height = max(26, row_height - 8)
+
+            def _configure_combo_size(combo: QComboBox) -> QComboBox:
+                combo.setMinimumHeight(combo_height)
+                combo.setMaximumHeight(combo_height)
+                combo.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Fixed,
+                )
+                return combo
+
+            def _make_choice_combo(
+                *,
+                current_value: str,
+                option_values: Sequence[str],
+                auto_label: str = "Auto",
+            ) -> QComboBox:
+                combo = _configure_combo_size(QComboBox(table))
+                combo.setEditable(True)
+                combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+                combo.addItem(str(auto_label), "")
+                for option in option_values:
+                    text = str(option).strip()
+                    if not text:
+                        continue
+                    combo.addItem(text, text)
+                value = str(current_value).strip()
+                index = combo.findData(value)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                elif value:
+                    combo.addItem(value, value)
+                    combo.setCurrentIndex(combo.count() - 1)
+                else:
+                    combo.setCurrentIndex(0)
+                line_edit = combo.lineEdit()
+                if line_edit is not None:
+                    line_edit.setCursorPosition(0)
+                return combo
+
+            def _read_choice_combo_value(combo: QComboBox) -> str:
+                text = str(combo.currentText()).strip()
+                current_index = int(combo.currentIndex())
+                if current_index >= 0:
+                    selected_label = str(combo.itemText(current_index)).strip()
+                    if text == selected_label:
+                        selected_data = combo.itemData(current_index)
+                        if selected_data is None:
+                            return ""
+                        return str(selected_data).strip()
+                return text
+
+            def _make_text_item(value: str) -> QTableWidgetItem:
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(
+                    int(
+                        Qt.AlignmentFlag.AlignVCenter
+                        | Qt.AlignmentFlag.AlignLeft
+                    )
+                )
+                return item
+
+            def _make_component_combo(current_value: str) -> QComboBox:
+                combo = _configure_combo_size(QComboBox(table))
+                combo.setEditable(True)
+                combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+                for component, label in component_options:
+                    combo.addItem(label, component)
+                value = str(current_value).strip()
+                index = combo.findData(value)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                elif value:
+                    combo.addItem(f"Custom component ({value})", value)
+                    combo.setCurrentIndex(combo.count() - 1)
+                else:
+                    combo.setCurrentIndex(0)
+                line_edit = combo.lineEdit()
+                if line_edit is not None:
+                    line_edit.setCursorPosition(0)
+                return combo
+
+            def _read_component_combo_value(combo: QComboBox) -> str:
+                text = str(combo.currentText()).strip()
+                current_index = int(combo.currentIndex())
+                if current_index >= 0:
+                    selected_label = str(combo.itemText(current_index)).strip()
+                    if text == selected_label:
+                        selected_data = combo.itemData(current_index)
+                        selected_component = (
+                            str(selected_data).strip()
+                            if selected_data is not None
+                            else ""
+                        )
+                        if selected_component:
+                            return selected_component
+                if text:
+                    return text
+                selected_data = combo.currentData()
+                return str(selected_data).strip() if selected_data is not None else ""
+
             def _make_type_combo(current_value: str) -> QComboBox:
-                combo = QComboBox(table)
+                combo = _configure_combo_size(QComboBox(table))
                 combo.addItem("Image", "image")
                 combo.addItem("Labels", "labels")
                 index = combo.findData(str(current_value).strip().lower() or "image")
@@ -6170,7 +6555,7 @@ if HAS_PYQT6:
                 return combo
 
             def _make_visible_combo(current_value: Optional[bool]) -> QComboBox:
-                combo = QComboBox(table)
+                combo = _configure_combo_size(QComboBox(table))
                 combo.addItem("Auto", None)
                 combo.addItem("True", True)
                 combo.addItem("False", False)
@@ -6179,7 +6564,7 @@ if HAS_PYQT6:
                 return combo
 
             def _make_multiscale_combo(current_value: str) -> QComboBox:
-                combo = QComboBox(table)
+                combo = _configure_combo_size(QComboBox(table))
                 combo.addItem("Inherit", "inherit")
                 combo.addItem("Require", "require")
                 combo.addItem("Auto build", "auto_build")
@@ -6200,12 +6585,12 @@ if HAS_PYQT6:
                 table.setItem(
                     row_index,
                     0,
-                    QTableWidgetItem(str(values.get("name", "")).strip()),
+                    _make_text_item(str(values.get("name", "")).strip()),
                 )
-                table.setItem(
+                table.setCellWidget(
                     row_index,
                     1,
-                    QTableWidgetItem(
+                    _make_component_combo(
                         str(
                             values.get("component", values.get("source_component", ""))
                         ).strip()
@@ -6216,7 +6601,7 @@ if HAS_PYQT6:
                     2,
                     _make_type_combo(str(values.get("layer_type", "image"))),
                 )
-                table.setItem(row_index, 3, QTableWidgetItem(channels_text))
+                table.setItem(row_index, 3, _make_text_item(channels_text))
                 table.setCellWidget(
                     row_index,
                     4,
@@ -6230,24 +6615,33 @@ if HAS_PYQT6:
                 table.setItem(
                     row_index,
                     5,
-                    QTableWidgetItem(
+                    _make_text_item(
                         "" if opacity_value is None else f"{float(opacity_value):.3f}"
                     ),
                 )
-                table.setItem(
+                table.setCellWidget(
                     row_index,
                     6,
-                    QTableWidgetItem(str(values.get("blending", "")).strip()),
+                    _make_choice_combo(
+                        current_value=str(values.get("blending", "")).strip().lower(),
+                        option_values=blending_options,
+                    ),
                 )
-                table.setItem(
+                table.setCellWidget(
                     row_index,
                     7,
-                    QTableWidgetItem(str(values.get("colormap", "")).strip()),
+                    _make_choice_combo(
+                        current_value=str(values.get("colormap", "")).strip(),
+                        option_values=colormap_options,
+                    ),
                 )
-                table.setItem(
+                table.setCellWidget(
                     row_index,
                     8,
-                    QTableWidgetItem(str(values.get("rendering", "")).strip()),
+                    _make_choice_combo(
+                        current_value=str(values.get("rendering", "")).strip().lower(),
+                        option_values=rendering_options,
+                    ),
                 )
                 table.setCellWidget(
                     row_index,
@@ -6256,6 +6650,7 @@ if HAS_PYQT6:
                         str(values.get("multiscale_policy", "inherit"))
                     ),
                 )
+                table.setRowHeight(row_index, row_height)
 
             rows_seed = (
                 list(self._visualization_volume_layers)
@@ -6307,21 +6702,19 @@ if HAS_PYQT6:
             rows: list[Dict[str, Any]] = []
             for row_index in range(table.rowCount()):
                 name_item = table.item(row_index, 0)
-                component_item = table.item(row_index, 1)
                 channels_item = table.item(row_index, 3)
                 opacity_item = table.item(row_index, 5)
-                blending_item = table.item(row_index, 6)
-                colormap_item = table.item(row_index, 7)
-                rendering_item = table.item(row_index, 8)
+                component_widget = table.cellWidget(row_index, 1)
                 type_widget = table.cellWidget(row_index, 2)
                 visible_widget = table.cellWidget(row_index, 4)
+                blending_widget = table.cellWidget(row_index, 6)
+                colormap_widget = table.cellWidget(row_index, 7)
+                rendering_widget = table.cellWidget(row_index, 8)
                 multiscale_widget = table.cellWidget(row_index, 9)
 
-                component = (
-                    str(component_item.text()).strip()
-                    if isinstance(component_item, QTableWidgetItem)
-                    else ""
-                )
+                component = ""
+                if isinstance(component_widget, QComboBox):
+                    component = _read_component_combo_value(component_widget)
                 if not component:
                     continue
                 row_payload: Dict[str, Any] = {
@@ -6352,18 +6745,18 @@ if HAS_PYQT6:
                         else ""
                     ),
                     "blending": (
-                        str(blending_item.text()).strip().lower()
-                        if isinstance(blending_item, QTableWidgetItem)
+                        _read_choice_combo_value(blending_widget).lower()
+                        if isinstance(blending_widget, QComboBox)
                         else ""
                     ),
                     "colormap": (
-                        str(colormap_item.text()).strip()
-                        if isinstance(colormap_item, QTableWidgetItem)
+                        _read_choice_combo_value(colormap_widget)
+                        if isinstance(colormap_widget, QComboBox)
                         else ""
                     ),
                     "rendering": (
-                        str(rendering_item.text()).strip().lower()
-                        if isinstance(rendering_item, QTableWidgetItem)
+                        _read_choice_combo_value(rendering_widget).lower()
+                        if isinstance(rendering_widget, QComboBox)
                         else ""
                     ),
                     "multiscale_policy": (
@@ -6734,6 +7127,62 @@ if HAS_PYQT6:
                         self._set_parameter_help(self._parameter_help_default)
             return super().eventFilter(watched, event)
 
+        @staticmethod
+        def _detect_local_gpu_available() -> bool:
+            """Return whether at least one compatible local GPU is detected.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            bool
+                ``True`` when local GPU probes report one or more devices.
+            """
+            detected_gpu_count = 0
+            try:
+                recommendation = recommend_local_cluster_config()
+            except Exception:
+                recommendation = None
+            if recommendation is not None:
+                detected_gpu_count = int(
+                    getattr(recommendation, "detected_gpu_count", 0)
+                )
+            if detected_gpu_count > 0:
+                return True
+
+            # VirtualGL-backed Linux sessions can expose GPU rendering even when
+            # local CUDA probes are inconclusive.
+            vgl_display = str(os.environ.get("VGL_DISPLAY", "")).strip().lower()
+            if vgl_display and vgl_display not in {"0", "false", "off", "none"}:
+                return True
+            return False
+
+        def _sync_operation_panel_geometry(self) -> None:
+            """Recompute panel geometry and reset scroll to the top.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Panel geometry and scroll position are updated in-place.
+            """
+            if self._operation_panel_stack is None:
+                return
+            self._operation_panel_stack.updateGeometry()
+            self._operation_panel_stack.adjustSize()
+            current = self._operation_panel_stack.currentWidget()
+            if current is not None:
+                current.updateGeometry()
+                current.adjustSize()
+            if self._operation_panel_scroll is not None:
+                self._operation_panel_scroll.ensureVisible(0, 0, 0, 0)
+                self._operation_panel_scroll.verticalScrollBar().setValue(0)
+
         def _show_operation_configuration(self, operation_name: str) -> None:
             """Display parameter controls for one operation.
 
@@ -6760,6 +7209,7 @@ if HAS_PYQT6:
             self._active_config_operation = operation_name
             panel_index = int(self._operation_panel_indices[operation_name])
             self._operation_panel_stack.setCurrentIndex(panel_index)
+            self._sync_operation_panel_geometry()
             for key, button in self._operation_config_buttons.items():
                 button.setChecked(key == operation_name)
 
@@ -6822,6 +7272,7 @@ if HAS_PYQT6:
             self,
             operation_name: str,
             available_store_outputs: Optional[Mapping[str, str]] = None,
+            provenance_confirmed_operations: Optional[Sequence[str]] = None,
         ) -> list[tuple[str, str]]:
             """Build input-source options for a specific operation.
 
@@ -6831,6 +7282,8 @@ if HAS_PYQT6:
                 Operation key for which options are generated.
             available_store_outputs : mapping[str, str], optional
                 Existing operation outputs discovered in the selected store.
+            provenance_confirmed_operations : sequence[str], optional
+                Operation keys with successful provenance records.
 
             Returns
             -------
@@ -6844,6 +7297,69 @@ if HAS_PYQT6:
                 operation_labels=self._OPERATION_LABELS,
                 operation_output_components=self._OPERATION_OUTPUT_COMPONENTS,
                 available_store_output_components=available_store_outputs,
+                provenance_confirmed_operations=provenance_confirmed_operations,
+            )
+
+        def _discover_store_output_components(self) -> Dict[str, str]:
+            """Discover operation outputs currently present in the selected store.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, str]
+                Mapping from operation key to component path for discovered
+                existing outputs.
+            """
+            return _discover_available_operation_output_components(
+                store_path=str(self._base_config.file or "").strip(),
+                operation_output_components=self._OPERATION_OUTPUT_COMPONENTS,
+            )
+
+        def _provenance_confirmed_operation_names(self) -> list[str]:
+            """Return operation keys with successful provenance history.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            list[str]
+                Operation keys confirmed by provenance history.
+            """
+            return [
+                str(operation_name)
+                for operation_name in self._PROVENANCE_HISTORY_OPERATIONS
+                if bool(
+                    self._operation_history_cache.get(operation_name, {}).get(
+                        "has_successful_run", False
+                    )
+                )
+            ]
+
+        def _visualization_volume_layer_component_options(
+            self,
+        ) -> list[tuple[str, str]]:
+            """Build component choices for visualization volume-layer rows.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            list[tuple[str, str]]
+                Ordered ``(component_path, label)`` choices including raw data
+                and provenance-confirmed outputs present in the selected store.
+            """
+            return _build_visualization_volume_layer_component_options(
+                operation_key_order=self._OPERATION_KEYS,
+                operation_labels=self._OPERATION_LABELS,
+                available_store_output_components=self._discover_store_output_components(),
+                provenance_confirmed_operations=self._provenance_confirmed_operation_names(),
             )
 
         def _refresh_input_source_options(self) -> None:
@@ -6858,9 +7374,9 @@ if HAS_PYQT6:
             None
                 Combo options are rebuilt in-place.
             """
-            available_store_outputs = _discover_available_operation_output_components(
-                store_path=str(self._base_config.file or "").strip(),
-                operation_output_components=self._OPERATION_OUTPUT_COMPONENTS,
+            available_store_outputs = self._discover_store_output_components()
+            provenance_confirmed_operations = (
+                self._provenance_confirmed_operation_names()
             )
 
             for operation_name, combo in self._operation_input_combos.items():
@@ -6871,6 +7387,7 @@ if HAS_PYQT6:
                 options = self._input_options_for_operation(
                     operation_name,
                     available_store_outputs=available_store_outputs,
+                    provenance_confirmed_operations=provenance_confirmed_operations,
                 )
                 option_values = [value for value, _ in options]
 
@@ -6883,11 +7400,12 @@ if HAS_PYQT6:
                         selected_index = idx
 
                 if current_source not in option_values:
-                    combo.addItem(
-                        f"Custom component ({current_source})",
-                        current_source,
-                    )
-                    selected_index = combo.count() - 1
+                    if current_source not in self._OPERATION_KEYS:
+                        combo.addItem(
+                            f"Custom component ({current_source})",
+                            current_source,
+                        )
+                        selected_index = combo.count() - 1
 
                 combo.setCurrentIndex(selected_index)
                 combo.setEnabled(self._operation_checkboxes[operation_name].isChecked())
@@ -6926,6 +7444,84 @@ if HAS_PYQT6:
                 has_particle_detection_history=self._has_completed_particle_detection_history(),
             )
 
+        def _set_provenance_history_label_state(
+            self,
+            *,
+            label: QLabel,
+            state: str,
+            text: str,
+            tooltip: str,
+        ) -> None:
+            """Update one provenance status badge text, tooltip, and state.
+
+            Parameters
+            ----------
+            label : QLabel
+                Provenance status badge label.
+            state : str
+                Visual state key (for example ``confirmed`` or ``missing``).
+            text : str
+                Badge text.
+            tooltip : str
+                Hover hint text.
+
+            Returns
+            -------
+            None
+                Label state is updated in-place.
+            """
+            label.setText(str(text))
+            label.setToolTip(str(tooltip))
+            if str(label.property("state") or "") != str(state):
+                label.setProperty("state", str(state))
+                style = label.style()
+                if style is not None:
+                    style.unpolish(label)
+                    style.polish(label)
+                label.update()
+
+        def _on_operation_history_context_menu(
+            self,
+            operation_name: str,
+            position: QPoint,
+        ) -> None:
+            """Show right-click menu for copying provenance summary text.
+
+            Parameters
+            ----------
+            operation_name : str
+                Operation key associated with the history label.
+            position : QPoint
+                Click position in label-local coordinates.
+
+            Returns
+            -------
+            None
+                Context menu is shown and clipboard may be updated.
+            """
+            history_label = self._operation_history_labels.get(operation_name)
+            if history_label is None:
+                return
+
+            payload = str(self._operation_history_copy_payloads.get(operation_name, ""))
+            menu = QMenu(history_label)
+            copy_action = menu.addAction("Copy Provenance Info")
+            copy_action.setEnabled(bool(payload.strip()))
+            selected_action = menu.exec(history_label.mapToGlobal(position))
+            if selected_action is not copy_action or not payload.strip():
+                return
+
+            app = QApplication.instance()
+            if app is None:
+                return
+            clipboard = app.clipboard()
+            if clipboard is None:
+                return
+            clipboard.setText(payload)
+            self._set_status(
+                f"Copied {self._OPERATION_LABELS.get(operation_name, operation_name)} provenance info."
+            )
+
         def _refresh_operation_provenance_statuses(self) -> None:
             """Update per-operation provenance history labels and force-rerun controls.
 
@@ -6939,6 +7535,14 @@ if HAS_PYQT6:
                 History labels and force-rerun visibility are updated in-place.
             """
             store_path = str(self._base_config.file or "").strip()
+            empty_history: Dict[str, Any] = {
+                "has_successful_run": False,
+                "latest_success_run_id": None,
+                "latest_success_ended_utc": None,
+                "matches_parameters": False,
+                "matching_run_id": None,
+                "matching_ended_utc": None,
+            }
             if not store_path or not is_zarr_store_path(store_path):
                 for operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
                     history_label = self._operation_history_labels.get(operation_name)
@@ -6946,13 +7550,22 @@ if HAS_PYQT6:
                         operation_name
                     )
                     if history_label is not None:
-                        history_label.setText(
-                            "Provenance: unavailable (current input is not a Zarr/N5 store)."
+                        self._set_provenance_history_label_state(
+                            label=history_label,
+                            state="unavailable",
+                            text="Provenance Unavailable",
+                            tooltip=(
+                                "Current input is not a Zarr/N5 analysis store, so "
+                                "provenance cannot be queried."
+                            ),
                         )
+                    self._operation_history_cache[operation_name] = dict(empty_history)
+                    self._operation_history_copy_payloads[operation_name] = ""
                     if force_checkbox is not None:
                         force_checkbox.setVisible(False)
                         force_checkbox.setChecked(False)
                         force_checkbox.setEnabled(False)
+                self._refresh_input_source_options()
                 return
 
             for operation_name in self._PROVENANCE_HISTORY_OPERATIONS:
@@ -6960,8 +7573,6 @@ if HAS_PYQT6:
                 force_checkbox = self._operation_force_rerun_checkboxes.get(
                     operation_name
                 )
-                if history_label is None:
-                    continue
 
                 try:
                     operation_params = self._collect_operation_parameters(
@@ -6979,15 +7590,16 @@ if HAS_PYQT6:
                         parameters=compare_params,
                     )
                 except Exception as exc:
-                    history = {
-                        "has_successful_run": False,
-                        "latest_success_run_id": None,
-                        "latest_success_ended_utc": None,
-                        "matches_parameters": False,
-                        "matching_run_id": None,
-                        "matching_ended_utc": None,
-                    }
-                    history_label.setText(f"Provenance: unavailable ({exc}).")
+                    history = dict(empty_history)
+                    if history_label is not None:
+                        self._set_provenance_history_label_state(
+                            label=history_label,
+                            state="unavailable",
+                            text="Provenance Unavailable",
+                            tooltip=f"Could not read provenance for this operation: {exc}",
+                        )
+                    self._operation_history_cache[operation_name] = dict(history)
+                    self._operation_history_copy_payloads[operation_name] = ""
                     if force_checkbox is not None:
                         force_checkbox.setVisible(False)
                         force_checkbox.setChecked(False)
@@ -7003,30 +7615,53 @@ if HAS_PYQT6:
                 matching_ended = str(history.get("matching_ended_utc") or "")
 
                 if not has_successful_run:
-                    history_label.setText("Provenance: no successful run recorded yet.")
-                elif matches_parameters:
-                    summary_bits = (
-                        [f"run_id={matching_run_id}"] if matching_run_id else []
-                    )
-                    if matching_ended:
-                        summary_bits.append(f"ended={matching_ended}")
-                    summary_text = (
-                        ", ".join(summary_bits) if summary_bits else "latest run"
-                    )
-                    history_label.setText(
-                        "Provenance: matching successful run exists "
-                        f"({summary_text}); routine will be skipped unless Force rerun is enabled."
-                    )
+                    if history_label is not None:
+                        self._set_provenance_history_label_state(
+                            label=history_label,
+                            state="missing",
+                            text="No Provenance Record",
+                            tooltip="No successful provenance run recorded yet.",
+                        )
+                    self._operation_history_copy_payloads[operation_name] = ""
                 else:
-                    summary_bits = [f"run_id={latest_run_id}"] if latest_run_id else []
-                    if latest_ended:
-                        summary_bits.append(f"ended={latest_ended}")
-                    summary_text = (
-                        ", ".join(summary_bits) if summary_bits else "latest run"
+                    selected_run_id = (
+                        matching_run_id if matches_parameters and matching_run_id else latest_run_id
                     )
-                    history_label.setText(
-                        "Provenance: successful run exists with different parameters "
-                        f"({summary_text})."
+                    selected_ended = (
+                        matching_ended if matches_parameters and matching_run_id else latest_ended
+                    )
+                    tooltip_lines = []
+                    if selected_run_id:
+                        tooltip_lines.append(f"run_id={selected_run_id}")
+                    if selected_ended:
+                        tooltip_lines.append(f"ended={selected_ended}")
+                    tooltip_lines.append(
+                        "parameters match current settings."
+                        if matches_parameters
+                        else "parameters differ from current settings."
+                    )
+                    tooltip_text = (
+                        "\n".join(tooltip_lines)
+                        if tooltip_lines
+                        else "Successful provenance run exists."
+                    )
+                    if history_label is not None:
+                        self._set_provenance_history_label_state(
+                            label=history_label,
+                            state="confirmed",
+                            text="Provenance Confirmed",
+                            tooltip=tooltip_text,
+                        )
+                    payload_lines = [f"operation={operation_name}"]
+                    if selected_run_id:
+                        payload_lines.append(f"run_id={selected_run_id}")
+                    if selected_ended:
+                        payload_lines.append(f"ended_utc={selected_ended}")
+                    payload_lines.append(
+                        f"matches_parameters={str(matches_parameters).lower()}"
+                    )
+                    self._operation_history_copy_payloads[operation_name] = "\n".join(
+                        payload_lines
                     )
 
                 if force_checkbox is not None:
@@ -7037,6 +7672,7 @@ if HAS_PYQT6:
                         has_successful_run
                         and self._operation_checkboxes[operation_name].isChecked()
                     )
+            self._refresh_input_source_options()
 
         def _set_status(self, text: str) -> None:
             """Update the analysis status label text.
@@ -7477,6 +8113,7 @@ if HAS_PYQT6:
             ):
                 self._active_config_operation = None
                 self._operation_panel_stack.setCurrentIndex(0)
+                self._sync_operation_panel_geometry()
                 for button in self._operation_config_buttons.values():
                     button.setChecked(False)
 
@@ -7956,7 +8593,17 @@ if HAS_PYQT6:
                 visualization_enabled and not show_all_positions
             )
             self._visualization_multiscale_checkbox.setEnabled(visualization_enabled)
+            gpu_hint = self._PARAMETER_HINTS["require_gpu_rendering"]
+            if not bool(self._local_gpu_available):
+                gpu_hint = (
+                    "No compatible GPU was auto-detected. Detection can be limited "
+                    "on remote or virtualized sessions (for example VirtualGL/EGL). "
+                    "You can still enable this option; runtime checks will validate "
+                    "the OpenGL renderer."
+                )
             self._visualization_require_gpu_checkbox.setEnabled(visualization_enabled)
+            self._visualization_require_gpu_checkbox.setToolTip(gpu_hint)
+            self._parameter_help_map[self._visualization_require_gpu_checkbox] = gpu_hint
             if self._visualization_volume_layers_button is not None:
                 self._visualization_volume_layers_button.setEnabled(
                     visualization_enabled
@@ -8857,6 +9504,7 @@ if HAS_PYQT6:
             self._on_operation_selection_changed()
             if self._operation_panel_stack is not None:
                 self._operation_panel_stack.setCurrentIndex(0)
+                self._sync_operation_panel_geometry()
             for button in self._operation_config_buttons.values():
                 button.setChecked(False)
             self._active_config_operation = None
@@ -8880,7 +9528,7 @@ if HAS_PYQT6:
                     background-color: #0c1118;
                     color: #e6edf3;
                     font-family: "Avenir Next", "Helvetica Neue", "Arial", sans-serif;
-                    font-size: 13px;
+                    font-size: 14px;
                 }
                 QLabel {
                     color: #d9e2f1;
@@ -8902,8 +9550,8 @@ if HAS_PYQT6:
                     color: #f0f5ff;
                 }
                 QLabel#subtitle {
-                    font-size: 13px;
-                    color: #a6b7d0;
+                    font-size: 14px;
+                    color: #b8c8dd;
                 }
                 QLabel#parameterHint {
                     color: #c8daf3;
@@ -8929,6 +9577,23 @@ if HAS_PYQT6:
                     border: none;
                     background: transparent;
                 }
+                QScrollArea#usegment3dChannelScroll {
+                    border: 1px solid #2b3f58;
+                    border-radius: 8px;
+                    background-color: #101a29;
+                }
+                QScrollArea#usegment3dChannelScroll > QWidget {
+                    background-color: #101a29;
+                }
+                QWidget#usegment3dChannelContainer {
+                    background-color: #101a29;
+                }
+                QWidget#operationPanel {
+                    background-color: #111925;
+                    border: 1px solid #2a3442;
+                    border-radius: 10px;
+                    padding: 8px;
+                }
                 QFrame#operationSection {
                     background-color: #0f1b2a;
                     border: 1px solid #2a3442;
@@ -8938,7 +9603,7 @@ if HAS_PYQT6:
                 QLabel#operationSectionTitle {
                     color: #9cc6ff;
                     font-weight: 700;
-                    font-size: 12px;
+                    font-size: 13px;
                 }
                 QTabWidget#analysisTabs::pane {
                     border: 1px solid #2a3442;
@@ -8986,8 +9651,31 @@ if HAS_PYQT6:
                     spacing: 8px;
                     color: #d9e2f1;
                 }
+                QLabel:disabled, QCheckBox:disabled {
+                    color: #9cb1cc;
+                }
+                QLabel#provenanceStatusLabel {
+                    font-weight: 600;
+                    border-radius: 8px;
+                    padding: 4px 8px;
+                }
+                QLabel#provenanceStatusLabel[state=\"confirmed\"] {
+                    color: #b8f2c8;
+                    background-color: #143323;
+                    border: 1px solid #27543a;
+                }
+                QLabel#provenanceStatusLabel[state=\"missing\"] {
+                    color: #ffe2a7;
+                    background-color: #3a2d14;
+                    border: 1px solid #6a4d1d;
+                }
+                QLabel#provenanceStatusLabel[state=\"unavailable\"] {
+                    color: #c7d5e8;
+                    background-color: #1d2532;
+                    border: 1px solid #2d3b50;
+                }
                 QLabel#statusLabel {
-                    color: #9ab0ca;
+                    color: #c3d2e6;
                 }
                 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
                     min-height: 30px;
@@ -8998,6 +9686,11 @@ if HAS_PYQT6:
                     padding: 5px 10px;
                     selection-background-color: #2f81f7;
                     selection-color: #f8fbff;
+                }
+                QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
+                    color: #afc1d8;
+                    background-color: #142235;
+                    border-color: #2a3c54;
                 }
                 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
                     border-color: #2f81f7;
@@ -9050,6 +9743,11 @@ if HAS_PYQT6:
                 }
                 QPushButton:pressed {
                     background-color: #182639;
+                }
+                QPushButton:disabled {
+                    color: #9cb1cc;
+                    background-color: #142235;
+                    border-color: #2a3c54;
                 }
                 QPushButton#configureButton:checked {
                     background-color: #2f81f7;

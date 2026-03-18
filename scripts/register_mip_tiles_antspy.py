@@ -9,6 +9,10 @@ Registration is estimated from one channel (default ``c0000``) and then reused
 for all channels to produce one blended multi-channel mosaic TIFF per timepoint.
 Transforms are estimated against a fixed anchor position using only expected
 left-right overlap regions to suppress spurious global matches.
+
+uv run scripts/register_mip_tiles_antspy.py --input-dir /endosome/archive/bioinformatics/Danuser_lab/Dean/dean/2026-03-12-dvOPM-liver/
+  │ CH00_000000.n5_mip_export/latest --projection xy --time-index 0 --registration-channel 0 --overlap-fraction 0.05 --aff-iterations 50x25x10x0 --aff-shrink-factors 8x4x2x1
+  │ --aff-smoothing-sigmas 3x2x1x0 --aff-random-sampling-rate 0.2
 """
 
 from __future__ import annotations
@@ -23,7 +27,6 @@ from typing import Any, Iterable, Mapping, Sequence
 import ants
 import numpy as np
 import tifffile
-
 
 LOGGER = logging.getLogger("register_mip_tiles_antspy")
 
@@ -91,9 +94,9 @@ def _group_tiles(
     """Group tiles as ``projection -> time -> channel -> position -> path``."""
     grouped: dict[str, dict[int, dict[int, dict[int, Path]]]] = {}
     for record in records:
-        grouped.setdefault(record.projection, {}).setdefault(record.time_index, {}).setdefault(
-            record.channel, {}
-        )[record.position] = record.path
+        grouped.setdefault(record.projection, {}).setdefault(
+            record.time_index, {}
+        ).setdefault(record.channel, {})[record.position] = record.path
     return grouped
 
 
@@ -101,7 +104,9 @@ def _load_2d_tiff(path: Path) -> np.ndarray:
     """Load a 2D TIFF tile as ``float32``."""
     data = np.asarray(tifffile.imread(str(path)))
     if data.ndim != 2:
-        raise ValueError(f"Expected a 2D TIFF tile at {path}, found shape {tuple(data.shape)}.")
+        raise ValueError(
+            f"Expected a 2D TIFF tile at {path}, found shape {tuple(data.shape)}."
+        )
     return np.asarray(data, dtype=np.float32)
 
 
@@ -347,8 +352,12 @@ def _compute_crop_slices(weight_image: np.ndarray) -> tuple[slice, slice]:
     """Compute tight crop around nonzero coverage."""
     ys, xs = np.nonzero(weight_image > 0)
     if ys.size == 0 or xs.size == 0:
-        return slice(0, int(weight_image.shape[0])), slice(0, int(weight_image.shape[1]))
-    return slice(int(ys.min()), int(ys.max()) + 1), slice(int(xs.min()), int(xs.max()) + 1)
+        return slice(0, int(weight_image.shape[0])), slice(
+            0, int(weight_image.shape[1])
+        )
+    return slice(int(ys.min()), int(ys.max()) + 1), slice(
+        int(xs.min()), int(xs.max()) + 1
+    )
 
 
 def _cast_to_dtype(data: np.ndarray, dtype: np.dtype[Any]) -> np.ndarray:
@@ -394,7 +403,9 @@ def _register_positions(
             f"Anchor position p{int(anchor_position):04d} is missing from registration channel."
         )
 
-    position_to_index = {int(position): index for index, position in enumerate(positions)}
+    position_to_index = {
+        int(position): index for index, position in enumerate(positions)
+    }
     anchor_index = int(position_to_index[int(anchor_position)])
     anchor_tile = _load_2d_tiff(reg_channel_paths[int(anchor_position)])
     anchor_canvas, anchor_mask_canvas = _place_tile_on_canvas(
@@ -489,7 +500,9 @@ def _stitch_channels(
     reference_img = ants.from_numpy(np.zeros(layout.shape_yx, dtype=np.float32))
     blend_mode_value = str(blend_mode).strip().lower()
     normalization_mode = str(intensity_normalization).strip().lower()
-    position_to_index = {int(position): int(idx) for idx, position in enumerate(positions)}
+    position_to_index = {
+        int(position): int(idx) for idx, position in enumerate(positions)
+    }
     anchor_candidates = [
         int(position)
         for position in positions
@@ -559,8 +572,12 @@ def _stitch_channels(
                 warped_mask = np.asarray(moving_mask_canvas, dtype=np.float32)
                 warped_weight = np.asarray(blend_canvas, dtype=np.float32) * warped_mask
             else:
-                moving_img = ants.from_numpy(np.asarray(moving_canvas, dtype=np.float32))
-                moving_mask_img = ants.from_numpy(np.asarray(moving_mask_canvas, dtype=np.float32))
+                moving_img = ants.from_numpy(
+                    np.asarray(moving_canvas, dtype=np.float32)
+                )
+                moving_mask_img = ants.from_numpy(
+                    np.asarray(moving_mask_canvas, dtype=np.float32)
+                )
                 blend_img = ants.from_numpy(np.asarray(blend_canvas, dtype=np.float32))
                 warped_img = transform.apply_to_image(
                     image=moving_img,
@@ -579,13 +596,12 @@ def _stitch_channels(
                 )
                 warped = np.asarray(warped_img.numpy(), dtype=np.float32)
                 warped_mask = np.asarray(warped_mask_img.numpy(), dtype=np.float32)
-                warped_weight = np.asarray(warped_blend_img.numpy(), dtype=np.float32) * warped_mask
+                warped_weight = (
+                    np.asarray(warped_blend_img.numpy(), dtype=np.float32) * warped_mask
+                )
 
             gain, offset, sample_count = 1.0, 0.0, 0
-            if (
-                normalization_mode != "none"
-                and int(position) != int(anchor_position)
-            ):
+            if normalization_mode != "none" and int(position) != int(anchor_position):
                 overlap_region = _overlap_slices(
                     layout=layout,
                     tile_shape_yx=anchor_shape,
@@ -596,11 +612,12 @@ def _stitch_channels(
                 if overlap_region is not None:
                     ys, xs = overlap_region
                     overlap_mask = (
-                        (np.asarray(anchor_mask_canvas[ys, xs], dtype=np.float32) > 0.5)
-                        & (np.asarray(warped_mask[ys, xs], dtype=np.float32) > 0.5)
-                    )
+                        np.asarray(anchor_mask_canvas[ys, xs], dtype=np.float32) > 0.5
+                    ) & (np.asarray(warped_mask[ys, xs], dtype=np.float32) > 0.5)
                     gain, offset, sample_count = _estimate_intensity_correction(
-                        fixed_values=np.asarray(anchor_canvas[ys, xs], dtype=np.float32),
+                        fixed_values=np.asarray(
+                            anchor_canvas[ys, xs], dtype=np.float32
+                        ),
                         moving_values=np.asarray(warped[ys, xs], dtype=np.float32),
                         overlap_mask=overlap_mask,
                         mode=normalization_mode,
@@ -610,7 +627,11 @@ def _stitch_channels(
                     if sample_count >= 1024:
                         warped = warped * float(gain) + float(offset)
                         np.maximum(warped, 0.0, out=warped)
-            channel_corrections[int(position)] = (float(gain), float(offset), int(sample_count))
+            channel_corrections[int(position)] = (
+                float(gain),
+                float(offset),
+                int(sample_count),
+            )
 
             sum_image += warped * warped_weight
             weight_image += warped_weight
@@ -863,9 +884,7 @@ def run(args: argparse.Namespace) -> list[Path]:
         args.aff_smoothing_sigmas, field_name="--aff-smoothing-sigmas"
     )
     if not (
-        len(aff_iterations)
-        == len(aff_shrink_factors)
-        == len(aff_smoothing_sigmas)
+        len(aff_iterations) == len(aff_shrink_factors) == len(aff_smoothing_sigmas)
     ):
         raise ValueError(
             "Pyramid schedules must have matching lengths: "
@@ -921,8 +940,12 @@ def run(args: argparse.Namespace) -> list[Path]:
                 aff_shrink_factors=aff_shrink_factors,
                 aff_smoothing_sigmas=aff_smoothing_sigmas,
                 aff_random_sampling_rate=float(args.aff_random_sampling_rate),
-                anchor_position=None if args.anchor_position is None else int(args.anchor_position),
-                intensity_normalization=str(args.intensity_normalization).strip().lower(),
+                anchor_position=(
+                    None if args.anchor_position is None else int(args.anchor_position)
+                ),
+                intensity_normalization=str(args.intensity_normalization)
+                .strip()
+                .lower(),
                 norm_sample_size=norm_sample_size,
                 blend_mode=str(args.blend_mode).strip().lower(),
                 feather_min_edge_weight=feather_min_edge_weight,

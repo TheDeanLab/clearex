@@ -24,9 +24,12 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
+import sys
+
 import numpy as np
 import pytest
 
+import clearex.workflow as workflow_module
 from clearex.workflow import (
     ANALYSIS_OPERATION_ORDER,
     DASK_BACKEND_LOCAL_CLUSTER,
@@ -381,6 +384,27 @@ class TestWorkflowConfig:
             }
         ]
 
+    def test_normalizes_visualization_auto_display_values_to_defaults(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "visualization": {
+                    "volume_layers": [
+                        {
+                            "component": "data",
+                            "layer_type": "image",
+                            "blending": "Auto",
+                            "colormap": "AUTO",
+                            "rendering": "auto",
+                        }
+                    ]
+                }
+            }
+        )
+        layer = cfg.analysis_parameters["visualization"]["volume_layers"][0]
+        assert layer["blending"] == ""
+        assert layer["colormap"] == ""
+        assert layer["rendering"] == ""
+
     def test_normalizes_mip_export_parameters(self):
         cfg = WorkflowConfig(
             analysis_parameters={
@@ -679,6 +703,88 @@ class TestLocalClusterRecommendation:
         assert recommendation.detected_gpu_memory_bytes == (160 << 30)
         summary = format_local_cluster_recommendation_summary(recommendation)
         assert "2 GPU(s)" in summary
+
+
+def test_detect_local_gpu_info_falls_back_to_torch_cuda(monkeypatch) -> None:
+    class _FailingPynvml:
+        @staticmethod
+        def nvmlInit() -> None:
+            raise RuntimeError("nvml unavailable")
+
+    class _TorchProps:
+        def __init__(self, total_memory: int) -> None:
+            self.total_memory = int(total_memory)
+
+    class _TorchCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def device_count() -> int:
+            return 2
+
+        @staticmethod
+        def get_device_properties(index: int) -> _TorchProps:
+            if int(index) == 0:
+                return _TorchProps(8 << 30)
+            return _TorchProps(12 << 30)
+
+    class _TorchModule:
+        cuda = _TorchCuda()
+
+    class _FailedNvidiaSmiResult:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setitem(sys.modules, "pynvml", _FailingPynvml())
+    monkeypatch.setitem(sys.modules, "torch", _TorchModule())
+    monkeypatch.setattr(
+        workflow_module.subprocess,
+        "run",
+        lambda *args, **kwargs: _FailedNvidiaSmiResult(),
+    )
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    gpu_count, total_memory = workflow_module._detect_local_gpu_info()
+
+    assert gpu_count == 2
+    assert total_memory == (20 << 30)
+
+
+def test_detect_local_gpu_info_falls_back_to_cuda_visible_devices_env(
+    monkeypatch,
+) -> None:
+    class _FailingPynvml:
+        @staticmethod
+        def nvmlInit() -> None:
+            raise RuntimeError("nvml unavailable")
+
+    class _TorchCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class _TorchModule:
+        cuda = _TorchCuda()
+
+    class _FailedNvidiaSmiResult:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setitem(sys.modules, "pynvml", _FailingPynvml())
+    monkeypatch.setitem(sys.modules, "torch", _TorchModule())
+    monkeypatch.setattr(
+        workflow_module.subprocess,
+        "run",
+        lambda *args, **kwargs: _FailedNvidiaSmiResult(),
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0, 2,5")
+
+    gpu_count, total_memory = workflow_module._detect_local_gpu_info()
+
+    assert gpu_count == 3
+    assert total_memory is None
 
 
 def test_normalize_analysis_operation_parameters_returns_defaults():

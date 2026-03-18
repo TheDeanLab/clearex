@@ -202,6 +202,41 @@ def test_run_shear_transform_emits_larger_bounds_for_nonzero_shear(
     assert summary.applied_rotation_deg_xyz[0] != 0.0
 
 
+def test_run_shear_transform_linear_normalizes_edge_support(tmp_path: Path) -> None:
+    store_path = tmp_path / "shear_linear_support_normalization.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.full((1, 1, 1, 16, 16, 16), 100.0, dtype=np.float32)
+    root.create_dataset(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 8, 8, 8),
+        dtype="float32",
+        overwrite=True,
+    )
+    root["data"].attrs["voxel_size_um_zyx"] = [1.0, 1.0, 1.0]
+
+    run_shear_transform_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "shear_yz": 0.8,
+            "auto_rotate_from_shear": True,
+            "interpolation": "linear",
+            "output_dtype": "float32",
+            "roi_padding_zyx": [2, 2, 2],
+        },
+        client=None,
+    )
+
+    output = np.asarray(
+        zarr.open_group(str(store_path), mode="r")["results/shear_transform/latest/data"]
+    )
+    positive = output[output > 0.0]
+    assert positive.size > 0
+    assert float(np.percentile(positive, 1.0)) >= 95.0
+    assert float(np.percentile(positive, 99.0)) <= 105.0
+
+
 def test_run_shear_transform_identity_with_distributed_client(
     tmp_path: Path,
 ) -> None:

@@ -1411,6 +1411,64 @@ def run_usegment3d_analysis(
         save_native_labels=save_native_labels_effective,
         parameters=normalized,
     )
+    try:
+        output_array = root[data_component]
+        output_array.attrs.update(
+            {
+                "voxel_size_um_zyx": [float(value) for value in output_voxel_size_um_zyx],
+                "scale_tczyx": [
+                    1.0,
+                    1.0,
+                    float(output_voxel_size_um_zyx[0]),
+                    float(output_voxel_size_um_zyx[1]),
+                    float(output_voxel_size_um_zyx[2]),
+                ],
+                "source_component": str(source_component),
+                "output_reference_component": str(output_reference_component),
+                "input_resolution_level": int(effective_resolution_level),
+                "output_resolution_level": int(output_resolution_level),
+                "output_reference_space": str(output_reference_space),
+                "downsample_factors_tpczyx": [
+                    1,
+                    1,
+                    1,
+                    int(output_factor_zyx[0]),
+                    int(output_factor_zyx[1]),
+                    int(output_factor_zyx[2]),
+                ],
+            }
+        )
+    except Exception:
+        pass
+    if native_data_component:
+        try:
+            native_array = root[native_data_component]
+            native_array.attrs.update(
+                {
+                    "voxel_size_um_zyx": [
+                        float(value) for value in source_voxel_size_um_zyx
+                    ],
+                    "scale_tczyx": [
+                        1.0,
+                        1.0,
+                        float(source_voxel_size_um_zyx[0]),
+                        float(source_voxel_size_um_zyx[1]),
+                        float(source_voxel_size_um_zyx[2]),
+                    ],
+                    "source_component": str(source_component),
+                    "input_resolution_level": int(effective_resolution_level),
+                    "downsample_factors_tpczyx": [
+                        1,
+                        1,
+                        1,
+                        int(source_factor_zyx[0]),
+                        int(source_factor_zyx[1]),
+                        int(source_factor_zyx[2]),
+                    ],
+                }
+            )
+        except Exception:
+            pass
     _emit(10, "Initialized latest uSegment3D output dataset")
 
     work_items = [

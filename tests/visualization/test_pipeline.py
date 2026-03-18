@@ -945,6 +945,134 @@ def test_launch_napari_viewer_requests_3d_display_mode(
     assert viewer.image_calls[0]["rendering"] == "attenuated_mip"
 
 
+def test_launch_napari_viewer_resolves_per_layer_scale_for_downsampled_components(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 8, 8, 8),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.create_dataset(
+        name="results/usegment3d/latest/data",
+        shape=(1, 1, 1, 4, 4, 4),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint32",
+        overwrite=True,
+    )
+    root.attrs["voxel_size_um_zyx"] = [1.5, 0.5, 0.5]
+
+    primary_layer = visualization_pipeline.ResolvedVolumeLayer(
+        component="data",
+        source_components=("data",),
+        layer_type="image",
+        channels=tuple(),
+        visible=None,
+        opacity=None,
+        blending="",
+        colormap="",
+        rendering="",
+        name="Raw",
+        multiscale_policy="off",
+        multiscale_status="off",
+    )
+    labels_layer = visualization_pipeline.ResolvedVolumeLayer(
+        component="results/usegment3d/latest/data",
+        source_components=("results/usegment3d/latest/data",),
+        layer_type="labels",
+        channels=tuple(),
+        visible=None,
+        opacity=None,
+        blending="",
+        colormap="",
+        rendering="",
+        name="uSegment3D",
+        multiscale_policy="off",
+        multiscale_status="off",
+    )
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.ndim = 2
+            self.axis_labels = ("0", "1")
+
+    class _FakeViewer:
+        def __init__(self, *, ndisplay: int, show: bool) -> None:
+            del ndisplay, show
+            self.dims = _FakeDims()
+            self.image_calls: list[dict[str, object]] = []
+            self.labels_calls: list[dict[str, object]] = []
+
+        def add_image(self, data, **kwargs):
+            del data
+            self.image_calls.append(dict(kwargs))
+            self.dims.ndim = 5
+            return None
+
+        def add_labels(self, data, **kwargs):
+            del data
+            self.labels_calls.append(dict(kwargs))
+            self.dims.ndim = 5
+            return None
+
+        def add_points(self, *_args, **_kwargs):
+            return None
+
+    class _FakeNapari:
+        def __init__(self) -> None:
+            self.viewer: _FakeViewer | None = None
+
+        def Viewer(self, *, ndisplay: int, show: bool):
+            self.viewer = _FakeViewer(ndisplay=ndisplay, show=show)
+            return self.viewer
+
+        def run(self) -> None:
+            return None
+
+    fake_napari = _FakeNapari()
+    monkeypatch.setitem(sys.modules, "napari", fake_napari)
+
+    visualization_pipeline._launch_napari_viewer(
+        zarr_path=store_path,
+        volume_layers=(primary_layer, labels_layer),
+        selected_positions=(0,),
+        points_by_position={},
+        point_properties_by_position={},
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        axis_labels=("t", "c", "z", "y", "x"),
+        scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        image_metadata={},
+        points_metadata={},
+        require_gpu_rendering=False,
+        capture_keyframes=False,
+        keyframe_manifest_path=None,
+        keyframe_layer_overrides=[],
+    )
+
+    viewer = fake_napari.viewer
+    assert viewer is not None
+    assert len(viewer.image_calls) == 1
+    assert len(viewer.labels_calls) == 1
+    assert tuple(float(v) for v in viewer.image_calls[0]["scale"]) == (
+        1.0,
+        1.0,
+        1.5,
+        0.5,
+        0.5,
+    )
+    assert tuple(float(v) for v in viewer.labels_calls[0]["scale"]) == (
+        1.0,
+        1.0,
+        3.0,
+        1.0,
+        1.0,
+    )
+
+
 def test_launch_napari_viewer_rejects_software_renderer_when_required(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1011,6 +1139,26 @@ def test_launch_napari_viewer_rejects_software_renderer_when_required(
             keyframe_manifest_path=None,
             keyframe_layer_overrides=[],
         )
+
+
+def test_normalize_visualization_volume_layers_treats_auto_as_unspecified() -> None:
+    rows = visualization_pipeline._normalize_visualization_volume_layers(
+        [
+            {
+                "component": "data",
+                "layer_type": "image",
+                "blending": "Auto",
+                "colormap": "AUTO",
+                "rendering": "auto",
+            }
+        ]
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["blending"] == ""
+    assert row["colormap"] == ""
+    assert row["rendering"] == ""
 
 
 def test_launch_napari_viewer_rejects_unconfirmed_renderer_when_required(

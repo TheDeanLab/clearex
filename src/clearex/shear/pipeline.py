@@ -63,6 +63,7 @@ _AUTO_ESTIMATE_ZY_STRIDE_DEFAULT = 4
 _AUTO_ESTIMATE_SIGNAL_FRACTION_DEFAULT = 0.10
 _AUTO_ESTIMATE_MIN_VALID_COLUMNS = 16
 _AUTO_ESTIMATE_MIN_FOREGROUND_PIXELS = 64
+_RESAMPLE_SUPPORT_EPS = np.float32(1e-3)
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -1104,7 +1105,29 @@ def _process_and_write_tile(
         reference=reference_image,
         interpolation=str(interpolation),
     )
-    tile_data = _cast_output_dtype(transformed.numpy(), dtype=target_dtype)
+    support_source_image = ants.from_numpy(np.ones_like(source_zyx, dtype=np.float32))
+    support_source_image.set_spacing((z_um, y_um, x_um))
+    support_source_image.set_origin(src_origin_zyx)
+    transformed_support = transform.apply_to_image(
+        support_source_image,
+        reference=reference_image,
+        interpolation="linear",
+    )
+    transformed_data = np.asarray(transformed.numpy(), dtype=np.float32)
+    support_data = np.asarray(transformed_support.numpy(), dtype=np.float32)
+    normalized_data = np.full_like(
+        transformed_data,
+        np.float32(fill_value),
+        dtype=np.float32,
+    )
+    valid_support = support_data > _RESAMPLE_SUPPORT_EPS
+    np.divide(
+        transformed_data,
+        support_data,
+        out=normalized_data,
+        where=valid_support,
+    )
+    tile_data = _cast_output_dtype(normalized_data, dtype=target_dtype)
     output_array[out_slices] = tile_data[np.newaxis, np.newaxis, np.newaxis, ...]
     return 1
 

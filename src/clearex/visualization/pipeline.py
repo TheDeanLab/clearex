@@ -1220,6 +1220,15 @@ def _normalize_visualization_volume_layers(value: Any) -> list[Dict[str, Any]]:
         )
         if multiscale_policy not in _VOLUME_LAYER_MULTISCALE_POLICIES:
             multiscale_policy = "inherit"
+        blending = str(raw_row.get("blending", "")).strip().lower()
+        if blending in {"auto", "default"}:
+            blending = ""
+        colormap = str(raw_row.get("colormap", raw_row.get("lut", ""))).strip()
+        if colormap.strip().lower() in {"auto", "default"}:
+            colormap = ""
+        rendering = str(raw_row.get("rendering", "")).strip().lower()
+        if rendering in {"auto", "default"}:
+            rendering = ""
         rows.append(
             {
                 "component": component,
@@ -1228,11 +1237,9 @@ def _normalize_visualization_volume_layers(value: Any) -> list[Dict[str, Any]]:
                 "channels": _normalize_visualization_channels(raw_row.get("channels")),
                 "visible": _coerce_optional_bool(raw_row.get("visible")),
                 "opacity": _coerce_optional_unit_interval_float(raw_row.get("opacity")),
-                "blending": str(raw_row.get("blending", "")).strip().lower(),
-                "colormap": str(
-                    raw_row.get("colormap", raw_row.get("lut", ""))
-                ).strip(),
-                "rendering": str(raw_row.get("rendering", "")).strip().lower(),
+                "blending": blending,
+                "colormap": colormap,
+                "rendering": rendering,
                 "multiscale_policy": multiscale_policy,
             }
         )
@@ -2729,6 +2736,109 @@ def _launch_napari_viewer(
         return float(low_value), float(high_value)
 
     scale = tuple(float(value) for value in scale_tczyx)
+    scale_root: Optional[zarr.hierarchy.Group] = None
+    scale_root_attrs: Dict[str, Any] = {}
+    scale_source_experiment_raw: Dict[str, Any] = {}
+    try:
+        scale_root = zarr.open_group(str(zarr_path), mode="r")
+        scale_root_attrs = dict(scale_root.attrs)
+        scale_source_experiment_raw = _load_source_experiment_raw(scale_root_attrs)
+    except Exception:
+        scale_root = None
+    layer_scale_cache: dict[str, tuple[float, float, float, float, float]] = {}
+
+    def _resolve_layer_scale_tczyx(
+        component: str,
+    ) -> tuple[float, float, float, float, float]:
+        """Resolve per-layer ``(t, c, z, y, x)`` scale for napari rendering."""
+        key = str(component).strip() or "data"
+        cached = layer_scale_cache.get(key)
+        if cached is not None:
+            return cached
+        if scale_root is None:
+            layer_scale_cache[key] = scale
+            return scale
+
+        source_attrs: Dict[str, Any]
+        source_shape: Optional[tuple[int, int, int, int, int, int]]
+        try:
+            source_array = scale_root[key]
+            source_attrs = dict(source_array.attrs)
+            source_shape = tuple(int(value) for value in tuple(source_array.shape))
+        except Exception:
+            layer_scale_cache[key] = scale
+            return scale
+
+        resolved_scale = _extract_scale_tczyx_from_attrs(
+            root_attrs={},
+            source_attrs=source_attrs,
+        )
+        if resolved_scale is None and key == "data":
+            resolved_scale = _extract_scale_tczyx_from_attrs(
+                root_attrs=scale_root_attrs,
+                source_attrs=source_attrs,
+            )
+        if resolved_scale is None and key == "data":
+            resolved_scale = _extract_scale_tczyx_from_navigate_raw(
+                scale_source_experiment_raw
+            )
+
+        if resolved_scale is None:
+            base_scale = scale
+            base_shape: Optional[tuple[int, int, int, int, int, int]] = None
+            try:
+                base_array = scale_root["data"]
+                base_shape = tuple(int(value) for value in tuple(base_array.shape))
+                base_scale = (
+                    _extract_scale_tczyx_from_attrs(
+                        root_attrs=scale_root_attrs,
+                        source_attrs=dict(base_array.attrs),
+                    )
+                    or _extract_scale_tczyx_from_navigate_raw(
+                        scale_source_experiment_raw
+                    )
+                    or scale
+                )
+            except Exception:
+                base_shape = None
+
+            if (
+                base_shape is not None
+                and source_shape is not None
+                and len(base_shape) == 6
+                and len(source_shape) == 6
+                and all(int(size) > 0 for size in source_shape[3:])
+                and all(int(size) > 0 for size in base_shape[3:])
+            ):
+                factors: list[float] = []
+                for base_dim, source_dim in zip(
+                    base_shape[3:],
+                    source_shape[3:],
+                    strict=False,
+                ):
+                    if int(source_dim) <= 0 or int(base_dim) <= 0:
+                        factors.append(1.0)
+                        continue
+                    ratio = float(base_dim) / float(source_dim)
+                    rounded = int(round(ratio))
+                    if rounded >= 1 and abs(ratio - float(rounded)) <= 1e-6:
+                        factors.append(float(rounded))
+                    else:
+                        factors.append(1.0)
+                resolved_scale = (
+                    float(base_scale[0]),
+                    float(base_scale[1]),
+                    float(base_scale[2]) * float(factors[0]),
+                    float(base_scale[3]) * float(factors[1]),
+                    float(base_scale[4]) * float(factors[2]),
+                )
+
+        if resolved_scale is None:
+            resolved_scale = scale
+        normalized = _normalize_scale_tczyx(tuple(float(value) for value in resolved_scale))
+        layer_scale_cache[key] = normalized
+        return normalized
+
     viewer = napari.Viewer(ndisplay=3, show=True)
     axis_labels_tuple = tuple(str(label) for label in axis_labels)
     axis_labels_applied = False
@@ -2793,6 +2903,7 @@ def _launch_napari_viewer(
             dtype=np.float64,
         )
         for layer in volume_layers:
+            layer_scale = _resolve_layer_scale_tczyx(str(layer.component))
             level_arrays = [
                 da.from_zarr(str(zarr_path), component=str(component))[
                     :, position_index, :, :, :, :
@@ -2853,13 +2964,14 @@ def _launch_napari_viewer(
                 layer_metadata["multiscale_policy"] = str(layer.multiscale_policy)
                 layer_metadata["multiscale_status"] = str(layer.multiscale_status)
                 layer_metadata["volume_layers"] = serialized_volume_layers
+                layer_metadata["scale_tczyx"] = [float(value) for value in layer_scale]
 
                 if str(layer.layer_type) == "labels":
                     viewer.add_labels(
                         layer_data,
                         multiscale=is_multiscale,
                         name=layer_name,
-                        scale=scale,
+                        scale=layer_scale,
                         affine=layer_affine,
                         metadata={
                             str(key): value for key, value in layer_metadata.items()
@@ -2886,7 +2998,7 @@ def _launch_napari_viewer(
                         layer_data,
                         multiscale=is_multiscale,
                         name=layer_name,
-                        scale=scale,
+                        scale=layer_scale,
                         affine=layer_affine,
                         metadata={
                             str(key): value for key, value in layer_metadata.items()
