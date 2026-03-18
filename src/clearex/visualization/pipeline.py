@@ -67,6 +67,7 @@ _DEFAULT_PYRAMID_FACTORS_TPCZYX = (
 _VOLUME_LAYER_MULTISCALE_POLICIES = frozenset(
     {"inherit", "require", "auto_build", "off"}
 )
+_MAX_LAYER_DISPLAY_VOXELS = 256_000_000
 _SOFTWARE_RENDERER_HINTS = (
     "llvmpipe",
     "softpipe",
@@ -1741,6 +1742,137 @@ def _downsample_tpczyx_by_stride(
     ]
 
 
+def _downsample_tczyx_by_stride(
+    array: da.Array,
+    factors_zyx: tuple[int, int, int],
+) -> da.Array:
+    """Create a strided ``(t, c, z, y, x)`` downsampled view."""
+    z_factor = max(1, int(factors_zyx[0]))
+    y_factor = max(1, int(factors_zyx[1]))
+    x_factor = max(1, int(factors_zyx[2]))
+    return array[:, :, ::z_factor, ::y_factor, ::x_factor]
+
+
+def _volume_voxel_count_tczyx(shape_tczyx: Sequence[int]) -> int:
+    """Return voxel count for ``(z, y, x)`` axes of a ``(t, c, z, y, x)`` shape."""
+    if len(tuple(shape_tczyx)) < 5:
+        return 0
+    return max(
+        0,
+        int(shape_tczyx[-3]) * int(shape_tczyx[-2]) * int(shape_tczyx[-1]),
+    )
+
+
+def _resolve_display_level_arrays_for_voxel_budget(
+    *,
+    level_arrays: Sequence[da.Array],
+    layer_scale_tczyx: Sequence[float],
+    max_display_voxels: int = _MAX_LAYER_DISPLAY_VOXELS,
+) -> tuple[
+    tuple[da.Array, ...],
+    tuple[float, float, float, float, float],
+    tuple[float, float, float],
+    str,
+]:
+    """Resolve display arrays/scales that fit a 3D texture voxel budget.
+
+    Parameters
+    ----------
+    level_arrays : sequence of dask.array.Array
+        Layer arrays in ``(t, c, z, y, x)`` order, finest to coarsest.
+    layer_scale_tczyx : sequence of float
+        Base layer scale in ``(t, c, z, y, x)`` order.
+    max_display_voxels : int, default=256_000_000
+        Target voxel budget for one 3D texture upload.
+
+    Returns
+    -------
+    tuple[tuple[dask.array.Array, ...], tuple[float, float, float, float, float], tuple[float, float, float], str]
+        ``(resolved_arrays, resolved_scale_tczyx, display_factors_zyx, strategy)``.
+        Strategy values include ``"none"``, ``"coarse_level"``, and
+        ``"coarse_level+stride"``/``"stride"``.
+    """
+    if len(level_arrays) <= 0:
+        normalized_scale = _normalize_scale_tczyx(layer_scale_tczyx)
+        return tuple(), normalized_scale, (1.0, 1.0, 1.0), "none"
+
+    resolved_arrays = tuple(level_arrays)
+    normalized_scale = _normalize_scale_tczyx(layer_scale_tczyx)
+    display_factors_zyx = [1.0, 1.0, 1.0]
+    strategy = "none"
+    budget = max(1, int(max_display_voxels))
+
+    finest_shape = tuple(int(value) for value in tuple(resolved_arrays[0].shape))
+    finest_voxels = _volume_voxel_count_tczyx(finest_shape)
+    if finest_voxels > budget and len(resolved_arrays) > 1:
+        selected_index = len(resolved_arrays) - 1
+        for index, candidate in enumerate(resolved_arrays):
+            candidate_shape = tuple(int(value) for value in tuple(candidate.shape))
+            if _volume_voxel_count_tczyx(candidate_shape) <= budget:
+                selected_index = int(index)
+                break
+        if selected_index > 0:
+            resolved_arrays = tuple(resolved_arrays[selected_index:])
+            selected_shape = tuple(int(value) for value in tuple(resolved_arrays[0].shape))
+            for axis_index, (base_dim, selected_dim) in enumerate(
+                zip(finest_shape[-3:], selected_shape[-3:], strict=False)
+            ):
+                if int(base_dim) <= 0 or int(selected_dim) <= 0:
+                    factor = 1.0
+                else:
+                    factor = max(1.0, float(base_dim) / float(selected_dim))
+                display_factors_zyx[axis_index] *= float(factor)
+            normalized_scale = _normalize_scale_tczyx(
+                (
+                    float(normalized_scale[0]),
+                    float(normalized_scale[1]),
+                    float(normalized_scale[2]) * float(display_factors_zyx[0]),
+                    float(normalized_scale[3]) * float(display_factors_zyx[1]),
+                    float(normalized_scale[4]) * float(display_factors_zyx[2]),
+                )
+            )
+            strategy = "coarse_level"
+
+    current_shape = tuple(int(value) for value in tuple(resolved_arrays[0].shape))
+    current_voxels = _volume_voxel_count_tczyx(current_shape)
+    if current_voxels > budget:
+        stride = max(
+            1,
+            int(math.ceil((float(current_voxels) / float(budget)) ** (1.0 / 3.0))),
+        )
+        if stride > 1:
+            resolved_arrays = tuple(
+                _downsample_tczyx_by_stride(array, (stride, stride, stride))
+                for array in resolved_arrays
+            )
+            display_factors_zyx = [
+                float(display_factors_zyx[0]) * float(stride),
+                float(display_factors_zyx[1]) * float(stride),
+                float(display_factors_zyx[2]) * float(stride),
+            ]
+            normalized_scale = _normalize_scale_tczyx(
+                (
+                    float(normalized_scale[0]),
+                    float(normalized_scale[1]),
+                    float(normalized_scale[2]) * float(stride),
+                    float(normalized_scale[3]) * float(stride),
+                    float(normalized_scale[4]) * float(stride),
+                )
+            )
+            strategy = "stride" if strategy == "none" else f"{strategy}+stride"
+
+    return (
+        resolved_arrays,
+        normalized_scale,
+        (
+            float(display_factors_zyx[0]),
+            float(display_factors_zyx[1]),
+            float(display_factors_zyx[2]),
+        ),
+        strategy,
+    )
+
+
 def _resolve_level_chunks_tpczyx(
     *,
     source_chunks: Optional[Sequence[int]],
@@ -2912,8 +3044,31 @@ def _launch_napari_viewer(
             ]
             if not level_arrays:
                 continue
-            is_multiscale = len(level_arrays) > 1
-            channel_count = max(1, int(level_arrays[0].shape[1]))
+            display_level_arrays, display_scale, display_factors_zyx, display_strategy = (
+                _resolve_display_level_arrays_for_voxel_budget(
+                    level_arrays=level_arrays,
+                    layer_scale_tczyx=layer_scale,
+                    max_display_voxels=_MAX_LAYER_DISPLAY_VOXELS,
+                )
+            )
+            if not display_level_arrays:
+                continue
+            if display_strategy != "none":
+                base_shape = tuple(int(value) for value in tuple(level_arrays[0].shape))
+                display_shape = tuple(
+                    int(value) for value in tuple(display_level_arrays[0].shape)
+                )
+                print(
+                    "[visualization] Applying display downsampling for layer "
+                    f"'{layer.component}' at position {int(position_index)}: "
+                    f"strategy={display_strategy}, "
+                    f"shape={base_shape[-3:]} -> {display_shape[-3:]}, "
+                    "factors_zyx="
+                    f"({display_factors_zyx[0]:.3g}, "
+                    f"{display_factors_zyx[1]:.3g}, {display_factors_zyx[2]:.3g})."
+                )
+            is_multiscale = len(display_level_arrays) > 1
+            channel_count = max(1, int(display_level_arrays[0].shape[1]))
             requested_channels = tuple(
                 int(index)
                 for index in layer.channels
@@ -2940,10 +3095,10 @@ def _launch_napari_viewer(
                 if is_multiscale:
                     layer_data = [
                         level[:, channel_index : channel_index + 1, :, :, :]
-                        for level in level_arrays
+                        for level in display_level_arrays
                     ]
                 else:
-                    layer_data = level_arrays[0][
+                    layer_data = display_level_arrays[0][
                         :, channel_index : channel_index + 1, :, :, :
                     ]
 
@@ -2964,14 +3119,20 @@ def _launch_napari_viewer(
                 layer_metadata["multiscale_policy"] = str(layer.multiscale_policy)
                 layer_metadata["multiscale_status"] = str(layer.multiscale_status)
                 layer_metadata["volume_layers"] = serialized_volume_layers
-                layer_metadata["scale_tczyx"] = [float(value) for value in layer_scale]
+                layer_metadata["scale_tczyx"] = [float(value) for value in display_scale]
+                layer_metadata["display_downsample_strategy"] = str(display_strategy)
+                layer_metadata["display_downsample_factors_zyx"] = [
+                    float(display_factors_zyx[0]),
+                    float(display_factors_zyx[1]),
+                    float(display_factors_zyx[2]),
+                ]
 
                 if str(layer.layer_type) == "labels":
                     viewer.add_labels(
                         layer_data,
                         multiscale=is_multiscale,
                         name=layer_name,
-                        scale=layer_scale,
+                        scale=display_scale,
                         affine=layer_affine,
                         metadata={
                             str(key): value for key, value in layer_metadata.items()
@@ -2998,7 +3159,7 @@ def _launch_napari_viewer(
                         layer_data,
                         multiscale=is_multiscale,
                         name=layer_name,
-                        scale=layer_scale,
+                        scale=display_scale,
                         affine=layer_affine,
                         metadata={
                             str(key): value for key, value in layer_metadata.items()
@@ -3006,6 +3167,7 @@ def _launch_napari_viewer(
                         colormap=selected_colormap,
                         opacity=float(effective_opacity),
                         blending=effective_blending,
+                        projection_mode="max",
                         rendering=default_rendering,
                         contrast_limits=(
                             float(contrast_limits[0]),

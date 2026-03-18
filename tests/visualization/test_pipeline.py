@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 
 # Third Party Imports
+import dask.array as da
 import numpy as np
 import pytest
 import zarr
@@ -787,6 +788,8 @@ def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
     assert first_image_kwargs["colormap"] == "green"
     assert second_image_kwargs["colormap"] == "magenta"
     assert first_image_kwargs["blending"] == "additive"
+    assert first_image_kwargs["projection_mode"] == "max"
+    assert second_image_kwargs["projection_mode"] == "max"
     assert first_image_kwargs["rendering"] == "attenuated_mip"
     assert first_image_kwargs["opacity"] == 0.9
     assert second_image_kwargs["opacity"] == 0.9
@@ -1071,6 +1074,49 @@ def test_launch_napari_viewer_resolves_per_layer_scale_for_downsampled_component
         1.0,
         1.0,
     )
+
+
+def test_resolve_display_level_arrays_for_voxel_budget_applies_stride() -> None:
+    base = da.zeros(
+        (1, 1, 500, 2048, 2048),
+        chunks=(1, 1, 64, 256, 256),
+        dtype=np.uint8,
+    )
+
+    arrays, scale, factors, strategy = (
+        visualization_pipeline._resolve_display_level_arrays_for_voxel_budget(
+            level_arrays=(base,),
+            layer_scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+            max_display_voxels=256_000_000,
+        )
+    )
+
+    assert strategy == "stride"
+    assert len(arrays) == 1
+    assert tuple(int(v) for v in arrays[0].shape[-3:]) == (167, 683, 683)
+    assert scale == (1.0, 1.0, 3.0, 3.0, 3.0)
+    assert factors == (3.0, 3.0, 3.0)
+
+
+def test_resolve_display_level_arrays_for_voxel_budget_uses_coarser_level() -> None:
+    level0 = da.zeros((1, 1, 500, 2048, 2048), chunks=(1, 1, 64, 256, 256))
+    level1 = da.zeros((1, 1, 250, 1024, 1024), chunks=(1, 1, 64, 256, 256))
+    level2 = da.zeros((1, 1, 125, 512, 512), chunks=(1, 1, 64, 256, 256))
+
+    arrays, scale, factors, strategy = (
+        visualization_pipeline._resolve_display_level_arrays_for_voxel_budget(
+            level_arrays=(level0, level1, level2),
+            layer_scale_tczyx=(1.0, 1.0, 1.5, 0.5, 0.5),
+            max_display_voxels=300_000_000,
+        )
+    )
+
+    assert strategy == "coarse_level"
+    assert len(arrays) == 2
+    assert tuple(int(v) for v in arrays[0].shape[-3:]) == (250, 1024, 1024)
+    assert tuple(int(v) for v in arrays[1].shape[-3:]) == (125, 512, 512)
+    assert scale == (1.0, 1.0, 3.0, 1.0, 1.0)
+    assert factors == (2.0, 2.0, 2.0)
 
 
 def test_launch_napari_viewer_rejects_software_renderer_when_required(
