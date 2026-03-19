@@ -1287,3 +1287,342 @@ def test_run_workflow_chains_flatfield_output_to_visualization(
         ]["flatfield"].attrs
     )
     assert latest_ref["component"] == "results/flatfield/latest"
+
+
+def test_run_workflow_chains_deconvolution_output_to_particle_detection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_decon_chain.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _fake_deconvolution(*, zarr_path, parameters, client, progress_callback):
+        del parameters, client, progress_callback
+        fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
+        latest = (
+            fake_root.require_group("results")
+            .require_group("deconvolution")
+            .require_group("latest")
+        )
+        latest.create_dataset(
+            name="data",
+            shape=(1, 1, 1, 2, 2, 2),
+            chunks=(1, 1, 1, 2, 2, 2),
+            dtype="uint16",
+            overwrite=True,
+        )
+        return SimpleNamespace(
+            component="results/deconvolution/latest",
+            data_component="results/deconvolution/latest/data",
+            volumes_processed=1,
+            channel_count=1,
+            psf_mode="measured",
+            output_chunks_tpczyx=(1, 1, 1, 2, 2, 2),
+        )
+
+    captured: dict[str, object] = {}
+
+    def _fake_particle_detection(*, zarr_path, parameters, client, progress_callback):
+        del zarr_path, client, progress_callback
+        captured["input_source"] = str(parameters["input_source"])
+        return SimpleNamespace(
+            component="results/particle_detection/latest/detections",
+            detections=3,
+            chunks_processed=1,
+            channel_index=0,
+        )
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+    monkeypatch.setattr(main_module, "run_deconvolution_analysis", _fake_deconvolution)
+    monkeypatch.setattr(
+        main_module,
+        "run_particle_detection_analysis",
+        _fake_particle_detection,
+    )
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        deconvolution=True,
+        particle_detection=True,
+        analysis_parameters={
+            "deconvolution": {
+                "execution_order": 1,
+                "input_source": "data",
+                "psf_mode": "measured",
+                "measured_psf_paths": ["/tmp/psf.tif"],
+                "measured_psf_xy_um": [0.1],
+                "measured_psf_z_um": [0.5],
+            },
+            "particle_detection": {
+                "execution_order": 2,
+                "input_source": "deconvolution",
+            },
+        },
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.decon_particle_chain"),
+    )
+
+    assert captured["input_source"] == "results/deconvolution/latest/data"
+
+
+def test_run_workflow_fails_when_scheduled_output_is_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_missing_upstream.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _fake_flatfield(*, zarr_path, parameters, client, progress_callback):
+        del zarr_path, parameters, client, progress_callback
+        return SimpleNamespace(
+            component="results/flatfield/latest",
+            data_component="results/flatfield/latest/data",
+            flatfield_component="results/flatfield/latest/flatfield_pcyx",
+            darkfield_component="results/flatfield/latest/darkfield_pcyx",
+            baseline_component="results/flatfield/latest/baseline_pctz",
+            profile_count=1,
+            transformed_volumes=1,
+            output_chunks_tpczyx=(1, 1, 1, 2, 2, 2),
+            output_dtype="float32",
+        )
+
+    def _should_not_run(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("deconvolution should not run when upstream output is missing")
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+    monkeypatch.setattr(main_module, "run_flatfield_analysis", _fake_flatfield)
+    monkeypatch.setattr(main_module, "run_deconvolution_analysis", _should_not_run)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        flatfield=True,
+        deconvolution=True,
+        analysis_parameters={
+            "flatfield": {"execution_order": 1, "input_source": "data"},
+            "deconvolution": {
+                "execution_order": 2,
+                "input_source": "flatfield",
+                "psf_mode": "measured",
+                "measured_psf_paths": ["/tmp/psf.tif"],
+                "measured_psf_xy_um": [0.1],
+                "measured_psf_z_um": [0.5],
+            },
+        },
+    )
+
+    with pytest.raises(main_module.AnalysisDependencyError, match="ClearEx stops"):
+        main_module._run_workflow(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.missing_scheduled_output"),
+        )
+
+    runs_group = main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
+        "runs"
+    ]
+    run_records = [
+        dict(runs_group[run_id].attrs["record"]) for run_id in runs_group.group_keys()
+    ]
+
+    assert len(run_records) == 1
+    assert run_records[0]["status"] == "failed"
+    assert any(
+        str(step.get("name")) == "deconvolution"
+        and dict(step.get("parameters", {})).get("status") == "failed"
+        and dict(step.get("parameters", {})).get("reason")
+        == "missing_input_dependency"
+        and dict(step.get("parameters", {})).get("requested_input") == "flatfield"
+        and dict(step.get("parameters", {})).get("resolved_input")
+        == "results/flatfield/latest/data"
+        for step in run_records[0]["steps"]
+    )
+    assert (
+        run_records[0]["workflow"]["analysis_parameters"]["deconvolution"][
+            "input_source"
+        ]
+        == "results/flatfield/latest/data"
+    )
+
+
+def test_run_workflow_fails_for_missing_custom_component(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_missing_custom.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        deconvolution=True,
+        analysis_parameters={
+            "deconvolution": {
+                "execution_order": 1,
+                "input_source": "results/custom/latest/data",
+                "psf_mode": "measured",
+                "measured_psf_paths": ["/tmp/psf.tif"],
+                "measured_psf_xy_um": [0.1],
+                "measured_psf_z_um": [0.5],
+            }
+        },
+    )
+
+    with pytest.raises(
+        main_module.AnalysisDependencyError,
+        match="not available in the current analysis store",
+    ):
+        main_module._run_workflow(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.missing_custom_component"),
+        )
+
+    runs_group = main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
+        "runs"
+    ]
+    run_records = [
+        dict(runs_group[run_id].attrs["record"]) for run_id in runs_group.group_keys()
+    ]
+
+    assert len(run_records) == 1
+    assert run_records[0]["status"] == "failed"
+    assert any(
+        str(step.get("name")) == "deconvolution"
+        and dict(step.get("parameters", {})).get("status") == "failed"
+        and dict(step.get("parameters", {})).get("reason") == "missing_component"
+        for step in run_records[0]["steps"]
+    )
+    assert (
+        run_records[0]["workflow"]["analysis_parameters"]["deconvolution"][
+            "input_source"
+        ]
+        == "results/custom/latest/data"
+    )
+
+
+def test_run_workflow_chains_from_provenance_skipped_upstream_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_skip_chain.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.create_dataset(
+        name="results/usegment3d/latest/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        usegment3d=True,
+        visualization=True,
+        analysis_parameters={
+            "usegment3d": {"execution_order": 1, "input_source": "data"},
+            "visualization": {"execution_order": 2, "input_source": "usegment3d"},
+        },
+    )
+
+    persist_run_provenance(
+        zarr_path=store_path,
+        workflow=workflow,
+        image_info=ImageInfo(
+            path=store_path,
+            shape=(1, 1, 1, 2, 2, 2),
+            dtype=np.uint16,
+            axes=["t", "p", "c", "z", "y", "x"],
+        ),
+        steps=[{"name": "usegment3d", "parameters": {}}],
+        repo_root=tmp_path,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _should_not_run(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("usegment3d should have been skipped by provenance match")
+
+    captured: dict[str, object] = {}
+
+    def _fake_visualization(*, zarr_path, parameters, progress_callback):
+        del zarr_path, progress_callback
+        captured["input_source"] = str(parameters["input_source"])
+        return SimpleNamespace(
+            component="results/visualization/latest",
+            source_component=str(parameters["input_source"]),
+            source_components=(str(parameters["input_source"]),),
+            position_index=0,
+            overlay_points_count=0,
+            launch_mode="in_process",
+            viewer_pid=None,
+            keyframe_manifest_path="",
+            keyframe_count=0,
+        )
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+    monkeypatch.setattr(main_module, "run_usegment3d_analysis", _should_not_run)
+    monkeypatch.setattr(main_module, "run_visualization_analysis", _fake_visualization)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.skip_chain"),
+    )
+
+    assert captured["input_source"] == "results/usegment3d/latest/data"

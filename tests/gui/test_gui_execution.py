@@ -7,6 +7,7 @@ import inspect
 import math
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import clearex.gui.app as app_module
 from clearex.io.experiment import NavigateChannel, NavigateExperiment
@@ -1057,7 +1058,6 @@ def test_build_input_source_options_includes_existing_store_outputs() -> None:
         available_store_output_components={
             "flatfield": "results/flatfield/latest/data",
         },
-        provenance_confirmed_operations=["flatfield"],
     )
 
     assert options[0] == ("data", "Raw data (data)")
@@ -1099,18 +1099,17 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
         available_store_output_components={
             "flatfield": "results/flatfield/latest/data",
         },
-        provenance_confirmed_operations=["flatfield"],
     )
 
     values = [value for value, _label in options]
     assert values.count("flatfield") == 1
     assert (
         "flatfield",
-        "Flatfield Correction output (results/flatfield/latest/data)",
+        "Flatfield Correction output (results/flatfield/latest/data) [scheduled]",
     ) in options
 
 
-def test_build_input_source_options_omits_unconfirmed_upstream_outputs() -> None:
+def test_build_input_source_options_includes_scheduled_upstream_outputs() -> None:
     options = app_module._build_input_source_options(
         operation_name="visualization",
         selected_order=["deconvolution", "visualization"],
@@ -1142,15 +1141,17 @@ def test_build_input_source_options_omits_unconfirmed_upstream_outputs() -> None
         available_store_output_components={
             "deconvolution": "results/deconvolution/latest/data",
         },
-        provenance_confirmed_operations=[],
     )
 
-    values = [value for value, _ in options]
-    assert values == ["data"]
+    assert (
+        "deconvolution",
+        "Deconvolution output (results/deconvolution/latest/data) [scheduled]",
+    ) in options
 
 
-def test_build_visualization_volume_layer_component_options_only_uses_confirmed() -> None:
+def test_build_visualization_volume_layer_component_options_include_existing_outputs() -> None:
     options = app_module._build_visualization_volume_layer_component_options(
+        selected_order=("visualization",),
         operation_key_order=(
             "flatfield",
             "deconvolution",
@@ -1173,22 +1174,52 @@ def test_build_visualization_volume_layer_component_options_only_uses_confirmed(
             "flatfield": "results/flatfield/latest/data",
             "deconvolution": "results/deconvolution/latest/data",
         },
-        provenance_confirmed_operations=["flatfield"],
     )
 
     assert options[0] == ("data", "Raw data (data)")
     assert (
         "results/flatfield/latest/data",
-        "Flatfield Correction output (results/flatfield/latest/data)",
+        "Flatfield Correction output (results/flatfield/latest/data) [existing]",
     ) in options
-    assert all(
-        component != "results/deconvolution/latest/data"
-        for component, _label in options
+    assert (
+        "results/deconvolution/latest/data",
+        "Deconvolution output (results/deconvolution/latest/data) [existing]",
+    ) in options
+
+
+def test_build_visualization_volume_layer_component_options_include_scheduled_outputs() -> None:
+    options = app_module._build_visualization_volume_layer_component_options(
+        selected_order=("flatfield", "visualization"),
+        operation_key_order=(
+            "flatfield",
+            "deconvolution",
+            "shear_transform",
+            "particle_detection",
+            "usegment3d",
+            "registration",
+            "visualization",
+        ),
+        operation_labels={
+            "flatfield": "Flatfield Correction",
+            "deconvolution": "Deconvolution",
+            "shear_transform": "Shear Transform",
+            "particle_detection": "Particle Detection",
+            "usegment3d": "uSegment3D",
+            "registration": "Registration",
+            "visualization": "Visualization",
+        },
+        available_store_output_components={},
     )
+
+    assert (
+        "results/flatfield/latest/data",
+        "Flatfield Correction output (results/flatfield/latest/data) [scheduled]",
+    ) in options
 
 
 def test_build_visualization_volume_layer_component_options_deduplicates_components() -> None:
     options = app_module._build_visualization_volume_layer_component_options(
+        selected_order=("flatfield", "visualization"),
         operation_key_order=("flatfield", "deconvolution", "visualization"),
         operation_labels={
             "flatfield": "Flatfield Correction",
@@ -1199,7 +1230,6 @@ def test_build_visualization_volume_layer_component_options_deduplicates_compone
             "flatfield": "results/shared/latest/data",
             "deconvolution": "results/shared/latest/data",
         },
-        provenance_confirmed_operations=["flatfield", "deconvolution"],
     )
 
     components = [component for component, _ in options]
@@ -1258,7 +1288,7 @@ def test_discover_available_operation_output_components(monkeypatch) -> None:
 def test_particle_overlay_available_when_particle_detection_runs_first() -> None:
     available = app_module._particle_overlay_available_for_visualization(
         selected_order=["particle_detection", "visualization"],
-        has_particle_detection_history=False,
+        has_particle_detection_output=False,
     )
 
     assert available is True
@@ -1267,19 +1297,19 @@ def test_particle_overlay_available_when_particle_detection_runs_first() -> None
 def test_particle_overlay_unavailable_when_no_outputs_or_history() -> None:
     available = app_module._particle_overlay_available_for_visualization(
         selected_order=["visualization", "particle_detection"],
-        has_particle_detection_history=False,
+        has_particle_detection_output=False,
     )
 
     assert available is False
 
 
-def test_particle_overlay_available_with_historical_detections() -> None:
-    from_history = app_module._particle_overlay_available_for_visualization(
+def test_particle_overlay_available_with_existing_detections() -> None:
+    from_store = app_module._particle_overlay_available_for_visualization(
         selected_order=["visualization"],
-        has_particle_detection_history=True,
+        has_particle_detection_output=True,
     )
 
-    assert from_history is True
+    assert from_store is True
 
 
 def test_sync_visualization_volume_layers_from_input_source_updates_primary_layer() -> None:
@@ -1314,7 +1344,10 @@ def test_sync_visualization_volume_layers_from_input_source_updates_primary_laye
         dialog, refresh_summary=True
     )
 
-    assert dialog._visualization_volume_layers[0]["component"] == "shear_transform"
+    assert (
+        dialog._visualization_volume_layers[0]["component"]
+        == "results/shear_transform/latest/data"
+    )
     assert dialog._visualization_volume_layers[1]["component"] == (
         "results/deconvolution/latest/data"
     )
@@ -1373,8 +1406,31 @@ def test_collect_visualization_parameters_syncs_combo_with_primary_layer() -> No
 
     params = app_module.AnalysisSelectionDialog._collect_visualization_parameters(dialog)
 
-    assert params["input_source"] == "shear_transform"
-    assert params["volume_layers"][0]["component"] == "shear_transform"
+    assert params["input_source"] == "results/shear_transform/latest/data"
+    assert params["volume_layers"][0]["component"] == "results/shear_transform/latest/data"
+
+
+def test_validate_selected_analysis_dependencies_rejects_later_scheduled_producer() -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    dialog._base_config = SimpleNamespace(file="")
+    dialog._selected_operations_in_sequence = lambda: ["visualization", "flatfield"]
+    dialog._discover_store_output_components = lambda: {}
+
+    issues = app_module.AnalysisSelectionDialog._validate_selected_analysis_dependencies(
+        dialog,
+        {
+            "visualization": {"input_source": "flatfield"},
+            "flatfield": {"input_source": "data"},
+        },
+    )
+
+    assert issues
+    assert issues[0].reason == "producer_scheduled_after_consumer"
 
 
 def test_shear_degree_to_coefficient_and_back_round_trip() -> None:

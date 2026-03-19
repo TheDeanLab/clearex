@@ -74,11 +74,14 @@ from clearex.io.provenance import (
 )
 from clearex.io.read import ImageInfo, ImageOpener
 from clearex.workflow import (
+    ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS,
+    AnalysisInputDependencyIssue,
     AnalysisTarget,
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_MODE_LABELS,
     DASK_BACKEND_SLURM_CLUSTER,
     DASK_BACKEND_SLURM_RUNNER,
+    AnalysisInputReference,
     DEFAULT_ZARR_CHUNKS_PTCZYX,
     DEFAULT_ZARR_PYRAMID_PTCZYX,
     DEFAULT_SLURM_CLUSTER_JOB_EXTRA_DIRECTIVES,
@@ -91,6 +94,9 @@ from clearex.workflow import (
     WorkflowConfig,
     WorkflowExecutionCancelled,
     ZarrSaveConfig,
+    analysis_chainable_output_component,
+    analysis_operation_for_output_component,
+    collect_analysis_input_references,
     dask_backend_from_dict,
     dask_backend_to_dict,
     default_analysis_operation_parameters,
@@ -102,6 +108,8 @@ from clearex.workflow import (
     normalize_analysis_operation_parameters,
     parse_pyramid_levels,
     recommend_local_cluster_config,
+    resolve_analysis_input_component,
+    validate_analysis_input_references,
     zarr_save_from_dict,
     zarr_save_to_dict,
 )
@@ -1225,7 +1233,6 @@ def _build_input_source_options(
     operation_labels: Mapping[str, str],
     operation_output_components: Mapping[str, str],
     available_store_output_components: Optional[Mapping[str, str]] = None,
-    provenance_confirmed_operations: Optional[Sequence[str]] = None,
 ) -> list[tuple[str, str]]:
     """Build GUI input-source options for one analysis operation.
 
@@ -1243,8 +1250,6 @@ def _build_input_source_options(
         Expected output component per operation.
     available_store_output_components : mapping[str, str], optional
         Existing outputs discovered in the selected store from prior runs.
-    provenance_confirmed_operations : sequence[str], optional
-        Operation keys with at least one successful provenance record.
 
     Returns
     -------
@@ -1254,36 +1259,28 @@ def _build_input_source_options(
     options: list[tuple[str, str]] = [("data", "Raw data (data)")]
     option_values = {"data"}
     available = available_store_output_components or {}
-    confirmed_operations = {
-        str(name).strip()
-        for name in (provenance_confirmed_operations or ())
-        if str(name).strip()
-    }
-
-    def _available_component(operation_key: str) -> str:
-        return str(available.get(operation_key, "")).strip()
 
     for upstream_name in selected_order:
         if upstream_name == operation_name:
             break
-        if upstream_name in option_values or upstream_name not in confirmed_operations:
+        if upstream_name in option_values:
             continue
-        component = _available_component(upstream_name)
-        if not component:
+        component = analysis_chainable_output_component(upstream_name)
+        if component is None or upstream_name == "data":
             continue
         label = operation_labels.get(
             upstream_name, upstream_name.replace("_", " ").title()
         )
-        options.append((upstream_name, f"{label} output ({component})"))
+        options.append((upstream_name, f"{label} output ({component}) [scheduled]"))
         option_values.add(upstream_name)
 
     for upstream_name in operation_key_order:
         if upstream_name == operation_name or upstream_name in option_values:
             continue
-        if upstream_name not in confirmed_operations:
-            continue
-        component = _available_component(upstream_name)
+        component = str(available.get(upstream_name, "")).strip()
         if not component:
+            continue
+        if analysis_chainable_output_component(upstream_name) is None:
             continue
         label = operation_labels.get(
             upstream_name, upstream_name.replace("_", " ").title()
@@ -1296,50 +1293,58 @@ def _build_input_source_options(
 
 def _build_visualization_volume_layer_component_options(
     *,
+    selected_order: Sequence[str],
     operation_key_order: Sequence[str],
     operation_labels: Mapping[str, str],
     available_store_output_components: Optional[Mapping[str, str]] = None,
-    provenance_confirmed_operations: Optional[Sequence[str]] = None,
 ) -> list[tuple[str, str]]:
-    """Build provenance-backed component options for visualization volume layers.
+    """Build component options for visualization volume layers.
 
     Parameters
     ----------
+    selected_order : sequence[str]
+        Currently selected operations in execution order.
     operation_key_order : sequence of str
         Canonical operation display order.
     operation_labels : mapping[str, str]
         Human-readable labels per operation.
     available_store_output_components : mapping[str, str], optional
         Existing output components discovered in the selected store.
-    provenance_confirmed_operations : sequence[str], optional
-        Operation keys with at least one successful provenance run.
 
     Returns
     -------
     list[tuple[str, str]]
         Ordered ``(component_path, label)`` options. Includes raw ``data``
-        plus confirmed outputs currently present in the store.
+        plus scheduled and existing chainable outputs.
     """
     options: list[tuple[str, str]] = [("data", "Raw data (data)")]
     option_components = {"data"}
     available = available_store_output_components or {}
-    confirmed_operations = {
-        str(name).strip()
-        for name in (provenance_confirmed_operations or ())
-        if str(name).strip()
-    }
 
-    for operation_name in operation_key_order:
-        if operation_name not in confirmed_operations:
-            continue
-        component = str(available.get(operation_name, "")).strip()
-        if not component or component in option_components:
+    for operation_name in selected_order:
+        if operation_name == "visualization":
+            break
+        component = analysis_chainable_output_component(operation_name)
+        if component is None or component in option_components:
             continue
         label = operation_labels.get(
             operation_name,
             operation_name.replace("_", " ").title(),
         )
-        options.append((component, f"{label} output ({component})"))
+        options.append((component, f"{label} output ({component}) [scheduled]"))
+        option_components.add(component)
+
+    for operation_name in operation_key_order:
+        component = str(available.get(operation_name, "")).strip()
+        if not component or component in option_components:
+            continue
+        if analysis_chainable_output_component(operation_name) is None:
+            continue
+        label = operation_labels.get(
+            operation_name,
+            operation_name.replace("_", " ").title(),
+        )
+        options.append((component, f"{label} output ({component}) [existing]"))
         option_components.add(component)
     return options
 
@@ -1447,7 +1452,7 @@ def _available_visualization_colormap_options() -> list[str]:
 def _particle_overlay_available_for_visualization(
     *,
     selected_order: Sequence[str],
-    has_particle_detection_history: bool = False,
+    has_particle_detection_output: bool = False,
 ) -> bool:
     """Return whether particle-overlay controls should be available.
 
@@ -1455,22 +1460,22 @@ def _particle_overlay_available_for_visualization(
     ----------
     selected_order : sequence[str]
         Currently selected operations in execution order.
-    has_particle_detection_history : bool, default=False
-        Whether provenance indicates a completed particle-detection run.
+    has_particle_detection_output : bool, default=False
+        Whether the current store already contains particle detections.
 
     Returns
     -------
     bool
         ``True`` when overlay can be supported by either:
         a current particle-detection run before visualization or successful
-        particle-detection provenance history.
+        particle-detection output already present in the store.
     """
     ordered = [str(name).strip() for name in selected_order]
     if "particle_detection" in ordered and "visualization" in ordered:
         if ordered.index("particle_detection") < ordered.index("visualization"):
             return True
 
-    return bool(has_particle_detection_history)
+    return bool(has_particle_detection_output)
 
 
 def _shear_degrees_to_coefficient(angle_degrees: float) -> float:
@@ -9335,9 +9340,9 @@ if HAS_PYQT6:
             component = "data"
             if combo is not None:
                 data = combo.currentData()
-                component = (
+                component = resolve_analysis_input_component(
                     str(data).strip() if data is not None else "data"
-                ) or "data"
+                )
             return [
                 {
                     "component": component,
@@ -9433,8 +9438,11 @@ if HAS_PYQT6:
                 ).strip()
                 or "data"
             )
+            selected_value = str(
+                analysis_operation_for_output_component(component) or component
+            ).strip() or "data"
             combo.blockSignals(True)
-            combo_index = combo.findData(component)
+            combo_index = combo.findData(selected_value)
             if combo_index < 0:
                 combo.addItem(f"Custom component ({component})", component)
                 combo_index = combo.count() - 1
@@ -9462,9 +9470,9 @@ if HAS_PYQT6:
             if combo is None:
                 return
             combo_value = combo.currentData()
-            selected_component = (
+            selected_component = resolve_analysis_input_component(
                 str(combo_value).strip() if combo_value is not None else "data"
-            ) or "data"
+            )
 
             rows = self._normalize_visualization_volume_layers(
                 self._visualization_volume_layers
@@ -10540,7 +10548,6 @@ if HAS_PYQT6:
             self,
             operation_name: str,
             available_store_outputs: Optional[Mapping[str, str]] = None,
-            provenance_confirmed_operations: Optional[Sequence[str]] = None,
         ) -> list[tuple[str, str]]:
             """Build input-source options for a specific operation.
 
@@ -10550,8 +10557,6 @@ if HAS_PYQT6:
                 Operation key for which options are generated.
             available_store_outputs : mapping[str, str], optional
                 Existing operation outputs discovered in the selected store.
-            provenance_confirmed_operations : sequence[str], optional
-                Operation keys with successful provenance records.
 
             Returns
             -------
@@ -10565,7 +10570,6 @@ if HAS_PYQT6:
                 operation_labels=self._OPERATION_LABELS,
                 operation_output_components=self._OPERATION_OUTPUT_COMPONENTS,
                 available_store_output_components=available_store_outputs,
-                provenance_confirmed_operations=provenance_confirmed_operations,
             )
 
         def _discover_store_output_components(self) -> Dict[str, str]:
@@ -10583,7 +10587,11 @@ if HAS_PYQT6:
             """
             return _discover_available_operation_output_components(
                 store_path=str(self._base_config.file or "").strip(),
-                operation_output_components=self._OPERATION_OUTPUT_COMPONENTS,
+                operation_output_components={
+                    operation_name: component
+                    for operation_name, component in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS.items()
+                    if operation_name != "data"
+                },
             )
 
         def _provenance_confirmed_operation_names(self) -> list[str]:
@@ -10624,10 +10632,10 @@ if HAS_PYQT6:
                 and provenance-confirmed outputs present in the selected store.
             """
             return _build_visualization_volume_layer_component_options(
+                selected_order=self._selected_operations_in_sequence(),
                 operation_key_order=self._OPERATION_KEYS,
                 operation_labels=self._OPERATION_LABELS,
                 available_store_output_components=self._discover_store_output_components(),
-                provenance_confirmed_operations=self._provenance_confirmed_operation_names(),
             )
 
         def _refresh_input_source_options(self) -> None:
@@ -10643,9 +10651,6 @@ if HAS_PYQT6:
                 Combo options are rebuilt in-place.
             """
             available_store_outputs = self._discover_store_output_components()
-            provenance_confirmed_operations = (
-                self._provenance_confirmed_operation_names()
-            )
 
             for operation_name, combo in self._operation_input_combos.items():
                 current_data = combo.currentData()
@@ -10655,7 +10660,6 @@ if HAS_PYQT6:
                 options = self._input_options_for_operation(
                     operation_name,
                     available_store_outputs=available_store_outputs,
-                    provenance_confirmed_operations=provenance_confirmed_operations,
                 )
                 option_values = [value for value, _ in options]
 
@@ -10668,19 +10672,20 @@ if HAS_PYQT6:
                         selected_index = idx
 
                 if current_source not in option_values:
-                    if current_source not in self._OPERATION_KEYS:
-                        combo.addItem(
-                            f"Custom component ({current_source})",
-                            current_source,
-                        )
-                        selected_index = combo.count() - 1
+                    unavailable_label = (
+                        f"Unavailable source ({current_source})"
+                        if current_source in self._OPERATION_KEYS
+                        else f"Custom component ({current_source})"
+                    )
+                    combo.addItem(unavailable_label, current_source)
+                    selected_index = combo.count() - 1
 
                 combo.setCurrentIndex(selected_index)
                 combo.setEnabled(self._operation_checkboxes[operation_name].isChecked())
                 combo.blockSignals(False)
 
-        def _has_completed_particle_detection_history(self) -> bool:
-            """Return whether provenance has a successful particle-detection run.
+        def _has_particle_detection_output(self) -> bool:
+            """Return whether the active store already contains detections.
 
             Parameters
             ----------
@@ -10689,10 +10694,19 @@ if HAS_PYQT6:
             Returns
             -------
             bool
-                ``True`` when provenance indicates particle detection completed.
+                ``True`` when the latest detections component exists.
             """
-            history = self._operation_history_cache.get("particle_detection", {})
-            return bool(history.get("has_successful_run", False))
+            store_path = str(self._base_config.file or "").strip()
+            if not store_path or not is_zarr_store_path(store_path):
+                return False
+            try:
+                root = zarr.open_group(store_path, mode="r")
+            except Exception:
+                return False
+            return _zarr_component_exists_in_root(
+                root,
+                self._PARTICLE_DETECTION_OVERLAY_COMPONENT,
+            )
 
         def _is_particle_overlay_available(self) -> bool:
             """Return whether visualization particle overlay can be enabled.
@@ -10709,7 +10723,78 @@ if HAS_PYQT6:
             """
             return _particle_overlay_available_for_visualization(
                 selected_order=self._selected_operations_in_sequence(),
-                has_particle_detection_history=self._has_completed_particle_detection_history(),
+                has_particle_detection_output=self._has_particle_detection_output(),
+            )
+
+        def _collect_available_dependency_components(
+            self,
+            references: Sequence[AnalysisInputReference],
+        ) -> set[str]:
+            """Collect store components available for dependency validation.
+
+            Parameters
+            ----------
+            references : sequence[AnalysisInputReference]
+                Requested analysis input references.
+
+            Returns
+            -------
+            set[str]
+                Components known to exist in the active analysis store.
+            """
+            available_components = {"data"}
+            store_path = str(self._base_config.file or "").strip()
+            if not store_path or not is_zarr_store_path(store_path):
+                return available_components
+            try:
+                root = zarr.open_group(store_path, mode="r")
+            except Exception:
+                return available_components
+
+            for component in self._discover_store_output_components().values():
+                available_components.add(str(component))
+
+            for reference in references:
+                requested_source = str(reference.requested_source).strip()
+                if (
+                    not requested_source
+                    or requested_source == "data"
+                    or requested_source in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS
+                    or requested_source in available_components
+                ):
+                    continue
+                if _zarr_component_exists_in_root(root, requested_source):
+                    available_components.add(requested_source)
+            return available_components
+
+        def _validate_selected_analysis_dependencies(
+            self,
+            analysis_parameters: Mapping[str, Mapping[str, Any]],
+        ) -> tuple[AnalysisInputDependencyIssue, ...]:
+            """Validate currently selected analysis dependencies.
+
+            Parameters
+            ----------
+            analysis_parameters : mapping[str, mapping[str, Any]]
+                Normalized per-operation parameters for the current dialog state.
+
+            Returns
+            -------
+            tuple[AnalysisInputDependencyIssue, ...]
+                Dependency issues returned by the shared workflow validator.
+            """
+            execution_sequence = self._selected_operations_in_sequence()
+            references = collect_analysis_input_references(
+                execution_sequence=execution_sequence,
+                analysis_parameters=analysis_parameters,
+            )
+            available_components = self._collect_available_dependency_components(
+                references
+            )
+            return validate_analysis_input_references(
+                execution_sequence=execution_sequence,
+                analysis_parameters=analysis_parameters,
+                available_components=available_components,
             )
 
         def _set_provenance_history_label_state(
@@ -13721,6 +13806,18 @@ if HAS_PYQT6:
             analysis_parameters = normalize_analysis_operation_parameters(
                 analysis_parameters
             )
+            dependency_issues = self._validate_selected_analysis_dependencies(
+                analysis_parameters
+            )
+            if dependency_issues:
+                first_issue = dependency_issues[0]
+                QMessageBox.warning(
+                    self,
+                    "Invalid Analysis Dependencies",
+                    str(first_issue.message),
+                )
+                self._set_status(str(first_issue.message))
+                return
 
             if selected_flags["deconvolution"]:
                 decon_params = dict(analysis_parameters.get("deconvolution", {}))

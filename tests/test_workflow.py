@@ -32,6 +32,7 @@ import pytest
 import clearex.workflow as workflow_module
 from clearex.workflow import (
     ANALYSIS_OPERATION_ORDER,
+    ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS,
     AnalysisTarget,
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
@@ -57,7 +58,9 @@ from clearex.workflow import (
     parse_pyramid_levels,
     normalize_analysis_operation_parameters,
     recommend_local_cluster_config,
+    resolve_analysis_input_component,
     resolve_analysis_execution_sequence,
+    validate_analysis_input_references,
     to_tpczyx_chunks,
     to_tpczyx_pyramid,
 )
@@ -918,3 +921,68 @@ def test_analysis_operation_order_contains_expected_keys():
         "visualization",
         "mip_export",
     )
+
+
+def test_resolve_analysis_input_component_prefers_same_run_outputs() -> None:
+    resolved = resolve_analysis_input_component(
+        "flatfield",
+        produced_components={"flatfield": "results/flatfield/latest/data_run_2"},
+    )
+
+    assert resolved == "results/flatfield/latest/data_run_2"
+
+
+def test_validate_analysis_input_references_accepts_scheduled_chainable_input() -> None:
+    issues = validate_analysis_input_references(
+        execution_sequence=("flatfield", "deconvolution"),
+        analysis_parameters={
+            "flatfield": {"execution_order": 1, "input_source": "data"},
+            "deconvolution": {
+                "execution_order": 2,
+                "input_source": "flatfield",
+                "psf_mode": "measured",
+                "measured_psf_paths": ["/tmp/psf.tif"],
+                "measured_psf_xy_um": [0.1],
+                "measured_psf_z_um": [0.5],
+            },
+        },
+        available_components={"data"},
+    )
+
+    assert issues == ()
+
+
+def test_validate_analysis_input_references_rejects_later_producer() -> None:
+    issues = validate_analysis_input_references(
+        execution_sequence=("visualization", "flatfield"),
+        analysis_parameters={
+            "visualization": {"execution_order": 1, "input_source": "flatfield"},
+            "flatfield": {"execution_order": 2, "input_source": "data"},
+        },
+        available_components={"data", ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS["flatfield"]},
+    )
+
+    assert issues
+    assert all(
+        issue.reason == "producer_scheduled_after_consumer" for issue in issues
+    )
+
+
+def test_validate_analysis_input_references_rejects_nonchainable_known_output() -> None:
+    issues = validate_analysis_input_references(
+        execution_sequence=("deconvolution",),
+        analysis_parameters={
+            "deconvolution": {
+                "execution_order": 1,
+                "input_source": "results/particle_detection/latest/detections",
+                "psf_mode": "measured",
+                "measured_psf_paths": ["/tmp/psf.tif"],
+                "measured_psf_xy_um": [0.1],
+                "measured_psf_z_um": [0.5],
+            }
+        },
+        available_components={"data", "results/particle_detection/latest/detections"},
+    )
+
+    assert len(issues) == 1
+    assert issues[0].reason == "producer_not_chainable"

@@ -29,7 +29,7 @@
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 import argparse
 import json
 import logging
@@ -115,35 +115,30 @@ except ImportError:
 
 
 from clearex.workflow import (
+    ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS,
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
     DASK_BACKEND_SLURM_RUNNER,
+    AnalysisInputReference,
     DaskBackendConfig,
     LocalClusterConfig,
     WorkflowConfig,
     WorkflowExecutionCancelled,
+    analysis_chainable_output_component,
+    collect_analysis_input_references,
     dask_backend_from_dict,
     dask_backend_to_dict,
     format_dask_backend_summary,
     format_chunks,
     normalize_analysis_operation_parameters,
     recommend_local_cluster_config,
+    resolve_analysis_input_component,
     resolve_analysis_execution_sequence,
+    validate_analysis_input_references,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
     parse_chunks,
 )
-
-
-_ANALYSIS_SOURCE_COMPONENT_PATHS: Dict[str, str] = {
-    "data": "data",
-    "flatfield": "results/flatfield/latest/data",
-    "deconvolution": "results/deconvolution/latest/data",
-    "shear_transform": "results/shear_transform/latest/data",
-    "usegment3d": "results/usegment3d/latest/data",
-    "registration": "results/registration/latest/data",
-    "visualization": "data",
-}
 
 _CLEAREX_SETTINGS_DIR_NAME = ".clearex"
 _CLEAREX_DASK_BACKEND_SETTINGS_FILE = "dask_backend_settings.json"
@@ -184,6 +179,10 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "registration": ("results/registration/latest/data",),
     "mip_export": ("results/mip_export/latest",),
 }
+
+
+class AnalysisDependencyError(RuntimeError):
+    """Raised when a workflow requests an unavailable or invalid input."""
 
 
 def _is_zarr_like_path(path: Path) -> bool:
@@ -250,30 +249,92 @@ def _resolve_log_directory_for_workflow(workflow: WorkflowConfig) -> Path:
     return selected.parent if selected.parent != Path("") else Path.cwd().resolve()
 
 
-def _resolve_analysis_input_component(
-    requested_source: str,
-    produced_components: Dict[str, str],
-) -> str:
-    """Resolve an analysis input source key to a Zarr component path.
+def _collect_available_analysis_components(
+    zarr_path: Optional[str],
+    references: Sequence[AnalysisInputReference],
+) -> set[str]:
+    """Collect store components available for dependency validation.
 
     Parameters
     ----------
-    requested_source : str
-        Requested source key or explicit component path.
-    produced_components : dict[str, str]
-        Component paths produced by prior operations in this runtime.
+    zarr_path : str, optional
+        Active canonical analysis-store path.
+    references : sequence[AnalysisInputReference]
+        Requested input references to validate.
 
     Returns
     -------
-    str
-        Resolved component path suitable for Zarr lookup.
+    set[str]
+        Components known to exist in the current store.
     """
-    source = str(requested_source).strip() or "data"
-    if source in produced_components:
-        return str(produced_components[source])
-    if source in _ANALYSIS_SOURCE_COMPONENT_PATHS:
-        return _ANALYSIS_SOURCE_COMPONENT_PATHS[source]
-    return source
+    available_components = {"data"}
+    if not zarr_path or not is_zarr_store_path(zarr_path):
+        return available_components
+
+    for operation_name, component in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS.items():
+        if operation_name == "data":
+            continue
+        if _zarr_component_exists(zarr_path, component):
+            available_components.add(str(component))
+
+    for reference in references:
+        requested_source = str(reference.requested_source).strip()
+        if (
+            not requested_source
+            or requested_source == "data"
+            or requested_source in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS
+            or requested_source in available_components
+        ):
+            continue
+        if _zarr_component_exists(zarr_path, requested_source):
+            available_components.add(requested_source)
+    return available_components
+
+
+def _require_analysis_input_component(
+    *,
+    zarr_path: str,
+    operation_name: str,
+    field_name: str,
+    requested_source: str,
+    resolved_component: str,
+) -> None:
+    """Raise when a required analysis input component is unavailable.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Active canonical analysis-store path.
+    operation_name : str
+        Operation consuming the input.
+    field_name : str
+        Parameter field name carrying the reference.
+    requested_source : str
+        Original requested alias or component path.
+    resolved_component : str
+        Resolved component path expected at runtime.
+
+    Returns
+    -------
+    None
+        Validation side effects only.
+
+    Raises
+    ------
+    AnalysisDependencyError
+        If the resolved component does not exist in the active store.
+    """
+    if _zarr_component_exists(zarr_path, resolved_component):
+        return
+
+    operation_label = str(operation_name).strip().replace("_", " ").title()
+    requested_text = str(requested_source).strip() or "data"
+    resolved_text = str(resolved_component).strip() or "data"
+    raise AnalysisDependencyError(
+        f"{operation_label} {field_name} requested '{requested_text}' and resolved "
+        f"to '{resolved_text}', but that component is unavailable. ClearEx stops "
+        "instead of falling back to raw data."
+    )
 
 
 def _analysis_execution_requires_dask_client(
@@ -997,6 +1058,7 @@ def _run_workflow(
     provenance_store_path: Optional[str] = None
     run_status = "completed"
     cancellation_exc: Optional[WorkflowExecutionCancelled] = None
+    failure_exc: Optional[Exception] = None
     runtime_analysis_parameters = normalize_analysis_operation_parameters(
         workflow.analysis_parameters
     )
@@ -1143,6 +1205,59 @@ def _run_workflow(
         else:
             _emit_analysis_progress(100, "No analysis operations selected.")
 
+        current_operation_name: Optional[str] = None
+        current_requested_source = "data"
+        current_resolved_source = "data"
+        current_operation_parameters: Dict[str, Any] = {}
+        references = collect_analysis_input_references(
+            execution_sequence=execution_sequence,
+            analysis_parameters=runtime_analysis_parameters,
+        )
+        available_components = _collect_available_analysis_components(
+            provenance_store_path,
+            references,
+        )
+        dependency_issues = validate_analysis_input_references(
+            execution_sequence=execution_sequence,
+            analysis_parameters=runtime_analysis_parameters,
+            available_components=available_components,
+        )
+        if dependency_issues:
+            first_issue = dependency_issues[0]
+            run_status = "failed"
+            current_operation_name = str(first_issue.consumer_operation)
+            current_requested_source = str(first_issue.requested_source)
+            current_resolved_source = (
+                str(first_issue.resolved_component).strip()
+                if first_issue.resolved_component is not None
+                else current_requested_source
+            ) or "data"
+            current_operation_parameters = dict(
+                runtime_analysis_parameters.get(first_issue.consumer_operation, {})
+            )
+            current_operation_parameters.update(
+                {
+                    "status": "failed",
+                    "reason": str(first_issue.reason),
+                    "dependency_message": str(first_issue.message),
+                    "requested_input": current_requested_source,
+                    "resolved_input": current_resolved_source,
+                }
+            )
+            step_records.append(
+                {
+                    "name": current_operation_name,
+                    "parameters": dict(current_operation_parameters),
+                }
+            )
+            failure_exc = AnalysisDependencyError(str(first_issue.message))
+            logger.error(
+                "Invalid analysis dependency for '%s': %s",
+                current_operation_name,
+                first_issue.message,
+            )
+            _emit_analysis_progress(100, str(first_issue.message))
+
         analysis_client = (
             _configure_dask_backend(
                 workflow=workflow,
@@ -1150,17 +1265,16 @@ def _run_workflow(
                 exit_stack=analysis_stack,
                 workload="analysis",
             )
-            if _analysis_execution_requires_dask_client(execution_sequence)
+            if failure_exc is None
+            and _analysis_execution_requires_dask_client(execution_sequence)
             else None
         )
 
         produced_components: Dict[str, str] = {"data": "data"}
         total_operations = max(1, len(execution_sequence))
-        current_operation_name: Optional[str] = None
-        current_requested_source = "data"
-        current_resolved_source = "data"
-        current_operation_parameters: Dict[str, Any] = {}
         try:
+            if failure_exc is not None:
+                raise failure_exc
             for operation_index, operation_name in enumerate(execution_sequence):
                 current_operation_name = str(operation_name)
                 current_requested_source = "data"
@@ -1178,7 +1292,7 @@ def _run_workflow(
                     str(operation_parameters.get("input_source", "data")).strip()
                     or "data"
                 )
-                resolved_source = _resolve_analysis_input_component(
+                resolved_source = resolve_analysis_input_component(
                     requested_source=requested_source,
                     produced_components=produced_components,
                 )
@@ -1244,12 +1358,15 @@ def _run_workflow(
                                         else ""
                                     ),
                                 )
+                                chainable_component = (
+                                    analysis_chainable_output_component(operation_name)
+                                )
                                 if (
-                                    operation_name in _ANALYSIS_SOURCE_COMPONENT_PATHS
-                                    and operation_name != "particle_detection"
+                                    chainable_component is not None
+                                    and operation_name != "data"
                                 ):
                                     produced_components[operation_name] = (
-                                        _ANALYSIS_SOURCE_COMPONENT_PATHS[operation_name]
+                                        chainable_component
                                     )
                                 step_records.append(
                                     {
@@ -1282,25 +1399,24 @@ def _run_workflow(
                                 else "none",
                             )
 
+                if (
+                    operation_name != "visualization"
+                    and provenance_store_path
+                    and is_zarr_store_path(provenance_store_path)
+                ):
+                    _require_analysis_input_component(
+                        zarr_path=provenance_store_path,
+                        operation_name=str(operation_name),
+                        field_name="input_source",
+                        requested_source=str(requested_source),
+                        resolved_component=str(resolved_source),
+                    )
+
                 if operation_name == "flatfield":
                     flatfield_parameters = dict(operation_parameters)
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
-                        if not _zarr_component_exists(
-                            provenance_store_path,
-                            str(flatfield_parameters.get("input_source", "data")),
-                        ):
-                            logger.warning(
-                                "Requested flatfield input component '%s' was not found. "
-                                "Falling back to 'data'.",
-                                flatfield_parameters.get("input_source", "data"),
-                            )
-                            flatfield_parameters["input_source"] = "data"
-                            runtime_analysis_parameters["flatfield"] = dict(
-                                flatfield_parameters
-                            )
-
                         progress_state = {"last_percent": -5}
 
                         def _flatfield_progress(percent: int, message: str) -> None:
@@ -1417,20 +1533,6 @@ def _run_workflow(
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
-                        if not _zarr_component_exists(
-                            provenance_store_path,
-                            str(decon_parameters.get("input_source", "data")),
-                        ):
-                            logger.warning(
-                                "Requested deconvolution input component '%s' was not "
-                                "found. Falling back to 'data'.",
-                                decon_parameters.get("input_source", "data"),
-                            )
-                            decon_parameters["input_source"] = "data"
-                            runtime_analysis_parameters["deconvolution"] = dict(
-                                decon_parameters
-                            )
-
                         progress_state = {"last_percent": -5}
 
                         def _decon_progress(percent: int, message: str) -> None:
@@ -1528,20 +1630,6 @@ def _run_workflow(
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
-                        if not _zarr_component_exists(
-                            provenance_store_path,
-                            str(shear_parameters.get("input_source", "data")),
-                        ):
-                            logger.warning(
-                                "Requested shear-transform input component '%s' was "
-                                "not found. Falling back to 'data'.",
-                                shear_parameters.get("input_source", "data"),
-                            )
-                            shear_parameters["input_source"] = "data"
-                            runtime_analysis_parameters["shear_transform"] = dict(
-                                shear_parameters
-                            )
-
                         progress_state = {"last_percent": -5}
 
                         def _shear_progress(percent: int, message: str) -> None:
@@ -1663,20 +1751,6 @@ def _run_workflow(
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
-                        if not _zarr_component_exists(
-                            provenance_store_path,
-                            str(particle_parameters.get("input_source", "data")),
-                        ):
-                            logger.warning(
-                                "Requested particle-detection input component '%s' was "
-                                "not found. Falling back to 'data'.",
-                                particle_parameters.get("input_source", "data"),
-                            )
-                            particle_parameters["input_source"] = "data"
-                            runtime_analysis_parameters["particle_detection"] = dict(
-                                particle_parameters
-                            )
-
                         progress_state = {"last_percent": -5}
 
                         def _particle_progress(percent: int, message: str) -> None:
@@ -1769,20 +1843,6 @@ def _run_workflow(
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
-                        if not _zarr_component_exists(
-                            provenance_store_path,
-                            str(usegment3d_parameters.get("input_source", "data")),
-                        ):
-                            logger.warning(
-                                "Requested usegment3d input component '%s' was not "
-                                "found. Falling back to 'data'.",
-                                usegment3d_parameters.get("input_source", "data"),
-                            )
-                            usegment3d_parameters["input_source"] = "data"
-                            runtime_analysis_parameters["usegment3d"] = dict(
-                                usegment3d_parameters
-                            )
-
                         progress_state = {"last_percent": -5}
 
                         def _usegment3d_progress(percent: int, message: str) -> None:
@@ -1967,7 +2027,7 @@ def _run_workflow(
                             ).strip()
                             if not requested_component:
                                 continue
-                            resolved_component = _resolve_analysis_input_component(
+                            resolved_component = resolve_analysis_input_component(
                                 requested_source=requested_component,
                                 produced_components=produced_components,
                             )
@@ -1989,39 +2049,25 @@ def _run_workflow(
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
-                        if not _zarr_component_exists(
-                            provenance_store_path,
-                            str(visualization_parameters.get("input_source", "data")),
-                        ):
-                            logger.warning(
-                                "Requested visualization input component '%s' was "
-                                "not found. Falling back to 'data'.",
-                                visualization_parameters.get("input_source", "data"),
-                            )
-                            visualization_parameters["input_source"] = "data"
-                            if (
-                                isinstance(
-                                    visualization_parameters.get("volume_layers"),
-                                    (tuple, list),
-                                )
-                                and visualization_parameters["volume_layers"]
-                            ):
-                                first_row = visualization_parameters["volume_layers"][0]
-                                if isinstance(first_row, dict):
-                                    first_row["component"] = "data"
-                            runtime_analysis_parameters["visualization"] = dict(
-                                visualization_parameters
-                            )
+                        _require_analysis_input_component(
+                            zarr_path=provenance_store_path,
+                            operation_name="visualization",
+                            field_name="input_source",
+                            requested_source=str(current_requested_source),
+                            resolved_component=str(
+                                visualization_parameters.get("input_source", "data")
+                            ),
+                        )
                         volume_layers_value = visualization_parameters.get(
                             "volume_layers"
                         )
                         if isinstance(volume_layers_value, (tuple, list)):
                             sanitized_volume_layers: list[dict[str, Any]] = []
-                            for row in volume_layers_value:
+                            for index, row in enumerate(volume_layers_value):
                                 if not isinstance(row, dict):
                                     continue
                                 row_copy = dict(row)
-                                requested_component = (
+                                resolved_component = (
                                     str(
                                         row_copy.get(
                                             "component",
@@ -2030,19 +2076,22 @@ def _run_workflow(
                                     ).strip()
                                     or "data"
                                 )
-                                if not _zarr_component_exists(
-                                    provenance_store_path,
-                                    requested_component,
-                                ):
-                                    logger.warning(
-                                        "Requested visualization volume layer '%s' was "
-                                        "not found. Falling back to 'data'.",
-                                        requested_component,
-                                    )
-                                    requested_component = "data"
-                                row_copy["component"] = requested_component
+                                _require_analysis_input_component(
+                                    zarr_path=provenance_store_path,
+                                    operation_name="visualization",
+                                    field_name=f"volume_layers[{index}].component",
+                                    requested_source=str(
+                                        row.get(
+                                            "component",
+                                            row.get("source_component", ""),
+                                        )
+                                    ).strip()
+                                    or "data",
+                                    resolved_component=resolved_component,
+                                )
+                                row_copy["component"] = resolved_component
                                 if "source_component" in row_copy:
-                                    row_copy["source_component"] = requested_component
+                                    row_copy["source_component"] = resolved_component
                                 sanitized_volume_layers.append(row_copy)
                             if sanitized_volume_layers:
                                 visualization_parameters["volume_layers"] = (
@@ -2171,20 +2220,6 @@ def _run_workflow(
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
-                        if not _zarr_component_exists(
-                            provenance_store_path,
-                            str(mip_parameters.get("input_source", "data")),
-                        ):
-                            logger.warning(
-                                "Requested MIP-export input component '%s' was "
-                                "not found. Falling back to 'data'.",
-                                mip_parameters.get("input_source", "data"),
-                            )
-                            mip_parameters["input_source"] = "data"
-                            runtime_analysis_parameters["mip_export"] = dict(
-                                mip_parameters
-                            )
-
                         def _mip_export_progress(percent: int, message: str) -> None:
                             """Map MIP-export progress into workflow-scale progress.
 
@@ -2300,7 +2335,9 @@ def _run_workflow(
                         },
                     }
                 )
-        except Exception:
+        except Exception as exc:
+            run_status = "failed"
+            failure_exc = exc
             logger.exception(
                 "Analysis operation '%s' failed (store=%s, requested_input=%s, "
                 "resolved_input=%s, parameters=%s).",
@@ -2310,7 +2347,33 @@ def _run_workflow(
                 current_resolved_source,
                 current_operation_parameters,
             )
-            raise
+            if (
+                current_operation_name
+                and (
+                    not step_records
+                    or str(step_records[-1].get("name")) != current_operation_name
+                    or str(step_records[-1].get("parameters", {}).get("status", ""))
+                    not in {"failed", "cancelled"}
+                )
+            ):
+                reason = (
+                    "missing_input_dependency"
+                    if isinstance(exc, AnalysisDependencyError)
+                    else "runtime_error"
+                )
+                step_records.append(
+                    {
+                        "name": current_operation_name,
+                        "parameters": {
+                            **current_operation_parameters,
+                            "status": "failed",
+                            "reason": reason,
+                            "error": str(exc),
+                            "requested_input": current_requested_source,
+                            "resolved_input": current_resolved_source,
+                        },
+                    }
+                )
 
     if provenance_store_path and is_zarr_store_path(provenance_store_path):
         provenance_workflow = WorkflowConfig(
@@ -2369,6 +2432,9 @@ def _run_workflow(
 
     if cancellation_exc is not None:
         raise cancellation_exc
+
+    if failure_exc is not None:
+        raise failure_exc
 
     _emit_analysis_progress(100, "Workflow execution complete.")
 

@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 import math
 import os
 import subprocess
-from typing import Any, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Collection, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union
 
 
 ChunkSpec = Optional[Union[int, Tuple[int, ...]]]
@@ -56,6 +56,393 @@ ANALYSIS_OPERATION_ORDER = (
     "visualization",
     "mip_export",
 )
+
+ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS: Dict[str, str] = {
+    "data": "data",
+    "flatfield": "results/flatfield/latest/data",
+    "deconvolution": "results/deconvolution/latest/data",
+    "shear_transform": "results/shear_transform/latest/data",
+    "usegment3d": "results/usegment3d/latest/data",
+}
+ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
+    "data": "data",
+    "flatfield": "results/flatfield/latest/data",
+    "deconvolution": "results/deconvolution/latest/data",
+    "shear_transform": "results/shear_transform/latest/data",
+    "particle_detection": "results/particle_detection/latest/detections",
+    "usegment3d": "results/usegment3d/latest/data",
+    "registration": "results/registration/latest/data",
+    "visualization": "results/visualization/latest",
+    "mip_export": "results/mip_export/latest",
+}
+_OUTPUT_COMPONENT_TO_OPERATION: Dict[str, str] = {
+    str(component): str(operation_name)
+    for operation_name, component in ANALYSIS_KNOWN_OUTPUT_COMPONENTS.items()
+}
+
+
+@dataclass(frozen=True)
+class AnalysisInputReference:
+    """One analysis input reference used for dependency validation.
+
+    Parameters
+    ----------
+    consumer_operation : str
+        Analysis operation consuming the reference.
+    field_name : str
+        Parameter field name carrying the reference.
+    requested_source : str
+        Requested alias or component path.
+    """
+
+    consumer_operation: str
+    field_name: str
+    requested_source: str
+
+
+@dataclass(frozen=True)
+class AnalysisInputDependencyIssue:
+    """Description of one invalid analysis input dependency.
+
+    Parameters
+    ----------
+    consumer_operation : str
+        Analysis operation consuming the reference.
+    field_name : str
+        Parameter field name carrying the reference.
+    requested_source : str
+        Requested alias or component path.
+    reason : str
+        Machine-readable reason key.
+    message : str
+        Human-readable validation message.
+    producer_operation : str, optional
+        Upstream producer operation when the reference maps to one.
+    resolved_component : str, optional
+        Expected component path for the requested source when known.
+    """
+
+    consumer_operation: str
+    field_name: str
+    requested_source: str
+    reason: str
+    message: str
+    producer_operation: Optional[str] = None
+    resolved_component: Optional[str] = None
+
+
+def _analysis_operation_display_name(operation_name: str) -> str:
+    """Return a human-readable analysis operation name.
+
+    Parameters
+    ----------
+    operation_name : str
+        Operation key.
+
+    Returns
+    -------
+    str
+        Title-cased operation label for diagnostics.
+    """
+    return str(operation_name).strip().replace("_", " ").title() or "Analysis"
+
+
+def analysis_chainable_output_component(operation_name: str) -> Optional[str]:
+    """Return the reusable latest-output component for one operation.
+
+    Parameters
+    ----------
+    operation_name : str
+        Candidate operation key.
+
+    Returns
+    -------
+    str, optional
+        Reusable component path when the operation exposes one, otherwise
+        ``None``.
+    """
+    key = str(operation_name).strip()
+    if not key:
+        return None
+    return ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS.get(key)
+
+
+def analysis_operation_for_output_component(component: str) -> Optional[str]:
+    """Return the producing operation for one known output component.
+
+    Parameters
+    ----------
+    component : str
+        Output component path.
+
+    Returns
+    -------
+    str, optional
+        Operation key when the component is a known latest-output location,
+        otherwise ``None``.
+    """
+    key = str(component).strip()
+    if not key:
+        return None
+    return _OUTPUT_COMPONENT_TO_OPERATION.get(key)
+
+
+def resolve_analysis_input_component(
+    requested_source: str,
+    produced_components: Optional[Mapping[str, str]] = None,
+) -> str:
+    """Resolve an analysis input alias to a component path.
+
+    Parameters
+    ----------
+    requested_source : str
+        Requested alias or explicit component path.
+    produced_components : mapping[str, str], optional
+        Components produced earlier in the current workflow run.
+
+    Returns
+    -------
+    str
+        Resolved component path suitable for store lookup.
+    """
+    source = str(requested_source).strip() or "data"
+    if produced_components is not None and source in produced_components:
+        return str(produced_components[source])
+    component = analysis_chainable_output_component(source)
+    if component is not None:
+        return str(component)
+    return source
+
+
+def collect_analysis_input_references(
+    *,
+    execution_sequence: Sequence[str],
+    analysis_parameters: Mapping[str, Mapping[str, Any]],
+) -> Tuple[AnalysisInputReference, ...]:
+    """Collect input references from the selected analysis sequence.
+
+    Parameters
+    ----------
+    execution_sequence : sequence[str]
+        Selected operations in execution order.
+    analysis_parameters : mapping[str, mapping[str, Any]]
+        Candidate normalized or denormalized per-operation parameters.
+
+    Returns
+    -------
+    tuple[AnalysisInputReference, ...]
+        Collected references, including visualization volume-layer components.
+    """
+    normalized = normalize_analysis_operation_parameters(dict(analysis_parameters))
+    references: list[AnalysisInputReference] = []
+    for operation_name in execution_sequence:
+        params = dict(normalized.get(str(operation_name), {}))
+        references.append(
+            AnalysisInputReference(
+                consumer_operation=str(operation_name),
+                field_name="input_source",
+                requested_source=str(params.get("input_source", "data")).strip()
+                or "data",
+            )
+        )
+        if str(operation_name).strip() != "visualization":
+            continue
+        raw_rows = params.get("volume_layers", [])
+        if not isinstance(raw_rows, (tuple, list)):
+            continue
+        for index, raw_row in enumerate(raw_rows):
+            if not isinstance(raw_row, Mapping):
+                continue
+            component = str(
+                raw_row.get("component", raw_row.get("source_component", ""))
+            ).strip()
+            if not component:
+                continue
+            references.append(
+                AnalysisInputReference(
+                    consumer_operation="visualization",
+                    field_name=f"volume_layers[{index}].component",
+                    requested_source=component,
+                )
+            )
+    return tuple(references)
+
+
+def _validate_analysis_input_reference(
+    *,
+    reference: AnalysisInputReference,
+    execution_sequence: Sequence[str],
+    available_components: Collection[str],
+) -> Optional[AnalysisInputDependencyIssue]:
+    """Validate one analysis input reference against sequence and store state.
+
+    Parameters
+    ----------
+    reference : AnalysisInputReference
+        Input reference to validate.
+    execution_sequence : sequence[str]
+        Selected operations in execution order.
+    available_components : collection[str]
+        Components currently available in the active analysis store.
+
+    Returns
+    -------
+    AnalysisInputDependencyIssue, optional
+        Validation issue when the reference is invalid, otherwise ``None``.
+    """
+    requested_source = str(reference.requested_source).strip() or "data"
+    if requested_source == "data":
+        return None
+
+    available = {
+        str(component).strip()
+        for component in available_components
+        if str(component).strip()
+    }
+    available.add("data")
+    order_map = {
+        str(operation_name).strip(): index
+        for index, operation_name in enumerate(execution_sequence)
+        if str(operation_name).strip()
+    }
+    consumer_name = _analysis_operation_display_name(reference.consumer_operation)
+    field_name = str(reference.field_name).strip() or "input_source"
+
+    producer_operation: Optional[str] = None
+    resolved_component: Optional[str] = None
+    if requested_source in ANALYSIS_KNOWN_OUTPUT_COMPONENTS:
+        producer_operation = requested_source
+        resolved_component = ANALYSIS_KNOWN_OUTPUT_COMPONENTS[requested_source]
+    else:
+        producer_operation = analysis_operation_for_output_component(requested_source)
+        resolved_component = (
+            requested_source if producer_operation is not None else None
+        )
+
+    if producer_operation is not None:
+        producer_name = _analysis_operation_display_name(producer_operation)
+        if producer_operation not in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS:
+            return AnalysisInputDependencyIssue(
+                consumer_operation=reference.consumer_operation,
+                field_name=field_name,
+                requested_source=requested_source,
+                reason="producer_not_chainable",
+                message=(
+                    f"{consumer_name} {field_name} references {producer_name} output "
+                    f"({resolved_component or requested_source}), but {producer_name} "
+                    "does not expose a reusable downstream input for generic chaining."
+                ),
+                producer_operation=producer_operation,
+                resolved_component=resolved_component,
+            )
+        if producer_operation in order_map:
+            consumer_index = order_map.get(str(reference.consumer_operation).strip(), -1)
+            producer_index = order_map[producer_operation]
+            if producer_index >= consumer_index:
+                return AnalysisInputDependencyIssue(
+                    consumer_operation=reference.consumer_operation,
+                    field_name=field_name,
+                    requested_source=requested_source,
+                    reason="producer_scheduled_after_consumer",
+                    message=(
+                        f"{consumer_name} {field_name} references {producer_name} "
+                        f"output ({resolved_component or requested_source}), but "
+                        f"{producer_name} is scheduled after {consumer_name}. "
+                        "Reorder the analyses so the producer runs earlier."
+                    ),
+                    producer_operation=producer_operation,
+                    resolved_component=resolved_component,
+                )
+            return None
+        if (resolved_component or "") in available:
+            return None
+        return AnalysisInputDependencyIssue(
+            consumer_operation=reference.consumer_operation,
+            field_name=field_name,
+            requested_source=requested_source,
+            reason="producer_not_selected_or_available",
+            message=(
+                f"{consumer_name} {field_name} references {producer_name} output "
+                f"({resolved_component or requested_source}), but {producer_name} is "
+                "not scheduled earlier in this run and that component is not "
+                "available in the current analysis store."
+            ),
+            producer_operation=producer_operation,
+            resolved_component=resolved_component,
+        )
+
+    if requested_source in available:
+        return None
+
+    return AnalysisInputDependencyIssue(
+        consumer_operation=reference.consumer_operation,
+        field_name=field_name,
+        requested_source=requested_source,
+        reason="missing_component",
+        message=(
+            f"{consumer_name} {field_name} references component "
+            f"'{requested_source}', but it is not available in the current "
+            "analysis store and is not produced earlier in this run."
+        ),
+        resolved_component=requested_source,
+    )
+
+
+def validate_analysis_input_references(
+    *,
+    execution_sequence: Sequence[str],
+    analysis_parameters: Mapping[str, Mapping[str, Any]],
+    available_components: Optional[Collection[str]] = None,
+) -> Tuple[AnalysisInputDependencyIssue, ...]:
+    """Validate selected analysis input references.
+
+    Parameters
+    ----------
+    execution_sequence : sequence[str]
+        Selected operations in execution order.
+    analysis_parameters : mapping[str, mapping[str, Any]]
+        Candidate normalized or denormalized per-operation parameters.
+    available_components : collection[str], optional
+        Components currently available in the active analysis store.
+
+    Returns
+    -------
+    tuple[AnalysisInputDependencyIssue, ...]
+        Validation issues for invalid references. Empty when configuration is
+        dependency-safe under the current sequence and available components.
+    """
+    references = collect_analysis_input_references(
+        execution_sequence=execution_sequence,
+        analysis_parameters=analysis_parameters,
+    )
+    available = {
+        str(component).strip()
+        for component in (available_components or ())
+        if str(component).strip()
+    }
+    available.add("data")
+
+    issues: list[AnalysisInputDependencyIssue] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for reference in references:
+        issue = _validate_analysis_input_reference(
+            reference=reference,
+            execution_sequence=execution_sequence,
+            available_components=available,
+        )
+        if issue is None:
+            continue
+        key = (
+            str(issue.consumer_operation),
+            str(issue.field_name),
+            str(issue.requested_source),
+            str(issue.reason),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append(issue)
+    return tuple(issues)
 
 
 class WorkflowExecutionCancelled(RuntimeError):
