@@ -235,7 +235,19 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
     - `off`: force single-scale rendering for that layer.
   - Auto-generated visualization pyramids are written under `results/visualization_cache/pyramids/...` and reused on subsequent runs.
   - Chunk-wise `map_overlap` stitching across labels is not yet enabled by default because label continuity/relabeling across chunk seams requires additional global reconciliation.
-- GUI setup currently requires Navigate `experiment.yml`/`experiment.yaml`.
+- GUI setup accepts Navigate `experiment.yml`/`experiment.yaml` files and
+  managed experiment lists (`.clearex-experiment-list.json`).
+- In the setup window you can:
+  - load a single experiment,
+  - recursively scan a folder for `experiment.yml` files,
+  - drag and drop experiments, folders, or saved list files into the
+    experiment pane,
+  - save the current ordered experiment list for later reuse.
+- Selecting an experiment in the setup list loads metadata automatically;
+  double-clicking reloads that entry explicitly.
+- Pressing `Next` batch-prepares canonical `data_store.zarr` outputs for every
+  listed experiment that does not already have a compatible store, then opens
+  analysis selection for the currently selected experiment.
 - If GUI cannot launch (for example no display), ClearEx logs a warning and falls back to headless execution.
 
 ### Visualization Keyframes and Manifest

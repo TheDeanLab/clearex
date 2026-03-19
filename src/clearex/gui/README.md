@@ -5,10 +5,16 @@ This folder owns the PyQt6 UX in `app.py`.
 ## Window Structure
 
 - Setup window (`ClearExSetupDialog`):
-  - Select file / `experiment.yml`
+  - Manage an experiment list from:
+    - `Load Experiment` for one `experiment.yml`,
+    - `Create Experiment List` for recursive folder scans or saved-list reloads,
+    - drag and drop of experiments, folders, or `.clearex-experiment-list.json` files
+  - Add/remove experiment entries from the list and persist the list for reuse
+  - Auto-load metadata when the current list selection changes
   - Configure Dask backend and Zarr save options
   - Display image metadata
-  - Materialize canonical store when missing, with progress dialog
+  - On `Next`, batch-materialize missing canonical stores for every listed
+    experiment, then continue with the currently selected experiment
 - Analysis window (`AnalysisSelectionDialog`):
   - Left: operation selection, execution order, and `Configure` buttons
   - Right: operation parameter panels + parameter-help panel
@@ -34,6 +40,7 @@ This folder owns the PyQt6 UX in `app.py`.
 - Keep styling consistent with the dark theme.
 - Keep controls/popups/content cards in the dark theme; avoid introducing new light surfaces there.
 - Exception: top branding header cards intentionally use a light tint (`#f0f2ef`) to match the header image background.
+- Explicitly style setup-list context menus and any other new pop-up menus; do not fall back to platform-default light menus.
 - Explicitly style dropdown list views:
   - `QComboBox QAbstractItemView`
   - selected background and selected text colors
@@ -85,4 +92,5 @@ This folder owns the PyQt6 UX in `app.py`.
 
 - `uv run ruff check src/clearex/gui/app.py`
 - `uv run --with pytest --with requests python -m pytest -q tests/test_workflow.py`
-- Manually verify combo/dropdown readability in the GUI.
+- Manually verify combo/dropdown readability and experiment-list/menu styling in the GUI.
+- Capture an updated setup-dialog screenshot when the front-panel layout changes materially.

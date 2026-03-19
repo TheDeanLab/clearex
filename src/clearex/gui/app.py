@@ -28,7 +28,7 @@ from __future__ import annotations
 
 # Standard Library Imports
 from contextlib import ExitStack
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import logging
 import math
@@ -122,6 +122,7 @@ try:
         QPixmap,
     )
     from PyQt6.QtWidgets import (
+        QAbstractItemView,
         QApplication,
         QCheckBox,
         QComboBox,
@@ -136,6 +137,8 @@ try:
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QListWidget,
+        QListWidgetItem,
         QMenu,
         QMessageBox,
         QPlainTextEdit,
@@ -169,6 +172,27 @@ _GUI_HEADER_IMAGE = "ClearEx_full_header.png"
 _GUI_APP_ICON = "icon.png"
 _CLEAREX_SETTINGS_DIR_NAME = ".clearex"
 _CLEAREX_DASK_BACKEND_SETTINGS_FILE = "dask_backend_settings.json"
+_CLEAREX_EXPERIMENT_LIST_FORMAT = "clearex-experiment-list/v1"
+_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX = ".clearex-experiment-list.json"
+_SETUP_DIALOG_MINIMUM_SIZE = (1240, 920)
+_SETUP_DIALOG_PREFERRED_SIZE = (1520, 1120)
+_ZARR_SAVE_DIALOG_MINIMUM_SIZE = (860, 660)
+_ZARR_SAVE_DIALOG_PREFERRED_SIZE = (940, 760)
+_DASK_BACKEND_DIALOG_MINIMUM_SIZE = (940, 840)
+_DASK_BACKEND_DIALOG_PREFERRED_SIZE = (1120, 980)
+_MATERIALIZATION_PROGRESS_DIALOG_MINIMUM_SIZE = (620, 180)
+_MATERIALIZATION_PROGRESS_DIALOG_PREFERRED_SIZE = (720, 220)
+_ANALYSIS_PROGRESS_DIALOG_MINIMUM_SIZE = (640, 180)
+_ANALYSIS_PROGRESS_DIALOG_PREFERRED_SIZE = (720, 220)
+_ANALYSIS_DIALOG_MINIMUM_SIZE = (1440, 860)
+_ANALYSIS_DIALOG_PREFERRED_SIZE = (1520, 940)
+_VOLUME_LAYERS_DIALOG_MINIMUM_SIZE = (1240, 460)
+_VOLUME_LAYERS_DIALOG_PREFERRED_SIZE = (1460, 720)
+_LAYER_OVERRIDES_DIALOG_MINIMUM_SIZE = (900, 420)
+_LAYER_OVERRIDES_DIALOG_PREFERRED_SIZE = (1080, 620)
+_SYNTHETIC_PSF_PREVIEW_DIALOG_MINIMUM_SIZE = (840, 700)
+_SYNTHETIC_PSF_PREVIEW_DIALOG_PREFERRED_SIZE = (980, 820)
+_DIALOG_SCREEN_MARGIN_PX = 72
 
 
 def _resolve_gui_asset_path(filename: str) -> Path:
@@ -185,6 +209,402 @@ def _resolve_gui_asset_path(filename: str) -> Path:
         Resolved asset path.
     """
     return (_GUI_ASSET_DIRECTORY / filename).resolve()
+
+
+def _primary_screen_available_size() -> Optional[tuple[int, int]]:
+    """Return the available size of the primary screen for the active app.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    tuple[int, int], optional
+        Width and height of the current primary screen's available geometry.
+
+    Notes
+    -----
+    Returns ``None`` when Qt is unavailable or when there is no active
+    application/screen context.
+    """
+    if not HAS_PYQT6:
+        return None
+
+    app = QApplication.instance()
+    if app is None:
+        return None
+
+    primary_screen_getter = getattr(app, "primaryScreen", None)
+    if not callable(primary_screen_getter):
+        return None
+
+    screen = primary_screen_getter()
+    if screen is None:
+        return None
+
+    geometry = screen.availableGeometry()
+    return (int(geometry.width()), int(geometry.height()))
+
+
+def _resolve_initial_dialog_dimensions(
+    minimum_size: tuple[int, int],
+    preferred_size: tuple[int, int],
+    available_size: Optional[tuple[int, int]] = None,
+    margin_px: int = _DIALOG_SCREEN_MARGIN_PX,
+    content_size_hint: Optional[tuple[int, int]] = None,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Resolve minimum and startup dialog sizes for the current screen.
+
+    Parameters
+    ----------
+    minimum_size : tuple[int, int]
+        Preferred minimum width/height for the dialog.
+    preferred_size : tuple[int, int]
+        Target startup width/height for the dialog.
+    available_size : tuple[int, int], optional
+        Current screen available width/height. When omitted, the provided
+        minimum and preferred sizes are returned unchanged.
+    margin_px : int, default=_DIALOG_SCREEN_MARGIN_PX
+        Margin reserved around the dialog so it does not open flush against the
+        screen edges.
+    content_size_hint : tuple[int, int], optional
+        Actual built-content width/height requirement. When provided, the
+        minimum and preferred sizes are expanded to fit the content before
+        screen clamping is applied.
+
+    Returns
+    -------
+    tuple[tuple[int, int], tuple[int, int]]
+        Resolved ``(minimum_width, minimum_height)`` and startup
+        ``(width, height)``.
+    """
+    minimum_width, minimum_height = (int(minimum_size[0]), int(minimum_size[1]))
+    preferred_width, preferred_height = (
+        int(preferred_size[0]),
+        int(preferred_size[1]),
+    )
+    if content_size_hint is not None:
+        content_width = max(0, int(content_size_hint[0]))
+        content_height = max(0, int(content_size_hint[1]))
+        minimum_width = max(minimum_width, content_width)
+        minimum_height = max(minimum_height, content_height)
+        preferred_width = max(preferred_width, content_width)
+        preferred_height = max(preferred_height, content_height)
+    if available_size is None:
+        return (minimum_width, minimum_height), (preferred_width, preferred_height)
+
+    available_width = max(0, int(available_size[0]))
+    available_height = max(0, int(available_size[1]))
+    usable_width = available_width if available_width <= margin_px else available_width - margin_px
+    usable_height = (
+        available_height if available_height <= margin_px else available_height - margin_px
+    )
+
+    startup_width = preferred_width if usable_width <= 0 else min(preferred_width, usable_width)
+    startup_height = (
+        preferred_height if usable_height <= 0 else min(preferred_height, usable_height)
+    )
+    resolved_minimum_width = min(minimum_width, startup_width)
+    resolved_minimum_height = min(minimum_height, startup_height)
+    return (
+        resolved_minimum_width,
+        resolved_minimum_height,
+    ), (
+        startup_width,
+        startup_height,
+    )
+
+
+def _apply_initial_dialog_geometry(
+    dialog: "QDialog",
+    *,
+    minimum_size: tuple[int, int],
+    preferred_size: tuple[int, int],
+    available_size: Optional[tuple[int, int]] = None,
+    margin_px: int = _DIALOG_SCREEN_MARGIN_PX,
+    content_size_hint: Optional[tuple[int, int]] = None,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Apply screen-aware minimum and startup size to a dialog.
+
+    Parameters
+    ----------
+    dialog : QDialog
+        Dialog receiving the resolved geometry.
+    minimum_size : tuple[int, int]
+        Preferred minimum width/height for the dialog.
+    preferred_size : tuple[int, int]
+        Target startup width/height for the dialog.
+    available_size : tuple[int, int], optional
+        Screen-available width/height. When omitted, the active primary screen
+        is queried.
+    margin_px : int, default=_DIALOG_SCREEN_MARGIN_PX
+        Margin reserved around the dialog so it does not open flush against the
+        screen edges.
+    content_size_hint : tuple[int, int], optional
+        Actual built-content width/height requirement used to expand the dialog
+        target size before screen clamping.
+
+    Returns
+    -------
+    tuple[tuple[int, int], tuple[int, int]]
+        Applied minimum and startup size tuples.
+    """
+    resolved_available_size = (
+        _primary_screen_available_size()
+        if available_size is None
+        else available_size
+    )
+    minimum_dimensions, startup_dimensions = _resolve_initial_dialog_dimensions(
+        minimum_size=minimum_size,
+        preferred_size=preferred_size,
+        available_size=resolved_available_size,
+        margin_px=margin_px,
+        content_size_hint=content_size_hint,
+    )
+    dialog.setMinimumWidth(minimum_dimensions[0])
+    dialog.setMinimumHeight(minimum_dimensions[1])
+    dialog.resize(startup_dimensions[0], startup_dimensions[1])
+    return minimum_dimensions, startup_dimensions
+
+
+def _deduplicate_resolved_paths(paths: Sequence[Path]) -> list[Path]:
+    """Return first-seen unique resolved paths.
+
+    Parameters
+    ----------
+    paths : sequence[pathlib.Path]
+        Candidate paths to deduplicate.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Resolved paths in first-seen order with duplicates removed.
+    """
+    deduplicated: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        resolved = Path(raw_path).expanduser().resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(resolved)
+    return deduplicated
+
+
+def _discover_navigate_experiment_files(search_root: Path) -> list[Path]:
+    """Recursively discover Navigate experiment descriptors in a directory.
+
+    Parameters
+    ----------
+    search_root : pathlib.Path
+        Directory to search recursively.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Sorted absolute experiment-descriptor paths.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``search_root`` does not exist.
+    NotADirectoryError
+        If ``search_root`` is not a directory.
+    """
+    root = Path(search_root).expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"Directory does not exist: {root}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"Not a directory: {root}")
+
+    matches = list(root.rglob("experiment.yml")) + list(root.rglob("experiment.yaml"))
+    discovered = _deduplicate_resolved_paths(matches)
+    return sorted(discovered, key=lambda path: str(path).lower())
+
+
+def _is_saved_experiment_list_path(path: Path) -> bool:
+    """Return whether a path matches the ClearEx experiment-list format name.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Candidate file path.
+
+    Returns
+    -------
+    bool
+        ``True`` when the filename uses the ClearEx experiment-list suffix.
+    """
+    return str(Path(path).name).endswith(_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX)
+
+
+def _save_experiment_list_file(
+    list_path: Path,
+    experiment_paths: Sequence[Path],
+) -> Path:
+    """Persist a sequence of experiment descriptors to a JSON list file.
+
+    Parameters
+    ----------
+    list_path : pathlib.Path
+        Output JSON list path.
+    experiment_paths : sequence[pathlib.Path]
+        Ordered experiment-descriptor paths to persist.
+
+    Returns
+    -------
+    pathlib.Path
+        Resolved output list path.
+
+    Raises
+    ------
+    ValueError
+        If no experiment paths are provided or a path is not a Navigate
+        experiment descriptor.
+    FileNotFoundError
+        If an experiment path does not exist.
+    """
+    resolved_list_path = Path(list_path).expanduser().resolve()
+    resolved_experiments = _deduplicate_resolved_paths(experiment_paths)
+    if not resolved_experiments:
+        raise ValueError("Select at least one experiment.yml file to save a list.")
+
+    serialized_paths: list[str] = []
+    base_directory = resolved_list_path.parent
+    for experiment_path in resolved_experiments:
+        if not experiment_path.exists():
+            raise FileNotFoundError(f"Experiment path does not exist: {experiment_path}")
+        if not is_navigate_experiment_file(experiment_path):
+            raise ValueError(
+                f"Expected Navigate experiment.yml/experiment.yaml, got: {experiment_path}"
+            )
+        relative_path = os.path.relpath(
+            str(experiment_path),
+            start=str(base_directory),
+        )
+        serialized_paths.append(str(relative_path))
+
+    payload = {
+        "format": _CLEAREX_EXPERIMENT_LIST_FORMAT,
+        "experiments": serialized_paths,
+    }
+    resolved_list_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_list_path.write_text(
+        f"{json.dumps(payload, indent=2)}\n",
+        encoding="utf-8",
+    )
+    return resolved_list_path
+
+
+def _load_experiment_list_file(list_path: Path) -> list[Path]:
+    """Load a saved ClearEx experiment list from disk.
+
+    Parameters
+    ----------
+    list_path : pathlib.Path
+        Saved list JSON path.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Ordered resolved experiment-descriptor paths from the saved list.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``list_path`` does not exist.
+    ValueError
+        If the file does not contain a valid ClearEx experiment list or any
+        listed path is not a Navigate experiment descriptor.
+    """
+    resolved_list_path = Path(list_path).expanduser().resolve()
+    if not resolved_list_path.exists():
+        raise FileNotFoundError(f"Experiment list file does not exist: {resolved_list_path}")
+
+    try:
+        payload = json.loads(resolved_list_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Experiment list is not valid JSON: {resolved_list_path}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Experiment list must be a JSON object: {resolved_list_path}"
+        )
+    if payload.get("format") != _CLEAREX_EXPERIMENT_LIST_FORMAT:
+        raise ValueError(
+            "Unsupported experiment list format. "
+            f"Expected {_CLEAREX_EXPERIMENT_LIST_FORMAT}."
+        )
+
+    raw_experiments = payload.get("experiments")
+    if not isinstance(raw_experiments, list) or not raw_experiments:
+        raise ValueError(
+            f"Experiment list does not contain any saved experiments: {resolved_list_path}"
+        )
+
+    experiments: list[Path] = []
+    base_directory = resolved_list_path.parent
+    for raw_experiment in raw_experiments:
+        if not isinstance(raw_experiment, str) or not raw_experiment.strip():
+            raise ValueError(
+                f"Experiment list contains an invalid entry: {raw_experiment!r}"
+            )
+        candidate = Path(raw_experiment).expanduser()
+        if not candidate.is_absolute():
+            candidate = (base_directory / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        if not candidate.exists():
+            raise ValueError(
+                f"Experiment list entry does not exist: {candidate}"
+            )
+        if not is_navigate_experiment_file(candidate):
+            raise ValueError(
+                "Experiment list entries must point to Navigate "
+                f"experiment.yml/experiment.yaml files: {candidate}"
+            )
+        experiments.append(candidate)
+
+    return _deduplicate_resolved_paths(experiments)
+
+
+def _collect_experiment_paths_from_input_path(path: Path) -> list[Path]:
+    """Collect experiment descriptors from a file, directory, or saved list.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Input path that may refer to one experiment descriptor, a directory to
+        scan recursively, or a saved ClearEx experiment list.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Ordered resolved experiment-descriptor paths discovered from the input.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``path`` does not exist.
+    ValueError
+        If a saved list file is invalid.
+    """
+    candidate = Path(path).expanduser()
+    if not candidate.exists():
+        raise FileNotFoundError(f"Path does not exist: {candidate}")
+    if candidate.is_dir():
+        return _discover_navigate_experiment_files(candidate)
+
+    resolved = candidate.resolve()
+    if _is_saved_experiment_list_path(resolved):
+        return _load_experiment_list_file(resolved)
+    if is_navigate_experiment_file(resolved):
+        return [resolved]
+    return []
 
 
 def _display_is_available() -> bool:
@@ -1056,6 +1476,131 @@ def _apply_experiment_overrides(
     return out
 
 
+@dataclass(frozen=True)
+class ExperimentStorePreparationRequest:
+    """Describe one experiment store that may need canonical materialization.
+
+    Parameters
+    ----------
+    experiment_path : pathlib.Path
+        Navigate ``experiment.yml`` path represented in the setup list.
+    experiment : NavigateExperiment
+        Parsed experiment metadata used for canonical store preparation.
+    source_data_path : pathlib.Path
+        Resolved acquisition data path referenced by the experiment metadata.
+    target_store : pathlib.Path
+        Canonical ClearEx store path for this experiment.
+    """
+
+    experiment_path: Path
+    experiment: NavigateExperiment
+    source_data_path: Path
+    target_store: Path
+
+
+@dataclass(frozen=True)
+class ExperimentStorePreparationResult:
+    """Record the outcome of preparing one experiment's canonical store.
+
+    Parameters
+    ----------
+    experiment_path : pathlib.Path
+        Navigate ``experiment.yml`` path that was evaluated.
+    store_path : pathlib.Path
+        Canonical store path used or created for that experiment.
+    skipped_existing : bool
+        Whether an already-complete canonical store was reused without
+        rematerialization.
+    """
+
+    experiment_path: Path
+    store_path: Path
+    skipped_existing: bool
+
+
+def _has_complete_configured_canonical_store(
+    store_path: Path,
+    *,
+    zarr_save: ZarrSaveConfig,
+) -> bool:
+    """Return whether a canonical store already matches the requested config.
+
+    Parameters
+    ----------
+    store_path : pathlib.Path
+        Candidate canonical store path.
+    zarr_save : ZarrSaveConfig
+        Expected chunk and pyramid settings for the store.
+
+    Returns
+    -------
+    bool
+        ``True`` when the store exists and the canonical 6D data layout matches
+        the current Zarr save configuration.
+    """
+    resolved_store_path = Path(store_path).expanduser().resolve()
+    if not resolved_store_path.exists():
+        return False
+    return has_complete_canonical_data_store(
+        resolved_store_path,
+        expected_chunks_tpczyx=zarr_save.chunks_tpczyx(),
+        expected_pyramid_factors=zarr_save.pyramid_tpczyx(),
+    )
+
+
+def _plan_experiment_store_materialization(
+    requests: Sequence[ExperimentStorePreparationRequest],
+    *,
+    selected_experiment_path: Path,
+    zarr_save: ZarrSaveConfig,
+) -> tuple[
+    ExperimentStorePreparationRequest,
+    list[ExperimentStorePreparationRequest],
+    list[ExperimentStorePreparationRequest],
+]:
+    """Partition listed experiments into pending and already-ready stores.
+
+    Parameters
+    ----------
+    requests : sequence[ExperimentStorePreparationRequest]
+        Ordered experiment store requests represented in the setup list.
+    selected_experiment_path : pathlib.Path
+        Experiment currently selected in the GUI list.
+    zarr_save : ZarrSaveConfig
+        Zarr save configuration used to validate canonical stores.
+
+    Returns
+    -------
+    tuple[ExperimentStorePreparationRequest, list[ExperimentStorePreparationRequest], list[ExperimentStorePreparationRequest]]
+        Selected experiment request, pending requests that still require
+        materialization, and ready requests whose stores can be reused.
+
+    Raises
+    ------
+    ValueError
+        If the selected experiment is not present in ``requests``.
+    """
+    resolved_selected_path = Path(selected_experiment_path).expanduser().resolve()
+    selected_request: Optional[ExperimentStorePreparationRequest] = None
+    pending_requests: list[ExperimentStorePreparationRequest] = []
+    ready_requests: list[ExperimentStorePreparationRequest] = []
+
+    for request in requests:
+        if request.experiment_path == resolved_selected_path:
+            selected_request = request
+        if _has_complete_configured_canonical_store(
+            request.target_store,
+            zarr_save=zarr_save,
+        ):
+            ready_requests.append(request)
+        else:
+            pending_requests.append(request)
+
+    if selected_request is None:
+        raise ValueError("Selected experiment is not present in the experiment list.")
+    return selected_request, pending_requests, ready_requests
+
+
 def _format_zarr_save_summary(config: ZarrSaveConfig) -> str:
     """Build a compact GUI summary string for Zarr save settings.
 
@@ -1706,8 +2251,6 @@ if HAS_PYQT6:
             """
             super().__init__(parent)
             self.setWindowTitle("Zarr Save Settings")
-            self.setMinimumWidth(860)
-            self.setMinimumHeight(660)
             self.result_config: Optional[ZarrSaveConfig] = None
             self._chunk_inputs: Dict[str, QSpinBox] = {}
             self._pyramid_inputs: Dict[str, QLineEdit] = {}
@@ -1715,6 +2258,12 @@ if HAS_PYQT6:
             self._build_ui()
             self._hydrate(initial)
             self.setStyleSheet(_popup_dialog_stylesheet())
+            _apply_initial_dialog_geometry(
+                self,
+                minimum_size=_ZARR_SAVE_DIALOG_MINIMUM_SIZE,
+                preferred_size=_ZARR_SAVE_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
+            )
 
         def _build_ui(self) -> None:
             """Construct dialog controls and wire signals.
@@ -1929,8 +2478,6 @@ if HAS_PYQT6:
             """
             super().__init__(parent)
             self.setWindowTitle("Dask Backend Settings")
-            self.setMinimumWidth(940)
-            self.setMinimumHeight(840)
             self.result_config: Optional[DaskBackendConfig] = None
             self._mode_index: Dict[str, int] = {}
             self._recommendation_shape_tpczyx = recommendation_shape_tpczyx
@@ -1943,6 +2490,12 @@ if HAS_PYQT6:
             self._build_ui()
             self._hydrate(initial)
             self.setStyleSheet(_popup_dialog_stylesheet())
+            _apply_initial_dialog_geometry(
+                self,
+                minimum_size=_DASK_BACKEND_DIALOG_MINIMUM_SIZE,
+                preferred_size=_DASK_BACKEND_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
+            )
 
         def _build_ui(self) -> None:
             """Build all backend configuration widgets and wire signals.
@@ -2675,20 +3228,250 @@ if HAS_PYQT6:
                     traceback.format_exc(),
                 )
 
+    class BatchDataStoreMaterializationWorker(QThread):
+        """Background worker that prepares canonical stores for many experiments.
+
+        Parameters
+        ----------
+        requests : sequence[ExperimentStorePreparationRequest]
+            Ordered experiment store requests that still require preparation.
+        dask_backend : DaskBackendConfig
+            Backend configuration used for Dask execution.
+        zarr_save : ZarrSaveConfig
+            Zarr chunk and pyramid configuration to enforce.
+
+        Attributes
+        ----------
+        progress_changed : pyqtSignal
+            Signal with ``(percent, message)`` progress payload.
+        succeeded : pyqtSignal
+            Signal with a list of :class:`ExperimentStorePreparationResult`
+            objects for all prepared stores.
+        failed : pyqtSignal
+            Signal with error text.
+        """
+
+        progress_changed = pyqtSignal(int, str)
+        succeeded = pyqtSignal(object)
+        failed = pyqtSignal(str, str)
+
+        def __init__(
+            self,
+            *,
+            requests: Sequence[ExperimentStorePreparationRequest],
+            dask_backend: DaskBackendConfig,
+            zarr_save: ZarrSaveConfig,
+        ) -> None:
+            """Initialize worker state.
+
+            Parameters
+            ----------
+            requests : sequence[ExperimentStorePreparationRequest]
+                Ordered experiment store requests that still require
+                preparation.
+            dask_backend : DaskBackendConfig
+                Backend configuration used for Dask execution.
+            zarr_save : ZarrSaveConfig
+                Zarr chunk and pyramid configuration to enforce.
+
+            Returns
+            -------
+            None
+                Worker is initialized in-place.
+            """
+            super().__init__()
+            self._requests = list(requests)
+            self._dask_backend = dask_backend
+            self._zarr_save = zarr_save
+
+        def _emit_progress(self, percent: int, message: str) -> None:
+            """Emit stage progress updates from the worker thread.
+
+            Parameters
+            ----------
+            percent : int
+                Progress percentage value.
+            message : str
+                Human-readable stage text.
+
+            Returns
+            -------
+            None
+                Signal side effects only.
+            """
+            self.progress_changed.emit(int(percent), str(message))
+
+        def _prefixed_message(
+            self,
+            index: int,
+            total: int,
+            message: str,
+        ) -> str:
+            """Format a progress message with batch position context.
+
+            Parameters
+            ----------
+            index : int
+                Zero-based request index.
+            total : int
+                Total number of requests in the batch.
+            message : str
+                Stage text for the current request.
+
+            Returns
+            -------
+            str
+                Prefixed message string.
+            """
+            return f"[{index + 1}/{total}] {message}"
+
+        def _overall_progress_percent(
+            self,
+            *,
+            index: int,
+            total: int,
+            stage_percent: int,
+        ) -> int:
+            """Map per-request progress into one overall batch percentage.
+
+            Parameters
+            ----------
+            index : int
+                Zero-based request index.
+            total : int
+                Total number of requests in the batch.
+            stage_percent : int
+                Current request progress percentage.
+
+            Returns
+            -------
+            int
+                Overall batch progress percentage.
+            """
+            if total <= 0:
+                return 100
+            bounded_stage_percent = max(0, min(100, int(stage_percent)))
+            batch_fraction = (float(index) + (bounded_stage_percent / 100.0)) / float(
+                total
+            )
+            return max(0, min(100, int(round(batch_fraction * 100.0))))
+
+        def run(self) -> None:
+            """Execute batch canonical-store preparation in the background.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Emits success/failure signals on completion.
+            """
+            total = len(self._requests)
+            results: list[ExperimentStorePreparationResult] = []
+            if total <= 0:
+                self.succeeded.emit(results)
+                return
+
+            try:
+                with ExitStack() as exit_stack:
+                    client = _configure_dask_backend_client(
+                        self._dask_backend,
+                        exit_stack=exit_stack,
+                    )
+                    for index, request in enumerate(self._requests):
+                        experiment_label = str(request.experiment_path)
+
+                        def _batch_progress_callback(
+                            percent: int,
+                            message: str,
+                            *,
+                            batch_index: int = index,
+                            batch_total: int = total,
+                        ) -> None:
+                            overall = self._overall_progress_percent(
+                                index=batch_index,
+                                total=batch_total,
+                                stage_percent=percent,
+                            )
+                            self._emit_progress(
+                                overall,
+                                self._prefixed_message(
+                                    batch_index,
+                                    batch_total,
+                                    f"{experiment_label}: {message}",
+                                ),
+                            )
+
+                        _batch_progress_callback(
+                            1,
+                            "Starting canonical store preparation.",
+                        )
+                        result = materialize_experiment_data_store(
+                            experiment=request.experiment,
+                            source_path=request.source_data_path,
+                            chunks=self._zarr_save.chunks_tpczyx(),
+                            pyramid_factors=self._zarr_save.pyramid_tpczyx(),
+                            client=client,
+                            progress_callback=_batch_progress_callback,
+                        )
+                        results.append(
+                            ExperimentStorePreparationResult(
+                                experiment_path=request.experiment_path,
+                                store_path=Path(result.store_path).expanduser().resolve(),
+                                skipped_existing=False,
+                            )
+                        )
+                        self._emit_progress(
+                            self._overall_progress_percent(
+                                index=index,
+                                total=total,
+                                stage_percent=100,
+                            ),
+                            self._prefixed_message(
+                                index,
+                                total,
+                                f"{experiment_label}: canonical store ready.",
+                            ),
+                        )
+                self.succeeded.emit(results)
+            except Exception as exc:
+                logging.getLogger(__name__).exception(
+                    "Batch canonical store materialization failed."
+                )
+                self.failed.emit(
+                    f"{type(exc).__name__}: {exc}",
+                    traceback.format_exc(),
+                )
+
     class MaterializationProgressDialog(QDialog):
         """Modal progress dialog for canonical store creation.
 
         Parameters
         ----------
+        title_text : str, optional
+            Title shown at the top of the dialog.
+        initial_message : str, optional
+            Initial progress message shown before updates arrive.
         parent : QDialog, optional
             Parent window.
         """
 
-        def __init__(self, parent: Optional[QDialog] = None) -> None:
+        def __init__(
+            self,
+            title_text: str = "Building `data_store.zarr`",
+            initial_message: str = "Starting materialization...",
+            parent: Optional[QDialog] = None,
+        ) -> None:
             """Initialize progress dialog widgets.
 
             Parameters
             ----------
+            title_text : str, optional
+                Title shown at the top of the dialog.
+            initial_message : str, optional
+                Initial progress message shown before updates arrive.
             parent : QDialog, optional
                 Parent window.
 
@@ -2699,17 +3482,16 @@ if HAS_PYQT6:
             """
             super().__init__(parent)
             self.setWindowTitle("Preparing Data Store")
-            self.setMinimumWidth(620)
             self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
 
             root = QVBoxLayout(self)
             apply_window_root_spacing(root)
 
-            title = QLabel("Building `data_store.zarr`")
+            title = QLabel(str(title_text))
             title.setObjectName("progressTitle")
             root.addWidget(title)
 
-            self._message_label = QLabel("Starting materialization...")
+            self._message_label = QLabel(str(initial_message))
             self._message_label.setObjectName("progressMessage")
             self._message_label.setWordWrap(True)
             root.addWidget(self._message_label)
@@ -2752,6 +3534,12 @@ if HAS_PYQT6:
                     );
                 }
                 """
+            )
+            _apply_initial_dialog_geometry(
+                self,
+                minimum_size=_MATERIALIZATION_PROGRESS_DIALOG_MINIMUM_SIZE,
+                preferred_size=_MATERIALIZATION_PROGRESS_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
             )
 
         def update_progress(self, percent: int, message: str) -> None:
@@ -2888,7 +3676,6 @@ if HAS_PYQT6:
             """
             super().__init__(parent)
             self.setWindowTitle("Running Analysis")
-            self.setMinimumWidth(640)
             self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
 
             root = QVBoxLayout(self)
@@ -2942,6 +3729,12 @@ if HAS_PYQT6:
                 }
                 """
             )
+            _apply_initial_dialog_geometry(
+                self,
+                minimum_size=_ANALYSIS_PROGRESS_DIALOG_MINIMUM_SIZE,
+                preferred_size=_ANALYSIS_PROGRESS_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
+            )
 
         def update_progress(self, percent: int, message: str) -> None:
             """Update progress bar and stage message.
@@ -2979,8 +3772,6 @@ if HAS_PYQT6:
             """
             super().__init__()
             self.setWindowTitle("ClearEx")
-            self.setMinimumWidth(1100)
-            self.setMinimumHeight(780)
             self.setAcceptDrops(True)
 
             self._opener = ImageOpener()
@@ -2993,14 +3784,20 @@ if HAS_PYQT6:
             self._loaded_experiment_path: Optional[Path] = None
             self._loaded_image_info: Optional[ImageInfo] = None
             self._loaded_source_data_path: Optional[Path] = None
-            self._source_data_directory_override: Optional[Path] = None
-            self._materialization_worker: Optional[DataStoreMaterializationWorker] = (
-                None
-            )
+            self._experiment_list_file_path: Optional[Path] = None
+            self._experiment_list_dirty = False
+            self._source_data_directory_overrides: Dict[Path, Path] = {}
+            self._materialization_worker: Optional[QThread] = None
 
             self._build_ui()
             self._apply_theme()
             self._hydrate(initial)
+            _apply_initial_dialog_geometry(
+                self,
+                minimum_size=_SETUP_DIALOG_MINIMUM_SIZE,
+                preferred_size=_SETUP_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
+            )
 
         def _build_ui(self) -> None:
             """Build setup window widgets and connect actions.
@@ -3034,56 +3831,53 @@ if HAS_PYQT6:
             data_group = QGroupBox("Navigate Experiment")
             data_layout = QVBoxLayout(data_group)
             apply_stack_spacing(data_layout)
+            data_layout.setContentsMargins(12, 10, 12, 18)
 
-            path_row = QHBoxLayout()
-            apply_row_spacing(path_row)
-            self._path_input = QLineEdit()
-            self._path_input.setPlaceholderText(
-                "Select Navigate experiment.yml or experiment.yaml"
+            button_row = QHBoxLayout()
+            apply_compact_row_spacing(button_row)
+            self._load_experiment_button = QPushButton("Load Experiment")
+            self._create_experiment_list_button = QPushButton(
+                "Create Experiment List"
             )
-            self._path_input.setToolTip(
-                "Drop Navigate experiment.yml/experiment.yaml here."
-            )
-            self._path_input.setAcceptDrops(True)
-            self._path_input.installEventFilter(self)
-            self._browse_file_button = QPushButton("Browse Experiment")
-            self._load_button = QPushButton("Load Metadata")
-            path_row.addWidget(self._path_input, 1)
-            path_row.addWidget(self._browse_file_button)
-            path_row.addWidget(self._load_button)
-            data_layout.addLayout(path_row)
+            self._save_experiment_list_button = QPushButton("Save Experiment List")
+            self._remove_experiment_button = QPushButton("Remove Selected")
+            button_row.addWidget(self._load_experiment_button)
+            button_row.addWidget(self._create_experiment_list_button)
+            button_row.addWidget(self._save_experiment_list_button)
+            button_row.addWidget(self._remove_experiment_button)
+            button_row.addStretch(1)
+            data_layout.addLayout(button_row)
 
-            dask_backend_row = QHBoxLayout()
-            apply_row_spacing(dask_backend_row)
-            dask_backend_label = QLabel("Dask backend:")
-            dask_backend_label.setObjectName("metadataFieldLabel")
-            self._dask_backend_summary = QLabel("n/a")
-            self._dask_backend_summary.setObjectName("metadataFieldValue")
-            self._dask_backend_summary.setWordWrap(True)
-            self._dask_backend_summary.setTextInteractionFlags(
+            self._experiment_list_hint = QLabel(
+                "Load one experiment, scan a folder, or drag experiments, "
+                "folders, and saved lists here. Selecting an item loads "
+                "metadata automatically."
+            )
+            self._experiment_list_hint.setObjectName("experimentListHint")
+            self._experiment_list_hint.setWordWrap(True)
+            data_layout.addWidget(self._experiment_list_hint)
+
+            self._experiment_list = QListWidget()
+            self._experiment_list.setObjectName("experimentList")
+            self._experiment_list.setSelectionMode(
+                QAbstractItemView.SelectionMode.ExtendedSelection
+            )
+            self._experiment_list.setAlternatingRowColors(True)
+            self._experiment_list.setAcceptDrops(True)
+            self._experiment_list.setMinimumHeight(220)
+            self._experiment_list.installEventFilter(self)
+            self._experiment_list.viewport().installEventFilter(self)
+            data_layout.addWidget(self._experiment_list)
+            data_layout.addSpacing(6)
+
+            self._experiment_list_status_label = QLabel("No experiments loaded.")
+            self._experiment_list_status_label.setObjectName("experimentListStatus")
+            self._experiment_list_status_label.setWordWrap(True)
+            self._experiment_list_status_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            self._dask_backend_button = QPushButton("Edit Dask Backend")
-            dask_backend_row.addWidget(dask_backend_label)
-            dask_backend_row.addWidget(self._dask_backend_summary, 1)
-            dask_backend_row.addWidget(self._dask_backend_button)
-            data_layout.addLayout(dask_backend_row)
-
-            zarr_row = QHBoxLayout()
-            apply_row_spacing(zarr_row)
-            zarr_label = QLabel("Zarr save config:")
-            zarr_label.setObjectName("metadataFieldLabel")
-            self._zarr_config_summary = QLabel("n/a")
-            self._zarr_config_summary.setObjectName("zarrConfigSummary")
-            self._zarr_config_summary.setWordWrap(True)
-            self._zarr_config_summary.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
-            self._zarr_config_button = QPushButton("Edit Zarr Settings")
-            zarr_row.addWidget(zarr_label)
-            zarr_row.addWidget(self._zarr_config_summary, 1)
-            zarr_row.addWidget(self._zarr_config_button)
-            data_layout.addLayout(zarr_row)
+            self._experiment_list_status_label.setContentsMargins(0, 4, 0, 4)
+            data_layout.addWidget(self._experiment_list_status_label)
 
             root.addWidget(data_group)
 
@@ -3126,6 +3920,44 @@ if HAS_PYQT6:
             metadata_layout.setColumnStretch(3, 1)
             root.addWidget(metadata_group)
 
+            zarr_group = QGroupBox("Zarr Save Config")
+            zarr_layout = QVBoxLayout(zarr_group)
+            apply_stack_spacing(zarr_layout)
+            zarr_layout.setContentsMargins(10, 8, 10, 10)
+            self._zarr_config_summary = QLabel("n/a")
+            self._zarr_config_summary.setObjectName("zarrConfigSummary")
+            self._zarr_config_summary.setWordWrap(True)
+            self._zarr_config_summary.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            zarr_layout.addWidget(self._zarr_config_summary)
+            zarr_button_row = QHBoxLayout()
+            apply_row_spacing(zarr_button_row)
+            zarr_button_row.addStretch(1)
+            self._zarr_config_button = QPushButton("Edit Zarr Settings")
+            zarr_button_row.addWidget(self._zarr_config_button)
+            zarr_layout.addLayout(zarr_button_row)
+            root.addWidget(zarr_group)
+
+            dask_backend_group = QGroupBox("Dask Backend")
+            dask_backend_layout = QVBoxLayout(dask_backend_group)
+            apply_stack_spacing(dask_backend_layout)
+            dask_backend_layout.setContentsMargins(10, 8, 10, 10)
+            self._dask_backend_summary = QLabel("n/a")
+            self._dask_backend_summary.setObjectName("metadataFieldValue")
+            self._dask_backend_summary.setWordWrap(True)
+            self._dask_backend_summary.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            dask_backend_layout.addWidget(self._dask_backend_summary)
+            dask_backend_button_row = QHBoxLayout()
+            apply_row_spacing(dask_backend_button_row)
+            dask_backend_button_row.addStretch(1)
+            self._dask_backend_button = QPushButton("Edit Dask Backend")
+            dask_backend_button_row.addWidget(self._dask_backend_button)
+            dask_backend_layout.addLayout(dask_backend_button_row)
+            root.addWidget(dask_backend_group)
+
             footer = QHBoxLayout()
             apply_footer_row_spacing(footer)
             self._status_label = QLabel("Ready")
@@ -3138,9 +3970,28 @@ if HAS_PYQT6:
             footer.addWidget(self._next_button)
             root.addLayout(footer)
 
-            self._browse_file_button.clicked.connect(self._on_browse_file)
-            self._load_button.clicked.connect(self._on_load_metadata)
-            self._path_input.textChanged.connect(self._on_experiment_path_changed)
+            self._load_experiment_button.clicked.connect(self._on_load_experiment)
+            self._create_experiment_list_button.clicked.connect(
+                self._on_create_experiment_list
+            )
+            self._save_experiment_list_button.clicked.connect(
+                self._on_save_experiment_list
+            )
+            self._remove_experiment_button.clicked.connect(
+                self._on_remove_selected_experiments
+            )
+            self._experiment_list.currentItemChanged.connect(
+                self._on_current_experiment_changed
+            )
+            self._experiment_list.itemDoubleClicked.connect(
+                self._on_experiment_item_activated
+            )
+            self._experiment_list.customContextMenuRequested.connect(
+                self._show_experiment_list_context_menu
+            )
+            self._experiment_list.setContextMenuPolicy(
+                Qt.ContextMenuPolicy.CustomContextMenu
+            )
             self._dask_backend_button.clicked.connect(self._on_edit_dask_backend)
             self._zarr_config_button.clicked.connect(self._on_edit_zarr_settings)
             self._cancel_button.clicked.connect(self.reject)
@@ -3159,9 +4010,32 @@ if HAS_PYQT6:
             None
                 Widget state is updated in-place.
             """
-            self._path_input.setText(initial.file or "")
             self._refresh_dask_backend_summary()
             self._refresh_zarr_save_summary()
+            initial_file = str(initial.file or "").strip()
+            if not initial_file:
+                self._refresh_experiment_actions()
+                return
+
+            initial_path = Path(initial_file).expanduser()
+            try:
+                experiment_paths = _collect_experiment_paths_from_input_path(initial_path)
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "Ignoring non-experiment setup input during hydrate: %s",
+                    initial_file,
+                    exc_info=True,
+                )
+                self._refresh_experiment_actions()
+                return
+            if experiment_paths:
+                if _is_saved_experiment_list_path(initial_path):
+                    self._set_experiment_list_file_path(initial_path, dirty=False)
+                self._set_experiment_list_paths(
+                    experiment_paths,
+                    current_path=experiment_paths[0],
+                )
+            self._refresh_experiment_actions()
 
         def _refresh_dask_backend_summary(self) -> None:
             """Refresh setup summary text for Dask backend configuration.
@@ -3308,6 +4182,12 @@ if HAS_PYQT6:
                 QLabel#zarrConfigSummary {
                     color: #d9e2f1;
                 }
+                QLabel#experimentListHint {
+                    color: #9ab0ca;
+                }
+                QLabel#experimentListStatus {
+                    color: #8ea4c0;
+                }
                 QLineEdit {
                     background-color: #0b1320;
                     border: 1px solid #2b3f58;
@@ -3316,6 +4196,32 @@ if HAS_PYQT6:
                     padding: 5px 10px;
                     color: #e6edf3;
                     selection-background-color: #2f81f7;
+                }
+                QListWidget#experimentList {
+                    background-color: #0b1320;
+                    border: 1px solid #2b3f58;
+                    border-radius: 10px;
+                    padding: 6px;
+                    alternate-background-color: #0f1724;
+                    color: #e6edf3;
+                    outline: none;
+                }
+                QListWidget#experimentList:focus {
+                    border-color: #2f81f7;
+                }
+                QListWidget#experimentList::item {
+                    border-radius: 6px;
+                    padding: 8px 10px;
+                }
+                QListWidget#experimentList::item:alternate {
+                    background-color: #0f1724;
+                }
+                QListWidget#experimentList::item:selected {
+                    background-color: #1f6cd8;
+                    color: #f8fbff;
+                }
+                QListWidget#experimentList::item:hover {
+                    background-color: #172536;
                 }
                 QCheckBox {
                     spacing: 8px;
@@ -3334,6 +4240,11 @@ if HAS_PYQT6:
                 QPushButton:pressed {
                     background-color: #182639;
                 }
+                QPushButton:disabled {
+                    background-color: #121a26;
+                    border-color: #253447;
+                    color: #6f8198;
+                }
                 QPushButton#runButton {
                     background-color: #2f81f7;
                     border-color: #2f81f7;
@@ -3345,6 +4256,26 @@ if HAS_PYQT6:
                 }
                 QLabel#statusLabel {
                     color: #9ab0ca;
+                }
+                QMenu {
+                    background-color: #111925;
+                    border: 1px solid #2a3442;
+                    border-radius: 8px;
+                    padding: 6px;
+                    color: #d9e2f1;
+                }
+                QMenu::item {
+                    padding: 8px 20px;
+                    border-radius: 6px;
+                }
+                QMenu::item:selected {
+                    background-color: #1f6cd8;
+                    color: #f8fbff;
+                }
+                QMenu::separator {
+                    height: 1px;
+                    background: #2a3442;
+                    margin: 6px 8px;
                 }
                 """
             )
@@ -3364,11 +4295,257 @@ if HAS_PYQT6:
             """
             self._status_label.setText(text)
 
-        def _resolve_dropped_experiment_path(
+        def _refresh_experiment_actions(self) -> None:
+            """Refresh button enabled states for the experiment list.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Button state is updated in-place.
+            """
+            has_items = self._experiment_list.count() > 0
+            has_selection = bool(self._experiment_list.selectedItems())
+            self._save_experiment_list_button.setEnabled(has_items)
+            self._remove_experiment_button.setEnabled(has_selection)
+            self._next_button.setEnabled(has_items)
+            self._refresh_experiment_list_status()
+
+        def _set_experiment_list_file_path(
+            self,
+            list_path: Optional[Path],
+            *,
+            dirty: bool = False,
+        ) -> None:
+            """Store saved-list tracking state for the current experiment list.
+
+            Parameters
+            ----------
+            list_path : pathlib.Path, optional
+                Backing saved-list path when the current list originated from or
+                was saved to disk.
+            dirty : bool, default=False
+                Whether the in-memory list has diverged from the saved file.
+
+            Returns
+            -------
+            None
+                Saved-list tracking state is updated in-place.
+            """
+            self._experiment_list_file_path = (
+                Path(list_path).expanduser().resolve()
+                if list_path is not None
+                else None
+            )
+            self._experiment_list_dirty = bool(dirty) and (
+                self._experiment_list_file_path is not None
+            )
+            self._refresh_experiment_list_status()
+
+        def _refresh_experiment_list_status(self) -> None:
+            """Refresh the summary line under the experiment list.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Summary label text and tooltip are updated in-place.
+            """
+            count = self._experiment_list.count()
+            if count <= 0:
+                text = "No experiments loaded."
+            else:
+                item_text = "experiment" if count == 1 else "experiments"
+                current = self._current_selected_experiment_path()
+                current_text = str(current) if current is not None else "none selected"
+                if self._experiment_list_file_path is None:
+                    source_text = "unsaved list"
+                else:
+                    state_suffix = " (modified)" if self._experiment_list_dirty else ""
+                    source_text = f"{self._experiment_list_file_path}{state_suffix}"
+                text = (
+                    f"{count} {item_text} loaded. "
+                    f"Current: {current_text}. "
+                    f"List source: {source_text}."
+                )
+            self._experiment_list_status_label.setText(text)
+            self._experiment_list_status_label.setToolTip(text)
+
+        def _reset_metadata_labels(self) -> None:
+            """Reset metadata display labels to their empty state.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Metadata labels are updated in-place.
+            """
+            for label in self._metadata_labels.values():
+                label.setText("n/a")
+
+        def _experiment_path_from_item(
+            self,
+            item: Optional[QListWidgetItem],
+        ) -> Optional[Path]:
+            """Extract the experiment path stored on a list item.
+
+            Parameters
+            ----------
+            item : QListWidgetItem, optional
+                Experiment list item.
+
+            Returns
+            -------
+            pathlib.Path, optional
+                Stored experiment path when available, otherwise ``None``.
+            """
+            if item is None:
+                return None
+            raw_path = item.data(Qt.ItemDataRole.UserRole)
+            text = str(raw_path).strip() if raw_path is not None else ""
+            return Path(text).expanduser().resolve() if text else None
+
+        def _experiment_list_paths(self) -> list[Path]:
+            """Return all experiment paths currently listed in the setup UI.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            list[pathlib.Path]
+                Ordered resolved experiment paths.
+            """
+            experiment_paths: list[Path] = []
+            for index in range(self._experiment_list.count()):
+                path = self._experiment_path_from_item(self._experiment_list.item(index))
+                if path is not None:
+                    experiment_paths.append(path)
+            return experiment_paths
+
+        def _current_selected_experiment_path(self) -> Optional[Path]:
+            """Return the current experiment selection path.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            pathlib.Path, optional
+                Selected experiment path, otherwise ``None``.
+            """
+            return self._experiment_path_from_item(self._experiment_list.currentItem())
+
+        def _set_experiment_list_paths(
+            self,
+            experiment_paths: Sequence[Path],
+            *,
+            current_path: Optional[Path] = None,
+        ) -> None:
+            """Replace the experiment list with a new ordered path set.
+
+            Parameters
+            ----------
+            experiment_paths : sequence[pathlib.Path]
+                Ordered experiment-descriptor paths to display.
+            current_path : pathlib.Path, optional
+                Path to select after the list is populated. Defaults to the
+                first experiment when omitted.
+
+            Returns
+            -------
+            None
+                Widget state is updated in-place.
+            """
+            normalized_paths = _deduplicate_resolved_paths(experiment_paths)
+            prior_block_state = self._experiment_list.blockSignals(True)
+            self._experiment_list.clear()
+            for experiment_path in normalized_paths:
+                item = QListWidgetItem(str(experiment_path))
+                item.setData(Qt.ItemDataRole.UserRole, str(experiment_path))
+                item.setToolTip(str(experiment_path))
+                self._experiment_list.addItem(item)
+            self._experiment_list.blockSignals(prior_block_state)
+
+            if not normalized_paths:
+                self._clear_loaded_experiment_context()
+                self._reset_metadata_labels()
+                self._set_experiment_list_file_path(None, dirty=False)
+                self._refresh_experiment_actions()
+                self._set_status("Ready")
+                return
+
+            target_path = (
+                Path(current_path).expanduser().resolve()
+                if current_path is not None
+                else normalized_paths[0]
+            )
+            if target_path not in normalized_paths:
+                target_path = normalized_paths[0]
+
+            for index, experiment_path in enumerate(normalized_paths):
+                if experiment_path == target_path:
+                    self._experiment_list.setCurrentRow(index)
+                    break
+            self._refresh_experiment_actions()
+
+        def _add_experiment_paths(
+            self,
+            experiment_paths: Sequence[Path],
+            *,
+            replace: bool = False,
+            current_path: Optional[Path] = None,
+        ) -> None:
+            """Add experiments to the list or replace the list contents.
+
+            Parameters
+            ----------
+            experiment_paths : sequence[pathlib.Path]
+                Experiment paths to add.
+            replace : bool, default=False
+                When ``True``, replace the existing list contents.
+            current_path : pathlib.Path, optional
+                Path to select after the list update.
+
+            Returns
+            -------
+            None
+                Widget state is updated in-place.
+            """
+            previous_paths = self._experiment_list_paths()
+            normalized_new_paths = _deduplicate_resolved_paths(experiment_paths)
+            existing_paths = [] if replace else self._experiment_list_paths()
+            combined_paths = _deduplicate_resolved_paths(
+                [*existing_paths, *normalized_new_paths]
+            )
+            target_path = current_path
+            if target_path is None and normalized_new_paths:
+                target_path = normalized_new_paths[-1]
+            if target_path is None:
+                target_path = self._current_selected_experiment_path()
+            self._set_experiment_list_paths(combined_paths, current_path=target_path)
+            if self._experiment_list_file_path is not None and combined_paths != previous_paths:
+                self._set_experiment_list_file_path(
+                    self._experiment_list_file_path,
+                    dirty=True,
+                )
+
+        def _resolve_dropped_experiment_paths(
             self,
             mime_data: QMimeData,
-        ) -> Optional[Path]:
-            """Resolve a dropped Navigate experiment descriptor path.
+        ) -> tuple[list[Path], bool, Optional[Path]]:
+            """Resolve experiment paths from a drag/drop payload.
 
             Parameters
             ----------
@@ -3377,33 +4554,41 @@ if HAS_PYQT6:
 
             Returns
             -------
-            pathlib.Path, optional
-                Resolved local path to ``experiment.yml`` or
-                ``experiment.yaml`` when available, otherwise ``None``.
+            tuple[list[pathlib.Path], bool, pathlib.Path or None]
+                Resolved experiment paths, whether the list should be replaced,
+                and the saved-list file path when one was dropped alone.
             """
             if not mime_data.hasUrls():
-                return None
+                return [], False, None
 
+            local_paths: list[Path] = []
             for url in mime_data.urls():
                 if not url.isLocalFile():
                     continue
+                local_paths.append(Path(url.toLocalFile()).expanduser())
 
-                candidate_path = Path(url.toLocalFile()).expanduser()
-                if candidate_path.is_dir():
-                    for name in ("experiment.yml", "experiment.yaml"):
-                        experiment_path = candidate_path / name
-                        if experiment_path.exists():
-                            return experiment_path.resolve()
-                    continue
+            replace_existing = False
+            list_path: Optional[Path] = None
+            if len(local_paths) == 1 and _is_saved_experiment_list_path(local_paths[0]):
+                replace_existing = True
+                list_path = local_paths[0].resolve()
 
-                if candidate_path.exists() and is_navigate_experiment_file(
-                    candidate_path
-                ):
-                    return candidate_path.resolve()
-            return None
+            resolved_paths: list[Path] = []
+            for candidate_path in local_paths:
+                try:
+                    resolved_paths.extend(
+                        _collect_experiment_paths_from_input_path(candidate_path)
+                    )
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "Failed to resolve dropped experiment input %s.",
+                        candidate_path,
+                        exc_info=True,
+                    )
+            return _deduplicate_resolved_paths(resolved_paths), replace_existing, list_path
 
         def _can_accept_experiment_drop(self, mime_data: QMimeData) -> bool:
-            """Determine whether dropped payload contains an experiment path.
+            """Determine whether dropped payload contains experiment inputs.
 
             Parameters
             ----------
@@ -3413,13 +4598,15 @@ if HAS_PYQT6:
             Returns
             -------
             bool
-                ``True`` when a supported local Navigate experiment path is
-                present, otherwise ``False``.
+                ``True`` when supported local experiment inputs are present.
             """
-            return self._resolve_dropped_experiment_path(mime_data) is not None
+            experiment_paths, _replace_existing, _list_path = (
+                self._resolve_dropped_experiment_paths(mime_data)
+            )
+            return bool(experiment_paths)
 
         def _apply_experiment_drop(self, mime_data: QMimeData) -> bool:
-            """Apply dropped Navigate experiment path to the setup input field.
+            """Apply dropped experiment inputs to the setup list.
 
             Parameters
             ----------
@@ -3431,18 +4618,24 @@ if HAS_PYQT6:
             bool
                 ``True`` when a supported path was applied, otherwise ``False``.
             """
-            experiment_path = self._resolve_dropped_experiment_path(mime_data)
-            if experiment_path is None:
+            experiment_paths, replace_existing, list_path = (
+                self._resolve_dropped_experiment_paths(mime_data)
+            )
+            if not experiment_paths:
                 return False
 
-            self._path_input.setText(str(experiment_path))
-            self._set_status(
-                "Experiment path set from drag-and-drop. Click Load Metadata or Next."
+            current_path = experiment_paths[0] if replace_existing else experiment_paths[-1]
+            self._add_experiment_paths(
+                experiment_paths,
+                replace=replace_existing,
+                current_path=current_path,
             )
+            if list_path is not None:
+                self._set_experiment_list_file_path(list_path, dirty=False)
             return True
 
         def _clear_loaded_experiment_context(self) -> None:
-            """Clear cached experiment metadata and source-path override.
+            """Clear cached experiment metadata for the current selection.
 
             Parameters
             ----------
@@ -3457,25 +4650,9 @@ if HAS_PYQT6:
             self._loaded_experiment_path = None
             self._loaded_image_info = None
             self._loaded_source_data_path = None
-            self._source_data_directory_override = None
-
-        def _on_experiment_path_changed(self, _text: str) -> None:
-            """Reset cached experiment state when the selected path changes.
-
-            Parameters
-            ----------
-            _text : str
-                Current text content. Unused.
-
-            Returns
-            -------
-            None
-                Cached setup state is reset in-place.
-            """
-            self._clear_loaded_experiment_context()
 
         def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-            """Handle drag/drop events routed through the path input widget.
+            """Handle drag/drop events routed through the experiment list.
 
             Parameters
             ----------
@@ -3490,7 +4667,7 @@ if HAS_PYQT6:
                 ``True`` when the event was handled, otherwise base class
                 event filter result.
             """
-            if watched is self._path_input:
+            if watched in {self._experiment_list, self._experiment_list.viewport()}:
                 if isinstance(event, QDragEnterEvent):
                     if self._can_accept_experiment_drop(event.mimeData()):
                         event.acceptProposedAction()
@@ -3512,7 +4689,7 @@ if HAS_PYQT6:
             return super().eventFilter(watched, event)
 
         def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-            """Accept dialog-level drags containing Navigate experiment files.
+            """Accept dialog-level drags containing experiment inputs.
 
             Parameters
             ----------
@@ -3530,7 +4707,7 @@ if HAS_PYQT6:
             event.ignore()
 
         def dragMoveEvent(self, event: QDragMoveEvent) -> None:
-            """Accept dialog-level drag-move events for valid experiment files.
+            """Accept dialog-level drag-move events for valid experiment inputs.
 
             Parameters
             ----------
@@ -3548,7 +4725,7 @@ if HAS_PYQT6:
             event.ignore()
 
         def dropEvent(self, event: QDropEvent) -> None:
-            """Handle dialog-level file drops for experiment path selection.
+            """Handle dialog-level drops for experiment inputs.
 
             Parameters
             ----------
@@ -3558,15 +4735,15 @@ if HAS_PYQT6:
             Returns
             -------
             None
-                Path input and event acceptance are updated in-place.
+                Experiment list and event acceptance are updated in-place.
             """
             if self._apply_experiment_drop(event.mimeData()):
                 event.acceptProposedAction()
                 return
             event.ignore()
 
-        def _on_browse_file(self) -> None:
-            """Open file picker for Navigate experiment descriptor.
+        def _on_load_experiment(self) -> None:
+            """Open a file picker and add one experiment descriptor.
 
             Parameters
             ----------
@@ -3575,7 +4752,7 @@ if HAS_PYQT6:
             Returns
             -------
             None
-                Selected path is written into the input field.
+                Experiment list is updated in-place.
             """
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
@@ -3583,8 +4760,474 @@ if HAS_PYQT6:
                 str(Path.cwd()),
                 "Navigate Experiment (experiment.yml experiment.yaml *.yml *.yaml)",
             )
-            if file_path:
-                self._path_input.setText(file_path)
+            if not file_path:
+                return
+
+            experiment_path = Path(file_path).expanduser().resolve()
+            self._add_experiment_paths([experiment_path], current_path=experiment_path)
+
+        def _on_create_experiment_list(self) -> None:
+            """Open the experiment-list creation menu.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Runs the selected list-creation action.
+            """
+            menu = QMenu(self._create_experiment_list_button)
+            scan_action = menu.addAction("Scan Folder...")
+            load_action = menu.addAction("Load Saved List...")
+            selected_action = menu.exec(
+                self._create_experiment_list_button.mapToGlobal(
+                    QPoint(0, self._create_experiment_list_button.height())
+                )
+            )
+            if selected_action is scan_action:
+                self._on_scan_experiment_folder()
+            elif selected_action is load_action:
+                self._on_load_saved_experiment_list()
+
+        def _on_scan_experiment_folder(self) -> None:
+            """Recursively discover experiments in a selected directory.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Experiment list is replaced in-place.
+            """
+            selected_directory = QFileDialog.getExistingDirectory(
+                self,
+                "Select Folder to Scan for experiment.yml",
+                str(Path.cwd()),
+            )
+            if not selected_directory:
+                return
+
+            search_root = Path(selected_directory).expanduser().resolve()
+            try:
+                experiment_paths = _discover_navigate_experiment_files(search_root)
+            except Exception as exc:
+                _show_themed_error_dialog(
+                    self,
+                    "Experiment List Failed",
+                    "Failed to create an experiment list from the selected folder.",
+                    summary=f"{type(exc).__name__}: {exc}",
+                    details=traceback.format_exc(),
+                )
+                self._set_status("Failed to scan for experiments.")
+                return
+
+            if not experiment_paths:
+                QMessageBox.information(
+                    self,
+                    "No Experiments Found",
+                    f"No Navigate experiment.yml files were found under {search_root}.",
+                )
+                self._set_status("No experiment.yml files found in the selected folder.")
+                return
+
+            self._set_experiment_list_file_path(None, dirty=False)
+            self._set_experiment_list_paths(
+                experiment_paths,
+                current_path=experiment_paths[0],
+            )
+
+        def _on_load_saved_experiment_list(self) -> None:
+            """Load a previously saved experiment list from disk.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Experiment list is replaced in-place.
+            """
+            file_filter = (
+                "ClearEx Experiment List "
+                f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
+            )
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Load Saved Experiment List",
+                str(Path.cwd()),
+                file_filter,
+            )
+            if not file_path:
+                return
+
+            list_path = Path(file_path).expanduser().resolve()
+            try:
+                experiment_paths = _load_experiment_list_file(list_path)
+            except Exception as exc:
+                _show_themed_error_dialog(
+                    self,
+                    "Experiment List Failed",
+                    "Failed to load the saved experiment list.",
+                    summary=f"{type(exc).__name__}: {exc}",
+                    details=traceback.format_exc(),
+                )
+                self._set_status("Failed to load saved experiment list.")
+                return
+
+            self._set_experiment_list_file_path(list_path, dirty=False)
+            self._set_experiment_list_paths(
+                experiment_paths,
+                current_path=experiment_paths[0],
+            )
+
+        def _on_save_experiment_list(self) -> None:
+            """Save the current experiment list to disk.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Current experiment list is serialized to JSON.
+            """
+            experiment_paths = self._experiment_list_paths()
+            if not experiment_paths:
+                QMessageBox.information(
+                    self,
+                    "No Experiments",
+                    "Add at least one experiment before saving a list.",
+                )
+                self._set_status("Add an experiment before saving a list.")
+                return
+
+            default_directory = (
+                self._experiment_list_file_path.parent
+                if self._experiment_list_file_path is not None
+                else experiment_paths[0].parent
+            )
+            default_path = (
+                default_directory
+                / f"experiments{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
+            )
+            file_filter = (
+                "ClearEx Experiment List "
+                f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
+            )
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Experiment List",
+                str(default_path),
+                file_filter,
+            )
+            if not file_path:
+                return
+
+            target_path = Path(file_path).expanduser()
+            if not _is_saved_experiment_list_path(target_path):
+                target_path = Path(
+                    f"{target_path}{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
+                )
+            try:
+                saved_list_path = _save_experiment_list_file(target_path, experiment_paths)
+            except Exception as exc:
+                _show_themed_error_dialog(
+                    self,
+                    "Experiment List Failed",
+                    "Failed to save the experiment list.",
+                    summary=f"{type(exc).__name__}: {exc}",
+                    details=traceback.format_exc(),
+                )
+                self._set_status("Failed to save experiment list.")
+                return
+
+            self._set_experiment_list_file_path(saved_list_path, dirty=False)
+            self._set_status(
+                f"Saved experiment list to {self._experiment_list_file_path}."
+            )
+
+        def _on_remove_selected_experiments(self) -> None:
+            """Remove the selected experiments from the setup list.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Experiment list and metadata state are updated in-place.
+            """
+            selected_items = self._experiment_list.selectedItems()
+            if not selected_items:
+                self._refresh_experiment_actions()
+                return
+
+            selected_paths = {
+                path
+                for path in (
+                    self._experiment_path_from_item(item) for item in selected_items
+                )
+                if path is not None
+            }
+            remaining_paths = [
+                path
+                for path in self._experiment_list_paths()
+                if path not in selected_paths
+            ]
+            current_path = self._current_selected_experiment_path()
+            next_path = (
+                current_path
+                if current_path is not None and current_path in remaining_paths
+                else (remaining_paths[0] if remaining_paths else None)
+            )
+
+            for removed_path in selected_paths:
+                self._source_data_directory_overrides.pop(removed_path, None)
+            if (
+                self._experiment_list_file_path is not None
+                and remaining_paths != self._experiment_list_paths()
+            ):
+                self._set_experiment_list_file_path(
+                    self._experiment_list_file_path,
+                    dirty=True,
+                )
+            self._set_experiment_list_paths(remaining_paths, current_path=next_path)
+            if not remaining_paths:
+                self._set_status("Removed selected experiments.")
+
+        def _show_experiment_list_context_menu(self, position: QPoint) -> None:
+            """Show the experiment-list context menu.
+
+            Parameters
+            ----------
+            position : QPoint
+                Click position in list-widget viewport coordinates.
+
+            Returns
+            -------
+            None
+                Executes one selected context-menu action.
+            """
+            menu = QMenu(self._experiment_list)
+            item = self._experiment_list.itemAt(position)
+            load_action = menu.addAction("Load Metadata")
+            remove_action = menu.addAction("Remove Selected")
+            load_action.setEnabled(item is not None)
+            remove_action.setEnabled(bool(self._experiment_list.selectedItems()))
+            selected_action = menu.exec(
+                self._experiment_list.viewport().mapToGlobal(position)
+            )
+            if selected_action is load_action and item is not None:
+                self._experiment_list.setCurrentItem(item)
+                self._load_selected_experiment_metadata(force_reload=True)
+            elif selected_action is remove_action:
+                self._on_remove_selected_experiments()
+
+        def _on_current_experiment_changed(
+            self,
+            current: Optional[QListWidgetItem],
+            previous: Optional[QListWidgetItem],
+        ) -> None:
+            """Load metadata when the current experiment selection changes.
+
+            Parameters
+            ----------
+            current : QListWidgetItem, optional
+                Newly selected item.
+            previous : QListWidgetItem, optional
+                Previously selected item. Unused.
+
+            Returns
+            -------
+            None
+                Metadata state is updated in-place.
+            """
+            del previous
+            self._refresh_experiment_actions()
+            if current is None:
+                if self._experiment_list.count() == 0:
+                    self._clear_loaded_experiment_context()
+                    self._reset_metadata_labels()
+                    self._set_status("Ready")
+                return
+            self._load_selected_experiment_metadata()
+
+        def _on_experiment_item_activated(self, item: QListWidgetItem) -> None:
+            """Reload metadata when a list item is double-clicked.
+
+            Parameters
+            ----------
+            item : QListWidgetItem
+                Activated list item.
+
+            Returns
+            -------
+            None
+                Metadata state is updated in-place.
+            """
+            self._experiment_list.setCurrentItem(item)
+            self._load_selected_experiment_metadata(force_reload=True)
+
+        def _load_selected_experiment_metadata(
+            self,
+            *,
+            force_reload: bool = False,
+        ) -> None:
+            """Load metadata for the current experiment selection.
+
+            Parameters
+            ----------
+            force_reload : bool, default=False
+                When ``True``, bypass the cached experiment metadata state.
+
+            Returns
+            -------
+            None
+                Metadata state is updated in-place.
+            """
+            experiment_path = self._current_selected_experiment_path()
+            if experiment_path is None:
+                self._clear_loaded_experiment_context()
+                self._reset_metadata_labels()
+                self._set_status("Select an experiment to load metadata.")
+                return
+            self._load_metadata_for_experiment_path(
+                experiment_path,
+                force_reload=force_reload,
+            )
+
+        def _resolve_experiment_source_context(
+            self,
+            *,
+            path: Path,
+        ) -> tuple[Path, NavigateExperiment, Path]:
+            """Resolve experiment metadata and source path for one experiment.
+
+            Parameters
+            ----------
+            path : pathlib.Path
+                Selected experiment path.
+
+            Returns
+            -------
+            tuple[pathlib.Path, NavigateExperiment, pathlib.Path]
+                Experiment path, parsed experiment, and resolved source path.
+
+            Raises
+            ------
+            ValueError
+                If path is missing or not an experiment descriptor.
+            FileNotFoundError
+                If the selected path does not exist.
+            Exception
+                Propagates parse/read failures from experiment metadata or
+                acquisition path resolution.
+            """
+            selected_path = Path(path).expanduser()
+            if not selected_path.exists():
+                raise FileNotFoundError(f"Path does not exist: {selected_path}")
+            if not is_navigate_experiment_file(selected_path):
+                raise ValueError(
+                    "This setup window requires Navigate experiment.yml or "
+                    "experiment.yaml."
+                )
+
+            experiment_path = selected_path.resolve()
+            experiment = load_navigate_experiment(experiment_path)
+            override_directory = self._source_data_directory_overrides.get(
+                experiment_path
+            )
+            try:
+                source_data_path = resolve_experiment_data_path(
+                    experiment,
+                    search_directory=override_directory,
+                )
+            except ExperimentDataResolutionError as exc:
+                source_data_path = self._prompt_for_source_data_directory(
+                    experiment=experiment,
+                    error=exc,
+                )
+                if source_data_path is None:
+                    raise
+            return experiment_path, experiment, source_data_path
+
+        def _load_metadata_for_experiment_path(
+            self,
+            experiment_path: Path,
+            *,
+            force_reload: bool = False,
+        ) -> None:
+            """Load and display metadata for one experiment descriptor.
+
+            Parameters
+            ----------
+            experiment_path : pathlib.Path
+                Selected experiment-descriptor path.
+            force_reload : bool, default=False
+                When ``True``, bypass the cached metadata state.
+
+            Returns
+            -------
+            None
+                Metadata display fields and cached state are updated in-place.
+            """
+            resolved_experiment_path = Path(experiment_path).expanduser().resolve()
+            if (
+                not force_reload
+                and self._loaded_experiment_path == resolved_experiment_path
+                and self._loaded_experiment is not None
+                and self._loaded_source_data_path is not None
+                and self._loaded_image_info is not None
+            ):
+                return
+
+            try:
+                loaded_path, experiment, source_data_path, info = (
+                    self._load_experiment_context(path=resolved_experiment_path)
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).exception(
+                    "Failed to load experiment metadata from %s.",
+                    resolved_experiment_path,
+                )
+                self._clear_loaded_experiment_context()
+                self._reset_metadata_labels()
+                self._metadata_labels["path"].setText(str(resolved_experiment_path))
+                _show_themed_error_dialog(
+                    self,
+                    "Metadata Load Failed",
+                    "Failed to load experiment metadata.",
+                    summary=f"{type(exc).__name__}: {exc}",
+                    details=traceback.format_exc(),
+                )
+                self._set_status("Failed to load metadata.")
+                return
+
+            summary = summarize_image_info(info)
+            summary = _apply_experiment_overrides(
+                summary=summary,
+                experiment_path=loaded_path,
+                resolved_data_path=source_data_path,
+                experiment=experiment,
+            )
+
+            for key, value in summary.items():
+                self._metadata_labels[key].setText(value)
+
+            self._loaded_experiment = experiment
+            self._loaded_experiment_path = loaded_path
+            self._loaded_image_info = info
+            self._loaded_source_data_path = source_data_path
+
+            target_store = resolve_data_store_path(experiment, source_data_path)
+            self._set_status(f"Metadata loaded. Target store: {target_store}")
 
         def _prompt_for_source_data_directory(
             self,
@@ -3641,20 +5284,22 @@ if HAS_PYQT6:
                     start_directory = str(override_directory)
                     continue
 
-                self._source_data_directory_override = override_directory
+                self._source_data_directory_overrides[
+                    experiment.path.expanduser().resolve()
+                ] = override_directory
                 return source_data_path
 
         def _load_experiment_context(
             self,
             *,
-            path_text: str,
+            path: Path,
         ) -> tuple[Path, NavigateExperiment, Path, ImageInfo]:
             """Load experiment and source metadata for setup validation.
 
             Parameters
             ----------
-            path_text : str
-                User-entered experiment path text.
+            path : pathlib.Path
+                Selected experiment path.
 
             Returns
             -------
@@ -3671,31 +5316,9 @@ if HAS_PYQT6:
             Exception
                 Propagates parse/read failures from experiment or image I/O.
             """
-            if not path_text:
-                raise ValueError("Select a Navigate experiment.yml path first.")
-            selected_path = Path(path_text).expanduser()
-            if not selected_path.exists():
-                raise FileNotFoundError(f"Path does not exist: {selected_path}")
-            if not is_navigate_experiment_file(selected_path):
-                raise ValueError(
-                    "This setup window requires Navigate experiment.yml or "
-                    "experiment.yaml."
-                )
-
-            experiment_path = selected_path.resolve()
-            experiment = load_navigate_experiment(experiment_path)
-            try:
-                source_data_path = resolve_experiment_data_path(
-                    experiment,
-                    search_directory=self._source_data_directory_override,
-                )
-            except ExperimentDataResolutionError as exc:
-                source_data_path = self._prompt_for_source_data_directory(
-                    experiment=experiment,
-                    error=exc,
-                )
-                if source_data_path is None:
-                    raise
+            experiment_path, experiment, source_data_path = (
+                self._resolve_experiment_source_context(path=path)
+            )
             _, info = self._opener.open(
                 path=str(source_data_path),
                 prefer_dask=True,
@@ -3703,57 +5326,41 @@ if HAS_PYQT6:
             )
             return experiment_path, experiment, source_data_path, info
 
-        def _on_load_metadata(self) -> None:
-            """Load and display source metadata from selected experiment.
+        def _resolve_store_preparation_request(
+            self,
+            experiment_path: Path,
+        ) -> ExperimentStorePreparationRequest:
+            """Resolve canonical-store preparation inputs for one experiment.
 
             Parameters
             ----------
-            None
+            experiment_path : pathlib.Path
+                Experiment path to resolve.
 
             Returns
             -------
-            None
-                Metadata display fields and internal setup state are updated.
+            ExperimentStorePreparationRequest
+                Canonical-store preparation request for the experiment.
             """
-            try:
-                experiment_path, experiment, source_data_path, info = (
-                    self._load_experiment_context(
-                        path_text=self._path_input.text().strip()
-                    )
+            resolved_experiment_path = Path(experiment_path).expanduser().resolve()
+            if (
+                self._loaded_experiment_path == resolved_experiment_path
+                and self._loaded_experiment is not None
+                and self._loaded_source_data_path is not None
+            ):
+                experiment = self._loaded_experiment
+                source_data_path = self._loaded_source_data_path
+            else:
+                _loaded_path, experiment, source_data_path = (
+                    self._resolve_experiment_source_context(path=resolved_experiment_path)
                 )
-            except Exception as exc:
-                logging.getLogger(__name__).exception(
-                    "Failed to load experiment metadata from %s.",
-                    self._path_input.text().strip(),
-                )
-                _show_themed_error_dialog(
-                    self,
-                    "Metadata Load Failed",
-                    "Failed to load experiment metadata.",
-                    summary=f"{type(exc).__name__}: {exc}",
-                    details=traceback.format_exc(),
-                )
-                self._set_status("Failed to load metadata.")
-                return
-
-            summary = summarize_image_info(info)
-            summary = _apply_experiment_overrides(
-                summary=summary,
-                experiment_path=experiment_path,
-                resolved_data_path=source_data_path,
-                experiment=experiment,
-            )
-
-            for key, value in summary.items():
-                self._metadata_labels[key].setText(value)
-
-            self._loaded_experiment = experiment
-            self._loaded_experiment_path = experiment_path
-            self._loaded_image_info = info
-            self._loaded_source_data_path = source_data_path
-
             target_store = resolve_data_store_path(experiment, source_data_path)
-            self._set_status(f"Metadata loaded. Target store: {target_store}")
+            return ExperimentStorePreparationRequest(
+                experiment_path=resolved_experiment_path,
+                experiment=experiment,
+                source_data_path=source_data_path,
+                target_store=Path(target_store).expanduser().resolve(),
+            )
 
         def _current_local_cluster_shape_tpczyx(
             self,
@@ -3835,7 +5442,7 @@ if HAS_PYQT6:
             self.accept()
 
         def _on_next(self) -> None:
-            """Advance to analysis-selection step after store readiness checks.
+            """Advance after batch store readiness checks for the experiment list.
 
             Parameters
             ----------
@@ -3844,60 +5451,91 @@ if HAS_PYQT6:
             Returns
             -------
             None
-                Proceeds only when canonical store is confirmed ready.
+                Proceeds only when listed experiments have canonical stores.
             """
-            path_text = self._path_input.text().strip()
-            needs_reload = True
-            if self._loaded_experiment_path is not None:
-                needs_reload = str(self._loaded_experiment_path) != str(
-                    Path(path_text).expanduser().resolve()
+            selected_experiment_path = self._current_selected_experiment_path()
+            if selected_experiment_path is None:
+                QMessageBox.information(
+                    self,
+                    "No Experiment Selected",
+                    "Select at least one experiment before continuing.",
                 )
-
-            if (
-                needs_reload
-                or self._loaded_experiment is None
-                or self._loaded_source_data_path is None
-            ):
-                self._on_load_metadata()
-                if (
-                    self._loaded_experiment is None
-                    or self._loaded_source_data_path is None
-                ):
-                    return
-
-            experiment = self._loaded_experiment
-            source_data_path = self._loaded_source_data_path
-            target_store = resolve_data_store_path(experiment, source_data_path)
-
-            if target_store.exists() and has_complete_canonical_data_store(
-                target_store,
-                expected_chunks_tpczyx=self._zarr_save_config.chunks_tpczyx(),
-                expected_pyramid_factors=self._zarr_save_config.pyramid_tpczyx(),
-            ):
-                self._set_status(
-                    "Found existing data store. Opening analysis selection."
-                )
-                self._accept_with_store_path(target_store)
+                self._set_status("Select an experiment before continuing.")
                 return
-            if target_store.exists():
-                self._set_status(
-                    "Existing store found, but canonical 6D data is missing or "
-                    "incompatible. Rebuilding canonical store."
+
+            experiment_paths = self._experiment_list_paths()
+            if not experiment_paths:
+                QMessageBox.information(
+                    self,
+                    "No Experiments Loaded",
+                    "Load at least one experiment before continuing.",
                 )
+                self._set_status("Load an experiment before continuing.")
+                return
 
-            progress_dialog = MaterializationProgressDialog(parent=self)
+            requests: list[ExperimentStorePreparationRequest] = []
+            for experiment_path in experiment_paths:
+                try:
+                    request = self._resolve_store_preparation_request(experiment_path)
+                except Exception as exc:
+                    logging.getLogger(__name__).exception(
+                        "Failed to resolve experiment input from %s.",
+                        experiment_path,
+                    )
+                    _show_themed_error_dialog(
+                        self,
+                        "Experiment Preparation Failed",
+                        "Failed to prepare one experiment for batch ingestion.",
+                        summary=f"{type(exc).__name__}: {exc}",
+                        details=traceback.format_exc(),
+                    )
+                    self._set_status("Batch preparation failed before store creation.")
+                    return
+                requests.append(request)
+            try:
+                selected_request, pending_requests, ready_requests = (
+                    _plan_experiment_store_materialization(
+                        requests,
+                        selected_experiment_path=selected_experiment_path,
+                        zarr_save=self._zarr_save_config,
+                    )
+                )
+            except ValueError:
+                self._set_status("Selected experiment is no longer available.")
+                return
+            ready_count = len(ready_requests)
+
+            if not pending_requests:
+                self._set_status(
+                    "All listed data stores are ready. Opening analysis selection."
+                )
+                self._accept_with_store_path(selected_request.target_store)
+                return
+
+            self._set_status(
+                f"Preparing {len(pending_requests)} of {len(requests)} listed data stores."
+            )
+            progress_dialog = MaterializationProgressDialog(
+                title_text="Preparing Experiment Data Stores",
+                initial_message=(
+                    f"Preparing {len(pending_requests)} of {len(requests)} listed "
+                    "experiments. Existing canonical stores will be reused."
+                ),
+                parent=self,
+            )
             failure_payload: dict[str, str] = {}
-            success_paths: list[Path] = []
+            success_results: list[ExperimentStorePreparationResult] = []
 
-            worker = DataStoreMaterializationWorker(
-                experiment=experiment,
-                source_data_path=source_data_path,
+            worker = BatchDataStoreMaterializationWorker(
+                requests=pending_requests,
                 dask_backend=self._dask_backend_config,
                 zarr_save=self._zarr_save_config,
             )
             self._materialization_worker = worker
             worker.progress_changed.connect(progress_dialog.update_progress)
-            worker.succeeded.connect(lambda store: success_paths.append(Path(store)))
+            worker.succeeded.connect(
+                lambda results: success_results.extend(list(results))
+            )
             worker.succeeded.connect(lambda _: progress_dialog.accept())
             worker.failed.connect(
                 lambda summary, details: failure_payload.update(
@@ -3922,15 +5560,21 @@ if HAS_PYQT6:
                 self._set_status("Store creation failed.")
                 return
 
-            if not success_paths:
+            if not success_results:
                 self._set_status("Store creation was cancelled.")
                 return
 
-            store_path = success_paths[0]
+            prepared_count = len(success_results)
             self._set_status(
-                "Created canonical data store. Opening analysis selection."
+                "Prepared listed data stores. Opening analysis selection for the "
+                "selected experiment."
             )
-            self._accept_with_store_path(store_path)
+            logging.getLogger(__name__).info(
+                "Prepared %s experiment data stores and reused %s existing stores.",
+                prepared_count,
+                ready_count,
+            )
+            self._accept_with_store_path(selected_request.target_store)
 
     class AnalysisSelectionDialog(QDialog):
         """Second-step GUI dialog for selecting and sequencing analysis operations."""
@@ -4392,9 +6036,6 @@ if HAS_PYQT6:
             """
             super().__init__()
             self.setWindowTitle("ClearEx Analysis")
-            self.setMinimumWidth(1440)
-            self.setMinimumHeight(860)
-            self.resize(1520, 940)
 
             self._base_config = initial
             self._dask_backend_config: DaskBackendConfig = initial.dask_backend
@@ -4472,6 +6113,12 @@ if HAS_PYQT6:
             self._build_ui()
             self._apply_theme()
             self._hydrate(initial)
+            _apply_initial_dialog_geometry(
+                self,
+                minimum_size=_ANALYSIS_DIALOG_MINIMUM_SIZE,
+                preferred_size=_ANALYSIS_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
+            )
 
         def _build_ui(self) -> None:
             """Build analysis window controls and connect actions.
@@ -6388,8 +8035,11 @@ if HAS_PYQT6:
             """Open popup editor for visualization volume-layer rows."""
             dialog = QDialog(self)
             dialog.setWindowTitle("Visualization Volume Layers")
-            dialog.setMinimumWidth(1240)
-            dialog.setMinimumHeight(460)
+            _apply_initial_dialog_geometry(
+                dialog,
+                minimum_size=_VOLUME_LAYERS_DIALOG_MINIMUM_SIZE,
+                preferred_size=_VOLUME_LAYERS_DIALOG_PREFERRED_SIZE,
+            )
             dialog.setModal(True)
             dialog.setStyleSheet(_popup_dialog_stylesheet())
 
@@ -6695,6 +8345,12 @@ if HAS_PYQT6:
             root.addWidget(button_box)
             button_box.accepted.connect(dialog.accept)
             button_box.rejected.connect(dialog.reject)
+            _apply_initial_dialog_geometry(
+                dialog,
+                minimum_size=_VOLUME_LAYERS_DIALOG_MINIMUM_SIZE,
+                preferred_size=_VOLUME_LAYERS_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(dialog.sizeHint().width(), dialog.sizeHint().height()),
+            )
 
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
@@ -6875,8 +8531,11 @@ if HAS_PYQT6:
             """
             dialog = QDialog(self)
             dialog.setWindowTitle("Visualization Keyframe Table")
-            dialog.setMinimumWidth(900)
-            dialog.setMinimumHeight(420)
+            _apply_initial_dialog_geometry(
+                dialog,
+                minimum_size=_LAYER_OVERRIDES_DIALOG_MINIMUM_SIZE,
+                preferred_size=_LAYER_OVERRIDES_DIALOG_PREFERRED_SIZE,
+            )
             dialog.setModal(True)
             dialog.setStyleSheet(_popup_dialog_stylesheet())
 
@@ -6972,6 +8631,12 @@ if HAS_PYQT6:
             root.addWidget(button_box)
             button_box.accepted.connect(dialog.accept)
             button_box.rejected.connect(dialog.reject)
+            _apply_initial_dialog_geometry(
+                dialog,
+                minimum_size=_LAYER_OVERRIDES_DIALOG_MINIMUM_SIZE,
+                preferred_size=_LAYER_OVERRIDES_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(dialog.sizeHint().width(), dialog.sizeHint().height()),
+            )
 
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
@@ -8210,8 +9875,11 @@ if HAS_PYQT6:
 
             dialog = QDialog(self)
             dialog.setWindowTitle("Synthetic PSF Preview")
-            dialog.setMinimumWidth(840)
-            dialog.setMinimumHeight(700)
+            _apply_initial_dialog_geometry(
+                dialog,
+                minimum_size=_SYNTHETIC_PSF_PREVIEW_DIALOG_MINIMUM_SIZE,
+                preferred_size=_SYNTHETIC_PSF_PREVIEW_DIALOG_PREFERRED_SIZE,
+            )
             dialog.setStyleSheet(
                 """
                 QDialog {
@@ -8281,6 +9949,12 @@ if HAS_PYQT6:
             close_button.clicked.connect(dialog.accept)
             footer.addWidget(close_button)
             layout.addLayout(footer)
+            _apply_initial_dialog_geometry(
+                dialog,
+                minimum_size=_SYNTHETIC_PSF_PREVIEW_DIALOG_MINIMUM_SIZE,
+                preferred_size=_SYNTHETIC_PSF_PREVIEW_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(dialog.sizeHint().width(), dialog.sizeHint().height()),
+            )
             dialog.exec()
 
         def _set_deconvolution_parameter_enabled_state(self) -> None:

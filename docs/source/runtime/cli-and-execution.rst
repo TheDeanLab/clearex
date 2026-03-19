@@ -30,6 +30,32 @@ The entrypoint is GUI-first by default:
 - GUI launch failures (missing display/runtime issues) fall back to headless
   mode with warnings.
 
+GUI Setup Flow
+--------------
+
+The first GUI window is an experiment-list driven setup flow:
+
+- ``Load Experiment`` adds one Navigate ``experiment.yml``/``experiment.yaml``.
+- ``Create Experiment List`` can either:
+  - recursively scan a folder for Navigate experiment descriptors, or
+  - reload a saved ClearEx list file (``.clearex-experiment-list.json``).
+- Drag and drop accepts individual experiment descriptors, folders to scan,
+  and saved list files.
+- Selecting an entry in the list automatically loads the metadata panel.
+- Double-clicking a list item reloads that experiment's metadata explicitly.
+- The current ordered list can be saved back to a reusable
+  ``.clearex-experiment-list.json`` file.
+- Pressing ``Next`` batch-prepares canonical stores for every listed
+  experiment that still needs ingestion, then opens analysis selection for the
+  currently selected experiment.
+
+.. figure:: ../../screenshots/setup_dialog_experiment_list.png
+   :alt: ClearEx setup dialog showing the themed experiment list pane and metadata panel
+   :width: 100%
+
+   Setup dialog with the experiment list pane, automatic metadata loading, and
+   themed list-management controls.
+
 Workflow Selection
 ------------------
 

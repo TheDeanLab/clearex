@@ -9,6 +9,36 @@ from pathlib import Path
 
 import clearex.gui.app as app_module
 from clearex.io.experiment import NavigateChannel, NavigateExperiment
+import pytest
+
+
+def _make_navigate_experiment(path: Path) -> NavigateExperiment:
+    """Create a minimal NavigateExperiment instance for GUI tests."""
+
+    return NavigateExperiment(
+        path=Path(path).expanduser().resolve(),
+        raw={},
+        save_directory=Path(path).expanduser().resolve().parent,
+        file_type="OME-TIFF",
+        microscope_name="scope",
+        image_mode="z-stack",
+        timepoints=2,
+        number_z_steps=10,
+        y_pixels=32,
+        x_pixels=64,
+        multiposition_count=1,
+        selected_channels=[
+            NavigateChannel(
+                name="ch0",
+                laser=None,
+                laser_index=None,
+                exposure_ms=None,
+                is_selected=True,
+            )
+        ],
+        xy_pixel_size_um=0.12,
+        z_step_um=0.45,
+    )
 
 
 def _install_fake_gui_runtime(monkeypatch):
@@ -108,6 +138,147 @@ def test_summarize_image_info_extracts_pixel_size_from_voxel_size_metadata() -> 
     summary = app_module.summarize_image_info(info)
 
     assert summary["pixel_size"] == "z=0.2, y=0.166992, x=0.166992"
+
+
+def test_discover_navigate_experiment_files_recurses_and_sorts(tmp_path) -> None:
+    alpha = tmp_path / "alpha" / "experiment.yml"
+    beta = tmp_path / "beta" / "nested" / "experiment.yaml"
+    noise = tmp_path / "beta" / "nested" / "notes.yml"
+    alpha.parent.mkdir(parents=True)
+    beta.parent.mkdir(parents=True)
+    alpha.write_text("alpha\n", encoding="utf-8")
+    beta.write_text("beta\n", encoding="utf-8")
+    noise.write_text("noise\n", encoding="utf-8")
+
+    discovered = app_module._discover_navigate_experiment_files(tmp_path)
+
+    assert discovered == [alpha.resolve(), beta.resolve()]
+
+
+def test_resolve_initial_dialog_dimensions_keeps_larger_default_size() -> None:
+    minimum_size, startup_size = app_module._resolve_initial_dialog_dimensions(
+        minimum_size=app_module._SETUP_DIALOG_MINIMUM_SIZE,
+        preferred_size=app_module._SETUP_DIALOG_PREFERRED_SIZE,
+        available_size=(1920, 1200),
+    )
+
+    assert minimum_size == app_module._SETUP_DIALOG_MINIMUM_SIZE
+    assert startup_size == app_module._SETUP_DIALOG_PREFERRED_SIZE
+
+
+def test_resolve_initial_dialog_dimensions_clamps_to_available_screen() -> None:
+    available_size = (1366, 900)
+    minimum_size, startup_size = app_module._resolve_initial_dialog_dimensions(
+        minimum_size=app_module._SETUP_DIALOG_MINIMUM_SIZE,
+        preferred_size=app_module._SETUP_DIALOG_PREFERRED_SIZE,
+        available_size=available_size,
+    )
+
+    expected_width = available_size[0] - app_module._DIALOG_SCREEN_MARGIN_PX
+    expected_height = available_size[1] - app_module._DIALOG_SCREEN_MARGIN_PX
+
+    assert startup_size == (expected_width, expected_height)
+    assert minimum_size == (
+        min(app_module._SETUP_DIALOG_MINIMUM_SIZE[0], expected_width),
+        min(app_module._SETUP_DIALOG_MINIMUM_SIZE[1], expected_height),
+    )
+
+
+def test_resolve_initial_dialog_dimensions_expands_for_content_size_hint() -> None:
+    minimum_size, startup_size = app_module._resolve_initial_dialog_dimensions(
+        minimum_size=(1000, 900),
+        preferred_size=(1200, 1000),
+        available_size=(1800, 1600),
+        content_size_hint=(1100, 1225),
+    )
+
+    assert minimum_size == (1100, 1225)
+    assert startup_size == (1200, 1225)
+
+
+def test_save_and_load_experiment_list_round_trip(tmp_path) -> None:
+    first = tmp_path / "first" / "experiment.yml"
+    second = tmp_path / "second" / "experiment.yaml"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    list_path = tmp_path / f"batch{app_module._CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
+
+    saved_path = app_module._save_experiment_list_file(list_path, [first, second])
+    loaded_paths = app_module._load_experiment_list_file(saved_path)
+
+    assert saved_path == list_path.resolve()
+    assert loaded_paths == [first.resolve(), second.resolve()]
+
+
+def test_deduplicate_resolved_paths_preserves_first_seen_order(tmp_path) -> None:
+    first = tmp_path / "cell_001" / "experiment.yml"
+    second = tmp_path / "cell_002" / "experiment.yml"
+    paths = [first, second, first.resolve(), second.resolve(), first]
+
+    deduplicated = app_module._deduplicate_resolved_paths(paths)
+
+    assert deduplicated == [first.resolve(), second.resolve()]
+
+
+def test_plan_experiment_store_materialization_partitions_pending_requests(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    first = tmp_path / "cell_001" / "experiment.yml"
+    second = tmp_path / "cell_002" / "experiment.yml"
+    third = tmp_path / "cell_003" / "experiment.yml"
+    requests = [
+        app_module.ExperimentStorePreparationRequest(
+            experiment_path=first.resolve(),
+            experiment=_make_navigate_experiment(first),
+            source_data_path=first.parent / "CH00_000000.ome.tiff",
+            target_store=first.parent / "data_store.zarr",
+        ),
+        app_module.ExperimentStorePreparationRequest(
+            experiment_path=second.resolve(),
+            experiment=_make_navigate_experiment(second),
+            source_data_path=second.parent / "CH00_000000.ome.tiff",
+            target_store=second.parent / "data_store.zarr",
+        ),
+        app_module.ExperimentStorePreparationRequest(
+            experiment_path=third.resolve(),
+            experiment=_make_navigate_experiment(third),
+            source_data_path=third.parent / "CH00_000000.ome.tiff",
+            target_store=third.parent / "data_store.zarr",
+        ),
+    ]
+
+    monkeypatch.setattr(
+        app_module,
+        "_has_complete_configured_canonical_store",
+        lambda store_path, zarr_save: Path(store_path).expanduser().resolve()
+        == requests[2].target_store.resolve(),
+    )
+
+    selected_request, pending_requests, ready_requests = (
+        app_module._plan_experiment_store_materialization(
+            requests,
+            selected_experiment_path=second,
+            zarr_save=app_module.ZarrSaveConfig(),
+        )
+    )
+
+    assert selected_request.experiment_path == second.resolve()
+    assert [request.experiment_path for request in pending_requests] == [
+        first.resolve(),
+        second.resolve(),
+    ]
+    assert [request.experiment_path for request in ready_requests] == [third.resolve()]
+
+
+def test_load_experiment_list_file_rejects_invalid_format(tmp_path) -> None:
+    list_path = tmp_path / f"broken{app_module._CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
+    list_path.write_text('{"format":"wrong","experiments":["a"]}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported experiment list format"):
+        app_module._load_experiment_list_file(list_path)
 
 
 def test_summarize_image_info_extracts_pixel_size_from_navigate_metadata() -> None:
