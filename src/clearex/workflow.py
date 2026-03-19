@@ -3515,6 +3515,77 @@ def format_dask_backend_summary(config: DaskBackendConfig) -> str:
     )
 
 
+@dataclass(frozen=True)
+class AnalysisTarget:
+    """Resolved experiment/store pair available to the analysis dialog.
+
+    Attributes
+    ----------
+    experiment_path : str
+        Navigate ``experiment.yml`` path shown to operators in batch/single
+        analysis scope controls.
+    store_path : str
+        Canonical analysis-store path used when executing this target.
+    """
+
+    experiment_path: str
+    store_path: str
+
+
+def normalize_analysis_targets(
+    targets: Optional[Sequence[Union[AnalysisTarget, Mapping[str, Any]]]],
+) -> tuple[AnalysisTarget, ...]:
+    """Normalize workflow analysis targets.
+
+    Parameters
+    ----------
+    targets : sequence[AnalysisTarget or mapping], optional
+        Candidate analysis targets. Mapping entries must provide
+        ``experiment_path`` and ``store_path`` keys.
+
+    Returns
+    -------
+    tuple[AnalysisTarget, ...]
+        Normalized targets in first-seen order. Duplicate experiment paths are
+        collapsed to one entry.
+
+    Raises
+    ------
+    ValueError
+        If a target is malformed or missing required paths.
+    """
+    if targets is None:
+        return tuple()
+
+    normalized: list[AnalysisTarget] = []
+    seen_experiment_paths: set[str] = set()
+    for target in targets:
+        if isinstance(target, AnalysisTarget):
+            experiment_path = str(target.experiment_path).strip()
+            store_path = str(target.store_path).strip()
+        elif isinstance(target, Mapping):
+            experiment_path = str(target.get("experiment_path", "")).strip()
+            store_path = str(target.get("store_path", "")).strip()
+        else:
+            raise ValueError(
+                "Analysis targets must be AnalysisTarget instances or mappings."
+            )
+        if not experiment_path:
+            raise ValueError("Each analysis target must define an experiment_path.")
+        if not store_path:
+            raise ValueError("Each analysis target must define a store_path.")
+        if experiment_path in seen_experiment_paths:
+            continue
+        seen_experiment_paths.add(experiment_path)
+        normalized.append(
+            AnalysisTarget(
+                experiment_path=experiment_path,
+                store_path=store_path,
+            )
+        )
+    return tuple(normalized)
+
+
 @dataclass
 class WorkflowConfig:
     """Runtime workflow options shared by GUI and headless entrypoints.
@@ -3523,6 +3594,15 @@ class WorkflowConfig:
     ----------
     file : str, optional
         Input image path for processing.
+    analysis_targets : tuple[AnalysisTarget, ...]
+        Ordered experiment/store pairs available for single-experiment or
+        batch analysis selection in the GUI.
+    analysis_selected_experiment_path : str, optional
+        Currently selected Navigate ``experiment.yml`` path within
+        ``analysis_targets``.
+    analysis_apply_to_all : bool
+        Whether analysis should run across every entry in
+        ``analysis_targets`` instead of only the selected one.
     prefer_dask : bool
         Whether to open data using lazy Dask-backed arrays when supported.
     dask_backend : DaskBackendConfig
@@ -3552,6 +3632,9 @@ class WorkflowConfig:
     """
 
     file: Optional[str] = None
+    analysis_targets: tuple[AnalysisTarget, ...] = field(default_factory=tuple)
+    analysis_selected_experiment_path: Optional[str] = None
+    analysis_apply_to_all: bool = False
     prefer_dask: bool = True
     dask_backend: DaskBackendConfig = field(default_factory=DaskBackendConfig)
     chunks: ChunkSpec = None
@@ -3585,6 +3668,49 @@ class WorkflowConfig:
         ValueError
             If analysis parameter mappings are invalid.
         """
+        self.analysis_targets = normalize_analysis_targets(self.analysis_targets)
+        selected_experiment_path = (
+            str(self.analysis_selected_experiment_path).strip()
+            if self.analysis_selected_experiment_path is not None
+            else ""
+        )
+        if self.analysis_targets:
+            selected_target = None
+            if selected_experiment_path:
+                selected_target = next(
+                    (
+                        target
+                        for target in self.analysis_targets
+                        if target.experiment_path == selected_experiment_path
+                    ),
+                    None,
+                )
+                if selected_target is None:
+                    raise ValueError(
+                        "analysis_selected_experiment_path must match one of the "
+                        "configured analysis targets."
+                    )
+            else:
+                current_file = str(self.file or "").strip()
+                selected_target = next(
+                    (
+                        target
+                        for target in self.analysis_targets
+                        if target.store_path == current_file
+                    ),
+                    None,
+                )
+                if selected_target is None:
+                    selected_target = self.analysis_targets[0]
+            self.analysis_selected_experiment_path = (
+                selected_target.experiment_path
+            )
+            self.file = selected_target.store_path
+        else:
+            self.analysis_selected_experiment_path = (
+                selected_experiment_path if selected_experiment_path else None
+            )
+        self.analysis_apply_to_all = bool(self.analysis_apply_to_all)
         self.analysis_parameters = normalize_analysis_operation_parameters(
             self.analysis_parameters
         )
@@ -3609,6 +3735,25 @@ class WorkflowConfig:
                 self.mip_export,
             )
         )
+
+    def selected_analysis_target(self) -> Optional[AnalysisTarget]:
+        """Return the currently selected analysis target, when configured.
+
+        Returns
+        -------
+        AnalysisTarget, optional
+            Selected target resolved from ``analysis_targets`` and
+            ``analysis_selected_experiment_path``.
+        """
+        selected_experiment_path = (
+            str(self.analysis_selected_experiment_path or "").strip()
+        )
+        if not selected_experiment_path:
+            return None
+        for target in self.analysis_targets:
+            if target.experiment_path == selected_experiment_path:
+                return target
+        return None
 
 
 def parse_chunks(chunks: Optional[str]) -> ChunkSpec:

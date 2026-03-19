@@ -16,6 +16,11 @@ This folder owns the PyQt6 UX in `app.py`.
   - On `Next`, batch-materialize missing canonical stores for every listed
     experiment, then continue with the currently selected experiment
 - Analysis window (`AnalysisSelectionDialog`):
+  - Top `Analysis Scope` panel:
+    - choose the active `experiment.yml` from the loaded setup list,
+    - optionally apply the selected analysis sequence to every loaded experiment
+  - The selected experiment switches the active store/provenance context shown
+    in the dialog
   - Left: operation selection, execution order, and `Configure` buttons
   - Right: operation parameter panels + parameter-help panel
 

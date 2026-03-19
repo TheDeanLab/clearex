@@ -40,6 +40,34 @@ from typing import Any, TypeVar
 # Third Party Imports
 
 
+_QUIET_LIBRARY_LOGGER_LEVELS: dict[str, int] = {
+    "distributed.http.proxy": logging.WARNING,
+}
+
+
+def _configure_library_loggers() -> None:
+    """Apply ClearEx library-specific logger overrides.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+        Logger levels are updated in-place.
+
+    Notes
+    -----
+    ClearEx keeps Dask/distributed logs enabled overall, but some dependency
+    modules emit low-signal informational notices during normal startup. Those
+    are raised to ``WARNING`` here so the log file focuses on actual runtime
+    behavior and actionable diagnostics.
+    """
+    for logger_name, level in _QUIET_LIBRARY_LOGGER_LEVELS.items():
+        logging.getLogger(logger_name).setLevel(int(level))
+
+
 def initialize_logging(
     log_directory: os.PathLike[str] | str | None, enable_logging: bool | None = False
 ) -> logging.Logger:
@@ -77,6 +105,7 @@ def initialize_logging(
         # If logging is not initialized and we do not want to initialize it,
         # set a NullHandler to avoid "No handler found" warnings.
         root_logger.addHandler(logging.NullHandler())
+        _configure_library_loggers()
         return root_logger
 
 
@@ -134,6 +163,7 @@ def initiate_logger(log_directory: os.PathLike[str] | str) -> logging.Logger:
     root_logger.addHandler(sh)
 
     root_logger.setLevel(logging.INFO)
+    _configure_library_loggers()
     return root_logger
 
 

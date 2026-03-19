@@ -32,6 +32,7 @@ import pytest
 import clearex.workflow as workflow_module
 from clearex.workflow import (
     ANALYSIS_OPERATION_ORDER,
+    AnalysisTarget,
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
     DASK_BACKEND_SLURM_RUNNER,
@@ -165,6 +166,57 @@ class TestWorkflowConfig:
             cfg.analysis_parameters["mip_export"]["position_mode"] == "multi_position"
         )
         assert cfg.analysis_parameters["mip_export"]["export_format"] == "ome-tiff"
+
+    def test_normalizes_analysis_targets_and_selected_store(self):
+        cfg = WorkflowConfig(
+            file="/tmp/unselected/data_store.zarr",
+            analysis_targets=[
+                {
+                    "experiment_path": "/tmp/cell_001/experiment.yml",
+                    "store_path": "/tmp/cell_001/data_store.zarr",
+                },
+                AnalysisTarget(
+                    experiment_path="/tmp/cell_002/experiment.yml",
+                    store_path="/tmp/cell_002/data_store.zarr",
+                ),
+                {
+                    "experiment_path": "/tmp/cell_001/experiment.yml",
+                    "store_path": "/tmp/cell_001/duplicate_store.zarr",
+                },
+            ],
+            analysis_selected_experiment_path="/tmp/cell_002/experiment.yml",
+            analysis_apply_to_all=1,
+        )
+
+        assert cfg.analysis_targets == (
+            AnalysisTarget(
+                experiment_path="/tmp/cell_001/experiment.yml",
+                store_path="/tmp/cell_001/data_store.zarr",
+            ),
+            AnalysisTarget(
+                experiment_path="/tmp/cell_002/experiment.yml",
+                store_path="/tmp/cell_002/data_store.zarr",
+            ),
+        )
+        assert cfg.analysis_selected_experiment_path == "/tmp/cell_002/experiment.yml"
+        assert cfg.file == "/tmp/cell_002/data_store.zarr"
+        assert cfg.analysis_apply_to_all is True
+        assert cfg.selected_analysis_target() == AnalysisTarget(
+            experiment_path="/tmp/cell_002/experiment.yml",
+            store_path="/tmp/cell_002/data_store.zarr",
+        )
+
+    def test_rejects_unknown_selected_analysis_target(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_targets=[
+                    {
+                        "experiment_path": "/tmp/cell_001/experiment.yml",
+                        "store_path": "/tmp/cell_001/data_store.zarr",
+                    }
+                ],
+                analysis_selected_experiment_path="/tmp/cell_999/experiment.yml",
+            )
 
     def test_normalizes_flatfield_analysis_parameters(self):
         cfg = WorkflowConfig(

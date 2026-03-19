@@ -248,6 +248,10 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
 - Pressing `Next` batch-prepares canonical `data_store.zarr` outputs for every
   listed experiment that does not already have a compatible store, then opens
   analysis selection for the currently selected experiment.
+- The analysis window includes an `Analysis Scope` panel where you can:
+  - pick which loaded `experiment.yml` drives the current analysis context, or
+  - enable batch mode to run the same selected analysis sequence across every
+    experiment in the loaded list.
 - If GUI cannot launch (for example no display), ClearEx logs a warning and falls back to headless execution.
 
 ### Visualization Keyframes and Manifest

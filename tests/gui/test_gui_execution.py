@@ -273,6 +273,89 @@ def test_plan_experiment_store_materialization_partitions_pending_requests(
     assert [request.experiment_path for request in ready_requests] == [third.resolve()]
 
 
+def test_analysis_targets_for_workflow_falls_back_to_current_file() -> None:
+    workflow = app_module.WorkflowConfig(file="/tmp/current/data_store.zarr")
+
+    targets = app_module._analysis_targets_for_workflow(workflow)
+
+    assert targets == (
+        app_module.AnalysisTarget(
+            experiment_path="/tmp/current/data_store.zarr",
+            store_path="/tmp/current/data_store.zarr",
+        ),
+    )
+
+
+def test_workflows_for_selected_analysis_scope_expands_batch_targets() -> None:
+    workflow = app_module.WorkflowConfig(
+        file="/tmp/cell_002/data_store.zarr",
+        analysis_targets=(
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_001/experiment.yml",
+                store_path="/tmp/cell_001/data_store.zarr",
+            ),
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_002/experiment.yml",
+                store_path="/tmp/cell_002/data_store.zarr",
+            ),
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_003/experiment.yml",
+                store_path="/tmp/cell_003/data_store.zarr",
+            ),
+        ),
+        analysis_selected_experiment_path="/tmp/cell_002/experiment.yml",
+        analysis_apply_to_all=True,
+        flatfield=True,
+    )
+
+    scoped = app_module._workflows_for_selected_analysis_scope(workflow)
+
+    assert [entry.file for entry in scoped] == [
+        "/tmp/cell_001/data_store.zarr",
+        "/tmp/cell_002/data_store.zarr",
+        "/tmp/cell_003/data_store.zarr",
+    ]
+    assert [entry.analysis_selected_experiment_path for entry in scoped] == [
+        "/tmp/cell_001/experiment.yml",
+        "/tmp/cell_002/experiment.yml",
+        "/tmp/cell_003/experiment.yml",
+    ]
+    assert all(entry.analysis_apply_to_all is False for entry in scoped)
+    assert all(entry.flatfield is True for entry in scoped)
+
+
+def test_reset_analysis_selection_for_next_run_preserves_scope() -> None:
+    workflow = app_module.WorkflowConfig(
+        file="/tmp/cell_002/data_store.zarr",
+        analysis_targets=(
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_001/experiment.yml",
+                store_path="/tmp/cell_001/data_store.zarr",
+            ),
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_002/experiment.yml",
+                store_path="/tmp/cell_002/data_store.zarr",
+            ),
+        ),
+        analysis_selected_experiment_path="/tmp/cell_002/experiment.yml",
+        analysis_apply_to_all=True,
+        flatfield=True,
+        registration=True,
+    )
+
+    reset = app_module._reset_analysis_selection_for_next_run(workflow)
+
+    assert reset.file == "/tmp/cell_002/data_store.zarr"
+    assert reset.analysis_targets == workflow.analysis_targets
+    assert (
+        reset.analysis_selected_experiment_path
+        == "/tmp/cell_002/experiment.yml"
+    )
+    assert reset.analysis_apply_to_all is True
+    assert reset.flatfield is False
+    assert reset.registration is False
+
+
 def test_load_experiment_list_file_rejects_invalid_format(tmp_path) -> None:
     list_path = tmp_path / f"broken{app_module._CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
     list_path.write_text('{"format":"wrong","experiments":["a"]}\n', encoding="utf-8")
@@ -394,6 +477,72 @@ def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
     assert dialog.closed is True
     assert dialog.updates[0] == (1, "Starting analysis workflow...")
     assert dialog.updates[-1] == (100, "Analysis workflow completed.")
+
+
+def test_run_workflow_with_progress_slurm_batches_all_selected_experiments(
+    monkeypatch,
+) -> None:
+    fake_app_cls, fake_dialog_cls = _install_fake_gui_runtime(monkeypatch)
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
+            {"summary": str(summary), "details": str(details)}
+        ),
+    )
+    executed_files: list[str] = []
+
+    def _run_callback(workflow, progress_callback):
+        executed_files.append(str(workflow.file))
+        progress_callback(50, "running")
+
+    workflow = app_module.WorkflowConfig(
+        file="/tmp/cell_002/data_store.zarr",
+        analysis_targets=(
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_001/experiment.yml",
+                store_path="/tmp/cell_001/data_store.zarr",
+            ),
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_002/experiment.yml",
+                store_path="/tmp/cell_002/data_store.zarr",
+            ),
+        ),
+        analysis_selected_experiment_path="/tmp/cell_002/experiment.yml",
+        analysis_apply_to_all=True,
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        ),
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert executed_files == [
+        "/tmp/cell_001/data_store.zarr",
+        "/tmp/cell_002/data_store.zarr",
+    ]
+
+    app_instance = fake_app_cls.instance()
+    assert app_instance is not None
+    assert app_instance.quit_calls == 1
+
+    dialog = fake_dialog_cls.last_instance
+    assert dialog is not None
+    assert dialog.shown is True
+    assert dialog.accepted is True
+    assert dialog.rejected is False
+    assert dialog.closed is True
+    assert dialog.updates[0] == (
+        1,
+        "Starting batch analysis workflow for 2 experiments...",
+    )
+    assert dialog.updates[-1] == (100, "Completed analysis for 2 experiments.")
 
 
 def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(

@@ -68,6 +68,7 @@ from clearex.io.experiment import (
 from clearex.io.provenance import is_zarr_store_path, summarize_analysis_history
 from clearex.io.read import ImageInfo, ImageOpener
 from clearex.workflow import (
+    AnalysisTarget,
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_MODE_LABELS,
     DASK_BACKEND_SLURM_CLUSTER,
@@ -605,6 +606,160 @@ def _collect_experiment_paths_from_input_path(path: Path) -> list[Path]:
     if is_navigate_experiment_file(resolved):
         return [resolved]
     return []
+
+
+def _analysis_targets_from_store_requests(
+    requests: Sequence[ExperimentStorePreparationRequest],
+) -> tuple[AnalysisTarget, ...]:
+    """Build ordered analysis targets from prepared experiment-store requests.
+
+    Parameters
+    ----------
+    requests : sequence[ExperimentStorePreparationRequest]
+        Prepared experiment/store requests from the setup dialog.
+
+    Returns
+    -------
+    tuple[AnalysisTarget, ...]
+        Ordered experiment/store target list for the analysis dialog.
+    """
+    return tuple(
+        AnalysisTarget(
+            experiment_path=str(
+                Path(request.experiment_path).expanduser().resolve()
+            ),
+            store_path=str(Path(request.target_store).expanduser().resolve()),
+        )
+        for request in requests
+    )
+
+
+def _analysis_targets_for_workflow(
+    workflow: WorkflowConfig,
+) -> tuple[AnalysisTarget, ...]:
+    """Return available analysis targets for a workflow.
+
+    Parameters
+    ----------
+    workflow : WorkflowConfig
+        Workflow configuration to inspect.
+
+    Returns
+    -------
+    tuple[AnalysisTarget, ...]
+        Configured analysis targets, or a single fallback entry derived from
+        ``workflow.file`` when no explicit experiment list is available.
+    """
+    if workflow.analysis_targets:
+        return tuple(workflow.analysis_targets)
+    file_path = str(workflow.file or "").strip()
+    if not file_path:
+        return tuple()
+    return (
+        AnalysisTarget(
+            experiment_path=file_path,
+            store_path=file_path,
+        ),
+    )
+
+
+def _resolve_selected_analysis_target(
+    workflow: WorkflowConfig,
+    *,
+    targets: Optional[Sequence[AnalysisTarget]] = None,
+) -> Optional[AnalysisTarget]:
+    """Resolve the active analysis target for a workflow.
+
+    Parameters
+    ----------
+    workflow : WorkflowConfig
+        Workflow configuration carrying experiment selection state.
+    targets : sequence[AnalysisTarget], optional
+        Precomputed targets. Defaults to the workflow-derived targets.
+
+    Returns
+    -------
+    AnalysisTarget, optional
+        Selected target, or ``None`` when no file/targets are available.
+    """
+    available_targets = (
+        tuple(targets)
+        if targets is not None
+        else _analysis_targets_for_workflow(workflow)
+    )
+    if not available_targets:
+        return None
+    selected_experiment_path = str(
+        workflow.analysis_selected_experiment_path or ""
+    ).strip()
+    if selected_experiment_path:
+        for target in available_targets:
+            if target.experiment_path == selected_experiment_path:
+                return target
+    current_file = str(workflow.file or "").strip()
+    if current_file:
+        for target in available_targets:
+            if target.store_path == current_file:
+                return target
+    return available_targets[0]
+
+
+def _analysis_target_display_text(target: AnalysisTarget) -> str:
+    """Return operator-facing combo text for one analysis target.
+
+    Parameters
+    ----------
+    target : AnalysisTarget
+        Target to format.
+
+    Returns
+    -------
+    str
+        Experiment descriptor path shown in the analysis scope combo.
+    """
+    return str(target.experiment_path)
+
+
+def _analysis_scope_summary_text(
+    *,
+    targets: Sequence[AnalysisTarget],
+    selected_target: Optional[AnalysisTarget],
+    apply_to_all: bool,
+) -> str:
+    """Build descriptive text for the analysis-scope panel.
+
+    Parameters
+    ----------
+    targets : sequence[AnalysisTarget]
+        Available analysis targets.
+    selected_target : AnalysisTarget, optional
+        Currently selected experiment/store target.
+    apply_to_all : bool
+        Whether the workflow is in batch-analysis mode.
+
+    Returns
+    -------
+    str
+        Human-readable scope summary.
+    """
+    if not targets:
+        return "Analysis will run for the current data store."
+    if apply_to_all and len(targets) > 1:
+        reference_text = (
+            f" Reference experiment: {selected_target.experiment_path}."
+            if selected_target is not None
+            else ""
+        )
+        return (
+            f"Selected operations will run for all {len(targets)} loaded experiments."
+            f"{reference_text}"
+        )
+    if selected_target is None:
+        return "Analysis will run for the selected experiment."
+    return (
+        "Selected operations will run for the chosen experiment: "
+        f"{selected_target.experiment_path}"
+    )
 
 
 def _display_is_available() -> bool:
@@ -5411,13 +5566,25 @@ if HAS_PYQT6:
             except Exception:
                 return None
 
-        def _accept_with_store_path(self, store_path: Path) -> None:
+        def _accept_with_store_path(
+            self,
+            store_path: Path,
+            *,
+            analysis_targets: Sequence[AnalysisTarget],
+            selected_experiment_path: Path,
+        ) -> None:
             """Finalize setup dialog with prepared store path configuration.
 
             Parameters
             ----------
             store_path : pathlib.Path
                 Prepared canonical store path.
+            analysis_targets : sequence[AnalysisTarget]
+                Ordered experiment/store targets available for the analysis
+                dialog.
+            selected_experiment_path : pathlib.Path
+                Navigate experiment descriptor currently selected in the setup
+                list.
 
             Returns
             -------
@@ -5426,6 +5593,11 @@ if HAS_PYQT6:
             """
             self.result_config = WorkflowConfig(
                 file=str(store_path),
+                analysis_targets=tuple(analysis_targets),
+                analysis_selected_experiment_path=str(
+                    Path(selected_experiment_path).expanduser().resolve()
+                ),
+                analysis_apply_to_all=False,
                 prefer_dask=True,
                 dask_backend=self._dask_backend_config,
                 chunks=self._chunks,
@@ -5504,12 +5676,17 @@ if HAS_PYQT6:
                 self._set_status("Selected experiment is no longer available.")
                 return
             ready_count = len(ready_requests)
+            analysis_targets = _analysis_targets_from_store_requests(requests)
 
             if not pending_requests:
                 self._set_status(
                     "All listed data stores are ready. Opening analysis selection."
                 )
-                self._accept_with_store_path(selected_request.target_store)
+                self._accept_with_store_path(
+                    selected_request.target_store,
+                    analysis_targets=analysis_targets,
+                    selected_experiment_path=selected_request.experiment_path,
+                )
                 return
 
             self._set_status(
@@ -5574,7 +5751,11 @@ if HAS_PYQT6:
                 prepared_count,
                 ready_count,
             )
-            self._accept_with_store_path(selected_request.target_store)
+            self._accept_with_store_path(
+                selected_request.target_store,
+                analysis_targets=analysis_targets,
+                selected_experiment_path=selected_request.experiment_path,
+            )
 
     class AnalysisSelectionDialog(QDialog):
         """Second-step GUI dialog for selecting and sequencing analysis operations."""
@@ -6038,8 +6219,15 @@ if HAS_PYQT6:
             self.setWindowTitle("ClearEx Analysis")
 
             self._base_config = initial
+            self._analysis_targets: tuple[AnalysisTarget, ...] = (
+                _analysis_targets_for_workflow(initial)
+            )
+            self._active_analysis_target: Optional[AnalysisTarget] = None
             self._dask_backend_config: DaskBackendConfig = initial.dask_backend
             self.result_config: Optional[WorkflowConfig] = None
+            self._analysis_scope_combo: Optional[QComboBox] = None
+            self._analysis_apply_to_all_checkbox: Optional[QCheckBox] = None
+            self._analysis_scope_summary_label: Optional[QLabel] = None
             self._status_label: Optional[QLabel] = None
             self._dask_backend_summary_label: Optional[QLabel] = None
             self._dask_backend_button: Optional[QPushButton] = None
@@ -6120,6 +6308,242 @@ if HAS_PYQT6:
                 content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
             )
 
+        def _build_analysis_scope_panel(self) -> QGroupBox:
+            """Build the top-level experiment-scope controls.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            QGroupBox
+                Configured panel containing single-vs-batch analysis controls.
+            """
+            group = QGroupBox("Analysis Scope")
+            layout = QVBoxLayout(group)
+            apply_stack_spacing(layout)
+
+            experiment_row = QHBoxLayout()
+            apply_row_spacing(experiment_row)
+            label = QLabel("Experiment:")
+            label.setObjectName("metadataFieldLabel")
+            experiment_row.addWidget(label)
+
+            self._analysis_scope_combo = QComboBox()
+            self._analysis_scope_combo.setObjectName("analysisScopeCombo")
+            self._analysis_scope_combo.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
+            self._analysis_scope_combo.currentIndexChanged.connect(
+                self._on_analysis_target_changed
+            )
+            experiment_row.addWidget(self._analysis_scope_combo, 1)
+            layout.addLayout(experiment_row)
+
+            self._analysis_apply_to_all_checkbox = QCheckBox(
+                "Run selected operations on all loaded experiments"
+            )
+            self._analysis_apply_to_all_checkbox.toggled.connect(
+                self._on_analysis_apply_to_all_changed
+            )
+            layout.addWidget(self._analysis_apply_to_all_checkbox)
+
+            self._analysis_scope_summary_label = QLabel(
+                "Select one experiment or enable batch mode."
+            )
+            self._analysis_scope_summary_label.setObjectName("statusLabel")
+            self._analysis_scope_summary_label.setWordWrap(True)
+            layout.addWidget(self._analysis_scope_summary_label)
+            return group
+
+        def _populate_analysis_scope_targets(self, initial: WorkflowConfig) -> None:
+            """Populate analysis-scope widgets from workflow state.
+
+            Parameters
+            ----------
+            initial : WorkflowConfig
+                Initial workflow carrying available targets and selection state.
+
+            Returns
+            -------
+            None
+                Scope controls are updated in-place.
+            """
+            selected_target = _resolve_selected_analysis_target(
+                initial,
+                targets=self._analysis_targets,
+            )
+            if self._analysis_scope_combo is not None:
+                self._analysis_scope_combo.blockSignals(True)
+                self._analysis_scope_combo.clear()
+                selected_index = -1
+                for index, target in enumerate(self._analysis_targets):
+                    display_text = _analysis_target_display_text(target)
+                    self._analysis_scope_combo.addItem(
+                        display_text,
+                        target.experiment_path,
+                    )
+                    self._analysis_scope_combo.setItemData(
+                        index,
+                        target.store_path,
+                        Qt.ItemDataRole.ToolTipRole,
+                    )
+                    if (
+                        selected_target is not None
+                        and target.experiment_path
+                        == selected_target.experiment_path
+                    ):
+                        selected_index = index
+                if selected_index >= 0:
+                    self._analysis_scope_combo.setCurrentIndex(selected_index)
+                self._analysis_scope_combo.setEnabled(bool(self._analysis_targets))
+                self._analysis_scope_combo.blockSignals(False)
+            if self._analysis_apply_to_all_checkbox is not None:
+                self._analysis_apply_to_all_checkbox.blockSignals(True)
+                self._analysis_apply_to_all_checkbox.setChecked(
+                    bool(initial.analysis_apply_to_all)
+                )
+                self._analysis_apply_to_all_checkbox.setEnabled(
+                    len(self._analysis_targets) > 1
+                )
+                self._analysis_apply_to_all_checkbox.blockSignals(False)
+            self._set_active_analysis_target(selected_target, refresh_context=False)
+            self._refresh_analysis_scope_summary()
+
+        def _current_analysis_target(self) -> Optional[AnalysisTarget]:
+            """Return the currently selected analysis target.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            AnalysisTarget, optional
+                Active experiment/store target.
+            """
+            if self._analysis_scope_combo is not None:
+                selected_experiment_path = str(
+                    self._analysis_scope_combo.currentData() or ""
+                ).strip()
+                if selected_experiment_path:
+                    for target in self._analysis_targets:
+                        if target.experiment_path == selected_experiment_path:
+                            return target
+            return self._active_analysis_target
+
+        def _set_active_analysis_target(
+            self,
+            target: Optional[AnalysisTarget],
+            *,
+            refresh_context: bool,
+        ) -> None:
+            """Switch the analysis dialog to a specific experiment/store target.
+
+            Parameters
+            ----------
+            target : AnalysisTarget, optional
+                Target to activate.
+            refresh_context : bool
+                Whether to refresh provenance/input-source state immediately.
+
+            Returns
+            -------
+            None
+                Active analysis-store context is updated in-place.
+            """
+            if target is None:
+                self._active_analysis_target = None
+                if self._store_label is not None:
+                    store_text = str(self._base_config.file or "").strip() or "n/a"
+                    self._store_label.setText(store_text)
+                    self._store_label.setToolTip(store_text)
+                self._refresh_analysis_scope_summary()
+                return
+
+            self._active_analysis_target = target
+            self._base_config.file = str(target.store_path)
+            self._base_config.analysis_selected_experiment_path = str(
+                target.experiment_path
+            )
+            if self._analysis_scope_combo is not None:
+                self._analysis_scope_combo.setToolTip(str(target.experiment_path))
+            if self._store_label is not None:
+                self._store_label.setText(str(target.store_path))
+                self._store_label.setToolTip(str(target.store_path))
+            self._refresh_analysis_scope_summary()
+            if refresh_context:
+                self._refresh_operation_provenance_statuses()
+
+        def _refresh_analysis_scope_summary(self) -> None:
+            """Refresh descriptive text for the analysis-scope panel.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Summary label text is updated in-place.
+            """
+            if self._analysis_scope_summary_label is None:
+                return
+            apply_to_all = bool(
+                self._analysis_apply_to_all_checkbox.isChecked()
+                if self._analysis_apply_to_all_checkbox is not None
+                else False
+            )
+            summary = _analysis_scope_summary_text(
+                targets=self._analysis_targets,
+                selected_target=self._current_analysis_target(),
+                apply_to_all=apply_to_all,
+            )
+            self._analysis_scope_summary_label.setText(summary)
+            self._analysis_scope_summary_label.setToolTip(summary)
+
+        def _on_analysis_target_changed(self, index: int) -> None:
+            """Handle experiment selection changes in the analysis-scope combo.
+
+            Parameters
+            ----------
+            index : int
+                Newly selected combo-box index.
+
+            Returns
+            -------
+            None
+                Active target and store-dependent status widgets are refreshed.
+            """
+            del index
+            self._set_active_analysis_target(
+                self._current_analysis_target(),
+                refresh_context=True,
+            )
+
+        def _on_analysis_apply_to_all_changed(self, checked: bool) -> None:
+            """Refresh scope text when batch-analysis mode toggles.
+
+            Parameters
+            ----------
+            checked : bool
+                Whether batch-analysis mode is enabled.
+
+            Returns
+            -------
+            None
+                Scope text and status message are updated in-place.
+            """
+            self._refresh_analysis_scope_summary()
+            if checked and len(self._analysis_targets) > 1:
+                self._set_status(
+                    f"Batch analysis enabled for {len(self._analysis_targets)} experiments."
+                )
+            else:
+                self._set_status("Configure selected analysis routines and click Run.")
+
         def _build_ui(self) -> None:
             """Build analysis window controls and connect actions.
 
@@ -6148,6 +6572,8 @@ if HAS_PYQT6:
             if header_image is not None:
                 header_layout.addWidget(header_image)
             root.addWidget(header)
+
+            root.addWidget(self._build_analysis_scope_panel())
 
             content_row = QHBoxLayout()
             apply_stack_spacing(content_row)
@@ -10386,8 +10812,7 @@ if HAS_PYQT6:
                 normalized_parameters.get("mip_export", self._mip_export_defaults)
             )
 
-            if self._store_label is not None:
-                self._store_label.setText(initial.file or "n/a")
+            self._populate_analysis_scope_targets(initial)
             self._refresh_dask_backend_summary()
 
             checkbox_defaults = {
@@ -12144,8 +12569,24 @@ if HAS_PYQT6:
                         )
                         return
 
+            selected_target = self._current_analysis_target()
             workflow_kwargs: Dict[str, Any] = {
-                "file": self._base_config.file,
+                "file": (
+                    str(selected_target.store_path)
+                    if selected_target is not None
+                    else self._base_config.file
+                ),
+                "analysis_targets": self._analysis_targets,
+                "analysis_selected_experiment_path": (
+                    str(selected_target.experiment_path)
+                    if selected_target is not None
+                    else self._base_config.analysis_selected_experiment_path
+                ),
+                "analysis_apply_to_all": bool(
+                    self._analysis_apply_to_all_checkbox.isChecked()
+                    if self._analysis_apply_to_all_checkbox is not None
+                    else False
+                ),
                 "prefer_dask": self._base_config.prefer_dask,
                 "dask_backend": self._dask_backend_config,
                 "chunks": self._base_config.chunks,
@@ -12168,7 +12609,18 @@ if HAS_PYQT6:
             sequence_text = " -> ".join(
                 self._OPERATION_LABELS[name] for name in sequence
             )
-            self._set_status(f"Launching selected analysis routines: {sequence_text}")
+            if (
+                self.result_config.analysis_apply_to_all
+                and len(self.result_config.analysis_targets) > 1
+            ):
+                self._set_status(
+                    "Launching selected analysis routines for all listed "
+                    f"experiments: {sequence_text}"
+                )
+            else:
+                self._set_status(
+                    f"Launching selected analysis routines: {sequence_text}"
+                )
             self.accept()
 
 
@@ -12306,6 +12758,11 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
 
     workflow_kwargs: Dict[str, Any] = {
         "file": workflow.file,
+        "analysis_targets": workflow.analysis_targets,
+        "analysis_selected_experiment_path": (
+            workflow.analysis_selected_experiment_path
+        ),
+        "analysis_apply_to_all": workflow.analysis_apply_to_all,
         "prefer_dask": workflow.prefer_dask,
         "dask_backend": workflow.dask_backend,
         "chunks": workflow.chunks,
@@ -12323,6 +12780,77 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
     if "usegment3d" in dataclass_fields:
         workflow_kwargs["usegment3d"] = False
     return WorkflowConfig(**workflow_kwargs)
+
+
+def _analysis_target_run_label(target: Optional[AnalysisTarget]) -> str:
+    """Return a compact progress label for one analysis target.
+
+    Parameters
+    ----------
+    target : AnalysisTarget, optional
+        Target to format.
+
+    Returns
+    -------
+    str
+        Short human-readable label for progress updates.
+    """
+    if target is None:
+        return "selected experiment"
+    experiment_path = Path(target.experiment_path)
+    parent_name = str(experiment_path.parent.name).strip()
+    if parent_name:
+        return f"{parent_name}/{experiment_path.name}"
+    return experiment_path.name or str(target.experiment_path)
+
+
+def _workflows_for_selected_analysis_scope(
+    workflow: WorkflowConfig,
+) -> tuple[WorkflowConfig, ...]:
+    """Expand one workflow into the selected single-target or batch scope.
+
+    Parameters
+    ----------
+    workflow : WorkflowConfig
+        Workflow carrying analysis-scope state from the GUI.
+
+    Returns
+    -------
+    tuple[WorkflowConfig, ...]
+        One workflow for single-experiment runs, or one per target for batch
+        analysis.
+    """
+    targets = _analysis_targets_for_workflow(workflow)
+    if not targets:
+        return (workflow,)
+    if workflow.analysis_apply_to_all and len(targets) > 1:
+        return tuple(
+            replace(
+                workflow,
+                file=str(target.store_path),
+                analysis_selected_experiment_path=str(target.experiment_path),
+                analysis_apply_to_all=False,
+            )
+            for target in targets
+        )
+    selected_target = _resolve_selected_analysis_target(workflow, targets=targets)
+    if selected_target is None:
+        return (workflow,)
+    if (
+        str(workflow.file or "").strip() == str(selected_target.store_path)
+        and str(workflow.analysis_selected_experiment_path or "").strip()
+        == str(selected_target.experiment_path)
+        and not workflow.analysis_apply_to_all
+    ):
+        return (workflow,)
+    return (
+        replace(
+            workflow,
+            file=str(selected_target.store_path),
+            analysis_selected_experiment_path=str(selected_target.experiment_path),
+            analysis_apply_to_all=False,
+        ),
+    )
 
 
 def run_workflow_with_progress(
@@ -12372,10 +12900,72 @@ def run_workflow_with_progress(
         app = QApplication(sys.argv)
     _apply_application_icon(app)
 
+    scoped_workflows = _workflows_for_selected_analysis_scope(workflow)
+    execution_workflow = scoped_workflows[0]
+    effective_run_callback = run_callback
+    if len(scoped_workflows) > 1:
+
+        def _batch_run_callback(
+            _workflow: WorkflowConfig,
+            progress_callback: Callable[[int, str], None],
+        ) -> None:
+            """Execute one run callback across multiple prepared workflows.
+
+            Parameters
+            ----------
+            _workflow : WorkflowConfig
+                Ignored placeholder matching ``run_callback`` signature.
+            progress_callback : callable
+                Batch-aware GUI progress callback.
+
+            Returns
+            -------
+            None
+                Side-effect execution only.
+            """
+            del _workflow
+            total = len(scoped_workflows)
+            for index, target_workflow in enumerate(scoped_workflows):
+                target = _resolve_selected_analysis_target(target_workflow)
+                target_label = _analysis_target_run_label(target)
+
+                def _batch_progress(
+                    percent: int,
+                    message: str,
+                    *,
+                    batch_index: int = index,
+                    batch_total: int = total,
+                    label: str = target_label,
+                ) -> None:
+                    bounded_percent = max(0, min(100, int(percent)))
+                    overall_fraction = (
+                        float(batch_index) + (float(bounded_percent) / 100.0)
+                    ) / float(batch_total)
+                    overall_percent = max(
+                        0,
+                        min(100, int(round(overall_fraction * 100.0))),
+                    )
+                    progress_callback(
+                        overall_percent,
+                        f"[{batch_index + 1}/{batch_total}] {label}: {message}",
+                    )
+
+                progress_callback(
+                    max(0, min(99, int(round((float(index) / float(total)) * 100.0)))),
+                    f"Starting [{index + 1}/{total}] {target_label}",
+                )
+                run_callback(target_workflow, _batch_progress)
+            progress_callback(
+                100,
+                f"Completed analysis for {len(scoped_workflows)} experiments.",
+            )
+
+        effective_run_callback = _batch_run_callback
+
     progress_dialog = AnalysisExecutionProgressDialog(parent=None)
     failure_payload: dict[str, str] = {}
     completed = {"ok": False}
-    use_main_thread_execution = workflow.dask_backend.mode in {
+    use_main_thread_execution = execution_workflow.dask_backend.mode in {
         DASK_BACKEND_SLURM_RUNNER,
         DASK_BACKEND_SLURM_CLUSTER,
     }
@@ -12402,9 +12992,16 @@ def run_workflow_with_progress(
             app.processEvents()
 
         try:
-            _progress_with_events(1, "Starting analysis workflow...")
-            run_callback(workflow, _progress_with_events)
-            _progress_with_events(100, "Analysis workflow completed.")
+            if len(scoped_workflows) > 1:
+                _progress_with_events(
+                    1,
+                    f"Starting batch analysis workflow for {len(scoped_workflows)} experiments...",
+                )
+            else:
+                _progress_with_events(1, "Starting analysis workflow...")
+            effective_run_callback(execution_workflow, _progress_with_events)
+            if len(scoped_workflows) == 1:
+                _progress_with_events(100, "Analysis workflow completed.")
             completed["ok"] = True
             progress_dialog.accept()
         except Exception as exc:
@@ -12419,8 +13016,8 @@ def run_workflow_with_progress(
             progress_dialog.close()
     else:
         worker = AnalysisExecutionWorker(
-            workflow=workflow,
-            run_callback=run_callback,
+            workflow=execution_workflow,
+            run_callback=effective_run_callback,
         )
         worker.progress_changed.connect(progress_dialog.update_progress)
         worker.succeeded.connect(lambda: completed.__setitem__("ok", True))

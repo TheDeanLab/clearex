@@ -62,6 +62,13 @@ Workflow Selection
 Each analysis flag is independent. You can run a single operation or multiple
 operations in one run.
 
+In the GUI analysis window:
+
+- ``Analysis Scope`` lets you choose which loaded ``experiment.yml`` is the
+  active analysis target.
+- Enabling the batch checkbox runs the same selected operation set across all
+  experiments from the setup list instead of only the selected one.
+
 Examples:
 
 .. code-block:: bash
