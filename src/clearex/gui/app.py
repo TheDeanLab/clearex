@@ -102,6 +102,8 @@ from clearex.workflow import (
     normalize_analysis_operation_parameters,
     parse_pyramid_levels,
     recommend_local_cluster_config,
+    zarr_save_from_dict,
+    zarr_save_to_dict,
 )
 
 # Third Party Imports
@@ -181,6 +183,7 @@ _GUI_HEADER_IMAGE = "ClearEx_full_header.png"
 _GUI_APP_ICON = "icon.png"
 _CLEAREX_SETTINGS_DIR_NAME = ".clearex"
 _CLEAREX_DASK_BACKEND_SETTINGS_FILE = "dask_backend_settings.json"
+_CLEAREX_ZARR_SAVE_SETTINGS_FILE = "zarr_save_settings.json"
 _CLEAREX_EXPERIMENT_LIST_FORMAT = "clearex-experiment-list/v1"
 _CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX = ".clearex-experiment-list.json"
 _SETUP_DIALOG_MINIMUM_SIZE = (1240, 920)
@@ -828,6 +831,29 @@ def _resolve_dask_backend_settings_path(
     return directory / _CLEAREX_DASK_BACKEND_SETTINGS_FILE
 
 
+def _resolve_zarr_save_settings_path(
+    settings_directory: Optional[Path] = None,
+) -> Path:
+    """Resolve the user settings JSON path for persisted Zarr save config.
+
+    Parameters
+    ----------
+    settings_directory : pathlib.Path, optional
+        Settings directory override. Defaults to ``~/.clearex``.
+
+    Returns
+    -------
+    pathlib.Path
+        Full JSON path used for Zarr save configuration persistence.
+    """
+    directory = (
+        settings_directory
+        if settings_directory is not None
+        else _resolve_clearex_settings_directory()
+    )
+    return directory / _CLEAREX_ZARR_SAVE_SETTINGS_FILE
+
+
 def _ensure_clearex_settings_directory(
     settings_directory: Optional[Path] = None,
 ) -> Path:
@@ -924,6 +950,73 @@ def _load_last_used_dask_backend_config(
     return dask_backend_from_dict(payload)
 
 
+def _load_last_used_zarr_save_config(
+    settings_path: Optional[Path] = None,
+) -> Optional[ZarrSaveConfig]:
+    """Load the last-used Zarr save configuration from JSON.
+
+    Parameters
+    ----------
+    settings_path : pathlib.Path, optional
+        JSON file path override.
+
+    Returns
+    -------
+    ZarrSaveConfig, optional
+        Persisted Zarr save configuration, or ``None`` when settings are
+        missing or unreadable.
+
+    Raises
+    ------
+    None
+        Read and parse errors are logged and handled internally.
+    """
+    path = (
+        settings_path
+        if settings_path is not None
+        else _resolve_zarr_save_settings_path()
+    )
+    resolved = path.expanduser()
+    if not resolved.exists():
+        return None
+
+    try:
+        raw_text = resolved.read_text(encoding="utf-8")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to read Zarr save settings %s: %s",
+            resolved,
+            exc,
+        )
+        return None
+
+    if not raw_text.strip():
+        return None
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to decode Zarr save settings %s: %s",
+            resolved,
+            exc,
+        )
+        return None
+
+    if isinstance(payload, dict) and not payload:
+        return None
+
+    try:
+        return zarr_save_from_dict(payload)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to parse Zarr save settings %s: %s",
+            resolved,
+            exc,
+        )
+        return None
+
+
 def _save_last_used_dask_backend_config(
     config: DaskBackendConfig,
     settings_path: Optional[Path] = None,
@@ -969,6 +1062,51 @@ def _save_last_used_dask_backend_config(
     return True
 
 
+def _save_last_used_zarr_save_config(
+    config: ZarrSaveConfig,
+    settings_path: Optional[Path] = None,
+) -> bool:
+    """Persist the most recently used Zarr save configuration.
+
+    Parameters
+    ----------
+    config : ZarrSaveConfig
+        Zarr save configuration to persist.
+    settings_path : pathlib.Path, optional
+        JSON file path override.
+
+    Returns
+    -------
+    bool
+        ``True`` when settings are written successfully, otherwise ``False``.
+
+    Raises
+    ------
+    None
+        Write errors are logged and handled internally.
+    """
+    path = (
+        settings_path
+        if settings_path is not None
+        else _resolve_zarr_save_settings_path()
+    )
+    resolved = path.expanduser()
+    _ensure_clearex_settings_directory(resolved.parent)
+
+    try:
+        payload = zarr_save_to_dict(config)
+        serialized = json.dumps(payload, indent=2, sort_keys=True)
+        resolved.write_text(f"{serialized}\n", encoding="utf-8")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to persist Zarr save settings %s: %s",
+            resolved,
+            exc,
+        )
+        return False
+    return True
+
+
 def _should_apply_persisted_dask_backend(initial: Optional[WorkflowConfig]) -> bool:
     """Return whether persisted backend settings should override GUI defaults.
 
@@ -986,6 +1124,25 @@ def _should_apply_persisted_dask_backend(initial: Optional[WorkflowConfig]) -> b
     if initial is None:
         return True
     return initial.dask_backend == DaskBackendConfig()
+
+
+def _should_apply_persisted_zarr_save(initial: Optional[WorkflowConfig]) -> bool:
+    """Return whether persisted Zarr save settings should override defaults.
+
+    Parameters
+    ----------
+    initial : WorkflowConfig, optional
+        Initial workflow provided by caller.
+
+    Returns
+    -------
+    bool
+        ``True`` when caller did not provide custom Zarr save settings and
+        persisted values can safely populate the GUI defaults.
+    """
+    if initial is None:
+        return True
+    return initial.zarr_save == ZarrSaveConfig()
 
 
 def _zarr_component_exists_in_root(root: Any, component: str) -> bool:
@@ -1681,41 +1838,30 @@ class ExperimentStorePreparationResult:
     skipped_existing: bool
 
 
-def _has_complete_configured_canonical_store(
-    store_path: Path,
-    *,
-    zarr_save: ZarrSaveConfig,
-) -> bool:
-    """Return whether a canonical store already matches the requested config.
+def _has_reusable_canonical_store(store_path: Path) -> bool:
+    """Return whether a canonical store already exists and is complete.
 
     Parameters
     ----------
     store_path : pathlib.Path
         Candidate canonical store path.
-    zarr_save : ZarrSaveConfig
-        Expected chunk and pyramid settings for the store.
 
     Returns
     -------
     bool
-        ``True`` when the store exists and the canonical 6D data layout matches
-        the current Zarr save configuration.
+        ``True`` when the store exists and canonical ingestion has completed.
     """
     resolved_store_path = Path(store_path).expanduser().resolve()
     if not resolved_store_path.exists():
         return False
-    return has_complete_canonical_data_store(
-        resolved_store_path,
-        expected_chunks_tpczyx=zarr_save.chunks_tpczyx(),
-        expected_pyramid_factors=zarr_save.pyramid_tpczyx(),
-    )
+    return has_complete_canonical_data_store(resolved_store_path)
 
 
 def _plan_experiment_store_materialization(
     requests: Sequence[ExperimentStorePreparationRequest],
     *,
     selected_experiment_path: Path,
-    zarr_save: ZarrSaveConfig,
+    rebuild_requested: bool = False,
 ) -> tuple[
     ExperimentStorePreparationRequest,
     list[ExperimentStorePreparationRequest],
@@ -1729,8 +1875,9 @@ def _plan_experiment_store_materialization(
         Ordered experiment store requests represented in the setup list.
     selected_experiment_path : pathlib.Path
         Experiment currently selected in the GUI list.
-    zarr_save : ZarrSaveConfig
-        Zarr save configuration used to validate canonical stores.
+    rebuild_requested : bool, default=False
+        Whether all listed stores should be rebuilt explicitly even when a
+        complete canonical store already exists.
 
     Returns
     -------
@@ -1751,10 +1898,9 @@ def _plan_experiment_store_materialization(
     for request in requests:
         if request.experiment_path == resolved_selected_path:
             selected_request = request
-        if _has_complete_configured_canonical_store(
-            request.target_store,
-            zarr_save=zarr_save,
-        ):
+        if rebuild_requested:
+            pending_requests.append(request)
+        elif _has_reusable_canonical_store(request.target_store):
             ready_requests.append(request)
         else:
             pending_requests.append(request)
@@ -3424,6 +3570,7 @@ if HAS_PYQT6:
             requests: Sequence[ExperimentStorePreparationRequest],
             dask_backend: DaskBackendConfig,
             zarr_save: ZarrSaveConfig,
+            force_rebuild: bool = False,
         ) -> None:
             """Initialize worker state.
 
@@ -3436,6 +3583,9 @@ if HAS_PYQT6:
                 Backend configuration used for Dask execution.
             zarr_save : ZarrSaveConfig
                 Zarr chunk and pyramid configuration to enforce.
+            force_rebuild : bool, default=False
+                Whether to rebuild stores even when a complete canonical store
+                already exists.
 
             Returns
             -------
@@ -3446,6 +3596,7 @@ if HAS_PYQT6:
             self._requests = list(requests)
             self._dask_backend = dask_backend
             self._zarr_save = zarr_save
+            self._force_rebuild = bool(force_rebuild)
 
         def _emit_progress(self, percent: int, message: str) -> None:
             """Emit stage progress updates from the worker thread.
@@ -3569,7 +3720,11 @@ if HAS_PYQT6:
 
                         _batch_progress_callback(
                             1,
-                            "Starting canonical store preparation.",
+                            (
+                                "Starting canonical store rebuild."
+                                if self._force_rebuild
+                                else "Starting canonical store preparation."
+                            ),
                         )
                         result = materialize_experiment_data_store(
                             experiment=request.experiment,
@@ -3577,6 +3732,7 @@ if HAS_PYQT6:
                             chunks=self._zarr_save.chunks_tpczyx(),
                             pyramid_factors=self._zarr_save.pyramid_tpczyx(),
                             client=client,
+                            force_rebuild=self._force_rebuild,
                             progress_callback=_batch_progress_callback,
                         )
                         results.append(
@@ -4017,6 +4173,7 @@ if HAS_PYQT6:
             self._experiment_list_dirty = False
             self._source_data_directory_overrides: Dict[Path, Path] = {}
             self._materialization_worker: Optional[QThread] = None
+            self._rebuild_store_checkbox: Optional[QCheckBox] = None
 
             self._build_ui()
             self._apply_theme()
@@ -4189,12 +4346,22 @@ if HAS_PYQT6:
 
             footer = QHBoxLayout()
             apply_footer_row_spacing(footer)
+            footer_status = QVBoxLayout()
+            apply_help_stack_spacing(footer_status)
             self._status_label = QLabel("Ready")
             self._status_label.setObjectName("statusLabel")
+            footer_status.addWidget(self._status_label)
+            self._rebuild_store_checkbox = QCheckBox("Rebuild Canonical Store")
+            self._rebuild_store_checkbox.setObjectName("statusLabel")
+            self._rebuild_store_checkbox.setToolTip(
+                "Rebuild every listed canonical store using the current Zarr "
+                "chunking and pyramid settings."
+            )
+            footer_status.addWidget(self._rebuild_store_checkbox)
             self._cancel_button = QPushButton("Cancel")
             self._next_button = QPushButton("Next")
             self._next_button.setObjectName("runButton")
-            footer.addWidget(self._status_label, 1)
+            footer.addLayout(footer_status, 1)
             footer.addWidget(self._cancel_button)
             footer.addWidget(self._next_button)
             root.addLayout(footer)
@@ -4225,6 +4392,9 @@ if HAS_PYQT6:
             self._zarr_config_button.clicked.connect(self._on_edit_zarr_settings)
             self._cancel_button.clicked.connect(self.reject)
             self._next_button.clicked.connect(self._on_next)
+            self._rebuild_store_checkbox.toggled.connect(
+                self._on_rebuild_store_toggled
+            )
 
         def _hydrate(self, initial: WorkflowConfig) -> None:
             """Populate setup window fields from initial workflow config.
@@ -4342,7 +4512,31 @@ if HAS_PYQT6:
                 return
             self._zarr_save_config = dialog.result_config
             self._refresh_zarr_save_summary()
+            _save_last_used_zarr_save_config(self._zarr_save_config)
             self._set_status("Updated Zarr save settings.")
+
+        def _on_rebuild_store_toggled(self, checked: bool) -> None:
+            """Update setup status when rebuild mode is toggled.
+
+            Parameters
+            ----------
+            checked : bool
+                Whether explicit canonical-store rebuild mode is enabled.
+
+            Returns
+            -------
+            None
+                Status text is updated in-place.
+            """
+            if checked:
+                self._set_status(
+                    "Rebuild mode enabled. Next will rebuild listed canonical stores "
+                    "with the current Zarr settings."
+                )
+            else:
+                self._set_status(
+                    "Ready. Existing complete canonical stores will be reused."
+                )
 
         def _apply_theme(self) -> None:
             """Apply stylesheet-based theme for setup window.
@@ -5685,6 +5879,7 @@ if HAS_PYQT6:
                 zarr_save=self._zarr_save_config,
             )
             _save_last_used_dask_backend_config(self._dask_backend_config)
+            _save_last_used_zarr_save_config(self._zarr_save_config)
             self.accept()
 
         def _on_next(self) -> None:
@@ -5738,12 +5933,17 @@ if HAS_PYQT6:
                     self._set_status("Batch preparation failed before store creation.")
                     return
                 requests.append(request)
+            rebuild_requested = bool(
+                self._rebuild_store_checkbox.isChecked()
+                if self._rebuild_store_checkbox is not None
+                else False
+            )
             try:
                 selected_request, pending_requests, ready_requests = (
                     _plan_experiment_store_materialization(
                         requests,
                         selected_experiment_path=selected_experiment_path,
-                        zarr_save=self._zarr_save_config,
+                        rebuild_requested=rebuild_requested,
                     )
                 )
             except ValueError:
@@ -5763,14 +5963,26 @@ if HAS_PYQT6:
                 )
                 return
 
-            self._set_status(
-                f"Preparing {len(pending_requests)} of {len(requests)} listed data stores."
-            )
+            if rebuild_requested:
+                self._set_status(
+                    f"Rebuilding {len(pending_requests)} listed canonical data stores."
+                )
+            else:
+                self._set_status(
+                    f"Preparing {len(pending_requests)} of {len(requests)} listed data stores."
+                )
             progress_dialog = MaterializationProgressDialog(
                 title_text="Preparing Experiment Data Stores",
                 initial_message=(
-                    f"Preparing {len(pending_requests)} of {len(requests)} listed "
-                    "experiments. Existing canonical stores will be reused."
+                    (
+                        f"Rebuilding {len(pending_requests)} listed experiments with "
+                        "the current Zarr chunking and pyramid settings."
+                    )
+                    if rebuild_requested
+                    else (
+                        f"Preparing {len(pending_requests)} of {len(requests)} listed "
+                        "experiments. Existing canonical stores will be reused."
+                    )
                 ),
                 parent=self,
             )
@@ -5781,6 +5993,7 @@ if HAS_PYQT6:
                 requests=pending_requests,
                 dask_backend=self._dask_backend_config,
                 zarr_save=self._zarr_save_config,
+                force_rebuild=rebuild_requested,
             )
             self._materialization_worker = worker
             worker.progress_changed.connect(progress_dialog.update_progress)
@@ -5817,11 +6030,22 @@ if HAS_PYQT6:
 
             prepared_count = len(success_results)
             self._set_status(
-                "Prepared listed data stores. Opening analysis selection for the "
-                "selected experiment."
+                (
+                    "Rebuilt listed data stores. Opening analysis selection for the "
+                    "selected experiment."
+                )
+                if rebuild_requested
+                else (
+                    "Prepared listed data stores. Opening analysis selection for the "
+                    "selected experiment."
+                )
             )
             logging.getLogger(__name__).info(
-                "Prepared %s experiment data stores and reused %s existing stores.",
+                (
+                    "Rebuilt %s experiment data stores and reused %s existing stores."
+                    if rebuild_requested
+                    else "Prepared %s experiment data stores and reused %s existing stores."
+                ),
                 prepared_count,
                 ready_count,
             )
@@ -13128,10 +13352,16 @@ def launch_gui(
 
     settings_directory = _ensure_clearex_settings_directory()
     settings_path = _resolve_dask_backend_settings_path(settings_directory)
+    zarr_settings_path = _resolve_zarr_save_settings_path(settings_directory)
     effective_initial = initial or WorkflowConfig()
     persisted_backend = _load_last_used_dask_backend_config(settings_path=settings_path)
+    persisted_zarr_save = _load_last_used_zarr_save_config(
+        settings_path=zarr_settings_path
+    )
     if persisted_backend is not None and _should_apply_persisted_dask_backend(initial):
         effective_initial = replace(effective_initial, dask_backend=persisted_backend)
+    if persisted_zarr_save is not None and _should_apply_persisted_zarr_save(initial):
+        effective_initial = replace(effective_initial, zarr_save=persisted_zarr_save)
 
     app = QApplication.instance()
     owns_app = app is None

@@ -830,6 +830,51 @@ def test_has_complete_canonical_data_store_requires_completed_progress_record(
     )
 
 
+def test_materialize_experiment_data_store_reuses_complete_store_by_default_and_force_rebuilds(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_path = tmp_path / "source.npy"
+    np.save(source_path, source_data)
+
+    initial = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 1, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    reused = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 3, 4),
+        pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
+    )
+
+    root = zarr.open_group(str(initial.store_path), mode="r")
+    assert reused.store_path == initial.store_path
+    assert tuple(root["data"].chunks) == (1, 1, 1, 1, 2, 2)
+    assert root.attrs["data_pyramid_levels"] == ["data"]
+    if "data_pyramid" in root:
+        assert list(root["data_pyramid"].array_keys()) == []
+
+    rebuilt = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 3, 4),
+        pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
+        force_rebuild=True,
+    )
+
+    rebuilt_root = zarr.open_group(str(rebuilt.store_path), mode="r")
+    assert tuple(rebuilt_root["data"].chunks) == (1, 1, 1, 2, 3, 4)
+    assert rebuilt_root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
+
+
 def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_path: Path):
     experiment_path = tmp_path / "experiment.yml"
     _write_minimal_experiment(

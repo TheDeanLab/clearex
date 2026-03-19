@@ -12,9 +12,13 @@ This folder owns the PyQt6 UX in `app.py`.
   - Add/remove experiment entries from the list and persist the list for reuse
   - Auto-load metadata when the current list selection changes
   - Configure Dask backend and Zarr save options
+  - Persist the last-used Zarr save config across sessions
   - Display image metadata
-  - On `Next`, batch-materialize missing canonical stores for every listed
-    experiment, then continue with the currently selected experiment
+  - On `Next`, batch-materialize only missing/incomplete canonical stores for
+    every listed experiment, then continue with the currently selected
+    experiment
+  - `Rebuild Canonical Store` forces the listed stores to be rebuilt with the
+    current GUI chunking and pyramid settings
 - Analysis window (`AnalysisSelectionDialog`):
   - Top `Analysis Scope` panel:
     - choose the active `experiment.yml` from the loaded setup list,

@@ -264,8 +264,8 @@ def test_plan_experiment_store_materialization_partitions_pending_requests(
 
     monkeypatch.setattr(
         app_module,
-        "_has_complete_configured_canonical_store",
-        lambda store_path, zarr_save: Path(store_path).expanduser().resolve()
+        "_has_reusable_canonical_store",
+        lambda store_path: Path(store_path).expanduser().resolve()
         == requests[2].target_store.resolve(),
     )
 
@@ -273,7 +273,6 @@ def test_plan_experiment_store_materialization_partitions_pending_requests(
         app_module._plan_experiment_store_materialization(
             requests,
             selected_experiment_path=second,
-            zarr_save=app_module.ZarrSaveConfig(),
         )
     )
 
@@ -283,6 +282,49 @@ def test_plan_experiment_store_materialization_partitions_pending_requests(
         second.resolve(),
     ]
     assert [request.experiment_path for request in ready_requests] == [third.resolve()]
+
+
+def test_plan_experiment_store_materialization_rebuilds_all_when_requested(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    first = tmp_path / "cell_001" / "experiment.yml"
+    second = tmp_path / "cell_002" / "experiment.yml"
+    requests = [
+        app_module.ExperimentStorePreparationRequest(
+            experiment_path=first.resolve(),
+            experiment=_make_navigate_experiment(first),
+            source_data_path=first.parent / "CH00_000000.ome.tiff",
+            target_store=first.parent / "data_store.zarr",
+        ),
+        app_module.ExperimentStorePreparationRequest(
+            experiment_path=second.resolve(),
+            experiment=_make_navigate_experiment(second),
+            source_data_path=second.parent / "CH00_000000.ome.tiff",
+            target_store=second.parent / "data_store.zarr",
+        ),
+    ]
+
+    monkeypatch.setattr(
+        app_module,
+        "_has_reusable_canonical_store",
+        lambda store_path: True,
+    )
+
+    selected_request, pending_requests, ready_requests = (
+        app_module._plan_experiment_store_materialization(
+            requests,
+            selected_experiment_path=second,
+            rebuild_requested=True,
+        )
+    )
+
+    assert selected_request.experiment_path == second.resolve()
+    assert [request.experiment_path for request in pending_requests] == [
+        first.resolve(),
+        second.resolve(),
+    ]
+    assert ready_requests == []
 
 
 def test_analysis_targets_for_workflow_falls_back_to_current_file() -> None:
@@ -694,6 +736,25 @@ def test_persisted_dask_backend_round_trip(tmp_path) -> None:
     assert loaded == config
 
 
+def test_persisted_zarr_save_round_trip(tmp_path) -> None:
+    settings_path = tmp_path / ".clearex" / "zarr_save_settings.json"
+    config = app_module.ZarrSaveConfig(
+        chunks_ptczyx=(2, 1, 1, 128, 192, 256),
+        pyramid_ptczyx=((1, 2), (1,), (1,), (1, 2), (1, 2, 4), (1, 2, 4)),
+    )
+
+    saved = app_module._save_last_used_zarr_save_config(
+        config,
+        settings_path=settings_path,
+    )
+    loaded = app_module._load_last_used_zarr_save_config(
+        settings_path=settings_path,
+    )
+
+    assert saved is True
+    assert loaded == config
+
+
 def test_load_persisted_backend_returns_none_for_empty_or_invalid_json(tmp_path) -> None:
     settings_path = tmp_path / ".clearex" / "dask_backend_settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -711,6 +772,23 @@ def test_load_persisted_backend_returns_none_for_empty_or_invalid_json(tmp_path)
     )
 
 
+def test_load_persisted_zarr_save_returns_none_for_empty_or_invalid_json(tmp_path) -> None:
+    settings_path = tmp_path / ".clearex" / "zarr_save_settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text("  \n", encoding="utf-8")
+
+    assert (
+        app_module._load_last_used_zarr_save_config(settings_path=settings_path)
+        is None
+    )
+
+    settings_path.write_text("{not-json}", encoding="utf-8")
+    assert (
+        app_module._load_last_used_zarr_save_config(settings_path=settings_path)
+        is None
+    )
+
+
 def test_launch_gui_applies_persisted_backend_defaults(monkeypatch, tmp_path) -> None:
     calls = {"ensure": 0}
     captured: dict[str, app_module.WorkflowConfig] = {}
@@ -719,6 +797,10 @@ def test_launch_gui_applies_persisted_backend_defaults(monkeypatch, tmp_path) ->
         slurm_runner=app_module.SlurmRunnerConfig(
             scheduler_file="/tmp/persisted-scheduler.json"
         ),
+    )
+    persisted_zarr = app_module.ZarrSaveConfig(
+        chunks_ptczyx=(1, 1, 1, 64, 128, 128),
+        pyramid_ptczyx=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
     )
 
     class _FakeApplication:
@@ -774,6 +856,11 @@ def test_launch_gui_applies_persisted_backend_defaults(monkeypatch, tmp_path) ->
         "_load_last_used_dask_backend_config",
         lambda settings_path=None: persisted_backend,
     )
+    monkeypatch.setattr(
+        app_module,
+        "_load_last_used_zarr_save_config",
+        lambda settings_path=None: persisted_zarr,
+    )
     monkeypatch.setattr(app_module, "_apply_application_icon", lambda _app: None)
     monkeypatch.setattr(app_module, "_show_startup_splash", lambda _app: None)
     monkeypatch.setattr(app_module, "QApplication", _FakeApplication, raising=False)
@@ -796,6 +883,7 @@ def test_launch_gui_applies_persisted_backend_defaults(monkeypatch, tmp_path) ->
 
     assert calls["ensure"] == 1
     assert captured["setup_initial"].dask_backend == persisted_backend
+    assert captured["setup_initial"].zarr_save == persisted_zarr
     assert selected is not None
 
 

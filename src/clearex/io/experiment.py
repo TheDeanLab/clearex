@@ -3286,6 +3286,7 @@ def materialize_experiment_data_store(
         tuple[int, ...],
     ] = ((1,), (1,), (1,), (1, 2, 4, 8), (1, 2, 4, 8), (1, 2, 4, 8)),
     client: Optional["Client"] = None,
+    force_rebuild: bool = False,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> MaterializedDataStore:
     """Materialize experiment source data into canonical Zarr ``data`` pyramid.
@@ -3302,6 +3303,9 @@ def materialize_experiment_data_store(
         Resolution pyramid factors in ``(t, p, c, z, y, x)`` order.
     client : dask.distributed.Client, optional
         Active Dask distributed client used to execute graph writes.
+    force_rebuild : bool, default=False
+        Whether to rebuild the canonical store even when a complete canonical
+        store already exists.
     progress_callback : callable, optional
         Callback invoked as ``progress_callback(percent, message)`` with
         stage-level progress updates from ``0`` to ``100``.
@@ -3424,11 +3428,7 @@ def materialize_experiment_data_store(
                 canonical = canonical.rechunk(normalized_chunks)
             _emit_progress(45, "Preparing chunk-batched canonical writes")
 
-        if has_complete_canonical_data_store(
-            store_path,
-            expected_chunks_tpczyx=normalized_chunks,
-            expected_pyramid_factors=pyramid_factors,
-        ):
+        if (not force_rebuild) and has_complete_canonical_data_store(store_path):
             _emit_progress(100, "Canonical data store is already complete")
             data_root = zarr.open_group(str(store_path), mode="r")
             data_chunks = tuple(int(value) for value in (data_root["data"].chunks or normalized_chunks))
@@ -3550,6 +3550,8 @@ def materialize_experiment_data_store(
         resume_from_checkpoint = False
         base_start_region = 0
         if (
+            not force_rebuild
+            and
             checkpoint_resume_supported
             and existing_progress_record is not None
             and _ingestion_progress_record_matches(

@@ -2311,6 +2311,54 @@ class ZarrSaveConfig:
         return to_tpczyx_pyramid(self.pyramid_ptczyx)
 
 
+def zarr_save_to_dict(config: ZarrSaveConfig) -> Dict[str, Any]:
+    """Serialize a Zarr save configuration to a JSON-safe mapping.
+
+    Parameters
+    ----------
+    config : ZarrSaveConfig
+        Zarr save configuration to serialize.
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-safe mapping containing chunk and pyramid settings in
+        ``(p, t, c, z, y, x)`` order.
+    """
+    return {
+        "chunks_ptczyx": [int(value) for value in config.chunks_ptczyx],
+        "pyramid_ptczyx": [
+            [int(value) for value in levels] for levels in config.pyramid_ptczyx
+        ],
+    }
+
+
+def zarr_save_from_dict(payload: Any) -> ZarrSaveConfig:
+    """Deserialize a Zarr save configuration from a mapping payload.
+
+    Parameters
+    ----------
+    payload : Any
+        Mapping payload produced by :func:`zarr_save_to_dict`.
+
+    Returns
+    -------
+    ZarrSaveConfig
+        Parsed Zarr save configuration.
+
+    Raises
+    ------
+    ValueError
+        If the payload is not a mapping containing valid Zarr save settings.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("Zarr save settings must be a JSON object.")
+    return ZarrSaveConfig(
+        chunks_ptczyx=payload.get("chunks_ptczyx", DEFAULT_ZARR_CHUNKS_PTCZYX),
+        pyramid_ptczyx=payload.get("pyramid_ptczyx", DEFAULT_ZARR_PYRAMID_PTCZYX),
+    )
+
+
 DASK_BACKEND_LOCAL_CLUSTER = "local_cluster"
 DASK_BACKEND_SLURM_RUNNER = "slurm_runner"
 DASK_BACKEND_SLURM_CLUSTER = "slurm_cluster"

@@ -46,8 +46,12 @@ The first GUI window is an experiment-list driven setup flow:
 - The current ordered list can be saved back to a reusable
   ``.clearex-experiment-list.json`` file.
 - Pressing ``Next`` batch-prepares canonical stores for every listed
-  experiment that still needs ingestion, then opens analysis selection for the
-  currently selected experiment.
+  experiment that is missing a complete store, then opens analysis selection
+  for the currently selected experiment.
+- The setup dialog persists the last-used Zarr save configuration across
+  sessions.
+- ``Rebuild Canonical Store`` forces the listed stores to be rebuilt with the
+  current chunk and pyramid settings instead of reusing complete stores.
 
 .. figure:: ../../screenshots/setup_dialog_experiment_list.png
    :alt: ClearEx setup dialog showing the themed experiment list pane and metadata panel

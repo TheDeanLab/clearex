@@ -246,8 +246,12 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
 - Selecting an experiment in the setup list loads metadata automatically;
   double-clicking reloads that entry explicitly.
 - Pressing `Next` batch-prepares canonical `data_store.zarr` outputs for every
-  listed experiment that does not already have a compatible store, then opens
+  listed experiment that does not already have a complete store, then opens
   analysis selection for the currently selected experiment.
+- The setup dialog persists the last-used Zarr save config across sessions.
+- `Rebuild Canonical Store` forces listed experiments to be rebuilt with the
+  current chunking and pyramid settings; otherwise existing complete stores are
+  reused as-is.
 - The analysis window includes an `Analysis Scope` panel where you can:
   - pick which loaded `experiment.yml` drives the current analysis context, or
   - enable batch mode to run the same selected analysis sequence across every
