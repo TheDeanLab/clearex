@@ -2523,6 +2523,41 @@ if HAS_PYQT6:
                 return super().minimumSizeHint()
             return current.minimumSizeHint()
 
+    def _configure_themed_scroll_area_surface(
+        scroll_area: QScrollArea,
+        *,
+        scroll_object_name: str,
+        viewport_object_name: str,
+    ) -> None:
+        """Assign themed surface object names to a rounded scroll area.
+
+        Parameters
+        ----------
+        scroll_area : QScrollArea
+            Scroll area whose viewport participates in a rounded dark surface.
+        scroll_object_name : str
+            Object name applied to ``scroll_area`` for stylesheet targeting.
+        viewport_object_name : str
+            Object name applied to the internal viewport widget.
+
+        Returns
+        -------
+        None
+            The scroll area is configured in-place.
+
+        Notes
+        -----
+        Rounded dark cards need their scroll viewport explicitly styled to avoid
+        exposing the platform-default viewport background in clipped corners.
+        """
+        scroll_area.setObjectName(scroll_object_name)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        viewport = scroll_area.viewport()
+        viewport.setObjectName(viewport_object_name)
+        viewport.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        viewport.setAutoFillBackground(True)
+
     class ZarrSaveConfigDialog(QDialog):
         """Dialog for configuring analysis-store Zarr chunking and pyramid factors.
 
@@ -7293,14 +7328,22 @@ if HAS_PYQT6:
             apply_stack_spacing(parameters_layout)
 
             self._operation_panel_stack = _CurrentPageStackedWidget()
+            self._operation_panel_stack.setObjectName("operationPanelStack")
+            self._operation_panel_stack.setAttribute(
+                Qt.WidgetAttribute.WA_StyledBackground,
+                True,
+            )
             self._operation_panel_stack.addWidget(self._build_no_selection_panel())
             for operation_name in self._OPERATION_KEYS:
                 panel = self._build_operation_panel(operation_name)
                 panel_index = self._operation_panel_stack.addWidget(panel)
                 self._operation_panel_indices[operation_name] = panel_index
             self._operation_panel_scroll = QScrollArea()
-            self._operation_panel_scroll.setWidgetResizable(True)
-            self._operation_panel_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            _configure_themed_scroll_area_surface(
+                self._operation_panel_scroll,
+                scroll_object_name="operationPanelScroll",
+                viewport_object_name="operationPanelViewport",
+            )
             self._operation_panel_scroll.setAlignment(
                 Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
             )
@@ -7504,6 +7547,7 @@ if HAS_PYQT6:
             """
             widget = QWidget()
             widget.setObjectName("operationPanel")
+            widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             layout = QVBoxLayout(widget)
             apply_stack_spacing(layout)
             text = QLabel(
@@ -7531,6 +7575,7 @@ if HAS_PYQT6:
             """
             panel = QWidget()
             panel.setObjectName("operationPanel")
+            panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             layout = QVBoxLayout(panel)
             apply_stack_spacing(layout)
 
@@ -8343,9 +8388,11 @@ if HAS_PYQT6:
                 "uSegment3D Runtime"
             )
             self._usegment3d_channel_scroll = QScrollArea()
-            self._usegment3d_channel_scroll.setObjectName("usegment3dChannelScroll")
-            self._usegment3d_channel_scroll.setWidgetResizable(True)
-            self._usegment3d_channel_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            _configure_themed_scroll_area_surface(
+                self._usegment3d_channel_scroll,
+                scroll_object_name="usegment3dChannelScroll",
+                viewport_object_name="usegment3dChannelViewport",
+            )
             self._usegment3d_channel_scroll.setHorizontalScrollBarPolicy(
                 Qt.ScrollBarPolicy.ScrollBarAsNeeded
             )
@@ -8354,6 +8401,10 @@ if HAS_PYQT6:
             )
             self._usegment3d_channel_container = QWidget()
             self._usegment3d_channel_container.setObjectName("usegment3dChannelContainer")
+            self._usegment3d_channel_container.setAttribute(
+                Qt.WidgetAttribute.WA_StyledBackground,
+                True,
+            )
             self._usegment3d_channel_layout = QHBoxLayout()
             apply_compact_row_spacing(self._usegment3d_channel_layout)
             self._usegment3d_channel_layout.setContentsMargins(0, 0, 0, 0)
@@ -12327,16 +12378,36 @@ if HAS_PYQT6:
                     border: none;
                     background: transparent;
                 }
+                QScrollArea#operationPanelScroll {
+                    background-color: #111925;
+                    border-radius: 10px;
+                }
+                QWidget#operationPanelViewport {
+                    background-color: #111925;
+                    border-radius: 10px;
+                }
+                QStackedWidget#operationPanelStack {
+                    background-color: #111925;
+                    border-radius: 10px;
+                }
+                QStackedWidget#operationPanelStack > QWidget {
+                    background-color: #111925;
+                }
                 QScrollArea#usegment3dChannelScroll {
                     border: 1px solid #2b3f58;
                     border-radius: 8px;
                     background-color: #101a29;
+                }
+                QWidget#usegment3dChannelViewport {
+                    background-color: #101a29;
+                    border-radius: 8px;
                 }
                 QScrollArea#usegment3dChannelScroll > QWidget {
                     background-color: #101a29;
                 }
                 QWidget#usegment3dChannelContainer {
                     background-color: #101a29;
+                    border-radius: 8px;
                 }
                 QWidget#operationPanel {
                     background-color: #111925;

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import threading
 from pathlib import Path
@@ -1168,6 +1169,26 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
     dialog_cls = app_module.AnalysisSelectionDialog
     assert dialog_cls._OPERATION_LABELS["visualization"] == "Napari"
     assert ("Visualization", ("visualization", "mip_export")) in dialog_cls._OPERATION_TABS
+
+
+def test_analysis_selection_dialog_themes_rounded_scroll_surfaces() -> None:
+    apply_theme_source = inspect.getsource(
+        app_module.AnalysisSelectionDialog._apply_theme
+    )
+    build_ui_source = inspect.getsource(app_module.AnalysisSelectionDialog._build_ui)
+    usegment_source = inspect.getsource(
+        app_module.AnalysisSelectionDialog._build_usegment3d_parameter_rows
+    )
+
+    assert "QScrollArea#operationPanelScroll" in apply_theme_source
+    assert "QWidget#operationPanelViewport" in apply_theme_source
+    assert "QStackedWidget#operationPanelStack" in apply_theme_source
+    assert "QWidget#usegment3dChannelViewport" in apply_theme_source
+    assert 'self._operation_panel_stack.setObjectName("operationPanelStack")' in (
+        build_ui_source
+    )
+    assert 'scroll_object_name="operationPanelScroll"' in build_ui_source
+    assert 'viewport_object_name="usegment3dChannelViewport"' in usegment_source
 
 
 def test_analysis_selection_dialog_detect_local_gpu_available(monkeypatch) -> None:

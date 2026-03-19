@@ -57,6 +57,10 @@ This folder owns the PyQt6 UX in `app.py`.
 - Keep styling consistent with the dark theme.
 - Keep controls/popups/content cards in the dark theme; avoid introducing new light surfaces there.
 - Exception: top branding header cards intentionally use a light tint (`#f0f2ef`) to match the header image background.
+- When a rounded dark card contains a `QScrollArea`, `QStackedWidget`, or other
+  nested viewport/page widget, explicitly theme the scroll area, its viewport,
+  and the inner content/page widgets together so Qt does not leak default light
+  corners behind rounded borders.
 - Explicitly style setup-list context menus and any other new pop-up menus; do not fall back to platform-default light menus.
 - Explicitly style dropdown list views:
   - `QComboBox QAbstractItemView`
