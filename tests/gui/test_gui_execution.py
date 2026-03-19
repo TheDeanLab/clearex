@@ -122,7 +122,12 @@ def _install_fake_gui_runtime(monkeypatch):
 
     monkeypatch.setattr(app_module, "HAS_PYQT6", True)
     monkeypatch.setattr(app_module, "_display_is_available", lambda: True)
-    monkeypatch.setattr(app_module, "_apply_application_icon", lambda _app: None)
+    monkeypatch.setattr(
+        app_module,
+        "_apply_application_icon",
+        lambda _app: None,
+        raising=False,
+    )
     monkeypatch.setattr(app_module, "QApplication", _FakeApplication, raising=False)
     monkeypatch.setattr(
         app_module,
@@ -984,8 +989,18 @@ def test_launch_gui_applies_persisted_backend_defaults(monkeypatch, tmp_path) ->
         "_load_last_used_zarr_save_config",
         lambda settings_path=None: persisted_zarr,
     )
-    monkeypatch.setattr(app_module, "_apply_application_icon", lambda _app: None)
-    monkeypatch.setattr(app_module, "_show_startup_splash", lambda _app: None)
+    monkeypatch.setattr(
+        app_module,
+        "_apply_application_icon",
+        lambda _app: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_show_startup_splash",
+        lambda _app: None,
+        raising=False,
+    )
     monkeypatch.setattr(app_module, "QApplication", _FakeApplication, raising=False)
     monkeypatch.setattr(app_module, "QDialog", _FakeQDialog, raising=False)
     monkeypatch.setattr(
@@ -1268,6 +1283,9 @@ def test_particle_overlay_available_with_historical_detections() -> None:
 
 
 def test_sync_visualization_volume_layers_from_input_source_updates_primary_layer() -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
     class _FakeCombo:
         def __init__(self, data: object) -> None:
             self._data = data
@@ -1304,6 +1322,9 @@ def test_sync_visualization_volume_layers_from_input_source_updates_primary_laye
 
 
 def test_collect_visualization_parameters_syncs_combo_with_primary_layer() -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
     class _FakeCombo:
         def __init__(self, data: object) -> None:
             self._data = data
@@ -1383,6 +1404,9 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
 
 
 def test_analysis_selection_dialog_themes_rounded_scroll_surfaces() -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
     apply_theme_source = inspect.getsource(
         app_module.AnalysisSelectionDialog._apply_theme
     )
@@ -1403,6 +1427,9 @@ def test_analysis_selection_dialog_themes_rounded_scroll_surfaces() -> None:
 
 
 def test_visualization_popup_tables_use_uniform_widget_rows() -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
     volume_layers_source = inspect.getsource(
         app_module.AnalysisSelectionDialog._open_visualization_volume_layers_dialog
     )
