@@ -307,12 +307,18 @@ def _resolve_initial_dialog_dimensions(
 
     available_width = max(0, int(available_size[0]))
     available_height = max(0, int(available_size[1]))
-    usable_width = available_width if available_width <= margin_px else available_width - margin_px
+    usable_width = (
+        available_width if available_width <= margin_px else available_width - margin_px
+    )
     usable_height = (
-        available_height if available_height <= margin_px else available_height - margin_px
+        available_height
+        if available_height <= margin_px
+        else available_height - margin_px
     )
 
-    startup_width = preferred_width if usable_width <= 0 else min(preferred_width, usable_width)
+    startup_width = (
+        preferred_width if usable_width <= 0 else min(preferred_width, usable_width)
+    )
     startup_height = (
         preferred_height if usable_height <= 0 else min(preferred_height, usable_height)
     )
@@ -362,9 +368,7 @@ def _apply_initial_dialog_geometry(
         Applied minimum and startup size tuples.
     """
     resolved_available_size = (
-        _primary_screen_available_size()
-        if available_size is None
-        else available_size
+        _primary_screen_available_size() if available_size is None else available_size
     )
     minimum_dimensions, startup_dimensions = _resolve_initial_dialog_dimensions(
         minimum_size=minimum_size,
@@ -486,7 +490,9 @@ def _save_experiment_list_file(
     base_directory = resolved_list_path.parent
     for experiment_path in resolved_experiments:
         if not experiment_path.exists():
-            raise FileNotFoundError(f"Experiment path does not exist: {experiment_path}")
+            raise FileNotFoundError(
+                f"Experiment path does not exist: {experiment_path}"
+            )
         if not is_navigate_experiment_file(experiment_path):
             raise ValueError(
                 f"Expected Navigate experiment.yml/experiment.yaml, got: {experiment_path}"
@@ -532,7 +538,9 @@ def _load_experiment_list_file(list_path: Path) -> list[Path]:
     """
     resolved_list_path = Path(list_path).expanduser().resolve()
     if not resolved_list_path.exists():
-        raise FileNotFoundError(f"Experiment list file does not exist: {resolved_list_path}")
+        raise FileNotFoundError(
+            f"Experiment list file does not exist: {resolved_list_path}"
+        )
 
     try:
         payload = json.loads(resolved_list_path.read_text(encoding="utf-8"))
@@ -542,9 +550,7 @@ def _load_experiment_list_file(list_path: Path) -> list[Path]:
         ) from exc
 
     if not isinstance(payload, dict):
-        raise ValueError(
-            f"Experiment list must be a JSON object: {resolved_list_path}"
-        )
+        raise ValueError(f"Experiment list must be a JSON object: {resolved_list_path}")
     if payload.get("format") != _CLEAREX_EXPERIMENT_LIST_FORMAT:
         raise ValueError(
             "Unsupported experiment list format. "
@@ -570,9 +576,7 @@ def _load_experiment_list_file(list_path: Path) -> list[Path]:
         else:
             candidate = candidate.resolve()
         if not candidate.exists():
-            raise ValueError(
-                f"Experiment list entry does not exist: {candidate}"
-            )
+            raise ValueError(f"Experiment list entry does not exist: {candidate}")
         if not is_navigate_experiment_file(candidate):
             raise ValueError(
                 "Experiment list entries must point to Navigate "
@@ -635,9 +639,7 @@ def _analysis_targets_from_store_requests(
     """
     return tuple(
         AnalysisTarget(
-            experiment_path=str(
-                Path(request.experiment_path).expanduser().resolve()
-            ),
+            experiment_path=str(Path(request.experiment_path).expanduser().resolve()),
             store_path=str(Path(request.target_store).expanduser().resolve()),
         )
         for request in requests
@@ -2158,9 +2160,7 @@ def _show_themed_error_dialog(
         dialog.setDetailedText(str(details))
 
     dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
-    dialog.setStyleSheet(
-        _popup_dialog_stylesheet()
-        + """
+    dialog.setStyleSheet(_popup_dialog_stylesheet() + """
         QMessageBox {
             background-color: #0c1118;
             color: #e6edf3;
@@ -2173,8 +2173,7 @@ def _show_themed_error_dialog(
             color: #e6edf3;
             selection-background-color: #2f81f7;
         }
-        """
-    )
+        """)
     dialog.exec()
 
 
@@ -3870,7 +3869,9 @@ if HAS_PYQT6:
                         results.append(
                             ExperimentStorePreparationResult(
                                 experiment_path=request.experiment_path,
-                                store_path=Path(result.store_path).expanduser().resolve(),
+                                store_path=Path(result.store_path)
+                                .expanduser()
+                                .resolve(),
                                 skipped_existing=False,
                             )
                         )
@@ -3954,8 +3955,7 @@ if HAS_PYQT6:
             self._progress.setFormat("%p%")
             root.addWidget(self._progress)
 
-            self.setStyleSheet(
-                """
+            self.setStyleSheet("""
                 QDialog {
                     background-color: #0c1118;
                     color: #e6edf3;
@@ -3984,8 +3984,7 @@ if HAS_PYQT6:
                         stop:0 #1f7fdc, stop:1 #33c3a5
                     );
                 }
-                """
-            )
+                """)
             _apply_initial_dialog_geometry(
                 self,
                 minimum_size=_MATERIALIZATION_PROGRESS_DIALOG_MINIMUM_SIZE,
@@ -4180,8 +4179,7 @@ if HAS_PYQT6:
             button_row.addWidget(self._stop_button)
             root.addLayout(button_row)
 
-            self.setStyleSheet(
-                """
+            self.setStyleSheet("""
                 QDialog {
                     background-color: #0c1118;
                     color: #e6edf3;
@@ -4228,8 +4226,7 @@ if HAS_PYQT6:
                     border-color: #2a3442;
                     background-color: #16202d;
                 }
-                """
-            )
+                """)
             _apply_initial_dialog_geometry(
                 self,
                 minimum_size=_ANALYSIS_PROGRESS_DIALOG_MINIMUM_SIZE,
@@ -4371,9 +4368,7 @@ if HAS_PYQT6:
             button_row = QHBoxLayout()
             apply_compact_row_spacing(button_row)
             self._load_experiment_button = QPushButton("Load Experiment")
-            self._create_experiment_list_button = QPushButton(
-                "Create Experiment List"
-            )
+            self._create_experiment_list_button = QPushButton("Create Experiment List")
             self._save_experiment_list_button = QPushButton("Save Experiment List")
             self._remove_experiment_button = QPushButton("Remove Selected")
             for button in (
@@ -4414,7 +4409,7 @@ if HAS_PYQT6:
             self._experiment_list.installEventFilter(self)
             self._experiment_list.viewport().installEventFilter(self)
             data_layout.addWidget(self._experiment_list)
-            data_layout.addSpacing(6)
+            data_layout.addSpacing(2)
 
             self._experiment_list_status_label = QLabel("No experiments loaded.")
             self._experiment_list_status_label.setObjectName("experimentListStatus")
@@ -4424,7 +4419,10 @@ if HAS_PYQT6:
             )
             self._experiment_list_status_label.setContentsMargins(0, 4, 0, 4)
             self._experiment_list_status_label.setMinimumHeight(
-                max(28, int(self._experiment_list_status_label.fontMetrics().height()) + 10)
+                max(
+                    28,
+                    int(self._experiment_list_status_label.fontMetrics().height()) + 10,
+                )
             )
             self._experiment_list_status_label.setSizePolicy(
                 QSizePolicy.Policy.Preferred,
@@ -4559,9 +4557,7 @@ if HAS_PYQT6:
             self._zarr_config_button.clicked.connect(self._on_edit_zarr_settings)
             self._cancel_button.clicked.connect(self.reject)
             self._next_button.clicked.connect(self._on_next)
-            self._rebuild_store_checkbox.toggled.connect(
-                self._on_rebuild_store_toggled
-            )
+            self._rebuild_store_checkbox.toggled.connect(self._on_rebuild_store_toggled)
             content_widget.setMinimumHeight(root.sizeHint().height())
 
         def _hydrate(self, initial: WorkflowConfig) -> None:
@@ -4586,7 +4582,9 @@ if HAS_PYQT6:
 
             initial_path = Path(initial_file).expanduser()
             try:
-                experiment_paths = _collect_experiment_paths_from_input_path(initial_path)
+                experiment_paths = _collect_experiment_paths_from_input_path(
+                    initial_path
+                )
             except Exception:
                 logging.getLogger(__name__).debug(
                     "Ignoring non-experiment setup input during hydrate: %s",
@@ -4718,8 +4716,7 @@ if HAS_PYQT6:
             None
                 Styles are applied in-place.
             """
-            self.setStyleSheet(
-                """
+            self.setStyleSheet("""
                 QDialog {
                     background-color: #0c1118;
                     color: #e6edf3;
@@ -4875,8 +4872,7 @@ if HAS_PYQT6:
                     background: #2a3442;
                     margin: 6px 8px;
                 }
-                """
-            )
+                """)
 
         def _set_status(self, text: str) -> None:
             """Set setup footer status text.
@@ -5026,7 +5022,9 @@ if HAS_PYQT6:
             """
             experiment_paths: list[Path] = []
             for index in range(self._experiment_list.count()):
-                path = self._experiment_path_from_item(self._experiment_list.item(index))
+                path = self._experiment_path_from_item(
+                    self._experiment_list.item(index)
+                )
                 if path is not None:
                     experiment_paths.append(path)
             return experiment_paths
@@ -5133,7 +5131,10 @@ if HAS_PYQT6:
             if target_path is None:
                 target_path = self._current_selected_experiment_path()
             self._set_experiment_list_paths(combined_paths, current_path=target_path)
-            if self._experiment_list_file_path is not None and combined_paths != previous_paths:
+            if (
+                self._experiment_list_file_path is not None
+                and combined_paths != previous_paths
+            ):
                 self._set_experiment_list_file_path(
                     self._experiment_list_file_path,
                     dirty=True,
@@ -5183,7 +5184,11 @@ if HAS_PYQT6:
                         candidate_path,
                         exc_info=True,
                     )
-            return _deduplicate_resolved_paths(resolved_paths), replace_existing, list_path
+            return (
+                _deduplicate_resolved_paths(resolved_paths),
+                replace_existing,
+                list_path,
+            )
 
         def _can_accept_experiment_drop(self, mime_data: QMimeData) -> bool:
             """Determine whether dropped payload contains experiment inputs.
@@ -5222,7 +5227,9 @@ if HAS_PYQT6:
             if not experiment_paths:
                 return False
 
-            current_path = experiment_paths[0] if replace_existing else experiment_paths[-1]
+            current_path = (
+                experiment_paths[0] if replace_existing else experiment_paths[-1]
+            )
             self._add_experiment_paths(
                 experiment_paths,
                 replace=replace_existing,
@@ -5429,7 +5436,9 @@ if HAS_PYQT6:
                     "No Experiments Found",
                     f"No Navigate experiment.yml files were found under {search_root}.",
                 )
-                self._set_status("No experiment.yml files found in the selected folder.")
+                self._set_status(
+                    "No experiment.yml files found in the selected folder."
+                )
                 return
 
             self._set_experiment_list_file_path(None, dirty=False)
@@ -5451,8 +5460,7 @@ if HAS_PYQT6:
                 Experiment list is replaced in-place.
             """
             file_filter = (
-                "ClearEx Experiment List "
-                f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
+                "ClearEx Experiment List " f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
             )
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
@@ -5511,12 +5519,10 @@ if HAS_PYQT6:
                 else experiment_paths[0].parent
             )
             default_path = (
-                default_directory
-                / f"experiments{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
+                default_directory / f"experiments{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
             )
             file_filter = (
-                "ClearEx Experiment List "
-                f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
+                "ClearEx Experiment List " f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
             )
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
@@ -5533,7 +5539,9 @@ if HAS_PYQT6:
                     f"{target_path}{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
                 )
             try:
-                saved_list_path = _save_experiment_list_file(target_path, experiment_paths)
+                saved_list_path = _save_experiment_list_file(
+                    target_path, experiment_paths
+                )
             except Exception as exc:
                 _show_themed_error_dialog(
                     self,
@@ -5950,7 +5958,9 @@ if HAS_PYQT6:
                 source_data_path = self._loaded_source_data_path
             else:
                 _loaded_path, experiment, source_data_path = (
-                    self._resolve_experiment_source_context(path=resolved_experiment_path)
+                    self._resolve_experiment_source_context(
+                        path=resolved_experiment_path
+                    )
                 )
             target_store = resolve_data_store_path(experiment, source_data_path)
             return ExperimentStorePreparationRequest(
@@ -6483,9 +6493,7 @@ if HAS_PYQT6:
                 "Foreground threshold fraction within local intensity range for "
                 "envelope fitting during auto-estimation."
             ),
-            "auto_estimate_t_index": (
-                "Time index sampled for shear auto-estimation."
-            ),
+            "auto_estimate_t_index": ("Time index sampled for shear auto-estimation."),
             "auto_estimate_p_index": (
                 "Position index sampled for shear auto-estimation."
             ),
@@ -6892,8 +6900,7 @@ if HAS_PYQT6:
                     )
                     if (
                         selected_target is not None
-                        and target.experiment_path
-                        == selected_target.experiment_path
+                        and target.experiment_path == selected_target.experiment_path
                     ):
                         selected_index = index
                 if selected_index >= 0:
@@ -7045,7 +7052,9 @@ if HAS_PYQT6:
                 str(target.experiment_path)
                 if target is not None
                 else (
-                    str(self._base_config.analysis_selected_experiment_path or "").strip()
+                    str(
+                        self._base_config.analysis_selected_experiment_path or ""
+                    ).strip()
                     or None
                 )
             )
@@ -7081,7 +7090,9 @@ if HAS_PYQT6:
             default_workflow = self._build_target_default_workflow(target)
             selected_flags = {
                 operation_name: bool(
-                    payload.get(operation_name, getattr(default_workflow, operation_name))
+                    payload.get(
+                        operation_name, getattr(default_workflow, operation_name)
+                    )
                 )
                 for operation_name in self._OPERATION_KEYS
             }
@@ -7131,8 +7142,8 @@ if HAS_PYQT6:
                 self._base_config.analysis_parameters
             )
             for operation_name in self._OPERATION_KEYS:
-                analysis_parameters[operation_name] = self._collect_operation_parameters(
-                    operation_name
+                analysis_parameters[operation_name] = (
+                    self._collect_operation_parameters(operation_name)
                 )
             payload["analysis_parameters"] = normalize_analysis_operation_parameters(
                 analysis_parameters
@@ -7270,9 +7281,8 @@ if HAS_PYQT6:
                     payload=saved_gui_state["workflow"],
                 )
                 source_text = "Restored unsaved GUI state from this dataset."
-            elif (
-                latest_completed_state is not None
-                and isinstance(latest_completed_state.get("workflow"), Mapping)
+            elif latest_completed_state is not None and isinstance(
+                latest_completed_state.get("workflow"), Mapping
             ):
                 restored_workflow = self._analysis_state_workflow_from_payload(
                     target=target,
@@ -7285,8 +7295,10 @@ if HAS_PYQT6:
                 source_text = "Persistence is unavailable for this data source."
 
             self._hydrate(restored_workflow)
-            self._base_config.analysis_parameters = normalize_analysis_operation_parameters(
-                restored_workflow.analysis_parameters
+            self._base_config.analysis_parameters = (
+                normalize_analysis_operation_parameters(
+                    restored_workflow.analysis_parameters
+                )
             )
             for operation_name in self._OPERATION_KEYS:
                 setattr(
@@ -7650,9 +7662,7 @@ if HAS_PYQT6:
                 history_label.setObjectName("provenanceStatusLabel")
                 history_label.setProperty("state", "missing")
                 history_label.setContentsMargins(24, 0, 0, 0)
-                history_label.setToolTip(
-                    "No successful provenance run recorded yet."
-                )
+                history_label.setToolTip("No successful provenance run recorded yet.")
                 history_label.setContextMenuPolicy(
                     Qt.ContextMenuPolicy.CustomContextMenu
                 )
@@ -7725,7 +7735,9 @@ if HAS_PYQT6:
             )
             profile.setObjectName("parameterHint")
             profile.setWordWrap(True)
-            profile.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            profile.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
             layout.addWidget(profile)
 
             form = QFormLayout()
@@ -8240,7 +8252,9 @@ if HAS_PYQT6:
             self._shear_auto_estimate_stride_spin = QSpinBox()
             self._shear_auto_estimate_stride_spin.setRange(1, 64)
             self._shear_auto_estimate_stride_spin.setSingleStep(1)
-            form.addRow("auto_estimate_zy_stride", self._shear_auto_estimate_stride_spin)
+            form.addRow(
+                "auto_estimate_zy_stride", self._shear_auto_estimate_stride_spin
+            )
             self._register_parameter_hint(
                 self._shear_auto_estimate_stride_spin,
                 self._PARAMETER_HINTS["auto_estimate_zy_stride"],
@@ -8544,7 +8558,9 @@ if HAS_PYQT6:
                 Qt.ScrollBarPolicy.ScrollBarAlwaysOff
             )
             self._usegment3d_channel_container = QWidget()
-            self._usegment3d_channel_container.setObjectName("usegment3dChannelContainer")
+            self._usegment3d_channel_container.setObjectName(
+                "usegment3dChannelContainer"
+            )
             self._usegment3d_channel_container.setAttribute(
                 Qt.WidgetAttribute.WA_StyledBackground,
                 True,
@@ -9231,9 +9247,7 @@ if HAS_PYQT6:
                 blending = str(raw_row.get("blending", "")).strip().lower()
                 if blending in {"auto", "default"}:
                     blending = ""
-                colormap = str(
-                    raw_row.get("colormap", raw_row.get("lut", ""))
-                ).strip()
+                colormap = str(raw_row.get("colormap", raw_row.get("lut", ""))).strip()
                 if colormap.strip().lower() in {"auto", "default"}:
                     colormap = ""
                 rendering = str(raw_row.get("rendering", "")).strip().lower()
@@ -9726,7 +9740,10 @@ if HAS_PYQT6:
                 dialog,
                 minimum_size=_VOLUME_LAYERS_DIALOG_MINIMUM_SIZE,
                 preferred_size=_VOLUME_LAYERS_DIALOG_PREFERRED_SIZE,
-                content_size_hint=(dialog.sizeHint().width(), dialog.sizeHint().height()),
+                content_size_hint=(
+                    dialog.sizeHint().width(),
+                    dialog.sizeHint().height(),
+                ),
             )
 
             if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -10071,7 +10088,10 @@ if HAS_PYQT6:
                 dialog,
                 minimum_size=_LAYER_OVERRIDES_DIALOG_MINIMUM_SIZE,
                 preferred_size=_LAYER_OVERRIDES_DIALOG_PREFERRED_SIZE,
-                content_size_hint=(dialog.sizeHint().width(), dialog.sizeHint().height()),
+                content_size_hint=(
+                    dialog.sizeHint().width(),
+                    dialog.sizeHint().height(),
+                ),
             )
 
             if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -10726,10 +10746,14 @@ if HAS_PYQT6:
                     self._operation_history_copy_payloads[operation_name] = ""
                 else:
                     selected_run_id = (
-                        matching_run_id if matches_parameters and matching_run_id else latest_run_id
+                        matching_run_id
+                        if matches_parameters and matching_run_id
+                        else latest_run_id
                     )
                     selected_ended = (
-                        matching_ended if matches_parameters and matching_run_id else latest_ended
+                        matching_ended
+                        if matches_parameters and matching_run_id
+                        else latest_ended
                     )
                     tooltip_lines = []
                     if selected_run_id:
@@ -11316,8 +11340,7 @@ if HAS_PYQT6:
                 minimum_size=_SYNTHETIC_PSF_PREVIEW_DIALOG_MINIMUM_SIZE,
                 preferred_size=_SYNTHETIC_PSF_PREVIEW_DIALOG_PREFERRED_SIZE,
             )
-            dialog.setStyleSheet(
-                """
+            dialog.setStyleSheet("""
                 QDialog {
                     background-color: #0c1118;
                     color: #e6edf3;
@@ -11349,8 +11372,7 @@ if HAS_PYQT6:
                 QPushButton:hover {
                     background-color: #22354c;
                 }
-                """
-            )
+                """)
             layout = QVBoxLayout(dialog)
             apply_popup_root_spacing(layout)
 
@@ -11389,7 +11411,10 @@ if HAS_PYQT6:
                 dialog,
                 minimum_size=_SYNTHETIC_PSF_PREVIEW_DIALOG_MINIMUM_SIZE,
                 preferred_size=_SYNTHETIC_PSF_PREVIEW_DIALOG_PREFERRED_SIZE,
-                content_size_hint=(dialog.sizeHint().width(), dialog.sizeHint().height()),
+                content_size_hint=(
+                    dialog.sizeHint().width(),
+                    dialog.sizeHint().height(),
+                ),
             )
             dialog.exec()
 
@@ -11713,7 +11738,9 @@ if HAS_PYQT6:
                 )
             self._visualization_require_gpu_checkbox.setEnabled(visualization_enabled)
             self._visualization_require_gpu_checkbox.setToolTip(gpu_hint)
-            self._parameter_help_map[self._visualization_require_gpu_checkbox] = gpu_hint
+            self._parameter_help_map[self._visualization_require_gpu_checkbox] = (
+                gpu_hint
+            )
             if self._visualization_volume_layers_button is not None:
                 self._visualization_volume_layers_button.setEnabled(
                     visualization_enabled
@@ -12631,8 +12658,7 @@ if HAS_PYQT6:
             None
                 Styles are applied in-place.
             """
-            self.setStyleSheet(
-                """
+            self.setStyleSheet("""
                 QDialog {
                     background-color: #0c1118;
                     color: #e6edf3;
@@ -12892,8 +12918,7 @@ if HAS_PYQT6:
                 QPushButton#runButton:hover {
                     background-color: #1f6cd8;
                 }
-                """
-            )
+                """)
 
         @staticmethod
         def _split_csv_values(text: str) -> list[str]:
