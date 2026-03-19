@@ -1145,6 +1145,95 @@ def test_particle_overlay_available_with_historical_detections() -> None:
     assert from_history is True
 
 
+def test_sync_visualization_volume_layers_from_input_source_updates_primary_layer() -> None:
+    class _FakeCombo:
+        def __init__(self, data: object) -> None:
+            self._data = data
+
+        def currentData(self) -> object:
+            return self._data
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    dialog._operation_input_combos = {"visualization": _FakeCombo("shear_transform")}
+    dialog._visualization_volume_layers = [
+        {"component": "data", "layer_type": "image"},
+        {"component": "results/deconvolution/latest/data", "layer_type": "image"},
+    ]
+    dialog._normalize_visualization_volume_layers = lambda rows: list(rows)
+    dialog._default_visualization_volume_layers = lambda: [
+        {"component": "data", "layer_type": "image"}
+    ]
+    refresh_calls = {"count": 0}
+    dialog._refresh_visualization_volume_layers_summary = lambda: refresh_calls.__setitem__(
+        "count", refresh_calls["count"] + 1
+    )
+
+    app_module.AnalysisSelectionDialog._sync_visualization_volume_layers_from_input_source(
+        dialog, refresh_summary=True
+    )
+
+    assert dialog._visualization_volume_layers[0]["component"] == "shear_transform"
+    assert dialog._visualization_volume_layers[1]["component"] == (
+        "results/deconvolution/latest/data"
+    )
+    assert refresh_calls["count"] == 1
+
+
+def test_collect_visualization_parameters_syncs_combo_with_primary_layer() -> None:
+    class _FakeCombo:
+        def __init__(self, data: object) -> None:
+            self._data = data
+
+        def currentData(self) -> object:
+            return self._data
+
+    class _FakeCheckbox:
+        def __init__(self, checked: bool) -> None:
+            self._checked = bool(checked)
+
+        def isChecked(self) -> bool:
+            return bool(self._checked)
+
+    class _FakeSpin:
+        def __init__(self, value: int) -> None:
+            self._value = int(value)
+
+        def value(self) -> int:
+            return int(self._value)
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    dialog._operation_input_combos = {"visualization": _FakeCombo("shear_transform")}
+    dialog._visualization_volume_layers = [{"component": "data", "layer_type": "image"}]
+    dialog._visualization_defaults = {
+        "memory_overhead_factor": 1.0,
+        "launch_mode": "auto",
+        "capture_keyframes": True,
+        "keyframe_manifest_path": "",
+        "particle_detection_component": "results/particle_detection/latest/detections",
+    }
+    dialog._visualization_keyframe_layer_overrides = []
+    dialog._normalize_visualization_volume_layers = lambda rows: list(rows)
+    dialog._default_visualization_volume_layers = lambda: [
+        {"component": "data", "layer_type": "image"}
+    ]
+    dialog._refresh_visualization_volume_layers_summary = lambda: None
+    dialog._is_particle_overlay_available = lambda: False
+    dialog._visualization_show_all_positions_checkbox = _FakeCheckbox(False)
+    dialog._visualization_position_spin = _FakeSpin(0)
+    dialog._visualization_multiscale_checkbox = _FakeCheckbox(False)
+    dialog._visualization_require_gpu_checkbox = _FakeCheckbox(False)
+    dialog._visualization_overlay_points_checkbox = _FakeCheckbox(False)
+
+    params = app_module.AnalysisSelectionDialog._collect_visualization_parameters(dialog)
+
+    assert params["input_source"] == "shear_transform"
+    assert params["volume_layers"][0]["component"] == "shear_transform"
+
+
 def test_shear_degree_to_coefficient_and_back_round_trip() -> None:
     for angle in (-70.0, -35.0, -5.5, 0.0, 8.25, 35.0, 70.0):
         coefficient = app_module._shear_degrees_to_coefficient(angle)

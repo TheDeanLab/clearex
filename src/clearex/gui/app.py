@@ -7601,6 +7601,10 @@ if HAS_PYQT6:
             self._register_parameter_hint(
                 input_combo, self._PARAMETER_HINTS["input_source"]
             )
+            if operation_name == "visualization":
+                input_combo.currentIndexChanged.connect(
+                    self._on_visualization_input_source_changed
+                )
 
             if operation_name == "deconvolution":
                 self._build_deconvolution_parameter_rows(form)
@@ -9135,6 +9139,70 @@ if HAS_PYQT6:
                 combo_index = combo.count() - 1
             combo.setCurrentIndex(combo_index)
             combo.blockSignals(False)
+
+        def _sync_visualization_volume_layers_from_input_source(
+            self,
+            *,
+            refresh_summary: bool = True,
+        ) -> None:
+            """Align primary visualization volume layer with input-source combo.
+
+            Parameters
+            ----------
+            refresh_summary : bool, default=True
+                Whether to refresh the layer summary label after synchronization.
+
+            Returns
+            -------
+            None
+                Visualization volume-layer rows are updated in-place.
+            """
+            combo = self._operation_input_combos.get("visualization")
+            if combo is None:
+                return
+            combo_value = combo.currentData()
+            selected_component = (
+                str(combo_value).strip() if combo_value is not None else "data"
+            ) or "data"
+
+            rows = self._normalize_visualization_volume_layers(
+                self._visualization_volume_layers
+            )
+            if not rows:
+                rows = self._default_visualization_volume_layers()
+            if not rows:
+                return
+
+            current_component = str(rows[0].get("component", "data")).strip() or "data"
+            if current_component == selected_component:
+                self._visualization_volume_layers = list(rows)
+                return
+
+            updated_first_row = dict(rows[0])
+            updated_first_row["component"] = selected_component
+            rows[0] = updated_first_row
+            self._visualization_volume_layers = list(rows)
+
+            if refresh_summary:
+                self._refresh_visualization_volume_layers_summary()
+
+        def _on_visualization_input_source_changed(self, _index: int) -> None:
+            """Handle visualization input-source combo selection changes.
+
+            Parameters
+            ----------
+            _index : int
+                Selected combo index (unused).
+
+            Returns
+            -------
+            None
+                Primary visualization layer component is synchronized to match the
+                selected input source.
+            """
+            self._sync_visualization_volume_layers_from_input_source(
+                refresh_summary=True
+            )
 
         def _refresh_visualization_volume_layers_summary(self) -> None:
             """Refresh summary text for visualization volume-layer rows."""
@@ -13055,6 +13123,9 @@ if HAS_PYQT6:
             dict[str, Any]
                 Visualization parameter mapping.
             """
+            self._sync_visualization_volume_layers_from_input_source(
+                refresh_summary=False
+            )
             overlay_enabled = self._is_particle_overlay_available()
             volume_layers = self._normalize_visualization_volume_layers(
                 self._visualization_volume_layers
