@@ -68,6 +68,9 @@ In the GUI analysis window:
   active analysis target.
 - Enabling the batch checkbox runs the same selected operation set across all
   experiments from the setup list instead of only the selected one.
+- Per-dataset analysis widget state is restored automatically when available:
+  saved GUI state is preferred, and ``Restore Latest Run Parameters`` falls
+  back to the latest completed provenance-backed run for the active store.
 
 Examples:
 
@@ -128,6 +131,10 @@ Execution progresses through these coarse stages:
 
 GUI execution uses explicit progress callbacks and per-run logging in the
 resolved workflow log directory.
+
+The ``Running Analysis`` dialog also includes a ``Stop Analysis`` button.
+Cancellation is cooperative: ClearEx stops at the next progress checkpoint and
+persists the interrupted run in provenance with ``status=cancelled``.
 
 Visualization Keyframe Capture
 ------------------------------

@@ -57,6 +57,11 @@ ANALYSIS_OPERATION_ORDER = (
     "mip_export",
 )
 
+
+class WorkflowExecutionCancelled(RuntimeError):
+    """Raised when a running workflow is cancelled by the operator."""
+
+
 DEFAULT_ZARR_CHUNKS_PTCZYX: ZarrAxisSpec = (1, 1, 1, 256, 256, 256)
 DEFAULT_ZARR_PYRAMID_PTCZYX: ZarrPyramidAxisSpec = (
     (1,),

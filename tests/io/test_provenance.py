@@ -34,6 +34,9 @@ import zarr
 # Local Imports
 from clearex.io.provenance import (
     is_zarr_store_path,
+    load_latest_analysis_gui_state,
+    load_latest_completed_workflow_state,
+    persist_latest_analysis_gui_state,
     persist_run_provenance,
     store_latest_analysis_output,
     summarize_analysis_history,
@@ -265,3 +268,64 @@ def test_summarize_analysis_history_ignores_skipped_steps(tmp_path: Path):
     )
     assert summary["has_successful_run"] is False
     assert summary["matches_parameters"] is False
+
+
+def test_load_latest_completed_workflow_state_skips_cancelled_runs(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "latest_completed_workflow.zarr"
+    zarr.open_group(str(store_path), mode="w")
+
+    completed_workflow = WorkflowConfig(file=str(store_path), visualization=True)
+    image_info = ImageInfo(path=store_path, shape=(2, 2), dtype=np.uint8)
+    completed_run_id = persist_run_provenance(
+        zarr_path=store_path,
+        workflow=completed_workflow,
+        image_info=image_info,
+        status="completed",
+        repo_root=tmp_path,
+    )
+    _ = persist_run_provenance(
+        zarr_path=store_path,
+        workflow=WorkflowConfig(file=str(store_path), shear_transform=True),
+        image_info=image_info,
+        status="cancelled",
+        repo_root=tmp_path,
+    )
+
+    loaded = load_latest_completed_workflow_state(store_path)
+
+    assert loaded is not None
+    assert loaded["run_id"] == completed_run_id
+    assert loaded["workflow"]["visualization"] is True
+    assert loaded["workflow"]["shear_transform"] is False
+
+
+def test_latest_analysis_gui_state_round_trip(tmp_path: Path) -> None:
+    store_path = tmp_path / "analysis_gui_state.zarr"
+    zarr.open_group(str(store_path), mode="w")
+    payload = {
+        "flatfield": True,
+        "deconvolution": False,
+        "analysis_parameters": {
+            "flatfield": {
+                "execution_order": 1,
+                "input_source": "data",
+                "force_rerun": False,
+                "get_darkfield": False,
+            }
+        },
+    }
+
+    persist_latest_analysis_gui_state(
+        store_path,
+        payload,
+        source="unit_test",
+    )
+    loaded = load_latest_analysis_gui_state(store_path)
+
+    assert loaded is not None
+    assert loaded["source"] == "unit_test"
+    assert loaded["updated_utc"] is not None
+    assert loaded["workflow"]["flatfield"] is True
+    assert loaded["workflow"]["analysis_parameters"]["flatfield"]["execution_order"] == 1

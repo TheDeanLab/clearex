@@ -65,7 +65,13 @@ from clearex.io.experiment import (
     resolve_data_store_path,
     resolve_experiment_data_path,
 )
-from clearex.io.provenance import is_zarr_store_path, summarize_analysis_history
+from clearex.io.provenance import (
+    is_zarr_store_path,
+    load_latest_analysis_gui_state,
+    load_latest_completed_workflow_state,
+    persist_latest_analysis_gui_state,
+    summarize_analysis_history,
+)
 from clearex.io.read import ImageInfo, ImageOpener
 from clearex.workflow import (
     AnalysisTarget,
@@ -83,6 +89,7 @@ from clearex.workflow import (
     SlurmClusterConfig,
     SlurmRunnerConfig,
     WorkflowConfig,
+    WorkflowExecutionCancelled,
     ZarrSaveConfig,
     dask_backend_from_dict,
     dask_backend_to_dict,
@@ -114,6 +121,7 @@ try:
         pyqtSignal,
     )
     from PyQt6.QtGui import (
+        QCloseEvent,
         QDragEnterEvent,
         QDragMoveEvent,
         QDropEvent,
@@ -3738,6 +3746,7 @@ if HAS_PYQT6:
 
         progress_changed = pyqtSignal(int, str)
         succeeded = pyqtSignal()
+        cancelled = pyqtSignal(str)
         failed = pyqtSignal(str, str)
 
         def __init__(
@@ -3766,6 +3775,23 @@ if HAS_PYQT6:
             super().__init__()
             self._workflow = workflow
             self._run_callback = run_callback
+            self._cancel_requested = False
+
+        def cancel(self) -> None:
+            """Request cooperative cancellation of the running workflow.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Cancellation is recorded in-place and checked on progress
+                callbacks.
+            """
+            self._cancel_requested = True
+            self.requestInterruption()
 
         def _emit_progress(self, percent: int, message: str) -> None:
             """Emit progress updates from worker thread.
@@ -3782,6 +3808,8 @@ if HAS_PYQT6:
             None
                 Signal side effects only.
             """
+            if self._cancel_requested or self.isInterruptionRequested():
+                raise WorkflowExecutionCancelled("Analysis cancelled by user.")
             self.progress_changed.emit(int(percent), str(message))
 
         def run(self) -> None:
@@ -3801,6 +3829,8 @@ if HAS_PYQT6:
                 self._run_callback(self._workflow, self._emit_progress)
                 self._emit_progress(100, "Analysis workflow completed.")
                 self.succeeded.emit()
+            except WorkflowExecutionCancelled as exc:
+                self.cancelled.emit(str(exc) or "Analysis cancelled by user.")
             except Exception as exc:
                 self.failed.emit(
                     f"{type(exc).__name__}: {exc}",
@@ -3815,6 +3845,8 @@ if HAS_PYQT6:
         parent : QDialog, optional
             Parent window.
         """
+
+        cancel_requested = pyqtSignal()
 
         def __init__(self, parent: Optional[QDialog] = None) -> None:
             """Initialize analysis progress dialog widgets.
@@ -3852,6 +3884,14 @@ if HAS_PYQT6:
             self._progress.setFormat("%p%")
             root.addWidget(self._progress)
 
+            button_row = QHBoxLayout()
+            apply_footer_row_spacing(button_row)
+            button_row.addStretch(1)
+            self._stop_button = QPushButton("Stop Analysis")
+            self._stop_button.clicked.connect(self._on_cancel_requested)
+            button_row.addWidget(self._stop_button)
+            root.addLayout(button_row)
+
             self.setStyleSheet(
                 """
                 QDialog {
@@ -3882,6 +3922,24 @@ if HAS_PYQT6:
                         stop:0 #2f81f7, stop:1 #33c3a5
                     );
                 }
+                QPushButton {
+                    background-color: #1b2a3d;
+                    border: 1px solid #2f4f78;
+                    border-radius: 10px;
+                    color: #dce8f8;
+                    font-size: 14px;
+                    font-weight: 600;
+                    padding: 10px 18px;
+                }
+                QPushButton:hover {
+                    background-color: #24354b;
+                    border-color: #4c6e99;
+                }
+                QPushButton:disabled {
+                    color: #7f91ab;
+                    border-color: #2a3442;
+                    background-color: #16202d;
+                }
                 """
             )
             _apply_initial_dialog_geometry(
@@ -3890,6 +3948,22 @@ if HAS_PYQT6:
                 preferred_size=_ANALYSIS_PROGRESS_DIALOG_PREFERRED_SIZE,
                 content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
             )
+
+        def _on_cancel_requested(self) -> None:
+            """Request cooperative cancellation of analysis execution.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Dialog state is updated in-place and a cancel signal is emitted.
+            """
+            self._stop_button.setEnabled(False)
+            self._message_label.setText("Stopping after the current checkpoint...")
+            self.cancel_requested.emit()
 
         def update_progress(self, percent: int, message: str) -> None:
             """Update progress bar and stage message.
@@ -6219,6 +6293,7 @@ if HAS_PYQT6:
             self.setWindowTitle("ClearEx Analysis")
 
             self._base_config = initial
+            self._session_default_analysis_template = replace(initial)
             self._analysis_targets: tuple[AnalysisTarget, ...] = (
                 _analysis_targets_for_workflow(initial)
             )
@@ -6228,6 +6303,8 @@ if HAS_PYQT6:
             self._analysis_scope_combo: Optional[QComboBox] = None
             self._analysis_apply_to_all_checkbox: Optional[QCheckBox] = None
             self._analysis_scope_summary_label: Optional[QLabel] = None
+            self._analysis_state_source_label: Optional[QLabel] = None
+            self._restore_latest_run_button: Optional[QPushButton] = None
             self._status_label: Optional[QLabel] = None
             self._dask_backend_summary_label: Optional[QLabel] = None
             self._dask_backend_button: Optional[QPushButton] = None
@@ -6300,7 +6377,13 @@ if HAS_PYQT6:
 
             self._build_ui()
             self._apply_theme()
-            self._hydrate(initial)
+            self._restore_analysis_state_for_target(
+                _resolve_selected_analysis_target(
+                    initial,
+                    targets=self._analysis_targets,
+                ),
+                prefer_saved_gui_state=True,
+            )
             _apply_initial_dialog_geometry(
                 self,
                 minimum_size=_ANALYSIS_DIALOG_MINIMUM_SIZE,
@@ -6356,6 +6439,24 @@ if HAS_PYQT6:
             self._analysis_scope_summary_label.setObjectName("statusLabel")
             self._analysis_scope_summary_label.setWordWrap(True)
             layout.addWidget(self._analysis_scope_summary_label)
+
+            restore_row = QHBoxLayout()
+            apply_row_spacing(restore_row)
+            self._analysis_state_source_label = QLabel(
+                "Using default analysis parameters for this dataset."
+            )
+            self._analysis_state_source_label.setObjectName("statusLabel")
+            self._analysis_state_source_label.setWordWrap(True)
+            restore_row.addWidget(self._analysis_state_source_label, 1)
+
+            self._restore_latest_run_button = QPushButton(
+                "Restore Latest Run Parameters"
+            )
+            self._restore_latest_run_button.clicked.connect(
+                self._on_restore_latest_run_parameters
+            )
+            restore_row.addWidget(self._restore_latest_run_button)
+            layout.addLayout(restore_row)
             return group
 
         def _populate_analysis_scope_targets(self, initial: WorkflowConfig) -> None:
@@ -6504,6 +6605,328 @@ if HAS_PYQT6:
             self._analysis_scope_summary_label.setText(summary)
             self._analysis_scope_summary_label.setToolTip(summary)
 
+        def _current_analysis_apply_to_all(self) -> bool:
+            """Return whether batch-analysis mode is currently enabled.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            bool
+                ``True`` when batch-analysis mode is enabled.
+            """
+            if self._analysis_apply_to_all_checkbox is None:
+                return bool(self._base_config.analysis_apply_to_all)
+            return bool(self._analysis_apply_to_all_checkbox.isChecked())
+
+        def _build_target_default_workflow(
+            self,
+            target: Optional[AnalysisTarget],
+        ) -> WorkflowConfig:
+            """Build the default workflow template for one analysis target.
+
+            Parameters
+            ----------
+            target : AnalysisTarget, optional
+                Experiment/store target being restored.
+
+            Returns
+            -------
+            WorkflowConfig
+                Target-aware default workflow template.
+            """
+            file_path = (
+                str(target.store_path)
+                if target is not None
+                else str(self._base_config.file or "").strip() or None
+            )
+            selected_experiment_path = (
+                str(target.experiment_path)
+                if target is not None
+                else (
+                    str(self._base_config.analysis_selected_experiment_path or "").strip()
+                    or None
+                )
+            )
+            return replace(
+                self._session_default_analysis_template,
+                file=file_path,
+                analysis_targets=self._analysis_targets,
+                analysis_selected_experiment_path=selected_experiment_path,
+                analysis_apply_to_all=self._current_analysis_apply_to_all(),
+                dask_backend=self._dask_backend_config,
+            )
+
+        def _analysis_state_workflow_from_payload(
+            self,
+            *,
+            target: Optional[AnalysisTarget],
+            payload: Mapping[str, Any],
+        ) -> WorkflowConfig:
+            """Merge persisted GUI/provenance payload into a target workflow.
+
+            Parameters
+            ----------
+            target : AnalysisTarget, optional
+                Experiment/store target being restored.
+            payload : mapping[str, Any]
+                Persisted workflow-like payload.
+
+            Returns
+            -------
+            WorkflowConfig
+                Restored workflow state for the active target.
+            """
+            default_workflow = self._build_target_default_workflow(target)
+            selected_flags = {
+                operation_name: bool(
+                    payload.get(operation_name, getattr(default_workflow, operation_name))
+                )
+                for operation_name in self._OPERATION_KEYS
+            }
+            analysis_parameters = normalize_analysis_operation_parameters(
+                payload.get(
+                    "analysis_parameters",
+                    default_workflow.analysis_parameters,
+                )
+            )
+            return replace(
+                default_workflow,
+                flatfield=selected_flags["flatfield"],
+                deconvolution=selected_flags["deconvolution"],
+                shear_transform=selected_flags["shear_transform"],
+                particle_detection=selected_flags["particle_detection"],
+                usegment3d=selected_flags["usegment3d"],
+                registration=selected_flags["registration"],
+                visualization=selected_flags["visualization"],
+                mip_export=selected_flags["mip_export"],
+                analysis_parameters=analysis_parameters,
+            )
+
+        def _analysis_gui_state_payload_from_current_widgets(self) -> Dict[str, Any]:
+            """Collect dataset-local GUI state from current analysis widgets.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, Any]
+                Persistable mapping of selected flags and analysis parameters.
+
+            Raises
+            ------
+            ValueError
+                If any current widget values are invalid.
+            """
+            payload: Dict[str, Any] = {
+                operation_name: bool(
+                    self._operation_checkboxes[operation_name].isChecked()
+                )
+                for operation_name in self._OPERATION_KEYS
+            }
+            analysis_parameters = normalize_analysis_operation_parameters(
+                self._base_config.analysis_parameters
+            )
+            for operation_name in self._OPERATION_KEYS:
+                analysis_parameters[operation_name] = self._collect_operation_parameters(
+                    operation_name
+                )
+            payload["analysis_parameters"] = normalize_analysis_operation_parameters(
+                analysis_parameters
+            )
+            target = self._current_analysis_target()
+            if target is not None:
+                payload["file"] = str(target.store_path)
+                payload["analysis_selected_experiment_path"] = str(
+                    target.experiment_path
+                )
+            return payload
+
+        def _persist_analysis_gui_state_for_target(
+            self,
+            target: Optional[AnalysisTarget],
+        ) -> None:
+            """Persist current GUI analysis state for one dataset.
+
+            Parameters
+            ----------
+            target : AnalysisTarget, optional
+                Dataset target to persist.
+
+            Returns
+            -------
+            None
+                Persistence is best-effort and handled in-place.
+            """
+            if target is None:
+                return
+            store_path = str(target.store_path).strip()
+            if not store_path or not is_zarr_store_path(store_path):
+                return
+            try:
+                payload = self._analysis_gui_state_payload_from_current_widgets()
+            except ValueError as exc:
+                logging.getLogger(__name__).debug(
+                    "Skipping GUI-state persistence for %s because current analysis "
+                    "parameters are invalid: %s",
+                    store_path,
+                    exc,
+                )
+                return
+            try:
+                persist_latest_analysis_gui_state(store_path, payload)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Failed to persist analysis GUI state for %s.",
+                    store_path,
+                )
+
+        def _set_analysis_state_source_text(
+            self,
+            text: str,
+            *,
+            has_latest_run: bool,
+        ) -> None:
+            """Update the analysis-state restore summary and button state.
+
+            Parameters
+            ----------
+            text : str
+                Human-readable source description.
+            has_latest_run : bool
+                Whether a completed-run restore target is available.
+
+            Returns
+            -------
+            None
+                Summary widgets are updated in-place.
+            """
+            if self._analysis_state_source_label is not None:
+                self._analysis_state_source_label.setText(str(text))
+                self._analysis_state_source_label.setToolTip(str(text))
+            if self._restore_latest_run_button is not None:
+                self._restore_latest_run_button.setEnabled(bool(has_latest_run))
+
+        def _restore_analysis_state_for_target(
+            self,
+            target: Optional[AnalysisTarget],
+            *,
+            prefer_saved_gui_state: bool,
+        ) -> None:
+            """Restore GUI analysis state for the selected dataset target.
+
+            Parameters
+            ----------
+            target : AnalysisTarget, optional
+                Dataset target to restore.
+            prefer_saved_gui_state : bool
+                When ``True``, prefer unsaved GUI state over latest completed
+                provenance workflow parameters.
+
+            Returns
+            -------
+            None
+                The dialog is rehydrated in-place.
+            """
+            default_workflow = self._build_target_default_workflow(target)
+            restored_workflow = default_workflow
+            source_text = "Using default analysis parameters for this dataset."
+            latest_completed_state: Optional[Dict[str, Any]] = None
+            saved_gui_state: Optional[Dict[str, Any]] = None
+
+            store_path = (
+                str(target.store_path).strip()
+                if target is not None
+                else str(default_workflow.file or "").strip()
+            )
+            if store_path and is_zarr_store_path(store_path):
+                try:
+                    latest_completed_state = load_latest_completed_workflow_state(
+                        store_path
+                    )
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "Failed to load latest completed workflow state for %s.",
+                        store_path,
+                    )
+                try:
+                    saved_gui_state = load_latest_analysis_gui_state(store_path)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "Failed to load saved analysis GUI state for %s.",
+                        store_path,
+                    )
+
+            if (
+                prefer_saved_gui_state
+                and saved_gui_state is not None
+                and isinstance(saved_gui_state.get("workflow"), Mapping)
+            ):
+                restored_workflow = self._analysis_state_workflow_from_payload(
+                    target=target,
+                    payload=saved_gui_state["workflow"],
+                )
+                source_text = "Restored unsaved GUI state from this dataset."
+            elif (
+                latest_completed_state is not None
+                and isinstance(latest_completed_state.get("workflow"), Mapping)
+            ):
+                restored_workflow = self._analysis_state_workflow_from_payload(
+                    target=target,
+                    payload=latest_completed_state["workflow"],
+                )
+                source_text = (
+                    "Loaded parameters from the latest completed run for this dataset."
+                )
+            elif store_path and not is_zarr_store_path(store_path):
+                source_text = "Persistence is unavailable for this data source."
+
+            self._hydrate(restored_workflow)
+            self._base_config.analysis_parameters = normalize_analysis_operation_parameters(
+                restored_workflow.analysis_parameters
+            )
+            for operation_name in self._OPERATION_KEYS:
+                setattr(
+                    self._base_config,
+                    operation_name,
+                    bool(getattr(restored_workflow, operation_name)),
+                )
+            self._base_config.analysis_apply_to_all = bool(
+                restored_workflow.analysis_apply_to_all
+            )
+            self._set_analysis_state_source_text(
+                source_text,
+                has_latest_run=latest_completed_state is not None,
+            )
+
+        def _on_restore_latest_run_parameters(self) -> None:
+            """Restore the latest completed provenance workflow for the target.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                The selected dataset is rehydrated in-place.
+            """
+            target = self._current_analysis_target()
+            if target is None:
+                self._set_status("No analysis target is selected.")
+                return
+            self._restore_analysis_state_for_target(
+                target,
+                prefer_saved_gui_state=False,
+            )
+            self._set_status(
+                "Restored parameters from the latest completed run for the selected dataset."
+            )
+
         def _on_analysis_target_changed(self, index: int) -> None:
             """Handle experiment selection changes in the analysis-scope combo.
 
@@ -6518,9 +6941,12 @@ if HAS_PYQT6:
                 Active target and store-dependent status widgets are refreshed.
             """
             del index
-            self._set_active_analysis_target(
+            previous_target = self._active_analysis_target
+            if previous_target is not None:
+                self._persist_analysis_gui_state_for_target(previous_target)
+            self._restore_analysis_state_for_target(
                 self._current_analysis_target(),
-                refresh_context=True,
+                prefer_saved_gui_state=True,
             )
 
         def _on_analysis_apply_to_all_changed(self, checked: bool) -> None:
@@ -6536,6 +6962,7 @@ if HAS_PYQT6:
             None
                 Scope text and status message are updated in-place.
             """
+            self._base_config.analysis_apply_to_all = bool(checked)
             self._refresh_analysis_scope_summary()
             if checked and len(self._analysis_targets) > 1:
                 self._set_status(
@@ -12604,6 +13031,7 @@ if HAS_PYQT6:
             if "usegment3d" in dataclass_fields:
                 workflow_kwargs["usegment3d"] = selected_flags["usegment3d"]
             self.result_config = WorkflowConfig(**workflow_kwargs)
+            self._persist_analysis_gui_state_for_target(selected_target)
             _save_last_used_dask_backend_config(self._dask_backend_config)
             sequence = self._selected_operations_in_sequence()
             sequence_text = " -> ".join(
@@ -12622,6 +13050,37 @@ if HAS_PYQT6:
                     f"Launching selected analysis routines: {sequence_text}"
                 )
             self.accept()
+
+        def reject(self) -> None:
+            """Persist current GUI state before dismissing the dialog.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Dialog state is persisted best-effort before rejection.
+            """
+            self._persist_analysis_gui_state_for_target(self._active_analysis_target)
+            super().reject()
+
+        def closeEvent(self, event: QCloseEvent) -> None:
+            """Persist current GUI state before the dialog closes.
+
+            Parameters
+            ----------
+            event : QCloseEvent
+                Close event emitted by Qt.
+
+            Returns
+            -------
+            None
+                Close handling is delegated to ``QDialog`` after persistence.
+            """
+            self._persist_analysis_gui_state_for_target(self._active_analysis_target)
+            super().closeEvent(event)
 
 
 def launch_gui(
@@ -12964,7 +13423,28 @@ def run_workflow_with_progress(
 
     progress_dialog = AnalysisExecutionProgressDialog(parent=None)
     failure_payload: dict[str, str] = {}
+    cancellation_payload: dict[str, str] = {}
     completed = {"ok": False}
+    cancel_requested = {"value": False}
+
+    def _request_cancel() -> None:
+        """Record a user-requested cancellation event.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Cancellation state is updated in-place.
+        """
+        cancel_requested["value"] = True
+
+    cancel_signal = getattr(progress_dialog, "cancel_requested", None)
+    if cancel_signal is not None:
+        cancel_signal.connect(_request_cancel)
+
     use_main_thread_execution = execution_workflow.dask_backend.mode in {
         DASK_BACKEND_SLURM_RUNNER,
         DASK_BACKEND_SLURM_CLUSTER,
@@ -12988,8 +13468,12 @@ def run_workflow_with_progress(
             None
                 Progress UI side effects only.
             """
+            if cancel_requested["value"]:
+                raise WorkflowExecutionCancelled("Analysis cancelled by user.")
             progress_dialog.update_progress(int(percent), str(message))
             app.processEvents()
+            if cancel_requested["value"]:
+                raise WorkflowExecutionCancelled("Analysis cancelled by user.")
 
         try:
             if len(scoped_workflows) > 1:
@@ -13004,6 +13488,9 @@ def run_workflow_with_progress(
                 _progress_with_events(100, "Analysis workflow completed.")
             completed["ok"] = True
             progress_dialog.accept()
+        except WorkflowExecutionCancelled as exc:
+            cancellation_payload.update({"summary": str(exc) or "Analysis cancelled."})
+            progress_dialog.reject()
         except Exception as exc:
             failure_payload.update(
                 {
@@ -13022,6 +13509,12 @@ def run_workflow_with_progress(
         worker.progress_changed.connect(progress_dialog.update_progress)
         worker.succeeded.connect(lambda: completed.__setitem__("ok", True))
         worker.succeeded.connect(progress_dialog.accept)
+        if cancel_signal is not None:
+            cancel_signal.connect(worker.cancel)
+        worker.cancelled.connect(
+            lambda summary: cancellation_payload.update({"summary": str(summary)})
+        )
+        worker.cancelled.connect(lambda *_: progress_dialog.reject())
         worker.failed.connect(
             lambda summary, details: failure_payload.update(
                 {"summary": str(summary), "details": str(details)}
@@ -13041,6 +13534,10 @@ def run_workflow_with_progress(
             summary=failure_payload.get("summary"),
             details=failure_payload.get("details"),
         )
+        if owns_app:
+            app.quit()
+        return False
+    if cancellation_payload:
         if owns_app:
             app.quit()
         return False

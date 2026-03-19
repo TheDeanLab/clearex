@@ -55,6 +55,17 @@ def _install_fake_gui_runtime(monkeypatch):
         Fake ``QApplication`` and progress-dialog classes.
     """
 
+    class _FakeSignal:
+        def __init__(self) -> None:
+            self._callbacks: list[object] = []
+
+        def connect(self, callback) -> None:
+            self._callbacks.append(callback)
+
+        def emit(self, *args, **kwargs) -> None:
+            for callback in list(self._callbacks):
+                callback(*args, **kwargs)
+
     class _FakeApplication:
         _instance = None
 
@@ -84,6 +95,7 @@ def _install_fake_gui_runtime(monkeypatch):
             self.accepted = False
             self.rejected = False
             self.closed = False
+            self.cancel_requested = _FakeSignal()
 
         def update_progress(self, percent: int, message: str) -> None:
             self.updates.append((int(percent), str(message)))
@@ -590,6 +602,53 @@ def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
     assert dialog.accepted is False
     assert dialog.rejected is True
     assert dialog.closed is True
+
+
+def test_run_workflow_with_progress_slurm_cancels_without_error_dialog(
+    monkeypatch,
+) -> None:
+    fake_app_cls, fake_dialog_cls = _install_fake_gui_runtime(monkeypatch)
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
+            {"summary": str(summary), "details": str(details)}
+        ),
+    )
+
+    def _run_callback(workflow, progress_callback):
+        del workflow
+        dialog = fake_dialog_cls.last_instance
+        assert dialog is not None
+        dialog.cancel_requested.emit()
+        progress_callback(25, "should cancel")
+
+    workflow = app_module.WorkflowConfig(
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        )
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+    )
+
+    assert ok is False
+    assert themed_error_calls == []
+
+    app_instance = fake_app_cls.instance()
+    assert app_instance is not None
+    assert app_instance.quit_calls == 1
+
+    dialog = fake_dialog_cls.last_instance
+    assert dialog is not None
+    assert dialog.shown is True
+    assert dialog.accepted is False
+    assert dialog.rejected is True
+    assert dialog.closed is True
+    assert dialog.updates == [(1, "Starting analysis workflow...")]
 
 
 def test_ensure_clearex_settings_directory_creates_target(tmp_path) -> None:

@@ -19,10 +19,18 @@ This folder owns the PyQt6 UX in `app.py`.
   - Top `Analysis Scope` panel:
     - choose the active `experiment.yml` from the loaded setup list,
     - optionally apply the selected analysis sequence to every loaded experiment
+    - show whether parameters came from defaults, saved GUI state, or the
+      latest completed provenance-backed run
+    - allow one-click restore of the latest completed run parameters for the
+      active dataset
   - The selected experiment switches the active store/provenance context shown
     in the dialog
+  - Current analysis-widget values are persisted per dataset on target switch,
+    close, and run so reopening a store restores the previous GUI state
   - Left: operation selection, execution order, and `Configure` buttons
   - Right: operation parameter panels + parameter-help panel
+  - Analysis execution progress dialog includes a themed `Stop Analysis`
+    button that requests cooperative cancellation
 
 ## Analysis Dialog Invariants
 
@@ -90,8 +98,15 @@ This folder owns the PyQt6 UX in `app.py`.
 1. Add default/normalization in `src/clearex/workflow.py`.
 2. Add widgets to the operation panel in `AnalysisSelectionDialog`.
 3. Register parameter help text.
-4. Hydrate from normalized config.
+4. Hydrate from normalized config and make sure the widget restores correctly
+   from dataset-local GUI state and provenance-backed latest-run state.
 5. Collect values into `analysis_parameters` on Run.
+6. Verify the value persists across:
+   - switching between experiments in `Analysis Scope`,
+   - closing and reopening the analysis dialog,
+   - `Restore Latest Run Parameters` for the active dataset.
+7. Add or update targeted regression tests for persistence when the new widget
+   changes stored GUI state or run parameters.
 
 ## Validation
 

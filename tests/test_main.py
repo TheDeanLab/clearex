@@ -17,7 +17,7 @@ import pytest
 import clearex.main as main_module
 from clearex.io.provenance import persist_run_provenance
 from clearex.io.read import ImageInfo
-from clearex.workflow import WorkflowConfig
+from clearex.workflow import WorkflowConfig, WorkflowExecutionCancelled
 from clearex.workflow import DaskBackendConfig, LocalClusterConfig
 
 
@@ -484,6 +484,67 @@ def test_run_workflow_logs_operation_context_on_flatfield_failure(
     assert "Analysis operation 'flatfield' failed" in captured_messages[0]
     assert str(store_path) in captured_messages[0]
     assert "requested_input=data" in captured_messages[0]
+
+
+def test_run_workflow_persists_cancelled_provenance_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_cancelled.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _fake_flatfield(*, zarr_path, parameters, client, progress_callback):
+        del zarr_path, parameters, client
+        progress_callback(50, "cancelling")
+        raise AssertionError("progress callback should have cancelled execution")
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+    monkeypatch.setattr(main_module, "run_flatfield_analysis", _fake_flatfield)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        flatfield=True,
+    )
+
+    def _cancel_on_progress(percent: int, message: str) -> None:
+        if int(percent) >= 50 and "flatfield:" in str(message):
+            raise WorkflowExecutionCancelled("Analysis cancelled by user.")
+
+    with pytest.raises(WorkflowExecutionCancelled, match="Analysis cancelled by user"):
+        main_module._run_workflow(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.cancelled"),
+            analysis_progress_callback=_cancel_on_progress,
+        )
+
+    runs_group = main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
+        "runs"
+    ]
+    run_records = [
+        dict(runs_group[run_id].attrs["record"]) for run_id in runs_group.group_keys()
+    ]
+
+    assert len(run_records) == 1
+    assert run_records[0]["status"] == "cancelled"
+    assert any(
+        str(step.get("name")) == "flatfield"
+        and dict(step.get("parameters", {})).get("status") == "cancelled"
+        for step in run_records[0]["steps"]
+    )
 
 
 def test_run_workflow_registration_skips_without_crashing(monkeypatch) -> None:

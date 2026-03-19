@@ -10,8 +10,29 @@ This folder owns the PyQt6 UX in `app.py`.
   - Display image metadata
   - Materialize canonical store when missing, with progress dialog
 - Analysis window (`AnalysisSelectionDialog`):
+  - `Analysis Scope` manages the active experiment/store context for single or
+    batch analysis
   - Left: operation selection, execution order, and `Configure` buttons
   - Right: operation parameter panels + parameter-help panel
+
+## Persistence Contract
+
+- Treat per-dataset GUI persistence as part of the analysis-dialog contract,
+  not an optional enhancement.
+- `AnalysisSelectionDialog` must continue to:
+  - restore dataset-local saved GUI state when available,
+  - fall back to the latest completed provenance-backed workflow state,
+  - persist current widget state on experiment switch, close, and run,
+  - keep `Restore Latest Run Parameters` working for the active dataset.
+- When adding a new analysis workflow, new operation widget, or new parameter:
+  - add the default and normalization path in `src/clearex/workflow.py`,
+  - hydrate the widget from restored `analysis_parameters`,
+  - collect the widget back into `analysis_parameters`,
+  - ensure the value survives dataset-local GUI-state persistence and
+    provenance-backed restore,
+  - add/update targeted regression tests for restore/save behavior.
+- Do not introduce GUI-only parameters that bypass this persistence path unless
+  there is a deliberate documented reason.
 
 ## Analysis Dialog Invariants
 

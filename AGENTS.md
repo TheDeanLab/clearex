@@ -73,6 +73,13 @@ This file summarizes the current engineering strategy for agent-driven changes i
 - Metadata panel should stay operator-friendly and compact. Current design uses a 2-column key/value layout.
 - Visual direction: clean modern dark theme.
 - GUI layer should only collect/validate user intent and return a `WorkflowConfig`; core execution remains in `main.py`.
+- Per-dataset analysis GUI persistence is part of the expected UX:
+  - prefer restoring dataset-local saved GUI state for the active analysis
+    store,
+  - fall back to the latest completed provenance-backed workflow state,
+  - persist current analysis widget values on dataset switch, dialog close,
+    and run,
+  - keep new analysis widgets/workflows wired into this same restore/save path.
 
 ## Navigate Experiment Strategy
 

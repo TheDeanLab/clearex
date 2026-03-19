@@ -252,6 +252,20 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
   - pick which loaded `experiment.yml` drives the current analysis context, or
   - enable batch mode to run the same selected analysis sequence across every
     experiment in the loaded list.
+- Analysis parameters now persist per dataset:
+  - when you reopen a store, ClearEx restores the last saved GUI state for
+    that dataset when available,
+  - otherwise it can fall back to the latest completed provenance-backed run
+    parameters,
+  - `Restore Latest Run Parameters` resets the current dataset view back to the
+    most recent completed run.
+- This persistence path is part of the GUI contract:
+  future analysis widgets and workflows should be wired into the same restore,
+  save, and provenance-backed replay mechanism rather than introducing
+  one-off state handling.
+- The `Running Analysis` progress dialog includes a `Stop Analysis` button that
+  requests a cooperative halt at the next progress checkpoint and records the
+  run as `cancelled` in provenance.
 - If GUI cannot launch (for example no display), ClearEx logs a warning and falls back to headless execution.
 
 ### Visualization Keyframes and Manifest

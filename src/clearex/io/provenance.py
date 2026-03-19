@@ -61,6 +61,7 @@ ArrayLike = Union[np.ndarray, da.Array]
 _PROVENANCE_PARAMETER_COMPARE_EXCLUDE_KEYS = frozenset(
     {"execution_order", "force_rerun"}
 )
+_GUI_STATE_SCHEMA = "clearex.analysis_gui_state.v1"
 
 
 def is_zarr_store_path(path: Union[str, Path]) -> bool:
@@ -594,6 +595,158 @@ def summarize_analysis_history(
         "matches_parameters": matching_run_id is not None,
         "matching_run_id": matching_run_id,
         "matching_ended_utc": matching_ended_utc,
+    }
+
+
+def load_latest_completed_workflow_state(
+    zarr_path: Union[str, Path],
+) -> Optional[Dict[str, Any]]:
+    """Return the latest completed workflow payload from provenance.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Path to a Zarr/N5 store.
+
+    Returns
+    -------
+    dict[str, Any], optional
+        Mapping with ``run_id``, ``ended_utc``, and ``workflow`` payload when a
+        completed run record exists, otherwise ``None``.
+
+    Raises
+    ------
+    ValueError
+        If ``zarr_path`` is not a Zarr/N5 path.
+    """
+    if not is_zarr_store_path(zarr_path):
+        raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    provenance_group = root.get("provenance")
+    if provenance_group is None or "runs" not in provenance_group:
+        return None
+
+    runs_group = provenance_group["runs"]
+    run_entries: list[tuple[int, str, Dict[str, Any]]] = []
+    for run_id in runs_group.group_keys():
+        record = dict(runs_group[run_id].attrs.get("record", {}))
+        run_entries.append((int(record.get("run_index", 0)), str(run_id), record))
+    run_entries.sort(key=lambda item: item[0], reverse=True)
+
+    for _, run_id, record in run_entries:
+        if str(record.get("status", "")).strip().lower() != "completed":
+            continue
+        workflow_payload = record.get("workflow")
+        if not isinstance(workflow_payload, Mapping):
+            continue
+        ended_utc = None
+        timestamps = record.get("timestamps")
+        if isinstance(timestamps, Mapping) and timestamps.get("ended_utc") is not None:
+            ended_utc = str(timestamps.get("ended_utc"))
+        return {
+            "run_id": str(run_id),
+            "ended_utc": ended_utc,
+            "workflow": _to_jsonable(dict(workflow_payload)),
+        }
+    return None
+
+
+def persist_latest_analysis_gui_state(
+    zarr_path: Union[str, Path],
+    workflow: Mapping[str, Any],
+    *,
+    source: str = "analysis_dialog",
+) -> None:
+    """Persist latest dataset-local GUI analysis state.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Path to a Zarr/N5 store.
+    workflow : mapping[str, Any]
+        GUI workflow-state payload to persist.
+    source : str, default="analysis_dialog"
+        Source identifier used for diagnostics.
+
+    Returns
+    -------
+    None
+        GUI-state metadata is written in-place to the Zarr store.
+
+    Raises
+    ------
+    ValueError
+        If ``zarr_path`` is not a Zarr/N5 path.
+    """
+    if not is_zarr_store_path(zarr_path):
+        raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    provenance_group = root.require_group("provenance")
+    gui_state_group = provenance_group.require_group("gui_state")
+    latest_group = gui_state_group.require_group("analysis_dialog")
+    latest_group.attrs.update(
+        _to_jsonable(
+            {
+                "schema": _GUI_STATE_SCHEMA,
+                "source": str(source).strip() or "analysis_dialog",
+                "updated_utc": datetime.now(tz=timezone.utc).isoformat(),
+                "workflow": dict(workflow),
+            }
+        )
+    )
+
+
+def load_latest_analysis_gui_state(
+    zarr_path: Union[str, Path],
+) -> Optional[Dict[str, Any]]:
+    """Load latest dataset-local GUI analysis state.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Path to a Zarr/N5 store.
+
+    Returns
+    -------
+    dict[str, Any], optional
+        Mapping with ``updated_utc``, ``source``, and ``workflow`` payload when
+        saved GUI state exists, otherwise ``None``.
+
+    Raises
+    ------
+    ValueError
+        If ``zarr_path`` is not a Zarr/N5 path.
+    """
+    if not is_zarr_store_path(zarr_path):
+        raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    provenance_group = root.get("provenance")
+    if provenance_group is None:
+        return None
+    gui_state_group = provenance_group.get("gui_state")
+    if gui_state_group is None:
+        return None
+    latest_group = gui_state_group.get("analysis_dialog")
+    if latest_group is None:
+        return None
+
+    payload = dict(latest_group.attrs)
+    if str(payload.get("schema", "")).strip() != _GUI_STATE_SCHEMA:
+        return None
+    workflow_payload = payload.get("workflow")
+    if not isinstance(workflow_payload, Mapping):
+        return None
+    return {
+        "updated_utc": (
+            str(payload.get("updated_utc"))
+            if payload.get("updated_utc") is not None
+            else None
+        ),
+        "source": str(payload.get("source", "")).strip() or "analysis_dialog",
+        "workflow": _to_jsonable(dict(workflow_payload)),
     }
 
 

@@ -121,6 +121,7 @@ from clearex.workflow import (
     DaskBackendConfig,
     LocalClusterConfig,
     WorkflowConfig,
+    WorkflowExecutionCancelled,
     dask_backend_from_dict,
     dask_backend_to_dict,
     format_dask_backend_summary,
@@ -994,6 +995,11 @@ def _run_workflow(
     output_records: Dict[str, Dict[str, object]] = {}
     input_path = workflow.file
     provenance_store_path: Optional[str] = None
+    run_status = "completed"
+    cancellation_exc: Optional[WorkflowExecutionCancelled] = None
+    runtime_analysis_parameters = normalize_analysis_operation_parameters(
+        workflow.analysis_parameters
+    )
 
     if workflow.file:
         is_experiment_input = is_navigate_experiment_file(workflow.file)
@@ -1113,9 +1119,6 @@ def _run_workflow(
         _emit_analysis_progress(5, "Loaded source data and metadata.")
 
     with ExitStack() as analysis_stack:
-        runtime_analysis_parameters = normalize_analysis_operation_parameters(
-            workflow.analysis_parameters
-        )
         execution_sequence = resolve_analysis_execution_sequence(
             flatfield=workflow.flatfield,
             deconvolution=workflow.deconvolution,
@@ -2271,6 +2274,32 @@ def _run_workflow(
                             "MIP export skipped (no Zarr/N5 store).",
                         )
                     continue
+        except WorkflowExecutionCancelled as exc:
+            run_status = "cancelled"
+            cancellation_exc = exc
+            logger.info(
+                "Analysis execution cancelled by user during '%s' (store=%s).",
+                current_operation_name,
+                provenance_store_path,
+            )
+            if (
+                current_operation_name
+                and (
+                    not step_records
+                    or str(step_records[-1].get("name")) != current_operation_name
+                )
+            ):
+                step_records.append(
+                    {
+                        "name": current_operation_name,
+                        "parameters": {
+                            **current_operation_parameters,
+                            "status": "cancelled",
+                            "requested_input": current_requested_source,
+                            "resolved_input": current_resolved_source,
+                        },
+                    }
+                )
         except Exception:
             logger.exception(
                 "Analysis operation '%s' failed (store=%s, requested_input=%s, "
@@ -2307,6 +2336,7 @@ def _run_workflow(
                 image_info=image_info,
                 steps=step_records or None,
                 outputs=output_records or None,
+                status=run_status,
                 started_at_utc=run_started_at,
                 ended_at_utc=datetime.now(tz=timezone.utc),
                 repo_root=Path(__file__).resolve().parents[2],
@@ -2336,6 +2366,9 @@ def _run_workflow(
                 f"Failed to persist provenance in Zarr store "
                 f"{provenance_store_path}: {exc}"
             )
+
+    if cancellation_exc is not None:
+        raise cancellation_exc
 
     _emit_analysis_progress(100, "Workflow execution complete.")
 
