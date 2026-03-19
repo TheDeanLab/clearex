@@ -1977,6 +1977,13 @@ def _popup_dialog_stylesheet() -> str:
             font-family: "Avenir Next", "Helvetica Neue", "Arial", sans-serif;
             font-size: 13px;
         }
+        QScrollArea#popupDialogScroll {
+            border: none;
+            background: transparent;
+        }
+        QWidget#popupDialogContent {
+            background: transparent;
+        }
         QLabel {
             color: #d9e2f1;
         }
@@ -2654,6 +2661,32 @@ if HAS_PYQT6:
                 line_edit.installEventFilter(selector)
         return widget
 
+    def _configure_fixed_height_button(
+        button: QPushButton,
+        *,
+        minimum_height: int = 36,
+    ) -> QPushButton:
+        """Keep a dialog button visible under constrained-height layouts.
+
+        Parameters
+        ----------
+        button : QPushButton
+            Button to pin to a nonzero fixed-height policy.
+        minimum_height : int, default=36
+            Minimum pixel height retained when the dialog is height-clamped.
+
+        Returns
+        -------
+        QPushButton
+            The same button, configured in-place for convenient chaining.
+        """
+        button.setMinimumHeight(int(minimum_height))
+        button.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Fixed,
+        )
+        return button
+
     class ZarrSaveConfigDialog(QDialog):
         """Dialog for configuring analysis-store Zarr chunking and pyramid factors.
 
@@ -2717,7 +2750,24 @@ if HAS_PYQT6:
             None
                 Widgets are created and connected in-place.
             """
-            root = QVBoxLayout(self)
+            outer_root = QVBoxLayout(self)
+            outer_root.setContentsMargins(0, 0, 0, 0)
+            outer_root.setSpacing(0)
+
+            content_scroll = QScrollArea(self)
+            content_scroll.setObjectName("popupDialogScroll")
+            content_scroll.setWidgetResizable(True)
+            content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            content_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            outer_root.addWidget(content_scroll, 1)
+
+            content_widget = QWidget()
+            content_widget.setObjectName("popupDialogContent")
+            content_scroll.setWidget(content_widget)
+
+            root = QVBoxLayout(content_widget)
             apply_popup_root_spacing(root)
 
             description = QLabel(
@@ -2761,9 +2811,15 @@ if HAS_PYQT6:
 
             footer = QHBoxLayout()
             apply_footer_row_spacing(footer)
-            self._defaults_button = QPushButton("Reset Defaults")
-            self._cancel_button = QPushButton("Cancel")
-            self._apply_button = QPushButton("Apply")
+            self._defaults_button = _configure_fixed_height_button(
+                QPushButton("Reset Defaults")
+            )
+            self._cancel_button = _configure_fixed_height_button(
+                QPushButton("Cancel")
+            )
+            self._apply_button = _configure_fixed_height_button(
+                QPushButton("Apply")
+            )
             self._apply_button.setObjectName("runButton")
             footer.addWidget(self._defaults_button)
             footer.addStretch(1)
@@ -2774,6 +2830,7 @@ if HAS_PYQT6:
             self._defaults_button.clicked.connect(self._on_reset_defaults)
             self._cancel_button.clicked.connect(self.reject)
             self._apply_button.clicked.connect(self._on_apply)
+            content_widget.setMinimumHeight(root.sizeHint().height())
 
         def _hydrate(self, initial: ZarrSaveConfig) -> None:
             """Populate form controls from an initial Zarr save configuration.
@@ -2949,7 +3006,24 @@ if HAS_PYQT6:
             None
                 Widgets are created and connected in-place.
             """
-            root = QVBoxLayout(self)
+            outer_root = QVBoxLayout(self)
+            outer_root.setContentsMargins(0, 0, 0, 0)
+            outer_root.setSpacing(0)
+
+            content_scroll = QScrollArea(self)
+            content_scroll.setObjectName("popupDialogScroll")
+            content_scroll.setWidgetResizable(True)
+            content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            content_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            outer_root.addWidget(content_scroll, 1)
+
+            content_widget = QWidget()
+            content_widget.setObjectName("popupDialogContent")
+            content_scroll.setWidget(content_widget)
+
+            root = QVBoxLayout(content_widget)
             apply_popup_root_spacing(root)
 
             overview = QLabel(
@@ -2987,6 +3061,9 @@ if HAS_PYQT6:
             self._mode_help_label = QLabel("")
             self._mode_help_label.setWordWrap(True)
             self._mode_help_label.setObjectName("metadataFieldValue")
+            self._mode_help_label.setMinimumHeight(
+                max(28, int(self._mode_help_label.fontMetrics().height()) + 10)
+            )
             root.addWidget(self._mode_help_label)
 
             self._mode_stack = QStackedWidget()
@@ -2997,9 +3074,15 @@ if HAS_PYQT6:
 
             footer = QHBoxLayout()
             apply_footer_row_spacing(footer)
-            self._defaults_button = QPushButton("Reset Defaults")
-            self._cancel_button = QPushButton("Cancel")
-            self._apply_button = QPushButton("Apply")
+            self._defaults_button = _configure_fixed_height_button(
+                QPushButton("Reset Defaults")
+            )
+            self._cancel_button = _configure_fixed_height_button(
+                QPushButton("Cancel")
+            )
+            self._apply_button = _configure_fixed_height_button(
+                QPushButton("Apply")
+            )
             self._apply_button.setObjectName("runButton")
             footer.addWidget(self._defaults_button)
             footer.addStretch(1)
@@ -3011,6 +3094,7 @@ if HAS_PYQT6:
             self._defaults_button.clicked.connect(self._on_reset_defaults)
             self._cancel_button.clicked.connect(self.reject)
             self._apply_button.clicked.connect(self._on_apply)
+            content_widget.setMinimumHeight(root.sizeHint().height())
 
         def _build_local_cluster_page(self) -> QWidget:
             """Build page for LocalCluster options.
@@ -3044,7 +3128,9 @@ if HAS_PYQT6:
             form.addRow("Memory limit", self._local_memory_input)
 
             self._local_directory_input = QLineEdit()
-            self._local_directory_browse = QPushButton("Browse")
+            self._local_directory_browse = _configure_fixed_height_button(
+                QPushButton("Browse")
+            )
             self._local_directory_browse.clicked.connect(
                 lambda: self._browse_directory(self._local_directory_input)
             )
@@ -3056,7 +3142,9 @@ if HAS_PYQT6:
             local_dir_widget.setLayout(local_dir_row)
             form.addRow("Local directory", local_dir_widget)
 
-            self._local_recommend_button = QPushButton("Recommend Settings")
+            self._local_recommend_button = _configure_fixed_height_button(
+                QPushButton("Recommend Settings")
+            )
             self._local_recommend_button.clicked.connect(
                 self._on_recommend_local_cluster
             )
@@ -3065,6 +3153,9 @@ if HAS_PYQT6:
             self._local_recommendation_label = QLabel("")
             self._local_recommendation_label.setWordWrap(True)
             self._local_recommendation_label.setObjectName("metadataFieldValue")
+            self._local_recommendation_label.setMinimumHeight(
+                max(28, int(self._local_recommendation_label.fontMetrics().height()) + 10)
+            )
             form.addRow("", self._local_recommendation_label)
             return page
 
@@ -3091,7 +3182,9 @@ if HAS_PYQT6:
             self._runner_scheduler_file_input.setPlaceholderText(
                 "Path to scheduler file"
             )
-            self._runner_scheduler_file_browse = QPushButton("Browse")
+            self._runner_scheduler_file_browse = _configure_fixed_height_button(
+                QPushButton("Browse")
+            )
             self._runner_scheduler_file_browse.clicked.connect(
                 self._on_browse_scheduler_file
             )
@@ -3148,7 +3241,9 @@ if HAS_PYQT6:
             worker_form.addRow("Memory", self._cluster_memory_input)
 
             self._cluster_local_directory_input = QLineEdit()
-            self._cluster_local_directory_browse = QPushButton("Browse")
+            self._cluster_local_directory_browse = _configure_fixed_height_button(
+                QPushButton("Browse")
+            )
             self._cluster_local_directory_browse.clicked.connect(
                 lambda: self._browse_directory(self._cluster_local_directory_input)
             )
