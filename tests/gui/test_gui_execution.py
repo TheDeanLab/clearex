@@ -1280,6 +1280,32 @@ def test_analysis_selection_dialog_themes_rounded_scroll_surfaces() -> None:
     assert 'viewport_object_name="usegment3dChannelViewport"' in usegment_source
 
 
+def test_visualization_popup_tables_use_uniform_widget_rows() -> None:
+    volume_layers_source = inspect.getsource(
+        app_module.AnalysisSelectionDialog._open_visualization_volume_layers_dialog
+    )
+    layer_table_source = inspect.getsource(
+        app_module.AnalysisSelectionDialog._open_visualization_layer_table_dialog
+    )
+    popup_stylesheet_source = inspect.getsource(app_module._popup_dialog_stylesheet)
+
+    assert (
+        "table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)"
+        in volume_layers_source
+    )
+    assert (
+        'header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)'
+        in volume_layers_source
+    )
+    assert 'table.setColumnWidth(0, 140)' in volume_layers_source
+    assert 'placeholder_text="Optional name"' in volume_layers_source
+    assert 'placeholder_text="All channels"' in volume_layers_source
+    assert 'placeholder_text="Auto"' in volume_layers_source
+    assert 'line_edit.setPlaceholderText(str(placeholder_text))' in layer_table_source
+    assert 'table.setColumnWidth(2, 150)' in layer_table_source
+    assert 'QComboBox QLineEdit {' in popup_stylesheet_source
+
+
 def test_analysis_selection_dialog_detect_local_gpu_available(monkeypatch) -> None:
     if not app_module.HAS_PYQT6:
         return

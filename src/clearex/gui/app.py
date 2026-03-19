@@ -37,7 +37,7 @@ import sys
 import traceback
 import webbrowser
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import urlparse
 
 # Local Imports
@@ -162,7 +162,6 @@ try:
         QStackedWidget,
         QHeaderView,
         QTableWidget,
-        QTableWidgetItem,
         QTabWidget,
         QVBoxLayout,
         QWidget,
@@ -2006,6 +2005,15 @@ def _popup_dialog_stylesheet() -> str:
         QComboBox {
             padding-right: 24px;
         }
+        QComboBox QLineEdit {
+            background: transparent;
+            border: none;
+            min-height: 0px;
+            padding: 0px;
+            margin: 0px;
+            color: #e6edf3;
+            selection-background-color: #2f81f7;
+        }
         QComboBox::drop-down {
             subcontrol-origin: padding;
             subcontrol-position: top right;
@@ -2557,6 +2565,95 @@ if HAS_PYQT6:
         viewport.setObjectName(viewport_object_name)
         viewport.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         viewport.setAutoFillBackground(True)
+
+    class _TableRowSelectionFilter(QObject):
+        """Select the owning table row when a cell widget is interacted with.
+
+        Parameters
+        ----------
+        table : QTableWidget
+            Table whose rows should track embedded widget interaction.
+
+        Returns
+        -------
+        None
+            Event filter is initialized in-place.
+        """
+
+        def __init__(self, table: QTableWidget) -> None:
+            """Initialize the filter.
+
+            Parameters
+            ----------
+            table : QTableWidget
+                Table whose rows should be selected on widget interaction.
+
+            Returns
+            -------
+            None
+                Filter is initialized in-place.
+            """
+            super().__init__(table)
+            self._table = table
+
+        def eventFilter(self, watched: QObject, event: Optional[QEvent]) -> bool:
+            """Select the corresponding table row on click or focus.
+
+            Parameters
+            ----------
+            watched : QObject
+                Widget receiving the event.
+            event : QEvent, optional
+                Qt event being filtered.
+
+            Returns
+            -------
+            bool
+                ``False`` to allow normal event processing to continue.
+            """
+            if (
+                event is not None
+                and isinstance(watched, QWidget)
+                and event.type()
+                in {
+                    QEvent.Type.FocusIn,
+                    QEvent.Type.MouseButtonPress,
+                }
+            ):
+                cell_origin = watched.mapTo(self._table.viewport(), QPoint(0, 0))
+                index = self._table.indexAt(cell_origin)
+                if index.isValid():
+                    self._table.selectRow(int(index.row()))
+            return False
+
+    def _install_table_row_selection_widget_hook(
+        table: QTableWidget,
+        widget: QWidget,
+    ) -> QWidget:
+        """Ensure an embedded table widget selects its row on interaction.
+
+        Parameters
+        ----------
+        table : QTableWidget
+            Table receiving row selection updates.
+        widget : QWidget
+            Embedded cell widget to monitor.
+
+        Returns
+        -------
+        QWidget
+            The same widget, configured in-place for convenient chaining.
+        """
+        selector = table.property("_clearexRowSelectionFilter")
+        if not isinstance(selector, _TableRowSelectionFilter):
+            selector = _TableRowSelectionFilter(table)
+            table.setProperty("_clearexRowSelectionFilter", selector)
+        widget.installEventFilter(selector)
+        if isinstance(widget, QComboBox):
+            line_edit = widget.lineEdit()
+            if line_edit is not None:
+                line_edit.installEventFilter(selector)
+        return widget
 
     class ZarrSaveConfigDialog(QDialog):
         """Dialog for configuring analysis-store Zarr chunking and pyramid factors.
@@ -9265,25 +9362,32 @@ if HAS_PYQT6:
                     "Multiscale",
                 )
             )
+            table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
             header = table.horizontalHeader()
-            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
-            header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(9, QHeaderView.ResizeMode.Interactive)
+            table.setColumnWidth(0, 140)
             table.setColumnWidth(1, 280)
+            table.setColumnWidth(2, 120)
+            table.setColumnWidth(3, 130)
+            table.setColumnWidth(5, 110)
             table.setColumnWidth(6, 150)
             table.setColumnWidth(7, 140)
             table.setColumnWidth(8, 150)
+            table.setColumnWidth(9, 140)
             vertical_header = table.verticalHeader()
             vertical_header.setVisible(False)
             vertical_header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-            row_height = max(36, int(table.fontMetrics().height()) + 16)
+            row_height = max(40, int(table.fontMetrics().height()) + 18)
             vertical_header.setDefaultSectionSize(row_height)
             root.addWidget(table, stretch=1)
 
@@ -9291,7 +9395,7 @@ if HAS_PYQT6:
             blending_options = _available_visualization_blending_options()
             colormap_options = _available_visualization_colormap_options()
             rendering_options = _available_visualization_rendering_options()
-            combo_height = max(26, row_height - 8)
+            combo_height = max(30, row_height - 8)
 
             def _configure_combo_size(combo: QComboBox) -> QComboBox:
                 combo.setMinimumHeight(combo_height)
@@ -9300,7 +9404,28 @@ if HAS_PYQT6:
                     QSizePolicy.Policy.Expanding,
                     QSizePolicy.Policy.Fixed,
                 )
-                return combo
+                return cast(
+                    QComboBox,
+                    _install_table_row_selection_widget_hook(table, combo),
+                )
+
+            def _configure_line_edit_size(
+                line_edit: QLineEdit,
+                *,
+                placeholder_text: str = "",
+            ) -> QLineEdit:
+                line_edit.setMinimumHeight(combo_height)
+                line_edit.setMaximumHeight(combo_height)
+                line_edit.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Fixed,
+                )
+                if placeholder_text:
+                    line_edit.setPlaceholderText(str(placeholder_text))
+                return cast(
+                    QLineEdit,
+                    _install_table_row_selection_widget_hook(table, line_edit),
+                )
 
             def _make_choice_combo(
                 *,
@@ -9343,15 +9468,17 @@ if HAS_PYQT6:
                         return str(selected_data).strip()
                 return text
 
-            def _make_text_item(value: str) -> QTableWidgetItem:
-                item = QTableWidgetItem(str(value))
-                item.setTextAlignment(
-                    int(
-                        Qt.AlignmentFlag.AlignVCenter
-                        | Qt.AlignmentFlag.AlignLeft
-                    )
+            def _make_text_input(
+                value: str,
+                *,
+                placeholder_text: str = "",
+            ) -> QLineEdit:
+                line_edit = _configure_line_edit_size(
+                    QLineEdit(table),
+                    placeholder_text=placeholder_text,
                 )
-                return item
+                line_edit.setText(str(value))
+                return line_edit
 
             def _make_component_combo(current_value: str) -> QComboBox:
                 combo = _configure_combo_size(QComboBox(table))
@@ -9428,10 +9555,13 @@ if HAS_PYQT6:
                     values.get("channels")
                 )
                 channels_text = ", ".join(str(value) for value in channels)
-                table.setItem(
+                table.setCellWidget(
                     row_index,
                     0,
-                    _make_text_item(str(values.get("name", "")).strip()),
+                    _make_text_input(
+                        str(values.get("name", "")).strip(),
+                        placeholder_text="Optional name",
+                    ),
                 )
                 table.setCellWidget(
                     row_index,
@@ -9447,7 +9577,14 @@ if HAS_PYQT6:
                     2,
                     _make_type_combo(str(values.get("layer_type", "image"))),
                 )
-                table.setItem(row_index, 3, _make_text_item(channels_text))
+                table.setCellWidget(
+                    row_index,
+                    3,
+                    _make_text_input(
+                        channels_text,
+                        placeholder_text="All channels",
+                    ),
+                )
                 table.setCellWidget(
                     row_index,
                     4,
@@ -9458,11 +9595,12 @@ if HAS_PYQT6:
                 opacity_value = self._coerce_optional_unit_interval_float(
                     values.get("opacity")
                 )
-                table.setItem(
+                table.setCellWidget(
                     row_index,
                     5,
-                    _make_text_item(
-                        "" if opacity_value is None else f"{float(opacity_value):.3f}"
+                    _make_text_input(
+                        "" if opacity_value is None else f"{float(opacity_value):.3f}",
+                        placeholder_text="Auto",
                     ),
                 )
                 table.setCellWidget(
@@ -9553,12 +9691,12 @@ if HAS_PYQT6:
 
             rows: list[Dict[str, Any]] = []
             for row_index in range(table.rowCount()):
-                name_item = table.item(row_index, 0)
-                channels_item = table.item(row_index, 3)
-                opacity_item = table.item(row_index, 5)
+                name_widget = table.cellWidget(row_index, 0)
                 component_widget = table.cellWidget(row_index, 1)
                 type_widget = table.cellWidget(row_index, 2)
+                channels_widget = table.cellWidget(row_index, 3)
                 visible_widget = table.cellWidget(row_index, 4)
+                opacity_widget = table.cellWidget(row_index, 5)
                 blending_widget = table.cellWidget(row_index, 6)
                 colormap_widget = table.cellWidget(row_index, 7)
                 rendering_widget = table.cellWidget(row_index, 8)
@@ -9571,8 +9709,8 @@ if HAS_PYQT6:
                     continue
                 row_payload: Dict[str, Any] = {
                     "name": (
-                        str(name_item.text()).strip()
-                        if isinstance(name_item, QTableWidgetItem)
+                        str(name_widget.text()).strip()
+                        if isinstance(name_widget, QLineEdit)
                         else ""
                     ),
                     "component": component,
@@ -9582,8 +9720,8 @@ if HAS_PYQT6:
                         else "image"
                     ),
                     "channels": self._normalize_visualization_channels(
-                        channels_item.text()
-                        if isinstance(channels_item, QTableWidgetItem)
+                        channels_widget.text()
+                        if isinstance(channels_widget, QLineEdit)
                         else ""
                     ),
                     "visible": (
@@ -9592,8 +9730,8 @@ if HAS_PYQT6:
                         else None
                     ),
                     "opacity": self._coerce_optional_unit_interval_float(
-                        opacity_item.text()
-                        if isinstance(opacity_item, QTableWidgetItem)
+                        opacity_widget.text()
+                        if isinstance(opacity_widget, QLineEdit)
                         else ""
                     ),
                     "blending": (
@@ -9750,17 +9888,59 @@ if HAS_PYQT6:
             table.setHorizontalHeaderLabels(
                 ("Layer", "Visible", "LUT/Colormap", "Rendering", "Annotation")
             )
+            table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
             header = table.horizontalHeader()
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-            table.verticalHeader().setVisible(False)
+            table.setColumnWidth(2, 150)
+            table.setColumnWidth(3, 150)
+            vertical_header = table.verticalHeader()
+            vertical_header.setVisible(False)
+            vertical_header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            row_height = max(40, int(table.fontMetrics().height()) + 18)
+            vertical_header.setDefaultSectionSize(row_height)
             root.addWidget(table, stretch=1)
 
+            combo_height = max(30, row_height - 8)
+
+            def _configure_combo_size(combo: QComboBox) -> QComboBox:
+                combo.setMinimumHeight(combo_height)
+                combo.setMaximumHeight(combo_height)
+                combo.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Fixed,
+                )
+                return cast(
+                    QComboBox,
+                    _install_table_row_selection_widget_hook(table, combo),
+                )
+
+            def _make_text_input(
+                value: str,
+                *,
+                placeholder_text: str = "",
+            ) -> QLineEdit:
+                line_edit = QLineEdit(table)
+                line_edit.setMinimumHeight(combo_height)
+                line_edit.setMaximumHeight(combo_height)
+                line_edit.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Fixed,
+                )
+                if placeholder_text:
+                    line_edit.setPlaceholderText(str(placeholder_text))
+                line_edit.setText(str(value))
+                return cast(
+                    QLineEdit,
+                    _install_table_row_selection_widget_hook(table, line_edit),
+                )
+
             def _make_visible_combo(current_value: Optional[bool]) -> QComboBox:
-                combo = QComboBox(table)
+                combo = _configure_combo_size(QComboBox(table))
                 combo.addItem("Auto", None)
                 combo.addItem("True", True)
                 combo.addItem("False", False)
@@ -9783,11 +9963,28 @@ if HAS_PYQT6:
                 annotation = str(values.get("annotation", "")).strip()
                 visible = self._coerce_optional_bool(values.get("visible"))
 
-                table.setItem(row_index, 0, QTableWidgetItem(layer_name))
+                table.setCellWidget(
+                    row_index,
+                    0,
+                    _make_text_input(layer_name, placeholder_text="Layer name"),
+                )
                 table.setCellWidget(row_index, 1, _make_visible_combo(visible))
-                table.setItem(row_index, 2, QTableWidgetItem(colormap))
-                table.setItem(row_index, 3, QTableWidgetItem(rendering))
-                table.setItem(row_index, 4, QTableWidgetItem(annotation))
+                table.setCellWidget(
+                    row_index,
+                    2,
+                    _make_text_input(colormap, placeholder_text="Optional LUT"),
+                )
+                table.setCellWidget(
+                    row_index,
+                    3,
+                    _make_text_input(rendering, placeholder_text="Optional rendering"),
+                )
+                table.setCellWidget(
+                    row_index,
+                    4,
+                    _make_text_input(annotation, placeholder_text="Optional label"),
+                )
+                table.setRowHeight(row_index, row_height)
 
             for row in self._visualization_keyframe_layer_overrides:
                 _append_row(row)
@@ -9839,11 +10036,11 @@ if HAS_PYQT6:
 
             rows: list[Dict[str, Any]] = []
             for row_index in range(table.rowCount()):
-                layer_item = table.item(row_index, 0)
-                colormap_item = table.item(row_index, 2)
-                rendering_item = table.item(row_index, 3)
-                annotation_item = table.item(row_index, 4)
+                layer_widget = table.cellWidget(row_index, 0)
                 visible_widget = table.cellWidget(row_index, 1)
+                colormap_widget = table.cellWidget(row_index, 2)
+                rendering_widget = table.cellWidget(row_index, 3)
+                annotation_widget = table.cellWidget(row_index, 4)
                 visible_value: Optional[bool] = None
                 if isinstance(visible_widget, QComboBox):
                     visible_value = self._coerce_optional_bool(
@@ -9852,24 +10049,24 @@ if HAS_PYQT6:
 
                 row_payload: Dict[str, Any] = {
                     "layer_name": (
-                        str(layer_item.text()).strip()
-                        if isinstance(layer_item, QTableWidgetItem)
+                        str(layer_widget.text()).strip()
+                        if isinstance(layer_widget, QLineEdit)
                         else ""
                     ),
                     "visible": visible_value,
                     "colormap": (
-                        str(colormap_item.text()).strip()
-                        if isinstance(colormap_item, QTableWidgetItem)
+                        str(colormap_widget.text()).strip()
+                        if isinstance(colormap_widget, QLineEdit)
                         else ""
                     ),
                     "rendering": (
-                        str(rendering_item.text()).strip()
-                        if isinstance(rendering_item, QTableWidgetItem)
+                        str(rendering_widget.text()).strip()
+                        if isinstance(rendering_widget, QLineEdit)
                         else ""
                     ),
                     "annotation": (
-                        str(annotation_item.text()).strip()
-                        if isinstance(annotation_item, QTableWidgetItem)
+                        str(annotation_widget.text()).strip()
+                        if isinstance(annotation_widget, QLineEdit)
                         else ""
                     ),
                 }
