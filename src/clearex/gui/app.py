@@ -6845,6 +6845,9 @@ if HAS_PYQT6:
             )
             self._analysis_scope_summary_label.setObjectName("statusLabel")
             self._analysis_scope_summary_label.setWordWrap(True)
+            self._analysis_scope_summary_label.setMinimumHeight(
+                max(28, int(self._analysis_scope_summary_label.fontMetrics().height()) + 10)
+            )
             layout.addWidget(self._analysis_scope_summary_label)
 
             restore_row = QHBoxLayout()
@@ -6854,10 +6857,18 @@ if HAS_PYQT6:
             )
             self._analysis_state_source_label.setObjectName("statusLabel")
             self._analysis_state_source_label.setWordWrap(True)
+            self._analysis_state_source_label.setMinimumHeight(
+                max(28, int(self._analysis_state_source_label.fontMetrics().height()) + 10)
+            )
             restore_row.addWidget(self._analysis_state_source_label, 1)
 
             self._restore_latest_run_button = QPushButton(
                 "Restore Latest Run Parameters"
+            )
+            self._restore_latest_run_button.setMinimumHeight(36)
+            self._restore_latest_run_button.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Fixed,
             )
             self._restore_latest_run_button.clicked.connect(
                 self._on_restore_latest_run_parameters
@@ -7394,7 +7405,24 @@ if HAS_PYQT6:
             None
                 Widgets are created and connected in-place.
             """
-            root = QVBoxLayout(self)
+            outer_root = QVBoxLayout(self)
+            outer_root.setContentsMargins(0, 0, 0, 0)
+            outer_root.setSpacing(0)
+
+            content_scroll = QScrollArea(self)
+            content_scroll.setObjectName("analysisDialogScroll")
+            content_scroll.setWidgetResizable(True)
+            content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            content_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            outer_root.addWidget(content_scroll, 1)
+
+            content_widget = QWidget()
+            content_widget.setObjectName("analysisDialogContent")
+            content_scroll.setWidget(content_widget)
+
+            root = QVBoxLayout(content_widget)
             apply_window_root_spacing(root)
 
             header = QFrame()
@@ -7471,6 +7499,9 @@ if HAS_PYQT6:
             )
             analysis_hint.setObjectName("statusLabel")
             analysis_hint.setWordWrap(True)
+            analysis_hint.setMinimumHeight(
+                max(28, int(analysis_hint.fontMetrics().height()) + 10)
+            )
             left_column.addWidget(analysis_tabs, 1)
             left_column.addWidget(analysis_hint)
             content_row.addLayout(left_column, 1)
@@ -7526,12 +7557,21 @@ if HAS_PYQT6:
             )
             self._status_label.setObjectName("statusLabel")
             self._status_label.setWordWrap(True)
+            self._status_label.setMinimumHeight(
+                max(28, int(self._status_label.fontMetrics().height()) + 10)
+            )
             status_stack.addWidget(self._status_label)
             self._dask_backend_summary_label = QLabel("Dask backend: n/a")
             self._dask_backend_summary_label.setObjectName("statusLabel")
             self._dask_backend_summary_label.setWordWrap(True)
             self._dask_backend_summary_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self._dask_backend_summary_label.setMinimumHeight(
+                max(
+                    28,
+                    int(self._dask_backend_summary_label.fontMetrics().height()) + 10,
+                )
             )
             status_stack.addWidget(self._dask_backend_summary_label)
             footer.addLayout(status_stack, 1)
@@ -7540,6 +7580,17 @@ if HAS_PYQT6:
             self._cancel_button = QPushButton("Cancel")
             self._run_button = QPushButton("Run")
             self._run_button.setObjectName("runButton")
+            for button in (
+                self._dask_backend_button,
+                self._dask_dashboard_button,
+                self._cancel_button,
+                self._run_button,
+            ):
+                button.setMinimumHeight(36)
+                button.setSizePolicy(
+                    QSizePolicy.Policy.Maximum,
+                    QSizePolicy.Policy.Fixed,
+                )
             footer.addWidget(self._dask_backend_button)
             footer.addWidget(self._dask_dashboard_button)
             footer.addWidget(self._cancel_button)
@@ -7550,6 +7601,7 @@ if HAS_PYQT6:
             self._dask_dashboard_button.clicked.connect(self._on_open_dask_dashboard)
             self._cancel_button.clicked.connect(self.reject)
             self._run_button.clicked.connect(self._on_run)
+            content_widget.setMinimumHeight(root.sizeHint().height())
             self._decon_psf_mode_combo.currentIndexChanged.connect(
                 self._on_deconvolution_psf_mode_changed
             )
@@ -12707,6 +12759,13 @@ if HAS_PYQT6:
                 }
                 QLabel#helpBody {
                     color: #d9e2f1;
+                }
+                QScrollArea#analysisDialogScroll {
+                    border: none;
+                    background: transparent;
+                }
+                QWidget#analysisDialogContent {
+                    background: transparent;
                 }
                 QScrollArea {
                     border: none;

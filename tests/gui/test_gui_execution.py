@@ -239,6 +239,43 @@ def test_setup_dialog_keeps_experiment_controls_visible_on_short_screens(
     dialog.close()
 
 
+def test_analysis_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(file="/tmp/test/data_store.fake")
+    )
+    dialog.show()
+    app.processEvents()
+
+    scroll = dialog.findChild(app_module.QScrollArea, "analysisDialogScroll")
+    assert scroll is not None
+    assert scroll.verticalScrollBar().maximum() > 0
+    assert dialog._analysis_scope_summary_label is not None
+    assert dialog._analysis_state_source_label is not None
+    assert dialog._restore_latest_run_button is not None
+    assert dialog._status_label is not None
+    assert dialog._dask_backend_summary_label is not None
+    assert dialog._cancel_button is not None
+    assert dialog._run_button is not None
+    assert dialog._analysis_scope_summary_label.geometry().height() >= 28
+    assert dialog._analysis_state_source_label.geometry().height() >= 28
+    assert dialog._restore_latest_run_button.geometry().height() >= 36
+    assert dialog._status_label.geometry().height() >= 28
+    assert dialog._dask_backend_summary_label.geometry().height() >= 28
+    assert dialog._cancel_button.geometry().height() >= 36
+    assert dialog._run_button.geometry().height() >= 36
+
+    dialog.close()
+
+
 def test_save_and_load_experiment_list_round_trip(tmp_path) -> None:
     first = tmp_path / "first" / "experiment.yml"
     second = tmp_path / "second" / "experiment.yaml"
