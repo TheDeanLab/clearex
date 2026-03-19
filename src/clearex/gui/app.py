@@ -4329,7 +4329,24 @@ if HAS_PYQT6:
             None
                 Widgets are created and connected in-place.
             """
-            root = QVBoxLayout(self)
+            outer_root = QVBoxLayout(self)
+            outer_root.setContentsMargins(0, 0, 0, 0)
+            outer_root.setSpacing(0)
+
+            content_scroll = QScrollArea(self)
+            content_scroll.setObjectName("setupDialogScroll")
+            content_scroll.setWidgetResizable(True)
+            content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            content_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            outer_root.addWidget(content_scroll, 1)
+
+            content_widget = QWidget()
+            content_widget.setObjectName("setupDialogContent")
+            content_scroll.setWidget(content_widget)
+
+            root = QVBoxLayout(content_widget)
             apply_window_root_spacing(root)
 
             header = QFrame()
@@ -4359,6 +4376,17 @@ if HAS_PYQT6:
             )
             self._save_experiment_list_button = QPushButton("Save Experiment List")
             self._remove_experiment_button = QPushButton("Remove Selected")
+            for button in (
+                self._load_experiment_button,
+                self._create_experiment_list_button,
+                self._save_experiment_list_button,
+                self._remove_experiment_button,
+            ):
+                button.setMinimumHeight(36)
+                button.setSizePolicy(
+                    QSizePolicy.Policy.Maximum,
+                    QSizePolicy.Policy.Fixed,
+                )
             button_row.addWidget(self._load_experiment_button)
             button_row.addWidget(self._create_experiment_list_button)
             button_row.addWidget(self._save_experiment_list_button)
@@ -4395,6 +4423,13 @@ if HAS_PYQT6:
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
             self._experiment_list_status_label.setContentsMargins(0, 4, 0, 4)
+            self._experiment_list_status_label.setMinimumHeight(
+                max(28, int(self._experiment_list_status_label.fontMetrics().height()) + 10)
+            )
+            self._experiment_list_status_label.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Fixed,
+            )
             data_layout.addWidget(self._experiment_list_status_label)
 
             root.addWidget(data_group)
@@ -4527,6 +4562,7 @@ if HAS_PYQT6:
             self._rebuild_store_checkbox.toggled.connect(
                 self._on_rebuild_store_toggled
             )
+            content_widget.setMinimumHeight(root.sizeHint().height())
 
         def _hydrate(self, initial: WorkflowConfig) -> None:
             """Populate setup window fields from initial workflow config.
@@ -4742,6 +4778,13 @@ if HAS_PYQT6:
                 }
                 QLabel#experimentListStatus {
                     color: #8ea4c0;
+                }
+                QScrollArea#setupDialogScroll {
+                    border: none;
+                    background: transparent;
+                }
+                QWidget#setupDialogContent {
+                    background: transparent;
                 }
                 QLineEdit {
                     background-color: #0b1320;

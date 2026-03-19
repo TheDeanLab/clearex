@@ -209,6 +209,36 @@ def test_resolve_initial_dialog_dimensions_expands_for_content_size_hint() -> No
     assert startup_size == (1200, 1225)
 
 
+def test_setup_dialog_keeps_experiment_controls_visible_on_short_screens(
+    monkeypatch,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    dialog.show()
+    app.processEvents()
+
+    load_geometry = dialog._load_experiment_button.geometry()
+    experiment_list_geometry = dialog._experiment_list.geometry()
+    status_geometry = dialog._experiment_list_status_label.geometry()
+
+    assert load_geometry.height() >= 36
+    assert experiment_list_geometry.height() >= 220
+    assert status_geometry.height() >= 28
+    assert status_geometry.y() >= (
+        experiment_list_geometry.y() + experiment_list_geometry.height()
+    )
+
+    dialog.close()
+
+
 def test_save_and_load_experiment_list_round_trip(tmp_path) -> None:
     first = tmp_path / "first" / "experiment.yml"
     second = tmp_path / "second" / "experiment.yaml"
