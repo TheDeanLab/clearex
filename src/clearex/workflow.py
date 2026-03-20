@@ -26,10 +26,14 @@
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+import hashlib
+from importlib.metadata import PackageNotFoundError, version
+import json
 import math
 import os
+import re
 import subprocess
-from typing import Any, Collection, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Collection, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union, cast
 
 
 ChunkSpec = Optional[Union[int, Tuple[int, ...]]]
@@ -2761,6 +2765,26 @@ DASK_BACKEND_MODE_LABELS: Dict[str, str] = {
     DASK_BACKEND_SLURM_CLUSTER: "SLURMCluster",
 }
 
+EXECUTION_POLICY_AUTO = "auto"
+EXECUTION_POLICY_ADVANCED = "advanced"
+ExecutionPolicyMode = Literal["auto", "advanced"]
+
+EXECUTION_CALIBRATION_USE_IF_AVAILABLE = "use_if_available"
+EXECUTION_CALIBRATION_REFRESH = "refresh"
+ExecutionCalibrationPolicy = Literal["use_if_available", "refresh"]
+
+EXECUTION_GPU_MODE_NEVER = "never"
+EXECUTION_GPU_MODE_OPTIONAL = "optional"
+EXECUTION_GPU_MODE_REQUIRED = "required"
+ExecutionGpuMode = Literal["never", "optional", "required"]
+
+EXECUTION_WORKER_KIND_THREAD = "thread"
+EXECUTION_WORKER_KIND_PROCESS = "process"
+EXECUTION_WORKER_KIND_GPU_PROCESS = "gpu_process"
+ExecutionWorkerKind = Literal["thread", "process", "gpu_process"]
+
+EXECUTION_PLAN_MODEL_VERSION = "1"
+
 DEFAULT_SLURM_CLUSTER_JOB_EXTRA_DIRECTIVES: Tuple[str, ...] = (
     "--nodes=1",
     "--ntasks=1",
@@ -3216,6 +3240,316 @@ class DaskBackendConfig:
             valid_modes = ", ".join(DASK_BACKEND_MODE_LABELS.keys())
             raise ValueError(f"Dask backend mode must be one of: {valid_modes}.")
         object.__setattr__(self, "mode", mode)
+
+
+@dataclass(frozen=True)
+class ExecutionPolicy:
+    """Operator-facing execution-planning policy."""
+
+    mode: ExecutionPolicyMode = EXECUTION_POLICY_AUTO
+    max_workers: Optional[int] = None
+    memory_per_worker_limit: str = "auto"
+    calibration_policy: ExecutionCalibrationPolicy = (
+        EXECUTION_CALIBRATION_USE_IF_AVAILABLE
+    )
+
+    def __post_init__(self) -> None:
+        """Validate execution-policy values."""
+        mode = str(self.mode).strip().lower()
+        if mode not in {EXECUTION_POLICY_AUTO, EXECUTION_POLICY_ADVANCED}:
+            raise ValueError("Execution policy mode must be 'auto' or 'advanced'.")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(
+            self,
+            "max_workers",
+            _normalize_optional_positive_int(
+                self.max_workers,
+                field_name="ExecutionPolicy max_workers",
+            ),
+        )
+        memory_limit = (
+            str(self.memory_per_worker_limit).strip()
+            if self.memory_per_worker_limit is not None
+            else "auto"
+        )
+        object.__setattr__(
+            self,
+            "memory_per_worker_limit",
+            memory_limit or "auto",
+        )
+        calibration_policy = str(self.calibration_policy).strip().lower()
+        if calibration_policy not in {
+            EXECUTION_CALIBRATION_USE_IF_AVAILABLE,
+            EXECUTION_CALIBRATION_REFRESH,
+        }:
+            raise ValueError(
+                "Execution policy calibration_policy must be "
+                "'use_if_available' or 'refresh'."
+            )
+        object.__setattr__(self, "calibration_policy", calibration_policy)
+
+
+@dataclass(frozen=True)
+class AnalysisResourceDescriptor:
+    """Backend-agnostic resource model for one analysis operation."""
+
+    operation_name: str
+    chunk_basis: str
+    uses_overlap: bool
+    seed_memory_multiplier: float
+    seed_cpu_intensity: float
+    io_intensity: float
+    gpu_mode: ExecutionGpuMode = EXECUTION_GPU_MODE_NEVER
+    preferred_worker_kind: ExecutionWorkerKind = EXECUTION_WORKER_KIND_PROCESS
+    supports_chunk_calibration: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate descriptor values."""
+        if float(self.seed_memory_multiplier) <= 0:
+            raise ValueError(
+                "AnalysisResourceDescriptor seed_memory_multiplier must be > 0."
+            )
+        if float(self.seed_cpu_intensity) <= 0:
+            raise ValueError(
+                "AnalysisResourceDescriptor seed_cpu_intensity must be > 0."
+            )
+        if float(self.io_intensity) < 0:
+            raise ValueError("AnalysisResourceDescriptor io_intensity cannot be negative.")
+        gpu_mode = str(self.gpu_mode).strip().lower()
+        if gpu_mode not in {
+            EXECUTION_GPU_MODE_NEVER,
+            EXECUTION_GPU_MODE_OPTIONAL,
+            EXECUTION_GPU_MODE_REQUIRED,
+        }:
+            raise ValueError("AnalysisResourceDescriptor gpu_mode is invalid.")
+        object.__setattr__(self, "gpu_mode", gpu_mode)
+        worker_kind = str(self.preferred_worker_kind).strip().lower()
+        if worker_kind not in {
+            EXECUTION_WORKER_KIND_THREAD,
+            EXECUTION_WORKER_KIND_PROCESS,
+            EXECUTION_WORKER_KIND_GPU_PROCESS,
+        }:
+            raise ValueError(
+                "AnalysisResourceDescriptor preferred_worker_kind is invalid."
+            )
+        object.__setattr__(self, "preferred_worker_kind", worker_kind)
+
+
+@dataclass(frozen=True)
+class EnvironmentCapabilities:
+    """Detected execution-environment capabilities."""
+
+    cpu_count: int
+    memory_bytes: int
+    gpu_count: int
+    gpu_memory_bytes: Optional[int]
+    attached_scheduler_file: Optional[str] = None
+    scheduler_mode: str = "local"
+
+    def __post_init__(self) -> None:
+        """Normalize environment-capability values."""
+        object.__setattr__(self, "cpu_count", max(1, int(self.cpu_count)))
+        object.__setattr__(self, "memory_bytes", max(1 << 30, int(self.memory_bytes)))
+        object.__setattr__(self, "gpu_count", max(0, int(self.gpu_count)))
+        if self.gpu_memory_bytes is not None:
+            object.__setattr__(
+                self,
+                "gpu_memory_bytes",
+                max(1, int(self.gpu_memory_bytes)),
+            )
+        object.__setattr__(
+            self,
+            "attached_scheduler_file",
+            _normalize_optional_text(self.attached_scheduler_file),
+        )
+        scheduler_mode = str(self.scheduler_mode).strip().lower() or "local"
+        object.__setattr__(self, "scheduler_mode", scheduler_mode)
+
+
+@dataclass(frozen=True)
+class CalibrationProfile:
+    """Versioned execution-calibration profile."""
+
+    profile_key: str
+    operation_names: Tuple[str, ...]
+    parameter_signature: str
+    chunk_shape_tpczyx: Tuple[int, int, int, int, int, int]
+    dtype_itemsize: int
+    sample_chunk_count: int
+    estimated_peak_memory_bytes: int
+    estimated_seconds_per_chunk: float
+    cpu_utilization: float
+    source: str = "geometry_estimate"
+    confidence: float = 0.35
+    environment_fingerprint: str = ""
+    software_version: str = ""
+    model_version: str = EXECUTION_PLAN_MODEL_VERSION
+
+    def __post_init__(self) -> None:
+        """Validate profile values."""
+        object.__setattr__(self, "profile_key", str(self.profile_key).strip())
+        object.__setattr__(
+            self,
+            "operation_names",
+            tuple(
+                str(name).strip() for name in self.operation_names if str(name).strip()
+            ),
+        )
+        object.__setattr__(
+            self,
+            "parameter_signature",
+            str(self.parameter_signature).strip(),
+        )
+        object.__setattr__(
+            self,
+            "chunk_shape_tpczyx",
+            tuple(int(v) for v in self.chunk_shape_tpczyx),
+        )
+        object.__setattr__(self, "dtype_itemsize", max(1, int(self.dtype_itemsize)))
+        object.__setattr__(
+            self,
+            "sample_chunk_count",
+            max(1, int(self.sample_chunk_count)),
+        )
+        object.__setattr__(
+            self,
+            "estimated_peak_memory_bytes",
+            max(1, int(self.estimated_peak_memory_bytes)),
+        )
+        object.__setattr__(
+            self,
+            "estimated_seconds_per_chunk",
+            max(0.01, float(self.estimated_seconds_per_chunk)),
+        )
+        object.__setattr__(
+            self,
+            "cpu_utilization",
+            max(0.05, float(self.cpu_utilization)),
+        )
+        object.__setattr__(self, "source", str(self.source).strip() or "geometry_estimate")
+        object.__setattr__(
+            self,
+            "confidence",
+            max(0.0, min(1.0, float(self.confidence))),
+        )
+        object.__setattr__(
+            self,
+            "environment_fingerprint",
+            str(self.environment_fingerprint).strip(),
+        )
+        object.__setattr__(
+            self,
+            "software_version",
+            str(self.software_version).strip(),
+        )
+        object.__setattr__(
+            self,
+            "model_version",
+            str(self.model_version).strip() or EXECUTION_PLAN_MODEL_VERSION,
+        )
+
+
+@dataclass(frozen=True)
+class WorkerEnvelope:
+    """Generic worker capacity envelope."""
+
+    cpus: int
+    memory_bytes: int
+    gpus: int = 0
+    gpu_memory_bytes: Optional[int] = None
+    scratch_directory: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        """Normalize envelope values."""
+        object.__setattr__(self, "cpus", max(1, int(self.cpus)))
+        object.__setattr__(self, "memory_bytes", max(1 << 30, int(self.memory_bytes)))
+        object.__setattr__(self, "gpus", max(0, int(self.gpus)))
+        if self.gpu_memory_bytes is not None:
+            object.__setattr__(
+                self,
+                "gpu_memory_bytes",
+                max(1, int(self.gpu_memory_bytes)),
+            )
+        object.__setattr__(
+            self,
+            "scratch_directory",
+            _normalize_optional_text(self.scratch_directory),
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    """Effective execution plan derived from workflow context."""
+
+    policy_mode: ExecutionPolicyMode
+    workload: str
+    selected_operations: Tuple[str, ...]
+    worker_kind: ExecutionWorkerKind
+    backend_config: DaskBackendConfig
+    workers: int
+    threads_per_worker: int
+    memory_per_worker_limit: str
+    estimated_chunk_bytes: int
+    estimated_working_set_bytes: int
+    estimated_chunk_count: Optional[int]
+    requires_gpu: bool
+    environment: EnvironmentCapabilities
+    calibration_profile: Optional[CalibrationProfile] = None
+
+    def __post_init__(self) -> None:
+        """Normalize execution-plan values."""
+        object.__setattr__(
+            self,
+            "policy_mode",
+            str(self.policy_mode).strip().lower() or EXECUTION_POLICY_AUTO,
+        )
+        object.__setattr__(
+            self,
+            "workload",
+            str(self.workload).strip().lower() or "analysis",
+        )
+        object.__setattr__(
+            self,
+            "selected_operations",
+            tuple(
+                str(name).strip() for name in self.selected_operations if str(name).strip()
+            ),
+        )
+        worker_kind = str(self.worker_kind).strip().lower()
+        if worker_kind not in {
+            EXECUTION_WORKER_KIND_THREAD,
+            EXECUTION_WORKER_KIND_PROCESS,
+            EXECUTION_WORKER_KIND_GPU_PROCESS,
+        }:
+            raise ValueError("ExecutionPlan worker_kind is invalid.")
+        object.__setattr__(self, "worker_kind", worker_kind)
+        object.__setattr__(self, "workers", max(1, int(self.workers)))
+        object.__setattr__(
+            self,
+            "threads_per_worker",
+            max(1, int(self.threads_per_worker)),
+        )
+        object.__setattr__(
+            self,
+            "memory_per_worker_limit",
+            str(self.memory_per_worker_limit).strip() or "auto",
+        )
+        object.__setattr__(
+            self,
+            "estimated_chunk_bytes",
+            max(1, int(self.estimated_chunk_bytes)),
+        )
+        object.__setattr__(
+            self,
+            "estimated_working_set_bytes",
+            max(1, int(self.estimated_working_set_bytes)),
+        )
+        if self.estimated_chunk_count is not None:
+            object.__setattr__(
+                self,
+                "estimated_chunk_count",
+                max(1, int(self.estimated_chunk_count)),
+            )
 
 
 @dataclass(frozen=True)
@@ -3711,6 +4045,436 @@ def format_local_cluster_recommendation_summary(
     return " | ".join(parts)
 
 
+_MEMORY_TEXT_PATTERN = re.compile(
+    r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[kmgt]?i?b)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_memory_limit_bytes(value: Optional[str]) -> Optional[int]:
+    """Parse a human-readable memory limit into bytes."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "auto":
+        return None
+    match = _MEMORY_TEXT_PATTERN.match(text)
+    if match is None:
+        return None
+    scalar = float(match.group("value"))
+    unit = str(match.group("unit") or "b").lower()
+    multipliers = {
+        "b": 1,
+        "kb": 1000,
+        "mb": 1000**2,
+        "gb": 1000**3,
+        "tb": 1000**4,
+        "kib": 1 << 10,
+        "mib": 1 << 20,
+        "gib": 1 << 30,
+        "tib": 1 << 40,
+    }
+    multiplier = multipliers.get(unit)
+    if multiplier is None:
+        return None
+    return max(1, int(scalar * multiplier))
+
+
+def _clearex_software_version() -> str:
+    """Return a best-effort ClearEx software version string."""
+    try:
+        return str(version("clearex")).strip()
+    except PackageNotFoundError:
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _environment_fingerprint(capabilities: EnvironmentCapabilities) -> str:
+    """Build a stable environment fingerprint for profile keys."""
+    parts = [
+        f"cpu={capabilities.cpu_count}",
+        f"memory={capabilities.memory_bytes}",
+        f"gpu={capabilities.gpu_count}",
+        f"gpu_memory={capabilities.gpu_memory_bytes or 0}",
+        f"scheduler={capabilities.scheduler_mode}",
+    ]
+    if capabilities.attached_scheduler_file:
+        parts.append(f"scheduler_file={capabilities.attached_scheduler_file}")
+    return "|".join(parts)
+
+
+def detect_environment_capabilities(
+    *,
+    scheduler_file: Optional[str] = None,
+) -> EnvironmentCapabilities:
+    """Detect generic execution-environment capabilities."""
+    detected_gpu_count, detected_gpu_memory = _detect_local_gpu_info()
+    attached_scheduler_file = _normalize_optional_text(
+        scheduler_file or os.environ.get("DASK_SCHEDULER_FILE")
+    )
+    scheduler_mode = "attached_scheduler" if attached_scheduler_file else "local"
+    return EnvironmentCapabilities(
+        cpu_count=_detect_local_cpu_count(),
+        memory_bytes=_detect_local_memory_bytes(),
+        gpu_count=detected_gpu_count,
+        gpu_memory_bytes=detected_gpu_memory,
+        attached_scheduler_file=attached_scheduler_file,
+        scheduler_mode=scheduler_mode,
+    )
+
+
+def default_analysis_resource_descriptors() -> Dict[str, AnalysisResourceDescriptor]:
+    """Return seeded analysis resource descriptors keyed by operation name."""
+    descriptor_defaults: Dict[str, Dict[str, Any]] = {
+        "flatfield": {
+            "seed_cpu_intensity": 0.9,
+            "io_intensity": 0.4,
+            "gpu_mode": EXECUTION_GPU_MODE_NEVER,
+            "preferred_worker_kind": EXECUTION_WORKER_KIND_PROCESS,
+        },
+        "deconvolution": {
+            "seed_cpu_intensity": 1.2,
+            "io_intensity": 0.35,
+            "gpu_mode": EXECUTION_GPU_MODE_OPTIONAL,
+            "preferred_worker_kind": EXECUTION_WORKER_KIND_PROCESS,
+        },
+        "shear_transform": {
+            "seed_cpu_intensity": 1.1,
+            "io_intensity": 0.25,
+            "gpu_mode": EXECUTION_GPU_MODE_NEVER,
+            "preferred_worker_kind": EXECUTION_WORKER_KIND_PROCESS,
+        },
+        "particle_detection": {
+            "seed_cpu_intensity": 0.85,
+            "io_intensity": 0.2,
+            "gpu_mode": EXECUTION_GPU_MODE_NEVER,
+            "preferred_worker_kind": EXECUTION_WORKER_KIND_PROCESS,
+        },
+        "usegment3d": {
+            "seed_cpu_intensity": 1.0,
+            "io_intensity": 0.3,
+            "gpu_mode": EXECUTION_GPU_MODE_OPTIONAL,
+            "preferred_worker_kind": EXECUTION_WORKER_KIND_GPU_PROCESS,
+        },
+        "registration": {
+            "seed_cpu_intensity": 0.9,
+            "io_intensity": 0.35,
+            "gpu_mode": EXECUTION_GPU_MODE_NEVER,
+            "preferred_worker_kind": EXECUTION_WORKER_KIND_PROCESS,
+        },
+        "visualization": {
+            "seed_cpu_intensity": 0.4,
+            "io_intensity": 0.6,
+            "gpu_mode": EXECUTION_GPU_MODE_OPTIONAL,
+            "preferred_worker_kind": EXECUTION_WORKER_KIND_THREAD,
+        },
+        "mip_export": {
+            "seed_cpu_intensity": 0.6,
+            "io_intensity": 0.8,
+            "gpu_mode": EXECUTION_GPU_MODE_NEVER,
+            "preferred_worker_kind": EXECUTION_WORKER_KIND_PROCESS,
+        },
+    }
+    descriptors: Dict[str, AnalysisResourceDescriptor] = {}
+    normalized_defaults = normalize_analysis_operation_parameters(None)
+    for operation_name in ANALYSIS_OPERATION_ORDER:
+        params = dict(normalized_defaults.get(operation_name, {}))
+        descriptor_overrides = descriptor_defaults.get(operation_name, {})
+        descriptors[operation_name] = AnalysisResourceDescriptor(
+            operation_name=operation_name,
+            chunk_basis=str(params.get("chunk_basis", "3d")).strip() or "3d",
+            uses_overlap=bool(params.get("use_map_overlap", False)),
+            seed_memory_multiplier=float(params.get("memory_overhead_factor", 1.0)),
+            seed_cpu_intensity=float(
+                descriptor_overrides.get("seed_cpu_intensity", 1.0)
+            ),
+            io_intensity=float(descriptor_overrides.get("io_intensity", 0.25)),
+            gpu_mode=str(
+                descriptor_overrides.get("gpu_mode", EXECUTION_GPU_MODE_NEVER)
+            ),
+            preferred_worker_kind=str(
+                descriptor_overrides.get(
+                    "preferred_worker_kind",
+                    EXECUTION_WORKER_KIND_PROCESS,
+                )
+            ),
+            supports_chunk_calibration=False,
+        )
+    return descriptors
+
+
+def _selected_analysis_parameter_signature(
+    operation_names: Sequence[str],
+    analysis_parameters: Optional[Mapping[str, Mapping[str, Any]]],
+) -> str:
+    """Return a stable parameter signature for selected operations."""
+    payload: Dict[str, Any] = {}
+    normalized = normalize_analysis_operation_parameters(analysis_parameters)
+    for operation_name in operation_names:
+        payload[str(operation_name)] = normalized.get(str(operation_name), {})
+    return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def build_execution_calibration_profile(
+    *,
+    operation_names: Sequence[str],
+    analysis_parameters: Optional[Mapping[str, Mapping[str, Any]]],
+    chunks_tpczyx: Tuple[int, int, int, int, int, int],
+    dtype_itemsize: int,
+    capabilities: EnvironmentCapabilities,
+    descriptors: Optional[Mapping[str, AnalysisResourceDescriptor]] = None,
+    estimated_chunk_count: Optional[int] = None,
+) -> CalibrationProfile:
+    """Build a versioned execution profile from dataset geometry and defaults."""
+    descriptor_map = (
+        dict(descriptors) if descriptors is not None else default_analysis_resource_descriptors()
+    )
+    normalized = normalize_analysis_operation_parameters(analysis_parameters)
+    selected_operations = tuple(
+        str(name).strip() for name in operation_names if str(name).strip()
+    )
+    if not selected_operations:
+        selected_operations = ("analysis",)
+    itemsize = max(1, int(dtype_itemsize))
+    effective_chunks = tuple(int(v) for v in chunks_tpczyx)
+    estimated_chunk_bytes = max(1, math.prod(effective_chunks) * itemsize)
+
+    memory_multiplier = 1.0
+    cpu_intensity = 0.5
+    overlap_factor = 1.0
+    for operation_name in selected_operations:
+        params = dict(normalized.get(operation_name, {}))
+        descriptor = descriptor_map.get(operation_name)
+        if descriptor is None:
+            continue
+        memory_multiplier = max(
+            memory_multiplier,
+            float(descriptor.seed_memory_multiplier),
+        )
+        cpu_intensity = max(cpu_intensity, float(descriptor.seed_cpu_intensity))
+        if bool(params.get("use_map_overlap", descriptor.uses_overlap)):
+            overlap_zyx = params.get("overlap_zyx", [0, 0, 0])
+            if isinstance(overlap_zyx, Collection) and len(overlap_zyx) == 3:
+                zyx_chunks = effective_chunks[3:]
+                candidate_factor = 1.0
+                for chunk_value, overlap_value in zip(
+                    zyx_chunks,
+                    overlap_zyx,
+                    strict=False,
+                ):
+                    chunk_size = max(1, int(chunk_value))
+                    overlap_size = max(0, int(overlap_value))
+                    candidate_factor *= min(
+                        4.0,
+                        (chunk_size + (2 * overlap_size)) / chunk_size,
+                    )
+                overlap_factor = max(overlap_factor, candidate_factor)
+
+    estimated_peak_memory_bytes = max(
+        estimated_chunk_bytes,
+        int(math.ceil(estimated_chunk_bytes * memory_multiplier * overlap_factor)),
+    )
+    estimated_seconds_per_chunk = max(
+        0.05,
+        round(
+            (estimated_peak_memory_bytes / float(256 << 20))
+            * max(0.25, float(cpu_intensity)),
+            3,
+        ),
+    )
+    sample_chunk_count = max(
+        1,
+        min(10, int(estimated_chunk_count or 10)),
+    )
+    parameter_signature = _selected_analysis_parameter_signature(
+        selected_operations,
+        normalized,
+    )
+    fingerprint = _environment_fingerprint(capabilities)
+    key_material = {
+        "model_version": EXECUTION_PLAN_MODEL_VERSION,
+        "operations": list(selected_operations),
+        "parameter_signature": parameter_signature,
+        "chunks_tpczyx": list(effective_chunks),
+        "dtype_itemsize": itemsize,
+        "environment": fingerprint,
+        "software_version": _clearex_software_version(),
+    }
+    profile_key = hashlib.sha256(
+        json.dumps(key_material, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return CalibrationProfile(
+        profile_key=profile_key,
+        operation_names=selected_operations,
+        parameter_signature=parameter_signature,
+        chunk_shape_tpczyx=effective_chunks,
+        dtype_itemsize=itemsize,
+        sample_chunk_count=sample_chunk_count,
+        estimated_peak_memory_bytes=estimated_peak_memory_bytes,
+        estimated_seconds_per_chunk=estimated_seconds_per_chunk,
+        cpu_utilization=min(1.0, max(0.1, cpu_intensity / 1.25)),
+        source="geometry_estimate",
+        confidence=0.35,
+        environment_fingerprint=fingerprint,
+        software_version=_clearex_software_version(),
+        model_version=EXECUTION_PLAN_MODEL_VERSION,
+    )
+
+
+def execution_policy_to_dict(config: ExecutionPolicy) -> Dict[str, Any]:
+    """Serialize execution policy into a JSON-friendly mapping."""
+    return {
+        "mode": config.mode,
+        "max_workers": config.max_workers,
+        "memory_per_worker_limit": config.memory_per_worker_limit,
+        "calibration_policy": config.calibration_policy,
+    }
+
+
+def execution_policy_from_dict(payload: Any) -> ExecutionPolicy:
+    """Deserialize an execution-policy mapping."""
+    defaults = ExecutionPolicy()
+    if not isinstance(payload, Mapping):
+        return defaults
+    try:
+        return ExecutionPolicy(
+            mode=str(payload.get("mode", defaults.mode)).strip().lower()
+            or defaults.mode,
+            max_workers=payload.get("max_workers", defaults.max_workers),
+            memory_per_worker_limit=payload.get(
+                "memory_per_worker_limit",
+                defaults.memory_per_worker_limit,
+            ),
+            calibration_policy=payload.get(
+                "calibration_policy",
+                defaults.calibration_policy,
+            ),
+        )
+    except Exception:
+        return defaults
+
+
+def calibration_profile_to_dict(profile: CalibrationProfile) -> Dict[str, Any]:
+    """Serialize a calibration profile."""
+    return {
+        "profile_key": profile.profile_key,
+        "operation_names": list(profile.operation_names),
+        "parameter_signature": profile.parameter_signature,
+        "chunk_shape_tpczyx": list(profile.chunk_shape_tpczyx),
+        "dtype_itemsize": profile.dtype_itemsize,
+        "sample_chunk_count": profile.sample_chunk_count,
+        "estimated_peak_memory_bytes": profile.estimated_peak_memory_bytes,
+        "estimated_seconds_per_chunk": profile.estimated_seconds_per_chunk,
+        "cpu_utilization": profile.cpu_utilization,
+        "source": profile.source,
+        "confidence": profile.confidence,
+        "environment_fingerprint": profile.environment_fingerprint,
+        "software_version": profile.software_version,
+        "model_version": profile.model_version,
+    }
+
+
+def calibration_profile_from_dict(payload: Any) -> Optional[CalibrationProfile]:
+    """Deserialize a calibration profile mapping."""
+    if not isinstance(payload, Mapping):
+        return None
+    try:
+        return CalibrationProfile(
+            profile_key=str(payload.get("profile_key", "")).strip(),
+            operation_names=tuple(payload.get("operation_names", tuple())),
+            parameter_signature=str(payload.get("parameter_signature", "")).strip(),
+            chunk_shape_tpczyx=tuple(payload.get("chunk_shape_tpczyx", (1, 1, 1, 256, 256, 256))),
+            dtype_itemsize=payload.get("dtype_itemsize", 2),
+            sample_chunk_count=payload.get("sample_chunk_count", 1),
+            estimated_peak_memory_bytes=payload.get("estimated_peak_memory_bytes", 1),
+            estimated_seconds_per_chunk=payload.get("estimated_seconds_per_chunk", 0.1),
+            cpu_utilization=payload.get("cpu_utilization", 0.5),
+            source=str(payload.get("source", "geometry_estimate")).strip(),
+            confidence=payload.get("confidence", 0.35),
+            environment_fingerprint=str(
+                payload.get("environment_fingerprint", "")
+            ).strip(),
+            software_version=str(payload.get("software_version", "")).strip(),
+            model_version=str(payload.get("model_version", EXECUTION_PLAN_MODEL_VERSION)).strip()
+            or EXECUTION_PLAN_MODEL_VERSION,
+        )
+    except Exception:
+        return None
+
+
+def environment_capabilities_to_dict(
+    capabilities: EnvironmentCapabilities,
+) -> Dict[str, Any]:
+    """Serialize environment capabilities."""
+    return {
+        "cpu_count": capabilities.cpu_count,
+        "memory_bytes": capabilities.memory_bytes,
+        "gpu_count": capabilities.gpu_count,
+        "gpu_memory_bytes": capabilities.gpu_memory_bytes,
+        "attached_scheduler_file": capabilities.attached_scheduler_file,
+        "scheduler_mode": capabilities.scheduler_mode,
+    }
+
+
+def execution_plan_to_dict(plan: ExecutionPlan) -> Dict[str, Any]:
+    """Serialize an execution plan."""
+    return {
+        "policy_mode": plan.policy_mode,
+        "workload": plan.workload,
+        "selected_operations": list(plan.selected_operations),
+        "worker_kind": plan.worker_kind,
+        "workers": plan.workers,
+        "threads_per_worker": plan.threads_per_worker,
+        "memory_per_worker_limit": plan.memory_per_worker_limit,
+        "estimated_chunk_bytes": plan.estimated_chunk_bytes,
+        "estimated_working_set_bytes": plan.estimated_working_set_bytes,
+        "estimated_chunk_count": plan.estimated_chunk_count,
+        "requires_gpu": plan.requires_gpu,
+        "backend_config": dask_backend_to_dict(plan.backend_config),
+        "environment": environment_capabilities_to_dict(plan.environment),
+        "calibration_profile": (
+            calibration_profile_to_dict(plan.calibration_profile)
+            if plan.calibration_profile is not None
+            else None
+        ),
+    }
+
+
+def format_execution_policy_summary(config: ExecutionPolicy) -> str:
+    """Format a compact execution-policy summary."""
+    max_workers_text = (
+        str(config.max_workers) if config.max_workers is not None else "auto"
+    )
+    return (
+        f"{config.mode} "
+        f"(max_workers={max_workers_text}, "
+        f"memory_per_worker={config.memory_per_worker_limit}, "
+        f"calibration={config.calibration_policy})"
+    )
+
+
+def format_execution_plan_summary(plan: ExecutionPlan) -> str:
+    """Format a compact execution-plan summary."""
+    backend_summary = format_dask_backend_summary(plan.backend_config)
+    parts = [
+        backend_summary,
+        f"workers={plan.workers}",
+        f"threads={plan.threads_per_worker}",
+        f"memory={plan.memory_per_worker_limit}",
+        f"~{_format_binary_size(plan.estimated_working_set_bytes)} working set/chunk",
+    ]
+    if plan.requires_gpu:
+        parts.append("gpu=yes")
+    if plan.calibration_profile is not None:
+        parts.append(
+            f"profile={plan.calibration_profile.source}:{plan.calibration_profile.confidence:.2f}"
+        )
+    return " | ".join(parts)
+
+
 def dask_backend_to_dict(config: DaskBackendConfig) -> Dict[str, Any]:
     """Serialize Dask backend config into JSON-friendly mappings.
 
@@ -3903,10 +4667,13 @@ def dask_backend_from_dict(payload: Any) -> DaskBackendConfig:
         slurm_cluster = defaults.slurm_cluster
 
     mode_value = str(payload.get("mode", defaults.mode)).strip().lower()
-    mode = (
-        mode_value
-        if mode_value in DASK_BACKEND_MODE_LABELS
-        else DASK_BACKEND_LOCAL_CLUSTER
+    mode = cast(
+        DaskBackendMode,
+        (
+            mode_value
+            if mode_value in DASK_BACKEND_MODE_LABELS
+            else DASK_BACKEND_LOCAL_CLUSTER
+        ),
     )
 
     try:
@@ -4045,8 +4812,12 @@ class WorkflowConfig:
         ``analysis_targets`` instead of only the selected one.
     prefer_dask : bool
         Whether to open data using lazy Dask-backed arrays when supported.
+    execution_policy : ExecutionPolicy
+        Operator-facing execution-planning policy used for automatic sizing.
     dask_backend : DaskBackendConfig
-        Backend orchestration mode and runtime settings for Dask execution.
+        Advanced backend orchestration override and persisted scheduler hints.
+    execution_plan : ExecutionPlan, optional
+        Effective execution plan derived at runtime.
     chunks : int or tuple of int, optional
         Chunking configuration used for Dask reads.
     flatfield : bool
@@ -4076,7 +4847,9 @@ class WorkflowConfig:
     analysis_selected_experiment_path: Optional[str] = None
     analysis_apply_to_all: bool = False
     prefer_dask: bool = True
+    execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
     dask_backend: DaskBackendConfig = field(default_factory=DaskBackendConfig)
+    execution_plan: Optional[ExecutionPlan] = None
     chunks: ChunkSpec = None
     flatfield: bool = False
     deconvolution: bool = False
@@ -4108,6 +4881,8 @@ class WorkflowConfig:
         ValueError
             If analysis parameter mappings are invalid.
         """
+        if not isinstance(self.execution_policy, ExecutionPolicy):
+            self.execution_policy = execution_policy_from_dict(self.execution_policy)
         self.analysis_targets = normalize_analysis_targets(self.analysis_targets)
         selected_experiment_path = (
             str(self.analysis_selected_experiment_path).strip()
@@ -4194,6 +4969,454 @@ class WorkflowConfig:
             if target.experiment_path == selected_experiment_path:
                 return target
         return None
+
+
+def _selected_operations_for_execution_plan(
+    workflow: WorkflowConfig,
+    *,
+    workload: str,
+    analysis_parameters: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> tuple[str, ...]:
+    """Return ordered operations relevant to an execution plan."""
+    workload_name = str(workload).strip().lower() or "analysis"
+    if workload_name != "analysis":
+        return ("io",)
+    return tuple(
+        resolve_analysis_execution_sequence(
+            flatfield=workflow.flatfield,
+            deconvolution=workflow.deconvolution,
+            shear_transform=workflow.shear_transform,
+            particle_detection=workflow.particle_detection,
+            usegment3d=workflow.usegment3d,
+            registration=workflow.registration,
+            visualization=workflow.visualization,
+            mip_export=workflow.mip_export,
+            analysis_parameters=analysis_parameters or workflow.analysis_parameters,
+        )
+    )
+
+
+def _effective_analysis_descriptor(
+    operation_name: str,
+    parameters: Optional[Mapping[str, Any]],
+    *,
+    seeded_descriptors: Optional[Mapping[str, AnalysisResourceDescriptor]] = None,
+) -> AnalysisResourceDescriptor:
+    """Return one effective descriptor for a selected analysis operation."""
+    descriptor_map = (
+        dict(seeded_descriptors)
+        if seeded_descriptors is not None
+        else default_analysis_resource_descriptors()
+    )
+    base = descriptor_map.get(
+        str(operation_name),
+        AnalysisResourceDescriptor(
+            operation_name=str(operation_name),
+            chunk_basis="3d",
+            uses_overlap=False,
+            seed_memory_multiplier=1.0,
+            seed_cpu_intensity=1.0,
+            io_intensity=0.25,
+        ),
+    )
+    params = dict(parameters or {})
+    gpu_mode = base.gpu_mode
+    preferred_worker_kind = base.preferred_worker_kind
+    if str(operation_name) == "usegment3d":
+        if bool(params.get("require_gpu", False)):
+            gpu_mode = EXECUTION_GPU_MODE_REQUIRED
+            preferred_worker_kind = EXECUTION_WORKER_KIND_GPU_PROCESS
+        elif bool(params.get("gpu", False)):
+            gpu_mode = EXECUTION_GPU_MODE_OPTIONAL
+            preferred_worker_kind = EXECUTION_WORKER_KIND_GPU_PROCESS
+        else:
+            gpu_mode = EXECUTION_GPU_MODE_NEVER
+            preferred_worker_kind = EXECUTION_WORKER_KIND_PROCESS
+    elif str(operation_name) == "visualization" and not bool(
+        params.get("require_gpu_rendering", True)
+    ):
+        gpu_mode = EXECUTION_GPU_MODE_NEVER
+    elif str(operation_name) == "deconvolution" and bool(params.get("gpu_job", False)):
+        gpu_mode = EXECUTION_GPU_MODE_OPTIONAL
+        preferred_worker_kind = EXECUTION_WORKER_KIND_GPU_PROCESS
+    return AnalysisResourceDescriptor(
+        operation_name=str(operation_name),
+        chunk_basis=str(params.get("chunk_basis", base.chunk_basis)).strip()
+        or base.chunk_basis,
+        uses_overlap=bool(params.get("use_map_overlap", base.uses_overlap)),
+        seed_memory_multiplier=float(
+            params.get("memory_overhead_factor", base.seed_memory_multiplier)
+        ),
+        seed_cpu_intensity=float(base.seed_cpu_intensity),
+        io_intensity=float(base.io_intensity),
+        gpu_mode=gpu_mode,
+        preferred_worker_kind=preferred_worker_kind,
+        supports_chunk_calibration=base.supports_chunk_calibration,
+    )
+
+
+def _aggregate_execution_descriptor(
+    *,
+    workload: str,
+    operation_names: Sequence[str],
+    analysis_parameters: Optional[Dict[str, Dict[str, Any]]],
+) -> AnalysisResourceDescriptor:
+    """Aggregate selected operations into one planning descriptor."""
+    workload_name = str(workload).strip().lower() or "analysis"
+    if workload_name != "analysis":
+        return AnalysisResourceDescriptor(
+            operation_name="io",
+            chunk_basis="3d",
+            uses_overlap=False,
+            seed_memory_multiplier=1.5,
+            seed_cpu_intensity=0.65,
+            io_intensity=1.0,
+            gpu_mode=EXECUTION_GPU_MODE_NEVER,
+            preferred_worker_kind=EXECUTION_WORKER_KIND_PROCESS,
+            supports_chunk_calibration=False,
+        )
+
+    normalized = normalize_analysis_operation_parameters(analysis_parameters)
+    effective_descriptors = [
+        _effective_analysis_descriptor(
+            operation_name,
+            normalized.get(str(operation_name), {}),
+        )
+        for operation_name in operation_names
+    ]
+    if not effective_descriptors:
+        return AnalysisResourceDescriptor(
+            operation_name="analysis",
+            chunk_basis="3d",
+            uses_overlap=False,
+            seed_memory_multiplier=1.0,
+            seed_cpu_intensity=1.0,
+            io_intensity=0.25,
+            gpu_mode=EXECUTION_GPU_MODE_NEVER,
+            preferred_worker_kind=EXECUTION_WORKER_KIND_PROCESS,
+            supports_chunk_calibration=False,
+        )
+
+    gpu_mode = EXECUTION_GPU_MODE_NEVER
+    preferred_worker_kind = EXECUTION_WORKER_KIND_THREAD
+    for descriptor in effective_descriptors:
+        if descriptor.gpu_mode == EXECUTION_GPU_MODE_REQUIRED:
+            gpu_mode = EXECUTION_GPU_MODE_REQUIRED
+        elif (
+            descriptor.gpu_mode == EXECUTION_GPU_MODE_OPTIONAL
+            and gpu_mode != EXECUTION_GPU_MODE_REQUIRED
+        ):
+            gpu_mode = EXECUTION_GPU_MODE_OPTIONAL
+        if descriptor.preferred_worker_kind == EXECUTION_WORKER_KIND_GPU_PROCESS:
+            preferred_worker_kind = EXECUTION_WORKER_KIND_GPU_PROCESS
+        elif (
+            descriptor.preferred_worker_kind == EXECUTION_WORKER_KIND_PROCESS
+            and preferred_worker_kind != EXECUTION_WORKER_KIND_GPU_PROCESS
+        ):
+            preferred_worker_kind = EXECUTION_WORKER_KIND_PROCESS
+
+    return AnalysisResourceDescriptor(
+        operation_name="analysis_sequence",
+        chunk_basis=(
+            "3d"
+            if any(desc.chunk_basis == "3d" for desc in effective_descriptors)
+            else "2d"
+        ),
+        uses_overlap=any(desc.uses_overlap for desc in effective_descriptors),
+        seed_memory_multiplier=max(
+            float(desc.seed_memory_multiplier) for desc in effective_descriptors
+        ),
+        seed_cpu_intensity=max(
+            float(desc.seed_cpu_intensity) for desc in effective_descriptors
+        ),
+        io_intensity=max(float(desc.io_intensity) for desc in effective_descriptors),
+        gpu_mode=gpu_mode,
+        preferred_worker_kind=preferred_worker_kind,
+        supports_chunk_calibration=any(
+            desc.supports_chunk_calibration for desc in effective_descriptors
+        ),
+    )
+
+
+def _estimate_chunk_count(
+    shape_tpczyx: Optional[Tuple[int, int, int, int, int, int]],
+    chunks_tpczyx: Tuple[int, int, int, int, int, int],
+) -> Optional[int]:
+    """Estimate the number of chunks in a canonical dataset."""
+    if shape_tpczyx is None:
+        return None
+    return max(
+        1,
+        math.prod(
+            [
+                max(1, math.ceil(int(dim) / max(1, int(chunk))))
+                for dim, chunk in zip(shape_tpczyx, chunks_tpczyx, strict=False)
+            ]
+        ),
+    )
+
+
+def plan_execution(
+    workflow: WorkflowConfig,
+    *,
+    workload: str = "analysis",
+    shape_tpczyx: Optional[Tuple[int, int, int, int, int, int]] = None,
+    chunks_tpczyx: Optional[Tuple[int, int, int, int, int, int]] = None,
+    dtype_itemsize: Optional[int] = None,
+    calibration_profiles: Optional[Mapping[str, CalibrationProfile]] = None,
+) -> ExecutionPlan:
+    """Derive an execution plan for the requested workflow context."""
+    workload_name = str(workload).strip().lower() or "analysis"
+    effective_chunks = cast(
+        Tuple[int, int, int, int, int, int],
+        tuple(
+            int(v)
+            for v in (
+                chunks_tpczyx
+                if chunks_tpczyx is not None
+                else workflow.zarr_save.chunks_tpczyx()
+            )
+        ),
+    )
+    itemsize = max(1, int(dtype_itemsize or 2))
+    estimated_chunk_bytes = max(1, math.prod(effective_chunks) * itemsize)
+    normalized_parameters = normalize_analysis_operation_parameters(
+        workflow.analysis_parameters
+    )
+    selected_operations = _selected_operations_for_execution_plan(
+        workflow,
+        workload=workload_name,
+        analysis_parameters=normalized_parameters,
+    )
+    descriptor = _aggregate_execution_descriptor(
+        workload=workload_name,
+        operation_names=selected_operations,
+        analysis_parameters=normalized_parameters,
+    )
+    capabilities = detect_environment_capabilities(
+        scheduler_file=workflow.dask_backend.slurm_runner.scheduler_file
+    )
+    estimated_chunk_count = _estimate_chunk_count(shape_tpczyx, effective_chunks)
+    calibration_profile = build_execution_calibration_profile(
+        operation_names=selected_operations,
+        analysis_parameters=normalized_parameters,
+        chunks_tpczyx=effective_chunks,
+        dtype_itemsize=itemsize,
+        capabilities=capabilities,
+        estimated_chunk_count=estimated_chunk_count,
+    )
+    if (
+        workflow.execution_policy.calibration_policy
+        == EXECUTION_CALIBRATION_USE_IF_AVAILABLE
+        and calibration_profiles is not None
+    ):
+        cached_profile = calibration_profiles.get(calibration_profile.profile_key)
+        if cached_profile is not None:
+            calibration_profile = cached_profile
+
+    if workflow.execution_policy.mode == EXECUTION_POLICY_ADVANCED:
+        backend_config = workflow.dask_backend
+        workers = 1
+        threads_per_worker = 1
+        memory_per_worker_limit = "auto"
+        if backend_config.mode == DASK_BACKEND_LOCAL_CLUSTER:
+            if backend_config.local_cluster.n_workers is None:
+                recommendation = recommend_local_cluster_config(
+                    shape_tpczyx=shape_tpczyx,
+                    chunks_tpczyx=effective_chunks,
+                    dtype_itemsize=itemsize,
+                    cpu_count=capabilities.cpu_count,
+                    memory_bytes=capabilities.memory_bytes,
+                    gpu_count=capabilities.gpu_count,
+                    gpu_memory_bytes=capabilities.gpu_memory_bytes,
+                )
+                workers = int(recommendation.config.n_workers or 1)
+                threads_per_worker = int(recommendation.config.threads_per_worker)
+                memory_per_worker_limit = str(recommendation.config.memory_limit)
+                backend_config = DaskBackendConfig(
+                    mode=DASK_BACKEND_LOCAL_CLUSTER,
+                    local_cluster=LocalClusterConfig(
+                        n_workers=workers,
+                        threads_per_worker=threads_per_worker,
+                        memory_limit=memory_per_worker_limit,
+                        local_directory=backend_config.local_cluster.local_directory,
+                    ),
+                    slurm_runner=backend_config.slurm_runner,
+                    slurm_cluster=backend_config.slurm_cluster,
+                )
+            else:
+                workers = int(backend_config.local_cluster.n_workers or 1)
+                threads_per_worker = int(backend_config.local_cluster.threads_per_worker)
+                memory_per_worker_limit = str(backend_config.local_cluster.memory_limit)
+        elif backend_config.mode == DASK_BACKEND_SLURM_CLUSTER:
+            workers = int(backend_config.slurm_cluster.workers)
+            threads_per_worker = int(
+                max(
+                    1,
+                    int(backend_config.slurm_cluster.cores)
+                    // max(1, int(backend_config.slurm_cluster.processes)),
+                )
+            )
+            memory_per_worker_limit = str(backend_config.slurm_cluster.memory)
+        elif backend_config.mode == DASK_BACKEND_SLURM_RUNNER:
+            workers = max(
+                1,
+                int(backend_config.slurm_runner.wait_for_workers or 1),
+            )
+            threads_per_worker = 1
+            memory_per_worker_limit = workflow.execution_policy.memory_per_worker_limit
+        return ExecutionPlan(
+            policy_mode=workflow.execution_policy.mode,
+            workload=workload_name,
+            selected_operations=selected_operations,
+            worker_kind=descriptor.preferred_worker_kind,
+            backend_config=backend_config,
+            workers=workers,
+            threads_per_worker=threads_per_worker,
+            memory_per_worker_limit=memory_per_worker_limit,
+            estimated_chunk_bytes=estimated_chunk_bytes,
+            estimated_working_set_bytes=calibration_profile.estimated_peak_memory_bytes,
+            estimated_chunk_count=estimated_chunk_count,
+            requires_gpu=descriptor.gpu_mode == EXECUTION_GPU_MODE_REQUIRED,
+            environment=capabilities,
+            calibration_profile=calibration_profile,
+        )
+
+    legacy_local_worker_cap = (
+        int(workflow.dask_backend.local_cluster.n_workers)
+        if workflow.dask_backend.mode == DASK_BACKEND_LOCAL_CLUSTER
+        and workflow.dask_backend.local_cluster.n_workers is not None
+        else None
+    )
+    requested_max_workers = (
+        int(workflow.execution_policy.max_workers)
+        if workflow.execution_policy.max_workers is not None
+        else (
+            int(legacy_local_worker_cap)
+            if legacy_local_worker_cap is not None
+            else 64
+        )
+    )
+    reserve_bytes = min(
+        max(2 << 30, capabilities.memory_bytes // 10),
+        max(1 << 30, capabilities.memory_bytes // 6),
+    )
+    usable_bytes = max(1 << 30, capabilities.memory_bytes - reserve_bytes)
+    minimum_safe_memory_bytes = max(
+        1 << 30,
+        int(math.ceil(calibration_profile.estimated_peak_memory_bytes * 1.3)),
+    )
+    requested_memory_bytes = _parse_memory_limit_bytes(
+        workflow.execution_policy.memory_per_worker_limit
+    )
+    if requested_memory_bytes is None and (
+        workflow.dask_backend.mode == DASK_BACKEND_LOCAL_CLUSTER
+    ):
+        requested_memory_bytes = _parse_memory_limit_bytes(
+            workflow.dask_backend.local_cluster.memory_limit
+        )
+
+    if descriptor.preferred_worker_kind == EXECUTION_WORKER_KIND_THREAD:
+        workers = 1
+        threads_per_worker = max(
+            1,
+            min(capabilities.cpu_count, requested_max_workers, 8),
+        )
+        worker_memory_bytes = max(
+            minimum_safe_memory_bytes,
+            requested_memory_bytes or usable_bytes,
+        )
+    else:
+        threads_per_worker = 1
+        if capabilities.cpu_count >= 32 and estimated_chunk_bytes < (16 << 20):
+            threads_per_worker = 2
+        workers_by_cpu = max(1, capabilities.cpu_count // threads_per_worker)
+        worker_memory_bytes = max(
+            minimum_safe_memory_bytes,
+            requested_memory_bytes or minimum_safe_memory_bytes,
+        )
+        workers_by_memory = max(1, usable_bytes // max(1, worker_memory_bytes))
+        workers_by_chunk_count = (
+            max(1, int(estimated_chunk_count))
+            if estimated_chunk_count is not None
+            else requested_max_workers
+        )
+        if descriptor.gpu_mode == EXECUTION_GPU_MODE_NEVER:
+            workers_by_gpu = requested_max_workers
+        else:
+            workers_by_gpu = max(1, capabilities.gpu_count or 1)
+        workers = max(
+            1,
+            min(
+                requested_max_workers,
+                workers_by_cpu,
+                workers_by_memory,
+                workers_by_chunk_count,
+                workers_by_gpu,
+            ),
+        )
+        if threads_per_worker > 1 and workers * threads_per_worker > capabilities.cpu_count:
+            threads_per_worker = max(1, capabilities.cpu_count // max(1, workers))
+        worker_memory_bytes = max(
+            worker_memory_bytes,
+            usable_bytes // max(1, workers),
+        )
+
+    requires_gpu = descriptor.gpu_mode == EXECUTION_GPU_MODE_REQUIRED
+    use_gpu_local_cluster = (
+        descriptor.preferred_worker_kind == EXECUTION_WORKER_KIND_GPU_PROCESS
+        and capabilities.gpu_count > 0
+    )
+    memory_per_worker_limit = _format_worker_memory_limit(worker_memory_bytes)
+    if capabilities.attached_scheduler_file:
+        backend_config = DaskBackendConfig(
+            mode=DASK_BACKEND_SLURM_RUNNER,
+            slurm_runner=SlurmRunnerConfig(
+                scheduler_file=capabilities.attached_scheduler_file,
+                wait_for_workers=workers,
+            ),
+        )
+    else:
+        backend_config = DaskBackendConfig(
+            mode=DASK_BACKEND_LOCAL_CLUSTER,
+            local_cluster=LocalClusterConfig(
+                n_workers=workers,
+                threads_per_worker=threads_per_worker,
+                memory_limit=memory_per_worker_limit,
+                local_directory=workflow.dask_backend.local_cluster.local_directory,
+            ),
+            slurm_runner=workflow.dask_backend.slurm_runner,
+            slurm_cluster=workflow.dask_backend.slurm_cluster,
+        )
+        if use_gpu_local_cluster and capabilities.gpu_count > 0:
+            workers = min(workers, max(1, capabilities.gpu_count))
+            backend_config = DaskBackendConfig(
+                mode=DASK_BACKEND_LOCAL_CLUSTER,
+                local_cluster=LocalClusterConfig(
+                    n_workers=workers,
+                    threads_per_worker=threads_per_worker,
+                    memory_limit=memory_per_worker_limit,
+                    local_directory=workflow.dask_backend.local_cluster.local_directory,
+                ),
+                slurm_runner=workflow.dask_backend.slurm_runner,
+                slurm_cluster=workflow.dask_backend.slurm_cluster,
+            )
+    return ExecutionPlan(
+        policy_mode=workflow.execution_policy.mode,
+        workload=workload_name,
+        selected_operations=selected_operations,
+        worker_kind=descriptor.preferred_worker_kind,
+        backend_config=backend_config,
+        workers=workers,
+        threads_per_worker=threads_per_worker,
+        memory_per_worker_limit=memory_per_worker_limit,
+        estimated_chunk_bytes=estimated_chunk_bytes,
+        estimated_working_set_bytes=calibration_profile.estimated_peak_memory_bytes,
+        estimated_chunk_count=estimated_chunk_count,
+        requires_gpu=requires_gpu,
+        environment=capabilities,
+        calibration_profile=calibration_profile,
+    )
 
 
 def parse_chunks(chunks: Optional[str]) -> ChunkSpec:

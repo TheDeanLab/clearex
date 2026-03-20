@@ -86,6 +86,7 @@ from clearex.workflow import (
     DEFAULT_ZARR_PYRAMID_PTCZYX,
     DEFAULT_SLURM_CLUSTER_JOB_EXTRA_DIRECTIVES,
     DaskBackendConfig,
+    ExecutionPolicy,
     LocalClusterRecommendation,
     LocalClusterConfig,
     PTCZYX_AXES,
@@ -96,17 +97,23 @@ from clearex.workflow import (
     ZarrSaveConfig,
     analysis_chainable_output_component,
     analysis_operation_for_output_component,
+    calibration_profile_from_dict,
+    calibration_profile_to_dict,
     collect_analysis_input_references,
     dask_backend_from_dict,
     dask_backend_to_dict,
     default_analysis_operation_parameters,
-    format_dask_backend_summary,
+    execution_policy_from_dict,
+    execution_policy_to_dict,
+    format_execution_plan_summary,
+    format_execution_policy_summary,
     format_local_cluster_recommendation_summary,
     format_pyramid_levels,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
     normalize_analysis_operation_parameters,
     parse_pyramid_levels,
+    plan_execution,
     recommend_local_cluster_config,
     resolve_analysis_input_component,
     validate_analysis_input_references,
@@ -190,6 +197,10 @@ _GUI_HEADER_IMAGE = "ClearEx_full_header.png"
 _GUI_APP_ICON = "icon.png"
 _CLEAREX_SETTINGS_DIR_NAME = ".clearex"
 _CLEAREX_DASK_BACKEND_SETTINGS_FILE = "dask_backend_settings.json"
+_CLEAREX_EXECUTION_POLICY_SETTINGS_FILE = "execution_policy_settings.json"
+_CLEAREX_EXECUTION_CALIBRATION_PROFILES_FILE = (
+    "execution_calibration_profiles.json"
+)
 _CLEAREX_ZARR_SAVE_SETTINGS_FILE = "zarr_save_settings.json"
 _CLEAREX_EXPERIMENT_LIST_FORMAT = "clearex-experiment-list/v1"
 _CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX = ".clearex-experiment-list.json"
@@ -840,6 +851,30 @@ def _resolve_dask_backend_settings_path(
     return directory / _CLEAREX_DASK_BACKEND_SETTINGS_FILE
 
 
+def _resolve_execution_policy_settings_path(
+    settings_directory: Optional[Path] = None,
+) -> Path:
+    """Resolve the user settings JSON path for persisted execution policy."""
+    directory = (
+        settings_directory
+        if settings_directory is not None
+        else _resolve_clearex_settings_directory()
+    )
+    return directory / _CLEAREX_EXECUTION_POLICY_SETTINGS_FILE
+
+
+def _resolve_execution_calibration_profiles_path(
+    settings_directory: Optional[Path] = None,
+) -> Path:
+    """Resolve the user settings JSON path for persisted calibration profiles."""
+    directory = (
+        settings_directory
+        if settings_directory is not None
+        else _resolve_clearex_settings_directory()
+    )
+    return directory / _CLEAREX_EXECUTION_CALIBRATION_PROFILES_FILE
+
+
 def _resolve_zarr_save_settings_path(
     settings_directory: Optional[Path] = None,
 ) -> Path:
@@ -959,6 +994,80 @@ def _load_last_used_dask_backend_config(
     return dask_backend_from_dict(payload)
 
 
+def _load_last_used_execution_policy(
+    settings_path: Optional[Path] = None,
+) -> Optional[ExecutionPolicy]:
+    """Load the last-used execution policy from JSON."""
+    path = (
+        settings_path
+        if settings_path is not None
+        else _resolve_execution_policy_settings_path()
+    )
+    resolved = path.expanduser()
+    if not resolved.exists():
+        return None
+
+    try:
+        raw_text = resolved.read_text(encoding="utf-8")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to read execution policy settings %s: %s",
+            resolved,
+            exc,
+        )
+        return None
+
+    if not raw_text.strip():
+        return None
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to decode execution policy settings %s: %s",
+            resolved,
+            exc,
+        )
+        return None
+
+    if isinstance(payload, dict) and not payload:
+        return None
+    return execution_policy_from_dict(payload)
+
+
+def _load_execution_calibration_profiles(
+    settings_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Load persisted execution calibration profiles from JSON."""
+    path = (
+        settings_path
+        if settings_path is not None
+        else _resolve_execution_calibration_profiles_path()
+    )
+    resolved = path.expanduser()
+    if not resolved.exists():
+        return {}
+    try:
+        raw_text = resolved.read_text(encoding="utf-8")
+    except Exception:
+        return {}
+    if not raw_text.strip():
+        return {}
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    profiles: Dict[str, Any] = {}
+    for key, value in payload.items():
+        profile = calibration_profile_from_dict(value)
+        if profile is None:
+            continue
+        profiles[str(key)] = profile
+    return profiles
+
+
 def _load_last_used_zarr_save_config(
     settings_path: Optional[Path] = None,
 ) -> Optional[ZarrSaveConfig]:
@@ -1071,6 +1180,63 @@ def _save_last_used_dask_backend_config(
     return True
 
 
+def _save_last_used_execution_policy(
+    config: ExecutionPolicy,
+    settings_path: Optional[Path] = None,
+) -> bool:
+    """Persist the most recently used execution policy."""
+    path = (
+        settings_path
+        if settings_path is not None
+        else _resolve_execution_policy_settings_path()
+    )
+    resolved = path.expanduser()
+    _ensure_clearex_settings_directory(resolved.parent)
+
+    try:
+        payload = execution_policy_to_dict(config)
+        serialized = json.dumps(payload, indent=2, sort_keys=True)
+        resolved.write_text(f"{serialized}\n", encoding="utf-8")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to save execution policy settings %s: %s",
+            resolved,
+            exc,
+        )
+        return False
+    return True
+
+
+def _save_execution_calibration_profiles(
+    profiles: Mapping[str, Any],
+    settings_path: Optional[Path] = None,
+) -> bool:
+    """Persist execution calibration profiles."""
+    path = (
+        settings_path
+        if settings_path is not None
+        else _resolve_execution_calibration_profiles_path()
+    )
+    resolved = path.expanduser()
+    _ensure_clearex_settings_directory(resolved.parent)
+
+    try:
+        payload = {
+            str(key): calibration_profile_to_dict(profile)
+            for key, profile in profiles.items()
+        }
+        serialized = json.dumps(payload, indent=2, sort_keys=True)
+        resolved.write_text(f"{serialized}\n", encoding="utf-8")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to save execution calibration profiles %s: %s",
+            resolved,
+            exc,
+        )
+        return False
+    return True
+
+
 def _save_last_used_zarr_save_config(
     config: ZarrSaveConfig,
     settings_path: Optional[Path] = None,
@@ -1133,6 +1299,15 @@ def _should_apply_persisted_dask_backend(initial: Optional[WorkflowConfig]) -> b
     if initial is None:
         return True
     return initial.dask_backend == DaskBackendConfig()
+
+
+def _should_apply_persisted_execution_policy(
+    initial: Optional[WorkflowConfig],
+) -> bool:
+    """Return whether persisted execution policy should override GUI defaults."""
+    if initial is None:
+        return True
+    return initial.execution_policy == ExecutionPolicy()
 
 
 def _should_apply_persisted_zarr_save(initial: Optional[WorkflowConfig]) -> bool:
@@ -3649,6 +3824,262 @@ if HAS_PYQT6:
 
             self.accept()
 
+    class ExecutionPolicyDialog(QDialog):
+        """Dialog for configuring automatic execution planning."""
+
+        def __init__(
+            self,
+            *,
+            initial_policy: ExecutionPolicy,
+            initial_backend: DaskBackendConfig,
+            workload: str,
+            summary_workflow_factory: Callable[
+                [ExecutionPolicy, DaskBackendConfig], WorkflowConfig
+            ],
+            recommendation_shape_tpczyx: Optional[
+                Tuple[int, int, int, int, int, int]
+            ] = None,
+            recommendation_chunks_tpczyx: Optional[
+                Tuple[int, int, int, int, int, int]
+            ] = None,
+            recommendation_dtype_itemsize: Optional[int] = None,
+            parent: Optional[QDialog] = None,
+        ) -> None:
+            """Initialize execution-policy dialog state."""
+            super().__init__(parent)
+            self.setWindowTitle("Execution Planning")
+            self.result_policy: Optional[ExecutionPolicy] = None
+            self.result_backend: Optional[DaskBackendConfig] = None
+            self._advanced_backend = initial_backend
+            self._workload = str(workload).strip().lower() or "analysis"
+            self._summary_workflow_factory = summary_workflow_factory
+            self._recommendation_shape_tpczyx = recommendation_shape_tpczyx
+            self._recommendation_chunks_tpczyx = recommendation_chunks_tpczyx
+            self._recommendation_dtype_itemsize = recommendation_dtype_itemsize
+            self._refresh_calibration_once = False
+            self._build_ui()
+            self._hydrate(initial_policy)
+            self.setStyleSheet(_popup_dialog_stylesheet())
+            _apply_initial_dialog_geometry(
+                self,
+                minimum_size=_DASK_BACKEND_DIALOG_MINIMUM_SIZE,
+                preferred_size=_DASK_BACKEND_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
+            )
+
+        def _build_ui(self) -> None:
+            """Construct dialog controls and wire signals."""
+            root = QVBoxLayout(self)
+            apply_popup_root_spacing(root)
+
+            overview = QLabel(
+                "Choose whether ClearEx plans worker resources automatically "
+                "or uses the advanced backend override."
+            )
+            overview.setWordWrap(True)
+            root.addWidget(overview)
+
+            form = QFormLayout()
+            apply_form_spacing(form)
+            self._mode_combo = QComboBox()
+            self._mode_combo.addItem("Auto", "auto")
+            self._mode_combo.addItem("Advanced", "advanced")
+            form.addRow("Mode", self._mode_combo)
+
+            self._max_workers_input = QLineEdit()
+            self._max_workers_input.setPlaceholderText("blank = auto")
+            form.addRow("Max workers", self._max_workers_input)
+
+            self._memory_per_worker_input = QLineEdit()
+            self._memory_per_worker_input.setPlaceholderText("auto")
+            form.addRow("Memory per worker", self._memory_per_worker_input)
+            root.addLayout(form)
+
+            button_row = QHBoxLayout()
+            apply_row_spacing(button_row)
+            self._calibrate_button = _configure_fixed_height_button(
+                QPushButton("Calibrate")
+            )
+            self._advanced_button = _configure_fixed_height_button(
+                QPushButton("Advanced Backend")
+            )
+            button_row.addWidget(self._calibrate_button)
+            button_row.addWidget(self._advanced_button)
+            button_row.addStretch(1)
+            root.addLayout(button_row)
+
+            self._summary_label = QLabel("")
+            self._summary_label.setWordWrap(True)
+            self._summary_label.setObjectName("metadataFieldValue")
+            root.addWidget(self._summary_label)
+
+            footer = QHBoxLayout()
+            apply_footer_row_spacing(footer)
+            self._defaults_button = _configure_fixed_height_button(
+                QPushButton("Reset Defaults")
+            )
+            self._cancel_button = _configure_fixed_height_button(
+                QPushButton("Cancel")
+            )
+            self._apply_button = _configure_fixed_height_button(
+                QPushButton("Apply")
+            )
+            self._apply_button.setObjectName("runButton")
+            footer.addWidget(self._defaults_button)
+            footer.addStretch(1)
+            footer.addWidget(self._cancel_button)
+            footer.addWidget(self._apply_button)
+            root.addLayout(footer)
+
+            self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+            self._max_workers_input.textChanged.connect(self._refresh_summary)
+            self._memory_per_worker_input.textChanged.connect(self._refresh_summary)
+            self._calibrate_button.clicked.connect(self._on_calibrate)
+            self._advanced_button.clicked.connect(self._on_edit_advanced_backend)
+            self._defaults_button.clicked.connect(self._on_reset_defaults)
+            self._cancel_button.clicked.connect(self.reject)
+            self._apply_button.clicked.connect(self._on_apply)
+
+        def _parse_optional_positive_int(
+            self,
+            text: str,
+            *,
+            field_name: str,
+        ) -> Optional[int]:
+            """Parse optional positive integers from line-edit text."""
+            stripped = text.strip()
+            if not stripped:
+                return None
+            try:
+                value = int(stripped)
+            except ValueError as exc:
+                raise ValueError(f"{field_name} must be an integer.") from exc
+            if value <= 0:
+                raise ValueError(f"{field_name} must be greater than zero.")
+            return value
+
+        def _current_policy(
+            self,
+            *,
+            force_refresh: bool,
+        ) -> ExecutionPolicy:
+            """Build an execution policy from current widget state."""
+            return ExecutionPolicy(
+                mode=str(self._mode_combo.currentData()),
+                max_workers=self._parse_optional_positive_int(
+                    self._max_workers_input.text(),
+                    field_name="Max workers",
+                ),
+                memory_per_worker_limit=(
+                    self._memory_per_worker_input.text().strip() or "auto"
+                ),
+                calibration_policy=(
+                    "refresh"
+                    if force_refresh
+                    else "use_if_available"
+                ),
+            )
+
+        def _refresh_summary(self) -> None:
+            """Refresh the execution-plan summary for current controls."""
+            try:
+                policy = self._current_policy(
+                    force_refresh=self._refresh_calibration_once
+                )
+                workflow = self._summary_workflow_factory(
+                    policy,
+                    self._advanced_backend,
+                )
+                profiles = (
+                    {}
+                    if self._refresh_calibration_once
+                    else _load_execution_calibration_profiles()
+                )
+                plan = plan_execution(
+                    workflow,
+                    workload=self._workload,
+                    shape_tpczyx=self._recommendation_shape_tpczyx,
+                    chunks_tpczyx=self._recommendation_chunks_tpczyx,
+                    dtype_itemsize=self._recommendation_dtype_itemsize,
+                    calibration_profiles=profiles,
+                )
+            except Exception as exc:
+                self._summary_label.setText(
+                    f"Could not derive execution plan: {type(exc).__name__}: {exc}"
+                )
+                return
+
+            text = (
+                f"Policy: {format_execution_policy_summary(policy)}\n"
+                f"Plan: {format_execution_plan_summary(plan)}"
+            )
+            self._summary_label.setText(text)
+            self._summary_label.setToolTip(text)
+
+        def _hydrate(self, initial_policy: ExecutionPolicy) -> None:
+            """Populate controls from an initial execution policy."""
+            index = self._mode_combo.findData(initial_policy.mode)
+            if index < 0:
+                index = 0
+            self._mode_combo.setCurrentIndex(index)
+            self._max_workers_input.setText(
+                ""
+                if initial_policy.max_workers is None
+                else str(initial_policy.max_workers)
+            )
+            self._memory_per_worker_input.setText(
+                str(initial_policy.memory_per_worker_limit)
+            )
+            self._refresh_calibration_once = False
+            self._on_mode_changed(index)
+            self._refresh_summary()
+
+        def _on_mode_changed(self, _: int) -> None:
+            """Update enabled state after policy mode changes."""
+            auto_mode = str(self._mode_combo.currentData()) == "auto"
+            self._max_workers_input.setEnabled(auto_mode)
+            self._memory_per_worker_input.setEnabled(auto_mode)
+            self._calibrate_button.setEnabled(auto_mode)
+            self._refresh_summary()
+
+        def _on_calibrate(self) -> None:
+            """Mark the next execution to refresh the cached profile."""
+            self._refresh_calibration_once = True
+            self._refresh_summary()
+
+        def _on_edit_advanced_backend(self) -> None:
+            """Open the advanced backend dialog and store its result."""
+            dialog = DaskBackendConfigDialog(
+                initial=self._advanced_backend,
+                recommendation_shape_tpczyx=self._recommendation_shape_tpczyx,
+                recommendation_chunks_tpczyx=self._recommendation_chunks_tpczyx,
+                recommendation_dtype_itemsize=self._recommendation_dtype_itemsize,
+                parent=self,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            if dialog.result_config is None:
+                return
+            self._advanced_backend = dialog.result_config
+            self._refresh_summary()
+
+        def _on_reset_defaults(self) -> None:
+            """Reset controls to default execution policy values."""
+            self._advanced_backend = DaskBackendConfig()
+            self._hydrate(ExecutionPolicy())
+
+        def _on_apply(self) -> None:
+            """Validate current state and accept the dialog."""
+            try:
+                self.result_policy = self._current_policy(
+                    force_refresh=self._refresh_calibration_once
+                )
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid Execution Planning", str(exc))
+                return
+            self.result_backend = self._advanced_backend
+            self.accept()
+
     class DataStoreMaterializationWorker(QThread):
         """Background worker that materializes canonical store data.
 
@@ -3682,6 +4113,7 @@ if HAS_PYQT6:
             *,
             experiment: NavigateExperiment,
             source_data_path: Path,
+            execution_policy: ExecutionPolicy,
             dask_backend: DaskBackendConfig,
             zarr_save: ZarrSaveConfig,
         ) -> None:
@@ -3706,6 +4138,7 @@ if HAS_PYQT6:
             super().__init__()
             self._experiment = experiment
             self._source_data_path = source_data_path
+            self._execution_policy = execution_policy
             self._dask_backend = dask_backend
             self._zarr_save = zarr_save
 
@@ -3745,8 +4178,25 @@ if HAS_PYQT6:
             """
             try:
                 with ExitStack() as exit_stack:
+                    profiles = _load_execution_calibration_profiles()
+                    planning_workflow = WorkflowConfig(
+                        execution_policy=self._execution_policy,
+                        dask_backend=self._dask_backend,
+                        zarr_save=self._zarr_save,
+                    )
+                    plan = plan_execution(
+                        planning_workflow,
+                        workload="io",
+                        chunks_tpczyx=self._zarr_save.chunks_tpczyx(),
+                        calibration_profiles=profiles,
+                    )
+                    if plan.calibration_profile is not None:
+                        profiles[plan.calibration_profile.profile_key] = (
+                            plan.calibration_profile
+                        )
+                        _save_execution_calibration_profiles(profiles)
                     client = _configure_dask_backend_client(
-                        self._dask_backend,
+                        plan.backend_config,
                         exit_stack=exit_stack,
                     )
                     result = materialize_experiment_data_store(
@@ -3799,6 +4249,7 @@ if HAS_PYQT6:
             self,
             *,
             requests: Sequence[ExperimentStorePreparationRequest],
+            execution_policy: ExecutionPolicy,
             dask_backend: DaskBackendConfig,
             zarr_save: ZarrSaveConfig,
             force_rebuild: bool = False,
@@ -3825,6 +4276,7 @@ if HAS_PYQT6:
             """
             super().__init__()
             self._requests = list(requests)
+            self._execution_policy = execution_policy
             self._dask_backend = dask_backend
             self._zarr_save = zarr_save
             self._force_rebuild = bool(force_rebuild)
@@ -3921,8 +4373,25 @@ if HAS_PYQT6:
 
             try:
                 with ExitStack() as exit_stack:
+                    profiles = _load_execution_calibration_profiles()
+                    planning_workflow = WorkflowConfig(
+                        execution_policy=self._execution_policy,
+                        dask_backend=self._dask_backend,
+                        zarr_save=self._zarr_save,
+                    )
+                    plan = plan_execution(
+                        planning_workflow,
+                        workload="io",
+                        chunks_tpczyx=self._zarr_save.chunks_tpczyx(),
+                        calibration_profiles=profiles,
+                    )
+                    if plan.calibration_profile is not None:
+                        profiles[plan.calibration_profile.profile_key] = (
+                            plan.calibration_profile
+                        )
+                        _save_execution_calibration_profiles(profiles)
                     client = _configure_dask_backend_client(
-                        self._dask_backend,
+                        plan.backend_config,
                         exit_stack=exit_stack,
                     )
                     for index, request in enumerate(self._requests):
@@ -4391,6 +4860,7 @@ if HAS_PYQT6:
             self._opener = ImageOpener()
             self.result_config: Optional[WorkflowConfig] = None
             self._metadata_labels: Dict[str, QLabel] = {}
+            self._execution_policy: ExecutionPolicy = initial.execution_policy
             self._dask_backend_config: DaskBackendConfig = initial.dask_backend
             self._zarr_save_config: ZarrSaveConfig = initial.zarr_save
             self._chunks = initial.chunks
@@ -4590,7 +5060,7 @@ if HAS_PYQT6:
             zarr_layout.addLayout(zarr_button_row)
             root.addWidget(zarr_group)
 
-            dask_backend_group = QGroupBox("Dask Backend")
+            dask_backend_group = QGroupBox("Execution Planning")
             dask_backend_layout = QVBoxLayout(dask_backend_group)
             apply_stack_spacing(dask_backend_layout)
             dask_backend_layout.setContentsMargins(10, 8, 10, 10)
@@ -4604,7 +5074,7 @@ if HAS_PYQT6:
             dask_backend_button_row = QHBoxLayout()
             apply_row_spacing(dask_backend_button_row)
             dask_backend_button_row.addStretch(1)
-            self._dask_backend_button = QPushButton("Edit Dask Backend")
+            self._dask_backend_button = QPushButton("Edit Execution Planning")
             dask_backend_button_row.addWidget(self._dask_backend_button)
             dask_backend_layout.addLayout(dask_backend_button_row)
             root.addWidget(dask_backend_group)
@@ -4714,7 +5184,28 @@ if HAS_PYQT6:
             None
                 Summary labels are updated in-place.
             """
-            summary = format_dask_backend_summary(self._dask_backend_config)
+            try:
+                workflow = WorkflowConfig(
+                    execution_policy=self._execution_policy,
+                    dask_backend=self._dask_backend_config,
+                    zarr_save=self._zarr_save_config,
+                    chunks=self._chunks,
+                )
+                profiles = _load_execution_calibration_profiles()
+                plan = plan_execution(
+                    workflow,
+                    workload="io",
+                    shape_tpczyx=self._current_local_cluster_shape_tpczyx(),
+                    chunks_tpczyx=self._zarr_save_config.chunks_tpczyx(),
+                    dtype_itemsize=self._current_dtype_itemsize(),
+                    calibration_profiles=profiles,
+                )
+                summary = (
+                    f"Policy: {format_execution_policy_summary(self._execution_policy)}\n"
+                    f"Plan: {format_execution_plan_summary(plan)}"
+                )
+            except Exception as exc:
+                summary = f"Could not derive execution plan: {type(exc).__name__}: {exc}"
             self._dask_backend_summary.setText(summary)
             self._dask_backend_summary.setToolTip(summary)
 
@@ -4746,19 +5237,32 @@ if HAS_PYQT6:
             None
                 Selected backend values are stored in-place.
             """
-            dialog = DaskBackendConfigDialog(
-                initial=self._dask_backend_config,
+            dialog = ExecutionPolicyDialog(
+                initial_policy=self._execution_policy,
+                initial_backend=self._dask_backend_config,
+                workload="io",
+                summary_workflow_factory=lambda policy, backend: WorkflowConfig(
+                    execution_policy=policy,
+                    dask_backend=backend,
+                    zarr_save=self._zarr_save_config,
+                    chunks=self._chunks,
+                ),
                 recommendation_shape_tpczyx=self._current_local_cluster_shape_tpczyx(),
                 recommendation_chunks_tpczyx=self._zarr_save_config.chunks_tpczyx(),
                 recommendation_dtype_itemsize=self._current_dtype_itemsize(),
                 parent=self,
             )
             result = dialog.exec()
-            if result != QDialog.DialogCode.Accepted or dialog.result_config is None:
+            if (
+                result != QDialog.DialogCode.Accepted
+                or dialog.result_policy is None
+                or dialog.result_backend is None
+            ):
                 return
-            self._dask_backend_config = dialog.result_config
+            self._execution_policy = dialog.result_policy
+            self._dask_backend_config = dialog.result_backend
             self._refresh_dask_backend_summary()
-            self._set_status("Updated Dask backend settings.")
+            self._set_status("Updated execution planning settings.")
 
         def _on_edit_zarr_settings(self) -> None:
             """Open Zarr settings dialog and apply selected configuration.
@@ -6152,6 +6656,7 @@ if HAS_PYQT6:
                 ),
                 analysis_apply_to_all=False,
                 prefer_dask=True,
+                execution_policy=self._execution_policy,
                 dask_backend=self._dask_backend_config,
                 chunks=self._chunks,
                 flatfield=False,
@@ -6162,6 +6667,12 @@ if HAS_PYQT6:
                 visualization=False,
                 mip_export=False,
                 zarr_save=self._zarr_save_config,
+            )
+            _save_last_used_execution_policy(
+                replace(
+                    self._execution_policy,
+                    calibration_policy="use_if_available",
+                )
             )
             _save_last_used_dask_backend_config(self._dask_backend_config)
             _save_last_used_zarr_save_config(self._zarr_save_config)
@@ -6276,6 +6787,7 @@ if HAS_PYQT6:
 
             worker = BatchDataStoreMaterializationWorker(
                 requests=pending_requests,
+                execution_policy=self._execution_policy,
                 dask_backend=self._dask_backend_config,
                 zarr_save=self._zarr_save_config,
                 force_rebuild=rebuild_requested,
@@ -6805,6 +7317,7 @@ if HAS_PYQT6:
                 _analysis_targets_for_workflow(initial)
             )
             self._active_analysis_target: Optional[AnalysisTarget] = None
+            self._execution_policy: ExecutionPolicy = initial.execution_policy
             self._dask_backend_config: DaskBackendConfig = initial.dask_backend
             self.result_config: Optional[WorkflowConfig] = None
             self._analysis_scope_combo: Optional[QComboBox] = None
@@ -7661,7 +8174,7 @@ if HAS_PYQT6:
                 max(28, int(self._status_label.fontMetrics().height()) + 10)
             )
             status_stack.addWidget(self._status_label)
-            self._dask_backend_summary_label = QLabel("Dask backend: n/a")
+            self._dask_backend_summary_label = QLabel("Execution planning: n/a")
             self._dask_backend_summary_label.setObjectName("statusLabel")
             self._dask_backend_summary_label.setWordWrap(True)
             self._dask_backend_summary_label.setTextInteractionFlags(
@@ -7675,7 +8188,7 @@ if HAS_PYQT6:
             )
             status_stack.addWidget(self._dask_backend_summary_label)
             footer.addLayout(status_stack, 1)
-            self._dask_backend_button = QPushButton("Edit Dask Backend")
+            self._dask_backend_button = QPushButton("Edit Execution Planning")
             self._dask_dashboard_button = QPushButton("Open Dask Dashboard")
             self._cancel_button = QPushButton("Cancel")
             self._run_button = QPushButton("Run")
@@ -11064,7 +11577,7 @@ if HAS_PYQT6:
                 self._parameter_help_label.setText(str(text))
 
         def _refresh_dask_backend_summary(self) -> None:
-            """Refresh footer summary text for active Dask backend settings.
+            """Refresh footer summary text for active execution planning.
 
             Parameters
             ----------
@@ -11082,8 +11595,46 @@ if HAS_PYQT6:
             """
             if self._dask_backend_summary_label is None:
                 return
-            summary = format_dask_backend_summary(self._dask_backend_config)
-            text = f"Dask backend: {summary}"
+            workflow = WorkflowConfig(
+                file=self._base_config.file,
+                analysis_targets=self._analysis_targets,
+                analysis_selected_experiment_path=(
+                    self._base_config.analysis_selected_experiment_path
+                ),
+                analysis_apply_to_all=bool(
+                    self._analysis_apply_to_all_checkbox.isChecked()
+                    if self._analysis_apply_to_all_checkbox is not None
+                    else False
+                ),
+                prefer_dask=self._base_config.prefer_dask,
+                execution_policy=self._execution_policy,
+                dask_backend=self._dask_backend_config,
+                chunks=self._base_config.chunks,
+                flatfield=self._operation_checkboxes["flatfield"].isChecked(),
+                deconvolution=self._operation_checkboxes["deconvolution"].isChecked(),
+                shear_transform=self._operation_checkboxes["shear_transform"].isChecked(),
+                particle_detection=self._operation_checkboxes["particle_detection"].isChecked(),
+                usegment3d=self._operation_checkboxes["usegment3d"].isChecked(),
+                registration=self._operation_checkboxes["registration"].isChecked(),
+                visualization=self._operation_checkboxes["visualization"].isChecked(),
+                mip_export=self._operation_checkboxes["mip_export"].isChecked(),
+                zarr_save=self._base_config.zarr_save,
+                analysis_parameters=normalize_analysis_operation_parameters(
+                    self._base_config.analysis_parameters
+                ),
+            )
+            plan = plan_execution(
+                workflow,
+                workload="analysis",
+                shape_tpczyx=self._analysis_store_shape_tpczyx(),
+                chunks_tpczyx=self._base_config.zarr_save.chunks_tpczyx(),
+                dtype_itemsize=self._analysis_store_dtype_itemsize(),
+                calibration_profiles=_load_execution_calibration_profiles(),
+            )
+            text = (
+                f"Policy: {format_execution_policy_summary(self._execution_policy)}\n"
+                f"Plan: {format_execution_plan_summary(plan)}"
+            )
             self._dask_backend_summary_label.setText(text)
             self._dask_backend_summary_label.setToolTip(text)
             self._refresh_dask_dashboard_button_state()
@@ -11162,7 +11713,7 @@ if HAS_PYQT6:
                 return None
 
         def _on_edit_dask_backend(self) -> None:
-            """Open backend settings dialog and apply selected configuration.
+            """Open execution-planning dialog and apply selected configuration.
 
             Parameters
             ----------
@@ -11178,20 +11729,61 @@ if HAS_PYQT6:
             None
                 Validation and persistence errors are handled internally.
             """
-            dialog = DaskBackendConfigDialog(
-                initial=self._dask_backend_config,
+            dialog = ExecutionPolicyDialog(
+                initial_policy=self._execution_policy,
+                initial_backend=self._dask_backend_config,
+                workload="analysis",
+                summary_workflow_factory=lambda policy, backend: WorkflowConfig(
+                    file=self._base_config.file,
+                    analysis_targets=self._analysis_targets,
+                    analysis_selected_experiment_path=(
+                        self._base_config.analysis_selected_experiment_path
+                    ),
+                    analysis_apply_to_all=bool(
+                        self._analysis_apply_to_all_checkbox.isChecked()
+                        if self._analysis_apply_to_all_checkbox is not None
+                        else False
+                    ),
+                    prefer_dask=self._base_config.prefer_dask,
+                    execution_policy=policy,
+                    dask_backend=backend,
+                    chunks=self._base_config.chunks,
+                    flatfield=self._operation_checkboxes["flatfield"].isChecked(),
+                    deconvolution=self._operation_checkboxes["deconvolution"].isChecked(),
+                    shear_transform=self._operation_checkboxes["shear_transform"].isChecked(),
+                    particle_detection=self._operation_checkboxes["particle_detection"].isChecked(),
+                    usegment3d=self._operation_checkboxes["usegment3d"].isChecked(),
+                    registration=self._operation_checkboxes["registration"].isChecked(),
+                    visualization=self._operation_checkboxes["visualization"].isChecked(),
+                    mip_export=self._operation_checkboxes["mip_export"].isChecked(),
+                    zarr_save=self._base_config.zarr_save,
+                    analysis_parameters=normalize_analysis_operation_parameters(
+                        self._base_config.analysis_parameters
+                    ),
+                ),
                 recommendation_shape_tpczyx=self._analysis_store_shape_tpczyx(),
                 recommendation_chunks_tpczyx=self._base_config.zarr_save.chunks_tpczyx(),
                 recommendation_dtype_itemsize=self._analysis_store_dtype_itemsize(),
                 parent=self,
             )
             result = dialog.exec()
-            if result != QDialog.DialogCode.Accepted or dialog.result_config is None:
+            if (
+                result != QDialog.DialogCode.Accepted
+                or dialog.result_policy is None
+                or dialog.result_backend is None
+            ):
                 return
-            self._dask_backend_config = dialog.result_config
+            self._execution_policy = dialog.result_policy
+            self._dask_backend_config = dialog.result_backend
+            _save_last_used_execution_policy(
+                replace(
+                    self._execution_policy,
+                    calibration_policy="use_if_available",
+                )
+            )
             _save_last_used_dask_backend_config(self._dask_backend_config)
             self._refresh_dask_backend_summary()
-            self._set_status("Updated Dask backend settings.")
+            self._set_status("Updated execution planning settings.")
 
         @staticmethod
         def _normalize_dashboard_url(
@@ -11328,6 +11920,8 @@ if HAS_PYQT6:
             None
                 Parsing failures are handled internally.
             """
+            if self._execution_policy.mode != "advanced":
+                return None
             mode = str(self._dask_backend_config.mode).strip().lower()
             if mode == DASK_BACKEND_LOCAL_CLUSTER:
                 return self._normalize_dashboard_url("127.0.0.1:8787")
@@ -13897,6 +14491,7 @@ if HAS_PYQT6:
                     else False
                 ),
                 "prefer_dask": self._base_config.prefer_dask,
+                "execution_policy": self._execution_policy,
                 "dask_backend": self._dask_backend_config,
                 "chunks": self._base_config.chunks,
                 "flatfield": selected_flags["flatfield"],
@@ -13914,6 +14509,12 @@ if HAS_PYQT6:
                 workflow_kwargs["usegment3d"] = selected_flags["usegment3d"]
             self.result_config = WorkflowConfig(**workflow_kwargs)
             self._persist_analysis_gui_state_for_target(selected_target)
+            _save_last_used_execution_policy(
+                replace(
+                    self._execution_policy,
+                    calibration_policy="use_if_available",
+                )
+            )
             _save_last_used_dask_backend_config(self._dask_backend_config)
             sequence = self._selected_operations_in_sequence()
             sequence_text = " -> ".join(
@@ -14010,12 +14611,26 @@ def launch_gui(
 
     settings_directory = _ensure_clearex_settings_directory()
     settings_path = _resolve_dask_backend_settings_path(settings_directory)
+    execution_policy_settings_path = _resolve_execution_policy_settings_path(
+        settings_directory
+    )
     zarr_settings_path = _resolve_zarr_save_settings_path(settings_directory)
     effective_initial = initial or WorkflowConfig()
+    persisted_execution_policy = _load_last_used_execution_policy(
+        settings_path=execution_policy_settings_path
+    )
     persisted_backend = _load_last_used_dask_backend_config(settings_path=settings_path)
     persisted_zarr_save = _load_last_used_zarr_save_config(
         settings_path=zarr_settings_path
     )
+    if (
+        persisted_execution_policy is not None
+        and _should_apply_persisted_execution_policy(initial)
+    ):
+        effective_initial = replace(
+            effective_initial,
+            execution_policy=persisted_execution_policy,
+        )
     if persisted_backend is not None and _should_apply_persisted_dask_backend(initial):
         effective_initial = replace(effective_initial, dask_backend=persisted_backend)
     if persisted_zarr_save is not None and _should_apply_persisted_zarr_save(initial):
@@ -14111,7 +14726,9 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         ),
         "analysis_apply_to_all": workflow.analysis_apply_to_all,
         "prefer_dask": workflow.prefer_dask,
+        "execution_policy": workflow.execution_policy,
         "dask_backend": workflow.dask_backend,
+        "execution_plan": None,
         "chunks": workflow.chunks,
         "flatfield": False,
         "deconvolution": False,

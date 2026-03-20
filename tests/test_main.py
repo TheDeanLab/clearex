@@ -17,7 +17,7 @@ import pytest
 import clearex.main as main_module
 from clearex.io.provenance import persist_run_provenance
 from clearex.io.read import ImageInfo
-from clearex.workflow import WorkflowConfig, WorkflowExecutionCancelled
+from clearex.workflow import ExecutionPolicy, WorkflowConfig, WorkflowExecutionCancelled
 from clearex.workflow import DaskBackendConfig, LocalClusterConfig
 
 
@@ -108,6 +108,7 @@ def test_configure_dask_backend_uses_processes_for_multiworker_io(monkeypatch) -
 
     workflow = WorkflowConfig(
         prefer_dask=True,
+        execution_policy=ExecutionPolicy(mode="advanced"),
         dask_backend=DaskBackendConfig(
             local_cluster=LocalClusterConfig(
                 n_workers=4,
@@ -144,6 +145,7 @@ def test_configure_dask_backend_uses_threads_for_single_worker_io(monkeypatch) -
 
     workflow = WorkflowConfig(
         prefer_dask=True,
+        execution_policy=ExecutionPolicy(mode="advanced"),
         dask_backend=DaskBackendConfig(
             local_cluster=LocalClusterConfig(
                 n_workers=1,
@@ -186,6 +188,7 @@ def test_configure_dask_backend_caps_workers_for_gpu_usegment3d_analysis(
 
     workflow = WorkflowConfig(
         prefer_dask=True,
+        execution_policy=ExecutionPolicy(mode="advanced"),
         usegment3d=True,
         analysis_parameters={
             "usegment3d": {
@@ -241,6 +244,7 @@ def test_configure_dask_backend_does_not_cap_workers_when_gpu_not_requested(
 
     workflow = WorkflowConfig(
         prefer_dask=True,
+        execution_policy=ExecutionPolicy(mode="advanced"),
         usegment3d=True,
         analysis_parameters={
             "usegment3d": {

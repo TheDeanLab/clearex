@@ -28,8 +28,9 @@
 # Standard Library Imports
 from contextlib import ExitStack
 from datetime import datetime, timezone
+import inspect
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 import argparse
 import json
 import logging
@@ -120,17 +121,26 @@ from clearex.workflow import (
     DASK_BACKEND_SLURM_CLUSTER,
     DASK_BACKEND_SLURM_RUNNER,
     AnalysisInputReference,
+    CalibrationProfile,
     DaskBackendConfig,
-    LocalClusterConfig,
+    ExecutionPolicy,
     WorkflowConfig,
     WorkflowExecutionCancelled,
     analysis_chainable_output_component,
+    calibration_profile_from_dict,
+    calibration_profile_to_dict,
     collect_analysis_input_references,
     dask_backend_from_dict,
     dask_backend_to_dict,
+    execution_plan_to_dict,
+    execution_policy_from_dict,
+    execution_policy_to_dict,
     format_dask_backend_summary,
     format_chunks,
+    format_execution_plan_summary,
+    format_execution_policy_summary,
     normalize_analysis_operation_parameters,
+    plan_execution,
     recommend_local_cluster_config,
     resolve_analysis_input_component,
     resolve_analysis_execution_sequence,
@@ -142,6 +152,10 @@ from clearex.workflow import (
 
 _CLEAREX_SETTINGS_DIR_NAME = ".clearex"
 _CLEAREX_DASK_BACKEND_SETTINGS_FILE = "dask_backend_settings.json"
+_CLEAREX_EXECUTION_POLICY_SETTINGS_FILE = "execution_policy_settings.json"
+_CLEAREX_EXECUTION_CALIBRATION_PROFILES_FILE = (
+    "execution_calibration_profiles.json"
+)
 
 _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
     {
@@ -476,10 +490,43 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
                 )
 
     persisted_dask_backend = _load_persisted_dask_backend_config()
+    persisted_execution_policy = _load_persisted_execution_policy()
+    effective_execution_policy = (
+        persisted_execution_policy
+        if persisted_execution_policy is not None
+        else ExecutionPolicy()
+    )
+    execution_mode_arg = getattr(args, "execution_mode", None)
+    max_workers_arg = getattr(args, "max_workers", None)
+    memory_per_worker_arg = getattr(args, "memory_per_worker", None)
+    refresh_calibration = bool(getattr(args, "calibrate", False))
+    effective_execution_policy = ExecutionPolicy(
+        mode=(
+            str(execution_mode_arg).strip().lower()
+            if execution_mode_arg is not None and str(execution_mode_arg).strip()
+            else effective_execution_policy.mode
+        ),
+        max_workers=(
+            int(max_workers_arg)
+            if max_workers_arg is not None
+            else effective_execution_policy.max_workers
+        ),
+        memory_per_worker_limit=(
+            str(memory_per_worker_arg).strip()
+            if memory_per_worker_arg is not None and str(memory_per_worker_arg).strip()
+            else effective_execution_policy.memory_per_worker_limit
+        ),
+        calibration_policy=(
+            "refresh"
+            if refresh_calibration
+            else effective_execution_policy.calibration_policy
+        ),
+    )
 
     return WorkflowConfig(
         file=args.file,
         prefer_dask=args.dask,
+        execution_policy=effective_execution_policy,
         dask_backend=(
             persisted_dask_backend
             if persisted_dask_backend is not None
@@ -550,6 +597,77 @@ def _load_persisted_dask_backend_config() -> Optional[DaskBackendConfig]:
     if not isinstance(payload, dict) or not payload:
         return None
     return dask_backend_from_dict(payload)
+
+
+def _resolve_persisted_execution_policy_settings_path() -> Path:
+    """Resolve the user settings JSON path for persisted execution policy."""
+    return (
+        Path.home()
+        / _CLEAREX_SETTINGS_DIR_NAME
+        / _CLEAREX_EXECUTION_POLICY_SETTINGS_FILE
+    ).expanduser()
+
+
+def _resolve_persisted_execution_calibration_profiles_path() -> Path:
+    """Resolve the user settings JSON path for persisted calibration profiles."""
+    return (
+        Path.home()
+        / _CLEAREX_SETTINGS_DIR_NAME
+        / _CLEAREX_EXECUTION_CALIBRATION_PROFILES_FILE
+    ).expanduser()
+
+
+def _load_persisted_execution_policy() -> Optional[ExecutionPolicy]:
+    """Load persisted execution policy for CLI/headless execution."""
+    settings_path = _resolve_persisted_execution_policy_settings_path()
+    if not settings_path.exists():
+        return None
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or not payload:
+        return None
+    return execution_policy_from_dict(payload)
+
+
+def _load_persisted_execution_calibration_profiles() -> Dict[str, CalibrationProfile]:
+    """Load persisted execution calibration profiles."""
+    settings_path = _resolve_persisted_execution_calibration_profiles_path()
+    if not settings_path.exists():
+        return {}
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    profiles: Dict[str, CalibrationProfile] = {}
+    for key, value in payload.items():
+        profile = calibration_profile_from_dict(value)
+        if profile is None:
+            continue
+        profiles[str(key)] = profile
+    return profiles
+
+
+def _save_persisted_execution_calibration_profiles(
+    profiles: Mapping[str, CalibrationProfile],
+) -> None:
+    """Persist execution calibration profiles best-effort."""
+    settings_path = _resolve_persisted_execution_calibration_profiles_path()
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            str(key): calibration_profile_to_dict(profile)
+            for key, profile in profiles.items()
+        }
+        settings_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        return
 
 
 def _extract_axis_map(info: ImageInfo) -> Dict[str, int]:
@@ -760,6 +878,8 @@ def _configure_dask_backend(
     exit_stack: ExitStack,
     *,
     workload: str = "io",
+    shape_tpczyx: Optional[tuple[int, int, int, int, int, int]] = None,
+    dtype_itemsize: Optional[int] = None,
 ) -> Optional[Any]:
     """Initialize and register the configured Dask backend.
 
@@ -787,107 +907,97 @@ def _configure_dask_backend(
     Backend initialization errors are converted into warnings and the workflow
     continues without a distributed client. This keeps local/headless paths
     operational even when optional Dask distributed backends are unavailable.
-    When LocalCluster ``n_workers`` is unset, runtime applies aggressive
-    host/data-aware defaults from
-    :func:`clearex.workflow.recommend_local_cluster_config`, including worker
-    count and, when left at defaults, thread and memory settings.
     """
     if not workflow.prefer_dask:
         logger.info("Dask lazy loading disabled; skipping backend startup.")
         return None
 
-    backend = workflow.dask_backend
     workload_name = workload.strip().lower()
+    calibration_profiles = _load_persisted_execution_calibration_profiles()
+    execution_plan = plan_execution(
+        workflow,
+        workload=workload_name,
+        shape_tpczyx=shape_tpczyx,
+        dtype_itemsize=dtype_itemsize,
+        calibration_profiles=calibration_profiles,
+    )
+    workflow.execution_plan = execution_plan
+    backend = execution_plan.backend_config
+    if execution_plan.calibration_profile is not None:
+        calibration_profiles[execution_plan.calibration_profile.profile_key] = (
+            execution_plan.calibration_profile
+        )
+        _save_persisted_execution_calibration_profiles(calibration_profiles)
+
     logger.info(
-        "Dask backend selection: "
-        f"{format_dask_backend_summary(backend)} (workload={workload_name})"
+        "Execution policy: %s",
+        format_execution_policy_summary(workflow.execution_policy),
+    )
+    logger.info(
+        "Execution plan: %s",
+        format_execution_plan_summary(execution_plan),
     )
 
     try:
         if backend.mode == DASK_BACKEND_LOCAL_CLUSTER:
             local_cfg = backend.local_cluster
-            requested_processes = workload_name == "analysis"
-            default_local_cfg = LocalClusterConfig()
-            effective_n_workers = local_cfg.n_workers
-            effective_threads_per_worker = local_cfg.threads_per_worker
-            effective_memory_limit = local_cfg.memory_limit
-            if effective_n_workers is None:
-                recommendation = recommend_local_cluster_config(
-                    chunks_tpczyx=workflow.zarr_save.chunks_tpczyx(),
-                )
-                effective_n_workers = recommendation.config.n_workers
-                if local_cfg.threads_per_worker == default_local_cfg.threads_per_worker:
-                    effective_threads_per_worker = (
-                        recommendation.config.threads_per_worker
-                    )
-                if (
-                    str(local_cfg.memory_limit).strip().lower()
-                    == str(default_local_cfg.memory_limit).strip().lower()
-                ):
-                    effective_memory_limit = recommendation.config.memory_limit
-                logger.info(
-                    "Auto-selected aggressive LocalCluster settings from "
-                    "host/data recommendation: "
-                    f"workers={effective_n_workers}, "
-                    f"threads_per_worker={effective_threads_per_worker}, "
-                    f"memory_limit={effective_memory_limit}, "
-                    f"gpus={recommendation.detected_gpu_count}."
-                )
-
-            if workload_name == "analysis":
-                gpu_worker_cap: Optional[int] = None
-                use_gpu_local_cluster = False
-                if bool(getattr(workflow, "usegment3d", False)):
-                    try:
-                        normalized_params = normalize_analysis_operation_parameters(
-                            workflow.analysis_parameters
-                        )
-                    except Exception:
-                        normalized_params = {}
-                    usegment3d_params = dict(normalized_params.get("usegment3d", {}))
-                    gpu_requested = bool(
-                        usegment3d_params.get("gpu", False)
-                        or usegment3d_params.get("require_gpu", False)
-                    )
-                    if gpu_requested:
-                        gpu_recommendation = recommend_local_cluster_config(
-                            chunks_tpczyx=workflow.zarr_save.chunks_tpczyx(),
-                        )
-                        detected_gpu_count = int(gpu_recommendation.detected_gpu_count)
-                        if detected_gpu_count > 0:
-                            gpu_worker_cap = max(1, detected_gpu_count)
-                            use_gpu_local_cluster = True
-
-                if gpu_worker_cap is not None:
-                    requested_workers = (
-                        int(effective_n_workers)
-                        if effective_n_workers is not None
-                        else int(gpu_worker_cap)
-                    )
-                    if requested_workers > int(gpu_worker_cap):
-                        logger.info(
-                            "GPU-aware LocalCluster cap applied for analysis: "
-                            f"requested_workers={requested_workers}, "
-                            f"capped_workers={int(gpu_worker_cap)}."
-                        )
-                        effective_n_workers = int(gpu_worker_cap)
-            else:
-                use_gpu_local_cluster = False
-
-            effective_worker_count = (
-                int(effective_n_workers) if effective_n_workers is not None else 1
+            detected_gpu_count = int(execution_plan.environment.gpu_count)
+            legacy_local_worker_cap = (
+                int(workflow.dask_backend.local_cluster.n_workers)
+                if workflow.dask_backend.mode == DASK_BACKEND_LOCAL_CLUSTER
+                and workflow.dask_backend.local_cluster.n_workers is not None
+                else None
             )
-            use_processes = bool(requested_processes or effective_worker_count > 1)
-            if not requested_processes and use_processes:
+            if execution_plan.worker_kind == "gpu_process":
+                recommendation = recommend_local_cluster_config(
+                    shape_tpczyx=shape_tpczyx,
+                    chunks_tpczyx=workflow.zarr_save.chunks_tpczyx(),
+                    dtype_itemsize=dtype_itemsize,
+                )
+                detected_gpu_count = max(
+                    detected_gpu_count,
+                    int(recommendation.detected_gpu_count),
+                )
+            use_gpu_local_cluster = (
+                execution_plan.worker_kind == "gpu_process"
+                and detected_gpu_count > 0
+            )
+            effective_worker_count = int(local_cfg.n_workers or execution_plan.workers)
+            if (
+                workload_name != "analysis"
+                and legacy_local_worker_cap is not None
+                and workflow.execution_policy.max_workers is None
+            ):
+                effective_worker_count = int(legacy_local_worker_cap)
+            elif use_gpu_local_cluster:
+                effective_worker_cap = int(
+                    workflow.execution_policy.max_workers
+                    if workflow.execution_policy.max_workers is not None
+                    else (
+                        legacy_local_worker_cap
+                        if legacy_local_worker_cap is not None
+                        else effective_worker_count
+                    )
+                )
+                effective_worker_count = min(
+                    max(1, effective_worker_cap),
+                    max(1, detected_gpu_count),
+                )
+            use_processes = True
+            if execution_plan.worker_kind == "thread":
+                use_processes = False
+            elif workload_name != "analysis" and effective_worker_count <= 1:
+                use_processes = False
+            elif workload_name != "analysis" and effective_worker_count > 1:
                 logger.info(
                     "Using process-based LocalCluster for multi-worker I/O "
                     "execution (memory isolation enabled)."
                 )
             client = create_dask_client(
-                n_workers=effective_n_workers,
-                threads_per_worker=effective_threads_per_worker,
+                n_workers=effective_worker_count,
+                threads_per_worker=int(local_cfg.threads_per_worker),
                 processes=use_processes,
-                memory_limit=effective_memory_limit,
+                memory_limit=local_cfg.memory_limit,
                 local_directory=local_cfg.local_directory,
                 gpu_enabled=use_gpu_local_cluster,
             )
@@ -930,16 +1040,14 @@ def _configure_dask_backend(
 
             cluster_cfg = backend.slurm_cluster
             if (
-                workload.strip().lower() == "analysis"
+                workload_name == "analysis"
                 and int(cluster_cfg.processes) == 1
                 and int(cluster_cfg.cores) > 1
             ):
                 logger.warning(
                     "SLURMCluster is configured with processes=1 and cores=%s. "
-                    "CPU-bound Python analyses (for example shear transform) may "
-                    "underutilize allocated CPUs with this layout. "
-                    "For maximum process-level parallelism, increase processes "
-                    "toward cores in the Dask backend configuration.",
+                    "CPU-bound Python analyses may underutilize allocated CPUs "
+                    "with this layout.",
                     cluster_cfg.cores,
                 )
             extra_directives = [
@@ -994,6 +1102,43 @@ def _configure_dask_backend(
             "Continuing without distributed client."
         )
         return None
+
+
+def _callable_accepts_keyword_argument(
+    callback: Callable[..., Any],
+    *,
+    keyword: str,
+) -> bool:
+    """Return whether a callable accepts one keyword argument.
+
+    Parameters
+    ----------
+    callback : callable
+        Callable to inspect.
+    keyword : str
+        Keyword argument name.
+
+    Returns
+    -------
+    bool
+        ``True`` when the callable explicitly accepts the keyword or a
+        ``**kwargs`` catch-all.
+
+    Notes
+    -----
+    Inspection failures default to ``True`` so opaque callables remain
+    callable through this compatibility check.
+    """
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return True
+    if keyword in signature.parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
 
 
 def _run_workflow(
@@ -1173,6 +1318,14 @@ def _run_workflow(
                 "parameters": {
                     "source_path": input_path,
                     "prefer_dask": workflow.prefer_dask,
+                    "execution_policy": execution_policy_to_dict(
+                        workflow.execution_policy
+                    ),
+                    "execution_plan": (
+                        execution_plan_to_dict(workflow.execution_plan)
+                        if workflow.execution_plan is not None
+                        else None
+                    ),
                     "chunks": format_chunks(workflow.chunks) or None,
                     "dask_backend": dask_backend_to_dict(workflow.dask_backend),
                 },
@@ -1258,17 +1411,28 @@ def _run_workflow(
             )
             _emit_analysis_progress(100, str(first_issue.message))
 
-        analysis_client = (
-            _configure_dask_backend(
-                workflow=workflow,
-                logger=logger,
-                exit_stack=analysis_stack,
-                workload="analysis",
-            )
-            if failure_exc is None
+        analysis_client = None
+        if (
+            failure_exc is None
             and _analysis_execution_requires_dask_client(execution_sequence)
-            else None
-        )
+        ):
+            configure_kwargs: Dict[str, Any] = {
+                "workflow": workflow,
+                "logger": logger,
+                "exit_stack": analysis_stack,
+                "workload": "analysis",
+            }
+            dtype_itemsize = (
+                int(getattr(image_info.dtype, "itemsize", 0))
+                if image_info is not None
+                else None
+            )
+            if dtype_itemsize is not None and _callable_accepts_keyword_argument(
+                _configure_dask_backend,
+                keyword="dtype_itemsize",
+            ):
+                configure_kwargs["dtype_itemsize"] = dtype_itemsize
+            analysis_client = _configure_dask_backend(**configure_kwargs)
 
         produced_components: Dict[str, str] = {"data": "data"}
         total_operations = max(1, len(execution_sequence))
@@ -2379,7 +2543,9 @@ def _run_workflow(
         provenance_workflow = WorkflowConfig(
             file=input_path,
             prefer_dask=workflow.prefer_dask,
+            execution_policy=workflow.execution_policy,
             dask_backend=workflow.dask_backend,
+            execution_plan=workflow.execution_plan,
             chunks=workflow.chunks,
             flatfield=workflow.flatfield,
             deconvolution=workflow.deconvolution,

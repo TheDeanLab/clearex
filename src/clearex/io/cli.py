@@ -232,6 +232,32 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Chunk spec for Dask, e.g. '256,256,64' or single int",
     )
+    parser.add_argument(
+        "--execution-mode",
+        type=str,
+        choices=("auto", "advanced"),
+        default=None,
+        help="Execution planning mode for Dask resources",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Maximum worker count for automatic execution planning",
+    )
+    parser.add_argument(
+        "--memory-per-worker",
+        type=str,
+        default=None,
+        help="Preferred per-worker memory limit for automatic execution planning",
+    )
+    parser.add_argument(
+        "--calibrate",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Refresh the cached execution profile before planning",
+    )
 
     parser.add_argument(
         "--gui",

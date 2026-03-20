@@ -51,8 +51,12 @@ from clearex.io.read import ImageInfo
 from clearex.workflow import (
     WorkflowConfig,
     dask_backend_to_dict,
+    execution_plan_to_dict,
+    execution_policy_to_dict,
     format_dask_backend_summary,
     format_chunks,
+    format_execution_plan_summary,
+    format_execution_policy_summary,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
 )
@@ -359,6 +363,22 @@ def _default_steps(workflow: WorkflowConfig) -> list[Dict[str, Any]]:
                 "name": "load_data",
                 "parameters": {
                     "prefer_dask": workflow.prefer_dask,
+                    "execution_policy_summary": format_execution_policy_summary(
+                        workflow.execution_policy
+                    ),
+                    "execution_policy": execution_policy_to_dict(
+                        workflow.execution_policy
+                    ),
+                    "execution_plan_summary": (
+                        format_execution_plan_summary(workflow.execution_plan)
+                        if workflow.execution_plan is not None
+                        else None
+                    ),
+                    "execution_plan": (
+                        execution_plan_to_dict(workflow.execution_plan)
+                        if workflow.execution_plan is not None
+                        else None
+                    ),
                     "chunks": format_chunks(workflow.chunks) or None,
                     "dask_backend_summary": format_dask_backend_summary(
                         workflow.dask_backend
@@ -982,6 +1002,20 @@ def persist_run_provenance(
     workflow_payload = {
         "file": workflow.file,
         "prefer_dask": workflow.prefer_dask,
+        "execution_policy_summary": format_execution_policy_summary(
+            workflow.execution_policy
+        ),
+        "execution_policy": execution_policy_to_dict(workflow.execution_policy),
+        "execution_plan_summary": (
+            format_execution_plan_summary(workflow.execution_plan)
+            if workflow.execution_plan is not None
+            else None
+        ),
+        "execution_plan": (
+            execution_plan_to_dict(workflow.execution_plan)
+            if workflow.execution_plan is not None
+            else None
+        ),
         "dask_backend_summary": format_dask_backend_summary(workflow.dask_backend),
         "dask_backend": dask_backend_to_dict(workflow.dask_backend),
         "chunks": format_chunks(workflow.chunks) or None,
