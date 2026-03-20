@@ -25,6 +25,7 @@ This file summarizes the current engineering strategy for agent-driven changes i
   - `--gui` / `--no-gui`
   - `--headless` (overrides GUI launch)
   - `--file`, `--dask`, `--chunks`
+  - `--stage-axis-map`
   - `--deconvolution`, `--particle-detection`, `--registration`, `--visualization`
 - GUI launch failures (missing display, missing Qt bindings, runtime issues) should gracefully fall back to headless mode with clear logs.
 - `experiment.yml` is a first-class input path:
@@ -43,6 +44,8 @@ This file summarizes the current engineering strategy for agent-driven changes i
 - `WorkflowConfig` carries both storage config (`ZarrSaveConfig`) and backend config (`DaskBackendConfig`) so GUI and runtime stay aligned.
 - `parse_chunks` is the single source of truth for validating chunk specs.
 - `format_chunks` is the single source of truth for rendering chunk specs back into UI text.
+- `parse_spatial_calibration` / `format_spatial_calibration` are the single
+  source of truth for store-level Navigate stage-to-world axis mapping.
 - Dask backend and Zarr-save helpers (validation, summary, serialization) should stay centralized in `workflow.py`.
 - Keep parsing/formatting logic centralized here to avoid drift between CLI and GUI behavior.
 
@@ -62,6 +65,11 @@ This file summarizes the current engineering strategy for agent-driven changes i
     - Zarr save configuration popup:
       - chunk sizes in `(p, t, c, z, y, x)`,
       - pyramid factors per axis,
+    - spatial calibration control:
+      - per-experiment world `z/y/x` to stage `X/Y/Z/F` mapping,
+      - prefill from existing store metadata when available,
+      - keep one draft per experiment path while setup is open,
+      - persist the resolved mapping to every reused/new store on `Next`,
     - `Next` action that validates/creates canonical data store before analysis step.
   - second-window analysis selection flow:
     - deconvolution,
@@ -99,8 +107,15 @@ This file summarizes the current engineering strategy for agent-driven changes i
   - non-Zarr/N5 sources: `data_store.zarr` beside `experiment.yml`,
   - Zarr/N5 sources: reuse source store path (no duplicate store path).
 - Canonical array layout: `(t, p, c, z, y, x)`.
+- Store-level physical placement metadata must live in root attr
+  `spatial_calibration = {schema, stage_axis_map_zyx, theta_mode}`.
+- Missing `spatial_calibration` metadata must read as identity
+  (`z=+z,y=+y,x=+x`); changing calibration must never rewrite canonical `data`.
 - For new conversion, chunking and pyramid factors come from GUI/backend `WorkflowConfig`.
 - After canonical data array ingest/establishment, treat base image data as read-only for downstream analysis stages.
+- Visualization already consumes store-level spatial calibration for
+  multiposition placement; future registration must read the same metadata
+  instead of introducing a second mapping path.
 
 ## Parallelism Strategy
 
@@ -136,6 +151,7 @@ This file summarizes the current engineering strategy for agent-driven changes i
 - input data locator and input fingerprint/hash
 - effective Dask backend mode + parameters
 - effective Zarr ingest/save chunk + pyramid settings
+- effective store-level spatial calibration
 - software identity:
   - git commit SHA
   - git branch

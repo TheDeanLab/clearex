@@ -51,6 +51,12 @@ import zarr
 # Local Imports
 from clearex.io.experiment import load_navigate_experiment
 from clearex.io.provenance import register_latest_output_reference
+from clearex.workflow import (
+    SpatialCalibrationConfig,
+    format_spatial_calibration,
+    spatial_calibration_from_dict,
+    spatial_calibration_to_dict,
+)
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -2390,7 +2396,7 @@ def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
     Returns
     -------
     list[dict[str, float]]
-        Parsed rows with ``x``, ``y``, ``z``, and ``theta`` values.
+        Parsed rows with ``x``, ``y``, ``z``, ``theta``, and ``f`` values.
     """
     if not isinstance(payload, list):
         return []
@@ -2420,9 +2426,28 @@ def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
                 "y": _value("Y", 1),
                 "z": _value("Z", 2),
                 "theta": _value("THETA", 3),
+                "f": _value("F", 4),
             }
         )
     return parsed_rows
+
+
+def _load_spatial_calibration(
+    root_attrs: Mapping[str, Any],
+) -> SpatialCalibrationConfig:
+    """Load store-level spatial calibration from root attrs.
+
+    Parameters
+    ----------
+    root_attrs : mapping[str, Any]
+        Root Zarr attributes.
+
+    Returns
+    -------
+    SpatialCalibrationConfig
+        Parsed store calibration. Missing attrs resolve to identity.
+    """
+    return spatial_calibration_from_dict(root_attrs.get("spatial_calibration"))
 
 
 def _load_multiposition_stage_rows(
@@ -2477,9 +2502,9 @@ def _load_multiposition_stage_rows(
 
 def _build_position_affine_tczyx(
     *,
-    delta_x: float,
-    delta_y: float,
-    delta_z: float,
+    delta_world_x: float,
+    delta_world_y: float,
+    delta_world_z: float,
     delta_theta_deg: float,
     scale_tczyx: Sequence[float],
 ) -> np.ndarray:
@@ -2487,12 +2512,12 @@ def _build_position_affine_tczyx(
 
     Parameters
     ----------
-    delta_x : float
-        Stage X translation delta relative to reference position.
-    delta_y : float
-        Stage Y translation delta relative to reference position.
-    delta_z : float
-        Stage Z translation delta relative to reference position.
+    delta_world_x : float
+        World X translation delta relative to reference position.
+    delta_world_y : float
+        World Y translation delta relative to reference position.
+    delta_world_z : float
+        World Z translation delta relative to reference position.
     delta_theta_deg : float
         Stage rotation delta (degrees) around sample X axis.
     scale_tczyx : sequence of float
@@ -2518,10 +2543,39 @@ def _build_position_affine_tczyx(
 
     # Stage coordinates are reported in microns. Napari affine translation is
     # interpreted in world units, so pass micron offsets directly.
-    affine[2, 5] = float(delta_z)
-    affine[3, 5] = float(delta_y)
-    affine[4, 5] = float(delta_x)
+    affine[2, 5] = float(delta_world_z)
+    affine[3, 5] = float(delta_world_y)
+    affine[4, 5] = float(delta_world_x)
     return affine
+
+
+def _resolve_world_axis_delta(
+    *,
+    row: Mapping[str, float],
+    reference: Mapping[str, float],
+    binding: str,
+) -> float:
+    """Resolve one world-axis translation delta from stage coordinates.
+
+    Parameters
+    ----------
+    row : mapping[str, float]
+        Current multiposition row.
+    reference : mapping[str, float]
+        Reference multiposition row.
+    binding : str
+        Canonical spatial-calibration binding for the world axis.
+
+    Returns
+    -------
+    float
+        Translation delta in stage/world units.
+    """
+    if binding == "none":
+        return 0.0
+    sign = -1.0 if binding.startswith("-") else 1.0
+    source_axis = binding[1:]
+    return sign * float(row[source_axis] - reference[source_axis])
 
 
 def _resolve_position_affines_tczyx(
@@ -2529,7 +2583,7 @@ def _resolve_position_affines_tczyx(
     root_attrs: Mapping[str, Any],
     selected_positions: Sequence[int],
     scale_tczyx: Sequence[float],
-) -> tuple[dict[int, np.ndarray], list[dict[str, float]]]:
+    ) -> tuple[dict[int, np.ndarray], list[dict[str, float]], SpatialCalibrationConfig]:
     """Resolve per-position affines for napari rendering.
 
     Parameters
@@ -2543,30 +2597,45 @@ def _resolve_position_affines_tczyx(
 
     Returns
     -------
-    tuple[dict[int, numpy.ndarray], list[dict[str, float]]]
-        Mapping of position index to affine matrix and parsed stage rows.
+    tuple[dict[int, numpy.ndarray], list[dict[str, float]], SpatialCalibrationConfig]
+        Mapping of position index to affine matrix, parsed stage rows, and the
+        effective store calibration.
     """
     affines: dict[int, np.ndarray] = {
         int(index): np.eye(6, dtype=np.float64) for index in selected_positions
     }
+    spatial_calibration = _load_spatial_calibration(root_attrs)
     stage_rows = _load_multiposition_stage_rows(root_attrs)
     if not stage_rows:
-        return affines, []
+        return affines, [], spatial_calibration
 
     reference = stage_rows[0]
+    stage_axis_map = spatial_calibration.stage_axis_map_by_world_axis()
     for position_index in selected_positions:
         idx = int(position_index)
         if idx < 0 or idx >= len(stage_rows):
             continue
         row = stage_rows[idx]
         affines[idx] = _build_position_affine_tczyx(
-            delta_x=float(row["x"] - reference["x"]),
-            delta_y=float(row["y"] - reference["y"]),
-            delta_z=float(row["z"] - reference["z"]),
+            delta_world_x=_resolve_world_axis_delta(
+                row=row,
+                reference=reference,
+                binding=stage_axis_map["x"],
+            ),
+            delta_world_y=_resolve_world_axis_delta(
+                row=row,
+                reference=reference,
+                binding=stage_axis_map["y"],
+            ),
+            delta_world_z=_resolve_world_axis_delta(
+                row=row,
+                reference=reference,
+                binding=stage_axis_map["z"],
+            ),
             delta_theta_deg=float(row["theta"] - reference["theta"]),
             scale_tczyx=scale_tczyx,
         )
-    return affines, stage_rows
+    return affines, stage_rows, spatial_calibration
 
 
 def _load_particle_overlay_points(
@@ -3416,6 +3485,7 @@ def _save_visualization_metadata(
     position_index: int,
     selected_positions: Sequence[int],
     show_all_positions: bool,
+    spatial_calibration: SpatialCalibrationConfig,
     parameters: Mapping[str, Any],
     overlay_points_count: int,
     renderer: Optional[Mapping[str, Any]],
@@ -3443,6 +3513,8 @@ def _save_visualization_metadata(
         Rendered position indices.
     show_all_positions : bool
         Whether all positions were rendered.
+    spatial_calibration : SpatialCalibrationConfig
+        Effective store-level stage-to-world axis mapping used for placement.
     parameters : mapping[str, Any]
         Effective visualization parameters.
     overlay_points_count : int
@@ -3480,6 +3552,10 @@ def _save_visualization_metadata(
         "position_index": int(position_index),
         "selected_positions": [int(value) for value in selected_positions],
         "show_all_positions": bool(show_all_positions),
+        "spatial_calibration": spatial_calibration_to_dict(spatial_calibration),
+        "spatial_calibration_text": format_spatial_calibration(
+            spatial_calibration
+        ),
         "overlay_points_count": int(overlay_points_count),
         "renderer": _sanitize_metadata_value(dict(renderer or {})),
         "launch_mode": str(launch_mode),
@@ -3606,7 +3682,11 @@ def run_visualization_analysis(
         overlay_points_count=total_overlay_points,
         point_property_names=point_property_names,
     )
-    position_affines_tczyx, stage_rows = _resolve_position_affines_tczyx(
+    (
+        position_affines_tczyx,
+        stage_rows,
+        spatial_calibration,
+    ) = _resolve_position_affines_tczyx(
         root_attrs=dict(root.attrs),
         selected_positions=selected_positions,
         scale_tczyx=napari_payload.scale_tczyx,
@@ -3620,15 +3700,24 @@ def run_visualization_analysis(
         str(index): np.asarray(matrix, dtype=np.float64).tolist()
         for index, matrix in position_affines_tczyx.items()
     }
-    napari_payload.image_metadata["stage_positions_xyztheta"] = [
+    stage_position_rows = [
         {
             "x": float(row["x"]),
             "y": float(row["y"]),
             "z": float(row["z"]),
             "theta": float(row["theta"]),
+            "f": float(row["f"]),
         }
         for row in stage_rows
     ]
+    napari_payload.image_metadata["stage_positions_xyztheta"] = stage_position_rows
+    napari_payload.image_metadata["stage_positions_xyzthetaf"] = stage_position_rows
+    napari_payload.image_metadata["spatial_calibration"] = spatial_calibration_to_dict(
+        spatial_calibration
+    )
+    napari_payload.image_metadata["spatial_calibration_text"] = (
+        format_spatial_calibration(spatial_calibration)
+    )
     napari_payload.points_metadata["position_index"] = int(reference_position_index)
     napari_payload.points_metadata["selected_positions"] = [
         int(value) for value in selected_positions
@@ -3708,6 +3797,7 @@ def run_visualization_analysis(
         position_index=reference_position_index,
         selected_positions=selected_positions,
         show_all_positions=show_all_positions,
+        spatial_calibration=spatial_calibration,
         parameters=normalized,
         overlay_points_count=total_overlay_points,
         renderer=renderer_info,

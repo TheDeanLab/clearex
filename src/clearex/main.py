@@ -47,9 +47,11 @@ from clearex.io.experiment import (
     create_dask_client,
     is_navigate_experiment_file,
     load_navigate_experiment,
+    load_store_spatial_calibration,
     materialize_experiment_data_store,
     resolve_data_store_path,
     resolve_experiment_data_path,
+    save_store_spatial_calibration,
 )
 from clearex.io.cli import create_parser, display_logo
 from clearex.io.log import initiate_logger
@@ -124,6 +126,7 @@ from clearex.workflow import (
     CalibrationProfile,
     DaskBackendConfig,
     ExecutionPolicy,
+    SpatialCalibrationConfig,
     WorkflowConfig,
     WorkflowExecutionCancelled,
     analysis_chainable_output_component,
@@ -135,11 +138,13 @@ from clearex.workflow import (
     execution_plan_to_dict,
     execution_policy_from_dict,
     execution_policy_to_dict,
+    format_spatial_calibration,
     format_dask_backend_summary,
     format_chunks,
     format_execution_plan_summary,
     format_execution_policy_summary,
     normalize_analysis_operation_parameters,
+    parse_spatial_calibration,
     plan_execution,
     recommend_local_cluster_config,
     resolve_analysis_input_component,
@@ -419,6 +424,34 @@ def _create_bootstrap_logger() -> logging.Logger:
     return logger
 
 
+def _resolve_effective_store_spatial_calibration(
+    *,
+    store_path: str,
+    desired_calibration: SpatialCalibrationConfig,
+    persist: bool,
+) -> SpatialCalibrationConfig:
+    """Load or persist the effective spatial calibration for one store.
+
+    Parameters
+    ----------
+    store_path : str
+        Canonical analysis-store path.
+    desired_calibration : SpatialCalibrationConfig
+        Candidate calibration selected for the current workflow.
+    persist : bool
+        Whether to write ``desired_calibration`` back to the store before
+        returning it.
+
+    Returns
+    -------
+    SpatialCalibrationConfig
+        Effective store calibration used for the current run.
+    """
+    if persist:
+        return save_store_spatial_calibration(store_path, desired_calibration)
+    return load_store_spatial_calibration(store_path)
+
+
 def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
     """Translate parsed CLI arguments into a workflow configuration.
 
@@ -522,6 +555,15 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
             else effective_execution_policy.calibration_policy
         ),
     )
+    stage_axis_map_arg = getattr(args, "stage_axis_map", None)
+    spatial_calibration_explicit = bool(
+        stage_axis_map_arg is not None and str(stage_axis_map_arg).strip()
+    )
+    spatial_calibration = (
+        parse_spatial_calibration(stage_axis_map_arg)
+        if spatial_calibration_explicit
+        else SpatialCalibrationConfig()
+    )
 
     return WorkflowConfig(
         file=args.file,
@@ -541,6 +583,8 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         registration=args.registration,
         visualization=args.visualization,
         mip_export=args.mip_export,
+        spatial_calibration=spatial_calibration,
+        spatial_calibration_explicit=spatial_calibration_explicit,
         analysis_parameters=usegment3d_analysis_parameters,
     )
 
@@ -1207,6 +1251,7 @@ def _run_workflow(
     runtime_analysis_parameters = normalize_analysis_operation_parameters(
         workflow.analysis_parameters
     )
+    runtime_spatial_calibration = workflow.spatial_calibration
 
     if workflow.file:
         is_experiment_input = is_navigate_experiment_file(workflow.file)
@@ -1271,11 +1316,20 @@ def _run_workflow(
                 )
                 image_info = materialized.source_image_info
                 provenance_store_path = str(materialized.store_path)
+                runtime_spatial_calibration = (
+                    _resolve_effective_store_spatial_calibration(
+                        store_path=provenance_store_path,
+                        desired_calibration=workflow.spatial_calibration,
+                        persist=workflow.spatial_calibration_explicit,
+                    )
+                )
                 _log_loaded_image(image_info, logger)
                 logger.info(
                     "Materialized source data to Zarr store "
                     f"{materialized.store_path} (component=data, "
-                    f"chunks_tpczyx={materialized.chunks_tpczyx})."
+                    f"chunks_tpczyx={materialized.chunks_tpczyx}, "
+                    "spatial_calibration="
+                    f"{format_spatial_calibration(runtime_spatial_calibration)})."
                 )
                 step_records.append(
                     {
@@ -1296,6 +1350,9 @@ def _run_workflow(
                                 list(levels)
                                 for levels in workflow.zarr_save.pyramid_ptczyx
                             ],
+                            "spatial_calibration": format_spatial_calibration(
+                                runtime_spatial_calibration
+                            ),
                         },
                     }
                 )
@@ -1311,6 +1368,13 @@ def _run_workflow(
 
                 if input_path and is_zarr_store_path(input_path):
                     provenance_store_path = input_path
+                    runtime_spatial_calibration = (
+                        _resolve_effective_store_spatial_calibration(
+                            store_path=input_path,
+                            desired_calibration=workflow.spatial_calibration,
+                            persist=workflow.spatial_calibration_explicit,
+                        )
+                    )
 
         step_records.append(
             {
@@ -1328,6 +1392,9 @@ def _run_workflow(
                     ),
                     "chunks": format_chunks(workflow.chunks) or None,
                     "dask_backend": dask_backend_to_dict(workflow.dask_backend),
+                    "spatial_calibration": format_spatial_calibration(
+                        runtime_spatial_calibration
+                    ),
                 },
             }
         )
@@ -2556,6 +2623,8 @@ def _run_workflow(
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,
             zarr_save=workflow.zarr_save,
+            spatial_calibration=runtime_spatial_calibration,
+            spatial_calibration_explicit=workflow.spatial_calibration_explicit,
             analysis_parameters=runtime_analysis_parameters,
         )
         try:

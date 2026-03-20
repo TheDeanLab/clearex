@@ -53,12 +53,14 @@ from clearex.workflow import (
     dask_backend_to_dict,
     execution_plan_to_dict,
     execution_policy_to_dict,
+    format_spatial_calibration,
     format_dask_backend_summary,
     format_chunks,
     format_execution_plan_summary,
     format_execution_policy_summary,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
+    spatial_calibration_to_dict,
 )
 
 ArrayLike = Union[np.ndarray, da.Array]
@@ -1034,6 +1036,15 @@ def persist_run_provenance(
         "visualization": workflow.visualization,
         "mip_export": workflow.mip_export,
         "selected_analyses": _selected_analyses(workflow),
+        "spatial_calibration": spatial_calibration_to_dict(
+            workflow.spatial_calibration
+        ),
+        "spatial_calibration_text": format_spatial_calibration(
+            workflow.spatial_calibration
+        ),
+        "spatial_calibration_explicit": bool(
+            workflow.spatial_calibration_explicit
+        ),
         "analysis_parameters": _to_jsonable(workflow.analysis_parameters),
         "analysis_output_policy": "latest_only",
     }

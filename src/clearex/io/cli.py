@@ -258,6 +258,15 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Refresh the cached execution profile before planning",
     )
+    parser.add_argument(
+        "--stage-axis-map",
+        type=str,
+        default=None,
+        help=(
+            "Store-level world z/y/x mapping for Navigate multiposition stage "
+            "coordinates, for example 'z=+x,y=none,x=+y'."
+        ),
+    )
 
     parser.add_argument(
         "--gui",

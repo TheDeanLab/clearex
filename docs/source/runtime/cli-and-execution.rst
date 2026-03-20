@@ -11,11 +11,21 @@ Current primary arguments are:
 - ``--flatfield``
 - ``--deconvolution``
 - ``--particle-detection``
+- ``--usegment3d``
+- ``--channel-indices``
+- ``--input-resolution-level``
+- ``--shear-transform``
 - ``--registration``
 - ``--visualization``
+- ``--mip-export``
 - ``--file``
 - ``--dask`` / ``--no-dask``
 - ``--chunks``
+- ``--execution-mode``
+- ``--max-workers``
+- ``--memory-per-worker``
+- ``--calibrate``
+- ``--stage-axis-map``
 - ``--gui`` / ``--no-gui``
 - ``--headless``
 
@@ -45,9 +55,15 @@ The first GUI window is an experiment-list driven setup flow:
 - Double-clicking a list item reloads that experiment's metadata explicitly.
 - The current ordered list can be saved back to a reusable
   ``.clearex-experiment-list.json`` file.
+- ``Spatial Calibration`` edits store-level world ``z/y/x`` placement mapping
+  for the currently selected experiment without rewriting canonical image data.
+- Spatial-calibration drafts are tracked per experiment while setup is open.
+- Existing stores prefill the spatial-calibration control when metadata is
+  already present.
 - Pressing ``Next`` batch-prepares canonical stores for every listed
-  experiment that is missing a complete store, then opens analysis selection
-  for the currently selected experiment.
+  experiment that is missing a complete store, persists the resolved spatial
+  calibration to every reused or newly prepared store, then opens analysis
+  selection for the currently selected experiment.
 - The setup dialog persists the last-used Zarr save configuration across
   sessions.
 - ``Rebuild Canonical Store`` forces the listed stores to be rebuilt with the
@@ -97,6 +113,38 @@ Examples:
      --file /path/to/data_store.zarr \
      --visualization
 
+.. code-block:: bash
+
+   # Headless Navigate run with explicit stage-to-world placement mapping
+   clearex --headless \
+     --file /path/to/experiment.yml \
+     --visualization \
+     --stage-axis-map z=+x,y=none,x=+y
+
+Spatial Calibration
+-------------------
+
+Spatial calibration is a store-level mapping from world ``z/y/x`` placement
+axes to Navigate multiposition stage coordinates.
+
+- Canonical text form is ``z=...,y=...,x=...``.
+- Allowed bindings are ``+x``, ``-x``, ``+y``, ``-y``, ``+z``, ``-z``,
+  ``+f``, ``-f``, and ``none``.
+- Default identity mapping is ``z=+z,y=+y,x=+x``.
+- ``none`` disables translation on that world axis.
+- ``THETA`` remains interpreted as rotation of the ``z/y`` plane about world
+  ``x``.
+
+GUI and headless flows share the same normalized parser and storage policy:
+
+- GUI setup writes the resolved mappings to the listed experiment stores on
+  ``Next``.
+- ``--stage-axis-map`` writes an explicit override to Navigate-materialized
+  stores and existing Zarr/N5 stores before analysis starts.
+- If no explicit override is supplied, existing store calibration is preserved.
+- The mapping changes placement metadata only; canonical ``data`` remains
+  unchanged.
+
 Interchangeable Routine Composition
 -----------------------------------
 
@@ -120,8 +168,8 @@ Runtime source aliases currently include:
 - ``deconvolution`` -> ``results/deconvolution/latest/data``
 - ``registration`` -> ``results/registration/latest/data``
 
-When a requested source component does not exist, operation-specific fallback
-logic can revert to ``data`` to keep workflows operable.
+When a requested source component does not exist, runtime raises an input
+dependency error instead of silently falling back to ``data``.
 
 Progress and Run Lifecycle
 --------------------------

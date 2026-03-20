@@ -61,9 +61,11 @@ from clearex.io.experiment import (
     infer_zyx_shape,
     is_navigate_experiment_file,
     load_navigate_experiment,
+    load_store_spatial_calibration,
     materialize_experiment_data_store,
     resolve_data_store_path,
     resolve_experiment_data_path,
+    save_store_spatial_calibration,
 )
 from clearex.io.provenance import (
     is_zarr_store_path,
@@ -90,6 +92,8 @@ from clearex.workflow import (
     LocalClusterRecommendation,
     LocalClusterConfig,
     PTCZYX_AXES,
+    SPATIAL_CALIBRATION_WORLD_AXES,
+    SpatialCalibrationConfig,
     SlurmClusterConfig,
     SlurmRunnerConfig,
     WorkflowConfig,
@@ -107,15 +111,18 @@ from clearex.workflow import (
     execution_policy_to_dict,
     format_execution_plan_summary,
     format_execution_policy_summary,
+    format_spatial_calibration,
     format_local_cluster_recommendation_summary,
     format_pyramid_levels,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
+    normalize_spatial_calibration,
     normalize_analysis_operation_parameters,
     parse_pyramid_levels,
     plan_execution,
     recommend_local_cluster_config,
     resolve_analysis_input_component,
+    spatial_calibration_to_dict,
     validate_analysis_input_references,
     zarr_save_from_dict,
     zarr_save_to_dict,
@@ -206,6 +213,8 @@ _CLEAREX_EXPERIMENT_LIST_FORMAT = "clearex-experiment-list/v1"
 _CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX = ".clearex-experiment-list.json"
 _SETUP_DIALOG_MINIMUM_SIZE = (1240, 920)
 _SETUP_DIALOG_PREFERRED_SIZE = (1520, 1120)
+_SPATIAL_CALIBRATION_DIALOG_MINIMUM_SIZE = (620, 420)
+_SPATIAL_CALIBRATION_DIALOG_PREFERRED_SIZE = (720, 520)
 _ZARR_SAVE_DIALOG_MINIMUM_SIZE = (860, 660)
 _ZARR_SAVE_DIALOG_PREFERRED_SIZE = (940, 760)
 _DASK_BACKEND_DIALOG_MINIMUM_SIZE = (940, 840)
@@ -2138,6 +2147,64 @@ def _dask_mode_help_text(mode: str) -> str:
     )
 
 
+def _spatial_calibration_binding_choices() -> tuple[tuple[str, str], ...]:
+    """Return labeled spatial-calibration binding choices for GUI controls.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    tuple[tuple[str, str], ...]
+        ``(label, binding)`` pairs in UI display order.
+    """
+    return (
+        ("+X stage", "+x"),
+        ("-X stage", "-x"),
+        ("+Y stage", "+y"),
+        ("-Y stage", "-y"),
+        ("+Z stage", "+z"),
+        ("-Z stage", "-z"),
+        ("+F focus", "+f"),
+        ("-F focus", "-f"),
+        ("Disabled", "none"),
+    )
+
+
+def _format_spatial_calibration_summary(config: SpatialCalibrationConfig) -> str:
+    """Format a compact setup-dialog summary for spatial calibration.
+
+    Parameters
+    ----------
+    config : SpatialCalibrationConfig
+        Calibration to summarize.
+
+    Returns
+    -------
+    str
+        Human-readable summary for setup and analysis dialogs.
+    """
+    binding_labels = {
+        binding: label
+        for label, binding in _spatial_calibration_binding_choices()
+    }
+    lines = [
+        f"Canonical: {format_spatial_calibration(config)}",
+    ]
+    for axis_name, binding in zip(
+        SPATIAL_CALIBRATION_WORLD_AXES,
+        config.stage_axis_map_zyx,
+        strict=False,
+    ):
+        lines.append(
+            f"World {axis_name.upper()}: "
+            f"{binding_labels.get(binding, binding)}"
+        )
+    lines.append("Theta: Rotate Z/Y about world X")
+    return "\n".join(lines)
+
+
 def _popup_dialog_stylesheet() -> str:
     """Return shared stylesheet for configuration popup dialogs.
 
@@ -3109,6 +3176,165 @@ if HAS_PYQT6:
                 QMessageBox.warning(self, "Invalid Zarr Settings", str(exc))
                 return
 
+            self.accept()
+
+    class SpatialCalibrationDialog(QDialog):
+        """Dialog for configuring store-level stage-to-world axis bindings."""
+
+        def __init__(
+            self,
+            initial: SpatialCalibrationConfig,
+            parent: Optional[QDialog] = None,
+        ) -> None:
+            """Initialize spatial-calibration controls.
+
+            Parameters
+            ----------
+            initial : SpatialCalibrationConfig
+                Initial stage-to-world mapping.
+            parent : QDialog, optional
+                Parent dialog widget.
+
+            Returns
+            -------
+            None
+                Dialog is initialized in-place.
+            """
+            super().__init__(parent)
+            self.setWindowTitle("Spatial Calibration")
+            self.result_config: Optional[SpatialCalibrationConfig] = None
+            self._binding_inputs: Dict[str, QComboBox] = {}
+
+            self._build_ui()
+            self._hydrate(initial)
+            self.setStyleSheet(_popup_dialog_stylesheet())
+            _apply_initial_dialog_geometry(
+                self,
+                minimum_size=_SPATIAL_CALIBRATION_DIALOG_MINIMUM_SIZE,
+                preferred_size=_SPATIAL_CALIBRATION_DIALOG_PREFERRED_SIZE,
+                content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
+            )
+
+        def _build_ui(self) -> None:
+            """Construct dialog controls and wire signals.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widgets are created and connected in-place.
+            """
+            outer_root = QVBoxLayout(self)
+            outer_root.setContentsMargins(0, 0, 0, 0)
+            outer_root.setSpacing(0)
+
+            content_scroll = QScrollArea(self)
+            content_scroll.setObjectName("popupDialogScroll")
+            content_scroll.setWidgetResizable(True)
+            content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            content_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            outer_root.addWidget(content_scroll, 1)
+
+            content_widget = QWidget()
+            content_widget.setObjectName("popupDialogContent")
+            content_scroll.setWidget(content_widget)
+
+            root = QVBoxLayout(content_widget)
+            apply_popup_root_spacing(root)
+
+            description = QLabel(
+                "Map world Z/Y/X placement axes to Navigate multiposition stage "
+                "coordinates. This affects spatial placement metadata only; "
+                "canonical data remains unchanged."
+            )
+            description.setWordWrap(True)
+            root.addWidget(description)
+
+            bindings_group = QGroupBox("World Axis Mapping")
+            bindings_layout = QFormLayout(bindings_group)
+            apply_form_spacing(bindings_layout)
+
+            for axis_name in SPATIAL_CALIBRATION_WORLD_AXES:
+                combo = QComboBox()
+                for label, binding in _spatial_calibration_binding_choices():
+                    combo.addItem(label, binding)
+                bindings_layout.addRow(f"World {axis_name.upper()}", combo)
+                self._binding_inputs[axis_name] = combo
+
+            root.addWidget(bindings_group)
+
+            note = QLabel(
+                "THETA remains a rotation of the Z/Y plane about world X for v1."
+            )
+            note.setWordWrap(True)
+            root.addWidget(note)
+
+            footer = QHBoxLayout()
+            apply_footer_row_spacing(footer)
+            self._defaults_button = _configure_fixed_height_button(
+                QPushButton("Reset Identity")
+            )
+            self._cancel_button = _configure_fixed_height_button(
+                QPushButton("Cancel")
+            )
+            self._apply_button = _configure_fixed_height_button(
+                QPushButton("Apply")
+            )
+            self._apply_button.setObjectName("runButton")
+            footer.addWidget(self._defaults_button)
+            footer.addStretch(1)
+            footer.addWidget(self._cancel_button)
+            footer.addWidget(self._apply_button)
+            root.addLayout(footer)
+
+            self._defaults_button.clicked.connect(self._on_reset_defaults)
+            self._cancel_button.clicked.connect(self.reject)
+            self._apply_button.clicked.connect(self._on_apply)
+            content_widget.setMinimumHeight(root.sizeHint().height())
+
+        def _hydrate(self, initial: SpatialCalibrationConfig) -> None:
+            """Populate combo boxes from an initial calibration.
+
+            Parameters
+            ----------
+            initial : SpatialCalibrationConfig
+                Calibration to display.
+
+            Returns
+            -------
+            None
+                Widget values are updated in-place.
+            """
+            for axis_name, binding in zip(
+                SPATIAL_CALIBRATION_WORLD_AXES,
+                initial.stage_axis_map_zyx,
+                strict=False,
+            ):
+                combo = self._binding_inputs[axis_name]
+                index = combo.findData(binding)
+                combo.setCurrentIndex(index if index >= 0 else 0)
+
+        def _on_reset_defaults(self) -> None:
+            """Reset controls to the identity mapping."""
+            self._hydrate(SpatialCalibrationConfig())
+
+        def _on_apply(self) -> None:
+            """Validate the selected bindings and accept the dialog."""
+            try:
+                self.result_config = SpatialCalibrationConfig(
+                    stage_axis_map_zyx=tuple(
+                        str(self._binding_inputs[axis_name].currentData())
+                        for axis_name in SPATIAL_CALIBRATION_WORLD_AXES
+                    )
+                )
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid Spatial Calibration", str(exc))
+                return
             self.accept()
 
     class DaskBackendConfigDialog(QDialog):
@@ -4868,9 +5094,14 @@ if HAS_PYQT6:
             self._loaded_experiment_path: Optional[Path] = None
             self._loaded_image_info: Optional[ImageInfo] = None
             self._loaded_source_data_path: Optional[Path] = None
+            self._loaded_target_store_path: Optional[Path] = None
             self._experiment_list_file_path: Optional[Path] = None
             self._experiment_list_dirty = False
             self._source_data_directory_overrides: Dict[Path, Path] = {}
+            self._spatial_calibration_drafts: Dict[Path, SpatialCalibrationConfig] = {}
+            self._current_spatial_calibration: SpatialCalibrationConfig = (
+                initial.spatial_calibration
+            )
             self._materialization_worker: Optional[QThread] = None
             self._rebuild_store_checkbox: Optional[QCheckBox] = None
 
@@ -5060,6 +5291,27 @@ if HAS_PYQT6:
             zarr_layout.addLayout(zarr_button_row)
             root.addWidget(zarr_group)
 
+            spatial_group = QGroupBox("Spatial Calibration")
+            spatial_layout = QVBoxLayout(spatial_group)
+            apply_stack_spacing(spatial_layout)
+            spatial_layout.setContentsMargins(10, 8, 10, 10)
+            self._spatial_calibration_summary = QLabel("n/a")
+            self._spatial_calibration_summary.setObjectName("metadataFieldValue")
+            self._spatial_calibration_summary.setWordWrap(True)
+            self._spatial_calibration_summary.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            spatial_layout.addWidget(self._spatial_calibration_summary)
+            spatial_button_row = QHBoxLayout()
+            apply_row_spacing(spatial_button_row)
+            spatial_button_row.addStretch(1)
+            self._spatial_calibration_button = QPushButton(
+                "Edit Spatial Calibration"
+            )
+            spatial_button_row.addWidget(self._spatial_calibration_button)
+            spatial_layout.addLayout(spatial_button_row)
+            root.addWidget(spatial_group)
+
             dask_backend_group = QGroupBox("Execution Planning")
             dask_backend_layout = QVBoxLayout(dask_backend_group)
             apply_stack_spacing(dask_backend_layout)
@@ -5125,6 +5377,9 @@ if HAS_PYQT6:
             )
             self._dask_backend_button.clicked.connect(self._on_edit_dask_backend)
             self._zarr_config_button.clicked.connect(self._on_edit_zarr_settings)
+            self._spatial_calibration_button.clicked.connect(
+                self._on_edit_spatial_calibration
+            )
             self._cancel_button.clicked.connect(self.reject)
             self._next_button.clicked.connect(self._on_next)
             self._rebuild_store_checkbox.toggled.connect(self._on_rebuild_store_toggled)
@@ -5145,6 +5400,7 @@ if HAS_PYQT6:
             """
             self._refresh_dask_backend_summary()
             self._refresh_zarr_save_summary()
+            self._refresh_spatial_calibration_summary()
             initial_file = str(initial.file or "").strip()
             if not initial_file:
                 self._refresh_experiment_actions()
@@ -5225,6 +5481,107 @@ if HAS_PYQT6:
             self._zarr_config_summary.setText(summary)
             self._zarr_config_summary.setToolTip(summary)
 
+        def _refresh_spatial_calibration_summary(self) -> None:
+            """Refresh setup summary text for spatial calibration.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Summary label and button state are updated in-place.
+            """
+            summary = _format_spatial_calibration_summary(
+                self._current_spatial_calibration
+            )
+            self._spatial_calibration_summary.setText(summary)
+            self._spatial_calibration_summary.setToolTip(summary)
+            has_selection = self._current_selected_experiment_path() is not None
+            self._spatial_calibration_button.setEnabled(bool(has_selection))
+
+        def _resolve_spatial_calibration_for_experiment(
+            self,
+            experiment_path: Path,
+            *,
+            target_store: Optional[Path] = None,
+        ) -> SpatialCalibrationConfig:
+            """Resolve draft/store/default calibration for one experiment.
+
+            Parameters
+            ----------
+            experiment_path : pathlib.Path
+                Selected experiment path.
+            target_store : pathlib.Path, optional
+                Prepared or target analysis-store path when already known.
+
+            Returns
+            -------
+            SpatialCalibrationConfig
+                Effective calibration for the experiment within the setup
+                session.
+            """
+            resolved_experiment_path = Path(experiment_path).expanduser().resolve()
+            draft = self._spatial_calibration_drafts.get(resolved_experiment_path)
+            if draft is not None:
+                return draft
+
+            store_path = (
+                Path(target_store).expanduser().resolve()
+                if target_store is not None
+                else None
+            )
+            if store_path is None:
+                try:
+                    request = self._resolve_store_preparation_request(
+                        resolved_experiment_path
+                    )
+                except Exception:
+                    return SpatialCalibrationConfig()
+                store_path = request.target_store
+
+            if is_zarr_store_path(store_path) and Path(store_path).exists():
+                return load_store_spatial_calibration(store_path)
+            return SpatialCalibrationConfig()
+
+        def _set_current_spatial_calibration(
+            self,
+            *,
+            experiment_path: Optional[Path],
+            calibration: Optional[SpatialCalibrationConfig] = None,
+            target_store: Optional[Path] = None,
+        ) -> None:
+            """Update the currently displayed calibration for setup.
+
+            Parameters
+            ----------
+            experiment_path : pathlib.Path, optional
+                Active experiment path.
+            calibration : SpatialCalibrationConfig, optional
+                Explicit calibration to display.
+            target_store : pathlib.Path, optional
+                Target store path used when loading from store attrs.
+
+            Returns
+            -------
+            None
+                Current setup calibration state is updated in-place.
+            """
+            if experiment_path is None:
+                self._current_spatial_calibration = SpatialCalibrationConfig()
+            else:
+                resolved_experiment_path = Path(experiment_path).expanduser().resolve()
+                self._current_spatial_calibration = (
+                    calibration
+                    if calibration is not None
+                    else self._resolve_spatial_calibration_for_experiment(
+                        resolved_experiment_path,
+                        target_store=target_store,
+                    )
+                )
+            self._refresh_spatial_calibration_summary()
+
         def _on_edit_dask_backend(self) -> None:
             """Open backend dialog and apply selected configuration.
 
@@ -5284,6 +5641,47 @@ if HAS_PYQT6:
             self._refresh_zarr_save_summary()
             _save_last_used_zarr_save_config(self._zarr_save_config)
             self._set_status("Updated Zarr save settings.")
+
+        def _on_edit_spatial_calibration(self) -> None:
+            """Open spatial-calibration dialog for the selected experiment.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Stores the selected calibration as an in-session draft.
+            """
+            experiment_path = self._current_selected_experiment_path()
+            if experiment_path is None:
+                QMessageBox.information(
+                    self,
+                    "No Experiment Selected",
+                    "Select an experiment before editing spatial calibration.",
+                )
+                return
+
+            dialog = SpatialCalibrationDialog(
+                initial=self._current_spatial_calibration,
+                parent=self,
+            )
+            result = dialog.exec()
+            if result != QDialog.DialogCode.Accepted or dialog.result_config is None:
+                return
+
+            resolved_experiment_path = Path(experiment_path).expanduser().resolve()
+            self._spatial_calibration_drafts[resolved_experiment_path] = (
+                dialog.result_config
+            )
+            self._set_current_spatial_calibration(
+                experiment_path=resolved_experiment_path,
+                calibration=dialog.result_config,
+            )
+            self._set_status(
+                "Updated spatial calibration draft for the selected experiment."
+            )
 
         def _on_rebuild_store_toggled(self, checked: bool) -> None:
             """Update setup status when rebuild mode is toggled.
@@ -5589,6 +5987,7 @@ if HAS_PYQT6:
             """
             for label in self._metadata_labels.values():
                 label.setText("n/a")
+            self._set_current_spatial_calibration(experiment_path=None)
 
         def _experiment_path_from_item(
             self,
@@ -5859,6 +6258,7 @@ if HAS_PYQT6:
             self._loaded_experiment_path = None
             self._loaded_image_info = None
             self._loaded_source_data_path = None
+            self._loaded_target_store_path = None
 
         def eventFilter(self, watched: QObject, event: QEvent) -> bool:
             """Handle drag/drop events routed through the experiment list.
@@ -6266,6 +6666,8 @@ if HAS_PYQT6:
                     self._clear_loaded_experiment_context()
                     self._reset_metadata_labels()
                     self._set_status("Ready")
+                else:
+                    self._set_current_spatial_calibration(experiment_path=None)
                 return
             self._load_selected_experiment_metadata()
 
@@ -6410,6 +6812,9 @@ if HAS_PYQT6:
                 self._clear_loaded_experiment_context()
                 self._reset_metadata_labels()
                 self._metadata_labels["path"].setText(str(resolved_experiment_path))
+                self._set_current_spatial_calibration(
+                    experiment_path=resolved_experiment_path
+                )
                 _show_themed_error_dialog(
                     self,
                     "Metadata Load Failed",
@@ -6437,6 +6842,11 @@ if HAS_PYQT6:
             self._loaded_source_data_path = source_data_path
 
             target_store = resolve_data_store_path(experiment, source_data_path)
+            self._loaded_target_store_path = Path(target_store).expanduser().resolve()
+            self._set_current_spatial_calibration(
+                experiment_path=loaded_path,
+                target_store=self._loaded_target_store_path,
+            )
             self._set_status(f"Metadata loaded. Target store: {target_store}")
 
         def _prompt_for_source_data_directory(
@@ -6623,12 +7033,42 @@ if HAS_PYQT6:
             except Exception:
                 return None
 
+        def _persist_spatial_calibration_for_requests(
+            self,
+            requests: Sequence[ExperimentStorePreparationRequest],
+        ) -> Dict[Path, SpatialCalibrationConfig]:
+            """Persist resolved spatial calibration for each prepared store.
+
+            Parameters
+            ----------
+            requests : sequence[ExperimentStorePreparationRequest]
+                Prepared or reused store requests.
+
+            Returns
+            -------
+            dict[pathlib.Path, SpatialCalibrationConfig]
+                Effective calibration written for each target store.
+            """
+            persisted: Dict[Path, SpatialCalibrationConfig] = {}
+            for request in requests:
+                resolved_store = Path(request.target_store).expanduser().resolve()
+                calibration = self._resolve_spatial_calibration_for_experiment(
+                    Path(request.experiment_path).expanduser().resolve(),
+                    target_store=resolved_store,
+                )
+                persisted[resolved_store] = save_store_spatial_calibration(
+                    resolved_store,
+                    calibration,
+                )
+            return persisted
+
         def _accept_with_store_path(
             self,
             store_path: Path,
             *,
             analysis_targets: Sequence[AnalysisTarget],
             selected_experiment_path: Path,
+            spatial_calibration: SpatialCalibrationConfig,
         ) -> None:
             """Finalize setup dialog with prepared store path configuration.
 
@@ -6642,6 +7082,8 @@ if HAS_PYQT6:
             selected_experiment_path : pathlib.Path
                 Navigate experiment descriptor currently selected in the setup
                 list.
+            spatial_calibration : SpatialCalibrationConfig
+                Effective calibration written to the selected target store.
 
             Returns
             -------
@@ -6667,6 +7109,8 @@ if HAS_PYQT6:
                 visualization=False,
                 mip_export=False,
                 zarr_save=self._zarr_save_config,
+                spatial_calibration=spatial_calibration,
+                spatial_calibration_explicit=False,
             )
             _save_last_used_execution_policy(
                 replace(
@@ -6749,6 +7193,23 @@ if HAS_PYQT6:
             analysis_targets = _analysis_targets_from_store_requests(requests)
 
             if not pending_requests:
+                try:
+                    persisted_calibrations = (
+                        self._persist_spatial_calibration_for_requests(requests)
+                    )
+                except Exception as exc:
+                    logging.getLogger(__name__).exception(
+                        "Failed to persist spatial calibration for prepared stores."
+                    )
+                    _show_themed_error_dialog(
+                        self,
+                        "Spatial Calibration Failed",
+                        "Failed to persist spatial calibration to the prepared analysis stores.",
+                        summary=f"{type(exc).__name__}: {exc}",
+                        details=traceback.format_exc(),
+                    )
+                    self._set_status("Failed to persist spatial calibration.")
+                    return
                 self._set_status(
                     "All listed data stores are ready. Opening analysis selection."
                 )
@@ -6756,6 +7217,9 @@ if HAS_PYQT6:
                     selected_request.target_store,
                     analysis_targets=analysis_targets,
                     selected_experiment_path=selected_request.experiment_path,
+                    spatial_calibration=persisted_calibrations[
+                        Path(selected_request.target_store).expanduser().resolve()
+                    ],
                 )
                 return
 
@@ -6846,10 +7310,30 @@ if HAS_PYQT6:
                 prepared_count,
                 ready_count,
             )
+            try:
+                persisted_calibrations = self._persist_spatial_calibration_for_requests(
+                    requests
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).exception(
+                    "Failed to persist spatial calibration for prepared stores."
+                )
+                _show_themed_error_dialog(
+                    self,
+                    "Spatial Calibration Failed",
+                    "Failed to persist spatial calibration to the prepared analysis stores.",
+                    summary=f"{type(exc).__name__}: {exc}",
+                    details=traceback.format_exc(),
+                )
+                self._set_status("Failed to persist spatial calibration.")
+                return
             self._accept_with_store_path(
                 selected_request.target_store,
                 analysis_targets=analysis_targets,
                 selected_experiment_path=selected_request.experiment_path,
+                spatial_calibration=persisted_calibrations[
+                    Path(selected_request.target_store).expanduser().resolve()
+                ],
             )
 
     class AnalysisSelectionDialog(QDialog):
@@ -7682,6 +8166,17 @@ if HAS_PYQT6:
                     or None
                 )
             )
+            spatial_calibration = self._base_config.spatial_calibration
+            if target is not None and is_zarr_store_path(target.store_path):
+                try:
+                    spatial_calibration = load_store_spatial_calibration(
+                        target.store_path
+                    )
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "Failed to load store spatial calibration for %s.",
+                        target.store_path,
+                    )
             return replace(
                 self._session_default_analysis_template,
                 file=file_path,
@@ -7689,6 +8184,8 @@ if HAS_PYQT6:
                 analysis_selected_experiment_path=selected_experiment_path,
                 analysis_apply_to_all=self._current_analysis_apply_to_all(),
                 dask_backend=self._dask_backend_config,
+                spatial_calibration=spatial_calibration,
+                spatial_calibration_explicit=False,
             )
 
         def _analysis_state_workflow_from_payload(
@@ -7726,6 +8223,10 @@ if HAS_PYQT6:
                     default_workflow.analysis_parameters,
                 )
             )
+            spatial_calibration_payload = payload.get(
+                "spatial_calibration",
+                default_workflow.spatial_calibration,
+            )
             return replace(
                 default_workflow,
                 flatfield=selected_flags["flatfield"],
@@ -7736,6 +8237,15 @@ if HAS_PYQT6:
                 registration=selected_flags["registration"],
                 visualization=selected_flags["visualization"],
                 mip_export=selected_flags["mip_export"],
+                spatial_calibration=normalize_spatial_calibration(
+                    spatial_calibration_payload
+                ),
+                spatial_calibration_explicit=bool(
+                    payload.get(
+                        "spatial_calibration_explicit",
+                        default_workflow.spatial_calibration_explicit,
+                    )
+                ),
                 analysis_parameters=analysis_parameters,
             )
 
@@ -7778,6 +8288,12 @@ if HAS_PYQT6:
                 payload["analysis_selected_experiment_path"] = str(
                     target.experiment_path
                 )
+            payload["spatial_calibration"] = spatial_calibration_to_dict(
+                self._base_config.spatial_calibration
+            )
+            payload["spatial_calibration_explicit"] = bool(
+                self._base_config.spatial_calibration_explicit
+            )
             return payload
 
         def _persist_analysis_gui_state_for_target(
@@ -7932,6 +8448,12 @@ if HAS_PYQT6:
                 )
             self._base_config.analysis_apply_to_all = bool(
                 restored_workflow.analysis_apply_to_all
+            )
+            self._base_config.spatial_calibration = (
+                restored_workflow.spatial_calibration
+            )
+            self._base_config.spatial_calibration_explicit = bool(
+                restored_workflow.spatial_calibration_explicit
             )
             self._set_analysis_state_source_text(
                 source_text,
@@ -14502,6 +15024,10 @@ if HAS_PYQT6:
                 "visualization": selected_flags["visualization"],
                 "mip_export": selected_flags["mip_export"],
                 "zarr_save": self._base_config.zarr_save,
+                "spatial_calibration": self._base_config.spatial_calibration,
+                "spatial_calibration_explicit": bool(
+                    self._base_config.spatial_calibration_explicit
+                ),
                 "analysis_parameters": analysis_parameters,
             }
             dataclass_fields = getattr(WorkflowConfig, "__dataclass_fields__", {})
@@ -14738,6 +15264,8 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         "visualization": False,
         "mip_export": False,
         "zarr_save": workflow.zarr_save,
+        "spatial_calibration": workflow.spatial_calibration,
+        "spatial_calibration_explicit": workflow.spatial_calibration_explicit,
         "analysis_parameters": analysis_parameters,
     }
     dataclass_fields = getattr(WorkflowConfig, "__dataclass_fields__", {})
@@ -14785,6 +15313,18 @@ def _workflows_for_selected_analysis_scope(
         analysis.
     """
     targets = _analysis_targets_for_workflow(workflow)
+
+    def _target_spatial_calibration(target: AnalysisTarget) -> SpatialCalibrationConfig:
+        if is_zarr_store_path(target.store_path):
+            try:
+                return load_store_spatial_calibration(target.store_path)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Failed to load store spatial calibration for %s.",
+                    target.store_path,
+                )
+        return workflow.spatial_calibration
+
     if not targets:
         return (workflow,)
     if workflow.analysis_apply_to_all and len(targets) > 1:
@@ -14794,6 +15334,8 @@ def _workflows_for_selected_analysis_scope(
                 file=str(target.store_path),
                 analysis_selected_experiment_path=str(target.experiment_path),
                 analysis_apply_to_all=False,
+                spatial_calibration=_target_spatial_calibration(target),
+                spatial_calibration_explicit=False,
             )
             for target in targets
         )
@@ -14806,13 +15348,21 @@ def _workflows_for_selected_analysis_scope(
         == str(selected_target.experiment_path)
         and not workflow.analysis_apply_to_all
     ):
-        return (workflow,)
+        return (
+            replace(
+                workflow,
+                spatial_calibration=_target_spatial_calibration(selected_target),
+                spatial_calibration_explicit=False,
+            ),
+        )
     return (
         replace(
             workflow,
             file=str(selected_target.store_path),
             analysis_selected_experiment_path=str(selected_target.experiment_path),
             analysis_apply_to_all=False,
+            spatial_calibration=_target_spatial_calibration(selected_target),
+            spatial_calibration_explicit=False,
         ),
     )
 

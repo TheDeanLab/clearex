@@ -79,3 +79,9 @@ def test_channel_indices_flag_accepts_indices_and_all():
 def test_input_resolution_level_flag_parses_integer():
     args = create_parser().parse_args(["--input-resolution-level", "2"])
     assert args.input_resolution_level == 2
+
+
+def test_stage_axis_map_flag_parses_string():
+    args = create_parser().parse_args(["--stage-axis-map", "z=+x,y=none,x=+y"])
+
+    assert args.stage_axis_map == "z=+x,y=none,x=+y"

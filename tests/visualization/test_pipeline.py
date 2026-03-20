@@ -17,6 +17,7 @@ import zarr
 # Local Imports
 import clearex.visualization.pipeline as visualization_pipeline
 from clearex.visualization.pipeline import run_visualization_analysis
+from clearex.workflow import spatial_calibration_to_dict
 
 
 def _single_image_volume_layers(
@@ -693,6 +694,8 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
     image_metadata = dict(captured["image_metadata"])
     assert image_metadata["selected_positions"] == [0, 1]
     assert image_metadata["show_all_positions"] is True
+    assert image_metadata["spatial_calibration_text"] == "z=+z,y=+y,x=+x"
+    assert image_metadata["stage_positions_xyzthetaf"][1]["f"] == 0.0
 
     latest_attrs = dict(
         zarr.open_group(str(store_path), mode="r")["results"]["visualization"][
@@ -702,6 +705,98 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
     assert latest_attrs["position_index"] == 0
     assert latest_attrs["selected_positions"] == [0, 1]
     assert latest_attrs["show_all_positions"] is True
+    assert latest_attrs["spatial_calibration_text"] == "z=+z,y=+y,x=+x"
+
+
+def test_resolve_position_affines_tczyx_supports_focus_axis_and_sign_inversion(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    experiment_path.write_text(
+        json.dumps(
+            {
+                "Saving": {"save_directory": str(tmp_path), "file_type": "TIFF"},
+                "MicroscopeState": {"timepoints": 1, "number_z_steps": 1},
+            }
+        )
+    )
+    (tmp_path / "multi_positions.yml").write_text(
+        json.dumps(
+            [
+                ["X", "Y", "Z", "THETA", "F"],
+                [0, 0, 0, 0, 0],
+                [10, 20, 30, 15, 5],
+            ]
+        )
+    )
+
+    affines, stage_rows, spatial_calibration = (
+        visualization_pipeline._resolve_position_affines_tczyx(
+            root_attrs={
+                "source_experiment": str(experiment_path),
+                "spatial_calibration": {
+                    "schema": "clearex.spatial_calibration.v1",
+                    "stage_axis_map_zyx": {"z": "+f", "y": "-y", "x": "+x"},
+                    "theta_mode": "rotate_zy_about_x",
+                },
+            },
+            selected_positions=(0, 1),
+            scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        )
+    )
+
+    affine = np.asarray(affines[1], dtype=np.float64)
+
+    assert stage_rows[1]["f"] == 5.0
+    assert affine[2, 5] == 5.0
+    assert affine[3, 5] == -20.0
+    assert affine[4, 5] == 10.0
+    assert spatial_calibration.stage_axis_map_zyx == ("+f", "-y", "+x")
+
+
+def test_resolve_position_affines_tczyx_supports_none_and_nontrivial_mapping(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    experiment_path.write_text(
+        json.dumps(
+            {
+                "Saving": {"save_directory": str(tmp_path), "file_type": "TIFF"},
+                "MicroscopeState": {"timepoints": 1, "number_z_steps": 1},
+            }
+        )
+    )
+    (tmp_path / "multi_positions.yml").write_text(
+        json.dumps(
+            [
+                ["X", "Y", "Z", "THETA", "F"],
+                [0, 0, 0, 0, 0],
+                [10, 20, 30, 15, 5],
+            ]
+        )
+    )
+
+    affines, _stage_rows, spatial_calibration = (
+        visualization_pipeline._resolve_position_affines_tczyx(
+            root_attrs={
+                "source_experiment": str(experiment_path),
+                "spatial_calibration": spatial_calibration_to_dict(
+                    visualization_pipeline.SpatialCalibrationConfig(
+                        stage_axis_map_zyx=("+x", "none", "+y")
+                    )
+                ),
+            },
+            selected_positions=(0, 1),
+            scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        )
+    )
+
+    affine = np.asarray(affines[1], dtype=np.float64)
+
+    assert affine[2, 5] == 10.0
+    assert affine[3, 5] == 0.0
+    assert affine[4, 5] == 20.0
+    assert spatial_calibration.stage_axis_map_zyx == ("+x", "none", "+y")
 
 
 def test_launch_napari_viewer_applies_axis_labels_after_layer_load(

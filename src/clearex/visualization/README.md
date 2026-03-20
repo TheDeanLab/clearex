@@ -55,15 +55,27 @@ This folder owns napari-facing visualization workflows.
   - single-position mode (`show_all_positions=False`, use `position_index`), and
   - multiposition mode (`show_all_positions=True`, render all positions).
 - Stage coordinates are resolved from `multi_positions.yml` adjacent to `source_experiment` when available (fallback: `MultiPositions` in experiment metadata).
-- Parsed stage rows use fields `X`, `Y`, `Z`, and `THETA` (`F` is ignored for visualization transforms).
+- Parsed stage rows use fields `X`, `Y`, `Z`, `F`, and `THETA`.
+- Root store attr `spatial_calibration` defines how world `z/y/x`
+  translations are derived from Navigate stage coordinates. Missing attrs
+  resolve to identity mapping `z=+z,y=+y,x=+x`.
 - Per-position napari affine uses homogeneous `6x6` matrix in `(t, c, z, y, x)` coordinates:
+  - world-axis bindings support `+/-x`, `+/-y`, `+/-z`, `+/-f`, and `none`,
+  - `none` forces zero translation on that world axis,
+  - sign inversion is applied before translation,
   - `THETA` rotates the `z/y` plane (sample rotation around x axis).
   - stage coordinates are in microns and affine translations are applied directly in world-space microns.
-- Persisted visualization metadata includes:
+- Napari image-layer metadata includes:
+  - `position_affines_tczyx`,
+  - `stage_positions_xyztheta`,
+  - `stage_positions_xyzthetaf`,
+  - `spatial_calibration`,
+  - `spatial_calibration_text`.
+- Latest visualization metadata includes:
   - `selected_positions`,
   - `show_all_positions`,
-  - `position_affines_tczyx`,
-  - `stage_positions_xyztheta`.
+  - `spatial_calibration`,
+  - `spatial_calibration_text`.
 
 ## GUI/Threading Contract
 
