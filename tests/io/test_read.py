@@ -35,7 +35,6 @@ import pytest
 import dask.array as da
 from numpy.typing import NDArray
 import tifffile
-import zarr
 from numcodecs import Blosc
 import h5py
 
@@ -49,12 +48,63 @@ from clearex.io.read import (
     NumpyReader,
     ImageOpener,
 )
+from clearex.io.zarr_storage import (
+    create_or_overwrite_array,
+    open_group as open_zarr_group,
+)
 from tests import download_test_registration_data
 
 
 # =============================================================================
 # Test ImageInfo Dataclass
 # =============================================================================
+
+
+def _wrap_test_zarr_group(group):
+    class _CompatZarrGroup:
+        def __init__(self, inner_group):
+            self._inner_group = inner_group
+
+        def __getattr__(self, name):
+            return getattr(self._inner_group, name)
+
+        def __contains__(self, key):
+            return key in self._inner_group
+
+        def __delitem__(self, key):
+            del self._inner_group[key]
+
+        def __getitem__(self, key):
+            item = self._inner_group[key]
+            if hasattr(item, "array_keys") and hasattr(item, "group_keys"):
+                return _wrap_test_zarr_group(item)
+            return item
+
+        def create_dataset(self, name, **kwargs):
+            return create_or_overwrite_array(root=self._inner_group, name=name, **kwargs)
+
+        def create_group(self, name, **kwargs):
+            return _wrap_test_zarr_group(self._inner_group.create_group(name, **kwargs))
+
+        def require_group(self, name, **kwargs):
+            return _wrap_test_zarr_group(
+                self._inner_group.require_group(name, **kwargs)
+            )
+
+    return _CompatZarrGroup(group)
+
+
+def _open_test_zarr_group(
+    path: Path | str,
+    *,
+    mode: str = "a",
+    zarr_format: int | None = None,
+):
+    if zarr_format is None and mode in {"w", "w-"}:
+        zarr_format = 2
+    return _wrap_test_zarr_group(
+        open_zarr_group(path, mode=mode, zarr_format=zarr_format)
+    )
 
 
 class TestImageInfo:
@@ -247,7 +297,6 @@ class TestReaderABC:
                 info = ImageInfo(path=path, shape=arr.shape, dtype=arr.dtype)
                 return arr, info
 
-        reader = EmptySuffixReader()
         assert EmptySuffixReader.claims(Path("any.file")) is False
 
     def test_open_method_signature(self):
@@ -698,7 +747,7 @@ class TestZarrReader:
         arr = np.random.randint(0, 65535, size=(256, 256), dtype=np.uint16)
         zarr_path = tmp_path / "test_2d.zarr"
         # Create as a group with a single array
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         root.create_dataset("data", data=arr)
         return zarr_path, arr
 
@@ -709,7 +758,7 @@ class TestZarrReader:
         arr = np.random.randint(0, 65535, size=(10, 256, 256), dtype=np.uint16)
         zarr_path = tmp_path / "test_3d.zarr"
         # Create as a group with a single array
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         root.create_dataset("data", data=arr)
         return zarr_path, arr
 
@@ -720,7 +769,7 @@ class TestZarrReader:
         arr = np.random.rand(10, 100, 100).astype(np.float32)
         zarr_path = tmp_path / "test_with_attrs.zarr"
 
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         z = root.create_dataset(
             "data",
             data=arr,
@@ -737,7 +786,7 @@ class TestZarrReader:
         """Fixture to create a Zarr store with multiple arrays."""
 
         zarr_path = tmp_path / "test_multi.zarr"
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
 
         # Create multiple arrays with different sizes
         arr_small = np.random.rand(50, 50).astype(np.float32)
@@ -757,7 +806,7 @@ class TestZarrReader:
         arr = np.random.randint(0, 255, size=(5, 3, 100, 100), dtype=np.uint8)
         zarr_path = tmp_path / "test_ome.zarr"
 
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         z = root.create_dataset("data", data=arr, chunks=(1, 1, 50, 50))
         z.attrs["multiscales"] = [
             {
@@ -956,7 +1005,7 @@ class TestZarrReader:
                 arr_in = (arr_in * np.iinfo(dtype).max).astype(dtype)
 
             zarr_path = tmp_path / f"test_{dtype.__name__}.zarr"
-            root = zarr.open_group(str(zarr_path), mode="w")
+            root = _open_test_zarr_group(zarr_path, mode="w")
             root.create_dataset("data", data=arr_in)
 
             arr_out, info = zarr_reader.open(zarr_path)
@@ -978,7 +1027,7 @@ class TestZarrReader:
         for idx, shape in enumerate(shapes):
             arr_in = np.random.randint(0, 255, size=shape, dtype=np.uint8)
             zarr_path = tmp_path / f"test_{len(shape)}d.zarr"
-            root = zarr.open_group(str(zarr_path), mode="w")
+            root = _open_test_zarr_group(zarr_path, mode="w")
             root.create_dataset("data", data=arr_in)
 
             arr_out, info = zarr_reader.open(zarr_path)
@@ -1034,7 +1083,7 @@ class TestZarrReader:
         # Create a moderately large Zarr store (not huge to keep test fast)
         arr = np.random.randint(0, 255, size=(50, 512, 512), dtype=np.uint8)
         zarr_path = tmp_path / "large.zarr"
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         root.create_dataset("data", data=arr)
 
         # Open with Dask should not load into memory immediately
@@ -1055,7 +1104,7 @@ class TestZarrReader:
         zarr_path = tmp_path / "chunked.zarr"
 
         # Create with specific chunking
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         z = root.create_dataset(
             "data",
             shape=arr.shape,
@@ -1076,7 +1125,7 @@ class TestZarrReader:
         """Test opening a Zarr store with nested groups."""
 
         zarr_path = tmp_path / "nested.zarr"
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
 
         # Create nested structure
         grp1 = root.create_group("group1")
@@ -1106,7 +1155,7 @@ class TestZarrReader:
         """Test opening a store where arrays exist only in nested groups."""
 
         zarr_path = tmp_path / "nested_only.zarr"
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         nested = root.create_group("setup0").create_group("timepoint0")
         expected = np.random.randint(0, 255, size=(30, 32, 32), dtype=np.uint8)
         nested.create_dataset("s0", data=expected, chunks=(2, 16, 16))
@@ -1123,7 +1172,7 @@ class TestZarrReader:
 
         zarr_path = tmp_path / "empty.zarr"
         # Create an empty group with no arrays
-        zarr.open_group(str(zarr_path), mode="w")
+        _open_test_zarr_group(zarr_path, mode="w")
 
         with pytest.raises(ValueError, match="No arrays found"):
             zarr_reader.open(zarr_path)
@@ -1147,6 +1196,21 @@ class TestZarrReader:
         assert info.axes is not None
         assert info.axes == ["z", "y", "x"]
 
+    def test_zarr_axes_from_ome_v05_metadata(self, zarr_reader, tmp_path):
+        """Test extraction of axes from OME-Zarr 0.5-style root attrs."""
+        zarr_path = tmp_path / "ome_v05.zarr"
+        root = _open_test_zarr_group(zarr_path, mode="w")
+        root.attrs["ome"] = {
+            "multiscales": [
+                {"axes": [{"name": "z"}, {"name": "y"}, {"name": "x"}]}
+            ]
+        }
+        root.create_dataset("data", data=np.arange(24, dtype=np.uint16).reshape(2, 3, 4))
+
+        _, info = zarr_reader.open(zarr_path, prefer_dask=False)
+
+        assert info.axes == ["z", "y", "x"]
+
     def test_zarr_readonly_mode(self, zarr_reader, temp_zarr_2d):
         """Test that ZarrReader opens stores in read-only mode."""
         zarr_path, _ = temp_zarr_2d
@@ -1162,7 +1226,7 @@ class TestZarrReader:
 
         arr = np.random.rand(100, 100, 100).astype(np.float32)
         zarr_path = tmp_path / "lazy.zarr"
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         root.create_dataset("data", data=arr)
 
         # Open as Dask
@@ -1184,7 +1248,7 @@ class TestZarrReader:
         zarr_path = tmp_path / "compressed.zarr"
 
         # Create with specific compressor
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         z = root.create_dataset(
             "data",
             shape=arr.shape,
@@ -1621,7 +1685,7 @@ class TestHDF5Reader:
 
         hdf5_path = tmp_path / "empty.h5"
         # Create an empty file with no datasets
-        with h5py.File(str(hdf5_path), "w") as f:
+        with h5py.File(str(hdf5_path), "w"):
             pass
 
         with pytest.raises(ValueError, match="No datasets found"):
@@ -2281,11 +2345,9 @@ class TestImageOpener:
     @pytest.fixture
     def temp_zarr_file(self, tmp_path):
         """Fixture to create a temporary Zarr store."""
-        import zarr
-
         arr = np.random.rand(100, 100).astype(np.float32)
         zarr_path = tmp_path / "test.zarr"
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         root.create_dataset("data", data=arr)
         return zarr_path, arr
 
@@ -2608,11 +2670,9 @@ class TestImageOpener:
 
     def test_open_zarr_with_dask_chunking(self, image_opener, tmp_path):
         """Test opening Zarr with Dask and custom chunking."""
-        import zarr
-
         arr = np.random.rand(200, 200).astype(np.float32)
         zarr_path = tmp_path / "test_chunked.zarr"
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         root.create_dataset("data", data=arr, chunks=(100, 100))
 
         darr, info = image_opener.open(zarr_path, prefer_dask=True, chunks=(50, 50))
@@ -2689,12 +2749,10 @@ class TestImageOpener:
 
     def test_open_large_file_with_dask(self, image_opener, tmp_path):
         """Test opening a large file with Dask for lazy loading."""
-        import zarr
-
         # Create a moderately large file
         arr = np.random.rand(200, 512, 512).astype(np.float32)
         zarr_path = tmp_path / "large.zarr"
-        root = zarr.open_group(str(zarr_path), mode="w")
+        root = _open_test_zarr_group(zarr_path, mode="w")
         root.create_dataset("data", data=arr)
 
         darr, info = image_opener.open(

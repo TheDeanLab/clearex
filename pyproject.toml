@@ -18,10 +18,10 @@ dependencies = [
     "antspyx",
     "basicpy",
     "cython>=3.1.4",
-    "dask==2025.1.0",
+    "dask==2026.1.1",
     "dask-image",
     "dask-jobqueue",
-    "distributed==2025.1.0",
+    "distributed==2026.1.1",
     "h5py",
     # u-Segment3D currently requires imagecodecs<2025.
     "imagecodecs>=2024.9.22,<2025",
@@ -36,8 +36,8 @@ dependencies = [
     "scikit-image",
     "scipy<1.13",
     "seaborn",
-    "tifffile==2025.1.10",
-    "zarr<3.0",
+    "tifffile==2025.10.16",
+    "zarr>=3,<4",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +50,11 @@ decon = [
 usegment3d = [
     "u-Segment3D>=0.1.4,<0.2",
     "cellpose<3",
+]
+
+viewer = [
+    "ome-zarr>=0.14.0",
+    "napari-ome-zarr>=0.7.2",
 ]
 
 dev = [

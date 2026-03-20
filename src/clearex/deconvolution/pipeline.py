@@ -45,6 +45,7 @@ import zarr
 # Local Imports
 from clearex.deconvolution.petakit import run_petakit_deconvolution
 from clearex.io.provenance import register_latest_output_reference
+from clearex.io.zarr_storage import create_or_overwrite_array
 
 if TYPE_CHECKING:
     from dask.distributed import Client
@@ -1069,25 +1070,37 @@ def _persist_synthetic_psf_assets(
             voxel_z_um=float(voxel_z_um),
         )
         channel_group = synthetic_group.create_group(f"ch{int(channel_index):02d}")
-        channel_group.create_dataset(
+        create_or_overwrite_array(
+            root=channel_group,
             name="combined_psf_zyx",
+            shape=tuple(int(v) for v in artifacts.combined_psf_zyx.shape),
+            dtype=np.float32,
             data=np.asarray(artifacts.combined_psf_zyx, dtype=np.float32),
             overwrite=True,
         )
-        channel_group.create_dataset(
+        create_or_overwrite_array(
+            root=channel_group,
             name="detection_psf_zyx",
+            shape=tuple(int(v) for v in artifacts.detection_psf_zyx.shape),
+            dtype=np.float32,
             data=np.asarray(artifacts.detection_psf_zyx, dtype=np.float32),
             overwrite=True,
         )
         if artifacts.illumination_psf_zyx is not None:
-            channel_group.create_dataset(
+            create_or_overwrite_array(
+                root=channel_group,
                 name="illumination_psf_zyx",
+                shape=tuple(int(v) for v in artifacts.illumination_psf_zyx.shape),
+                dtype=np.float32,
                 data=np.asarray(artifacts.illumination_psf_zyx, dtype=np.float32),
                 overwrite=True,
             )
         preview_bytes = np.frombuffer(artifacts.preview_png_bytes, dtype=np.uint8)
-        channel_group.create_dataset(
+        create_or_overwrite_array(
+            root=channel_group,
             name="preview_png",
+            shape=tuple(int(v) for v in preview_bytes.shape),
+            dtype=preview_bytes.dtype,
             data=preview_bytes,
             overwrite=True,
         )

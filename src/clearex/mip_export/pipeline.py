@@ -44,6 +44,7 @@ import zarr
 
 # Local Imports
 from clearex.io.provenance import register_latest_output_reference
+from clearex.io.zarr_storage import create_or_overwrite_array
 
 if TYPE_CHECKING:
     from dask.distributed import Client
@@ -1726,8 +1727,11 @@ def _write_projection_output(
     root = zarr.open_group(str(output_path), mode="w")
     try:
         payload = np.asarray(projection)
-        root.create_dataset(
+        create_or_overwrite_array(
+            root=root,
             name="data",
+            shape=tuple(int(v) for v in payload.shape),
+            dtype=payload.dtype,
             data=payload,
             chunks=_default_projection_chunks(tuple(int(v) for v in payload.shape)),
             overwrite=True,

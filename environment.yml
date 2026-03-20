@@ -3,13 +3,13 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.11
+  - python>=3.12,<3.13
   - pip
   - cython
-  - dask=2025.1.0
+  - dask=2026.1.1
   - dask-image
   - dask-jobqueue
-  - distributed=2025.1.0
+  - distributed=2026.1.1
   - h5py
   - jupyterlab
   - matplotlib
@@ -23,10 +23,10 @@ dependencies:
   - scikit-image
   - scipy
   - simpleitk
-  - tifffile
-  - zarr<3.0
+  - tifffile=2025.10.16
+  - zarr=3.1.5
   - pip:
       - antspyx
       - neuroglancer (>=2.40.1,<3.0.0)
       - PyQt6>=6.7
-      - -e .
+      - -e .[viewer]

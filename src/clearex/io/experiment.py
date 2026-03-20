@@ -39,6 +39,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import warnings
@@ -55,6 +56,19 @@ from dask.delayed import delayed
 
 # Local Imports
 from clearex.io.read import ImageInfo
+from clearex.io.zarr_storage import (
+    clear_component,
+    create_or_overwrite_array,
+    detect_store_format,
+    extract_raw_axes_metadata,
+    is_clearex_analysis_store,
+    open_group as open_zarr_group,
+    replace_store_path,
+    resolve_external_analysis_store_path,
+    resolve_legacy_v2_store_path,
+    resolve_staging_store_path,
+    to_jsonable,
+)
 from clearex.workflow import (
     SpatialCalibrationConfig,
     spatial_calibration_from_dict,
@@ -702,15 +716,7 @@ def _extract_zarr_axes(array: Any, group_attrs: dict[str, Any]) -> AxesSpec:
     tuple of str, optional
         Normalized source axes, when present.
     """
-    attrs = dict(getattr(array, "attrs", {}))
-    raw_axes = (
-        attrs.get("multiscales", [{}])[0].get("axes")
-        or group_attrs.get("multiscales", [{}])[0].get("axes")
-        or attrs.get("_ARRAY_DIMENSIONS")
-        or group_attrs.get("_ARRAY_DIMENSIONS")
-        or attrs.get("axes")
-        or group_attrs.get("axes")
-    )
+    raw_axes = extract_raw_axes_metadata(array, group_attrs)
     return _normalize_axes_descriptor(raw_axes, ndim=len(tuple(array.shape)))
 
 
@@ -3141,7 +3147,8 @@ def _materialize_data_pyramid(
         ):
             should_overwrite_level = False
         if should_overwrite_level:
-            root.create_dataset(
+            create_or_overwrite_array(
+                root=root,
                 name=component,
                 shape=level_shape,
                 chunks=level_chunks,
@@ -3312,19 +3319,198 @@ def resolve_data_store_path(
     Returns
     -------
     pathlib.Path
-        Destination Zarr store path. Existing Zarr/N5 sources are reused
-        in-place; non-Zarr sources are materialized as ``data_store.zarr``
-        next to ``experiment.yml``.
+        Destination Zarr store path. ClearEx-managed stores are reused
+        in-place; external Zarr/N5 sources are materialized into a sibling
+        ClearEx-managed store; non-Zarr sources are materialized as
+        ``data_store.zarr`` next to ``experiment.yml``.
 
     Raises
     ------
     None
         This helper does not raise custom exceptions.
     """
+    override_path = str(os.environ.get("CLEAREX_OVERRIDE_ANALYSIS_STORE_PATH", "")).strip()
+    if override_path:
+        return Path(override_path).expanduser().resolve()
+
     source = Path(source_path).expanduser().resolve()
     if _is_zarr_like_path(source):
-        return source
+        if is_clearex_analysis_store(source):
+            return source
+        return resolve_external_analysis_store_path(source)
     return (experiment.path.parent / "data_store.zarr").resolve()
+
+
+def _create_synthetic_experiment(
+    *,
+    source_path: Path,
+    source_shape: tuple[int, ...],
+    source_axes: AxesSpec,
+) -> "NavigateExperiment":
+    """Create a minimal synthetic experiment for direct-source materialization."""
+    axes = tuple(source_axes or ())
+    axis_sizes = {axis: int(source_shape[idx]) for idx, axis in enumerate(axes)}
+    channel_count = max(1, int(axis_sizes.get("c", 1)))
+    return NavigateExperiment(
+        path=source_path,
+        raw={"source_path": str(source_path), "synthetic": True},
+        save_directory=source_path.parent,
+        file_type=str(source_path.suffix).upper().lstrip(".") or "ZARR",
+        microscope_name=None,
+        image_mode=None,
+        timepoints=max(1, int(axis_sizes.get("t", 1))),
+        number_z_steps=max(1, int(axis_sizes.get("z", source_shape[-3] if len(source_shape) >= 3 else 1))),
+        y_pixels=max(1, int(axis_sizes.get("y", source_shape[-2] if len(source_shape) >= 2 else 1))),
+        x_pixels=max(1, int(axis_sizes.get("x", source_shape[-1] if len(source_shape) >= 1 else 1))),
+        multiposition_count=max(1, int(axis_sizes.get("p", 1))),
+        selected_channels=[
+            NavigateChannel(name=f"channel_{idx}", laser=None, laser_index=None, exposure_ms=None, is_selected=True)
+            for idx in range(channel_count)
+        ],
+        xy_pixel_size_um=None,
+        z_step_um=None,
+    )
+
+
+def _legacy_n5_helper_python() -> Optional[str]:
+    """Return a Python executable that still exposes ``zarr.N5Store``."""
+    candidates: list[str] = []
+    env_candidate = str(os.environ.get("CLEAREX_LEGACY_N5_PYTHON", "")).strip()
+    if env_candidate:
+        candidates.append(env_candidate)
+    default_candidates = [
+        "/opt/anaconda3/bin/python",
+        shutil.which("python3"),
+        shutil.which("python"),
+    ]
+    for candidate in default_candidates:
+        if candidate:
+            candidates.append(str(candidate))
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            probe = subprocess.run(
+                [
+                    candidate,
+                    "-c",
+                    "import zarr,sys; sys.exit(0 if hasattr(zarr, 'N5Store') else 1)",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            continue
+        if probe.returncode == 0:
+            return candidate
+    return None
+
+
+def _materialize_n5_via_legacy_helper(
+    *,
+    experiment: "NavigateExperiment",
+    source_path: Path,
+    output_store_path: Path,
+    chunks: CanonicalShapeTpczyx,
+    pyramid_factors: tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+    ],
+) -> Path:
+    """Materialize an N5 source into an intermediate v2 ClearEx store."""
+    legacy_python = _legacy_n5_helper_python()
+    if legacy_python is None:
+        raise RuntimeError(
+            "N5 ingestion requires a legacy Python environment with zarr.N5Store. "
+            "Set CLEAREX_LEGACY_N5_PYTHON to a compatible interpreter."
+        )
+
+    legacy_output = resolve_legacy_v2_store_path(output_store_path)
+    repo_root = Path(__file__).resolve().parents[3]
+    command = [
+        legacy_python,
+        "-m",
+        "clearex.io.n5_legacy_helper",
+        "--experiment-path",
+        str(experiment.path),
+        "--source-path",
+        str(source_path),
+        "--output-store",
+        str(legacy_output),
+        "--chunks",
+        ",".join(str(int(value)) for value in chunks),
+        "--pyramid-factors",
+        json.dumps([[int(value) for value in axis_levels] for axis_levels in pyramid_factors]),
+    ]
+    subprocess.run(
+        command,
+        check=True,
+        cwd=str(repo_root),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        },
+    )
+    return legacy_output
+
+
+def migrate_analysis_store(
+    zarr_path: Union[str, Path],
+    *,
+    keep_backup: bool = True,
+) -> Path:
+    """Convert an existing ClearEx-managed store to Zarr v3 in place."""
+    store_path = Path(zarr_path).expanduser().resolve()
+    if not _is_zarr_like_path(store_path):
+        raise ValueError(f"Path is not a Zarr store: {store_path}")
+    if not is_clearex_analysis_store(store_path):
+        raise ValueError(f"Path is not a ClearEx-managed analysis store: {store_path}")
+    if detect_store_format(store_path) == 3:
+        return store_path
+
+    staging_path = resolve_staging_store_path(store_path)
+    if staging_path.exists():
+        shutil.rmtree(staging_path)
+
+    source_root = zarr.open_group(str(store_path), mode="r")
+    target_root = open_zarr_group(staging_path, mode="a", zarr_format=3)
+
+    def _copy_group(source_group: Any, target_group: Any) -> None:
+        target_group.attrs.update(to_jsonable(dict(getattr(source_group, "attrs", {}))))
+        for array_key in sorted(source_group.array_keys()):
+            source_array = source_group[array_key]
+            chunks = getattr(source_array, "chunks", None)
+            target_array = create_or_overwrite_array(
+                root=target_group,
+                name=str(array_key),
+                shape=tuple(int(v) for v in source_array.shape),
+                chunks=tuple(int(v) for v in chunks) if chunks is not None else None,
+                dtype=source_array.dtype,
+                overwrite=True,
+            )
+            da.to_zarr(da.from_zarr(source_array), target_array, compute=True)
+            target_array.attrs.update(
+                to_jsonable(dict(getattr(source_array, "attrs", {})))
+            )
+        for group_key in sorted(source_group.group_keys()):
+            child_target = target_group.require_group(str(group_key))
+            _copy_group(source_group[group_key], child_target)
+
+    _copy_group(source_root, target_root)
+    _ = replace_store_path(
+        staging_path=staging_path,
+        target_path=store_path,
+        keep_backup=keep_backup,
+    )
+    return store_path
 
 
 def materialize_experiment_data_store(
@@ -3409,9 +3595,60 @@ def materialize_experiment_data_store(
     if not source_resolved.exists():
         raise FileNotFoundError(source_resolved)
 
-    store_path = resolve_data_store_path(
+    final_store_path = resolve_data_store_path(
         experiment=experiment, source_path=source_resolved
     )
+    if (
+        source_resolved.suffix.lower() == ".n5"
+        and not is_clearex_analysis_store(source_resolved)
+        and str(os.environ.get("CLEAREX_LEGACY_N5_ACTIVE", "")).strip() != "1"
+    ):
+        _emit_progress(10, "Materializing N5 source via legacy helper")
+        legacy_store_path = _materialize_n5_via_legacy_helper(
+            experiment=experiment,
+            source_path=source_resolved,
+            output_store_path=final_store_path,
+            chunks=chunks,
+            pyramid_factors=pyramid_factors,
+        )
+        migrated_legacy_store = migrate_analysis_store(
+            legacy_store_path,
+            keep_backup=False,
+        )
+        _ = replace_store_path(
+            staging_path=migrated_legacy_store,
+            target_path=final_store_path,
+            keep_backup=False,
+        )
+        root = zarr.open_group(str(final_store_path), mode="r")
+        data = root["data"]
+        canonical_shape = _normalize_tpczyx_shape(tuple(int(size) for size in data.shape))
+        canonical_chunks = _normalize_write_chunks(
+            shape_tpczyx=canonical_shape,
+            chunks=tuple(int(value) for value in (data.chunks or chunks)),
+        )
+        return MaterializedDataStore(
+            source_path=source_resolved,
+            store_path=final_store_path,
+            source_component=None,
+            source_image_info=ImageInfo(
+                path=source_resolved,
+                shape=canonical_shape,
+                dtype=np.dtype(data.dtype),
+                axes="TPCZYX",
+                metadata={"legacy_n5_helper": True},
+            ),
+            data_image_info=ImageInfo(
+                path=final_store_path,
+                shape=canonical_shape,
+                dtype=np.dtype(data.dtype),
+                axes="TPCZYX",
+                metadata={"component": "data", "legacy_n5_helper": True},
+            ),
+            chunks_tpczyx=canonical_chunks,
+        )
+
+    working_store_path = resolve_staging_store_path(final_store_path)
     write_client = client if _is_zarr_like_path(source_resolved) else None
     source_aligned_worker_count: Optional[int] = None
     source_aligned_worker_memory_limit_bytes: Optional[int] = None
@@ -3483,13 +3720,15 @@ def materialize_experiment_data_store(
                 canonical = canonical.rechunk(normalized_chunks)
             _emit_progress(45, "Preparing chunk-batched canonical writes")
 
-        if (not force_rebuild) and has_complete_canonical_data_store(store_path):
+        if (not force_rebuild) and has_complete_canonical_data_store(final_store_path):
             _emit_progress(100, "Canonical data store is already complete")
-            data_root = zarr.open_group(str(store_path), mode="r")
-            data_chunks = tuple(int(value) for value in (data_root["data"].chunks or normalized_chunks))
+            data_root = zarr.open_group(str(final_store_path), mode="r")
+            data_chunks = tuple(
+                int(value) for value in (data_root["data"].chunks or normalized_chunks)
+            )
             return MaterializedDataStore(
                 source_path=source_resolved,
-                store_path=store_path,
+                store_path=final_store_path,
                 source_component=source_component,
                 source_image_info=ImageInfo(
                     path=source_resolved,
@@ -3499,7 +3738,7 @@ def materialize_experiment_data_store(
                     metadata=dict(source_meta),
                 ),
                 data_image_info=ImageInfo(
-                    path=store_path,
+                    path=final_store_path,
                     shape=canonical_shape,
                     dtype=source_dtype,
                     axes="TPCZYX",
@@ -3510,6 +3749,8 @@ def materialize_experiment_data_store(
                     chunks=data_chunks,
                 ),
             )
+
+        store_path = working_store_path
 
         def _write_canonical_component(
             *,
@@ -3596,9 +3837,7 @@ def materialize_experiment_data_store(
                 chunks_tpczyx=normalized_chunks,
             )
 
-        should_stage_same_component = (
-            store_path == source_resolved and source_component == "data"
-        )
+        should_stage_same_component = False
         checkpoint_resume_supported = not should_stage_same_component
         root = zarr.open_group(str(store_path), mode="a")
         existing_progress_record = _read_ingestion_progress_record(root)
@@ -3696,111 +3935,56 @@ def materialize_experiment_data_store(
                 record=ingestion_record,
             )
 
-        if should_stage_same_component:
-            # Resume is disabled for staged same-component rewrites.
-            resume_from_checkpoint = False
-            base_start_region = 0
-            temp_component = "__clearex_tmp_data"
-            if temp_component in root:
-                del root[temp_component]
-            root.create_dataset(
-                name=temp_component,
-                shape=canonical_shape,
-                chunks=normalized_chunks,
-                dtype=source_dtype.name,
-                overwrite=True,
-            )
-            _write_canonical_component(
-                component=temp_component,
-                progress_start=55,
-                progress_end=82,
-                progress_label="Writing staged canonical data",
-                start_region_index=0,
-                batch_completed_callback=_persist_base_progress,
-            )
-            _emit_progress(82, "Swapping staged data into canonical component")
-            if "data" in root:
-                del root["data"]
-            root.move(temp_component, "data")
-            ingestion_record["swap_completed"] = True
-            ingestion_record["updated_utc"] = _utc_now_iso()
-            _write_ingestion_progress_record(
-                store_path=store_path,
-                record=ingestion_record,
-            )
+        initialize_analysis_store(
+            experiment=experiment,
+            zarr_path=store_path,
+            overwrite=not resume_from_checkpoint,
+            chunks=chunks,
+            pyramid_factors=pyramid_factors,
+            dtype=source_dtype.name,
+            shape_tpczyx=canonical_shape,
+        )
+        _write_canonical_component(
+            component="data",
+            progress_start=55,
+            progress_end=70,
+            progress_label="Writing canonical data",
+            start_region_index=base_start_region,
+            batch_completed_callback=_persist_base_progress,
+        )
+        ingestion_record["swap_completed"] = True
+        ingestion_record["updated_utc"] = _utc_now_iso()
+        _write_ingestion_progress_record(
+            store_path=store_path,
+            record=ingestion_record,
+        )
 
-            initialize_analysis_store(
-                experiment=experiment,
-                zarr_path=store_path,
-                overwrite=False,
-                chunks=chunks,
-                pyramid_factors=pyramid_factors,
-                dtype=source_dtype.name,
-                shape_tpczyx=canonical_shape,
-            )
-            _materialize_data_pyramid(
-                store_path=store_path,
-                base_chunks_tpczyx=normalized_chunks,
-                pyramid_factors=pyramid_factors,
-                client=client,
-                progress_callback=progress_callback,
-                progress_start=86,
-                progress_end=96,
-                preserve_existing=False,
-                level_progress_callback=_persist_level_progress,
-            )
-            _emit_progress(97, "Finalizing store metadata")
-        else:
-            initialize_analysis_store(
-                experiment=experiment,
-                zarr_path=store_path,
-                overwrite=not resume_from_checkpoint,
-                chunks=chunks,
-                pyramid_factors=pyramid_factors,
-                dtype=source_dtype.name,
-                shape_tpczyx=canonical_shape,
-            )
-            _write_canonical_component(
-                component="data",
-                progress_start=55,
-                progress_end=70,
-                progress_label="Writing canonical data",
-                start_region_index=base_start_region,
-                batch_completed_callback=_persist_base_progress,
-            )
-            ingestion_record["swap_completed"] = True
-            ingestion_record["updated_utc"] = _utc_now_iso()
-            _write_ingestion_progress_record(
-                store_path=store_path,
-                record=ingestion_record,
-            )
+        start_regions_by_component: Dict[str, int] = {}
+        if resume_from_checkpoint:
+            pyramid_progress = ingestion_record.get("pyramid_progress", {})
+            if isinstance(pyramid_progress, dict):
+                for component, payload in pyramid_progress.items():
+                    if not isinstance(payload, dict):
+                        continue
+                    try:
+                        completed = int(payload.get("completed_regions", 0))
+                    except Exception:
+                        continue
+                    start_regions_by_component[str(component)] = max(0, int(completed))
 
-            start_regions_by_component: Dict[str, int] = {}
-            if resume_from_checkpoint:
-                pyramid_progress = ingestion_record.get("pyramid_progress", {})
-                if isinstance(pyramid_progress, dict):
-                    for component, payload in pyramid_progress.items():
-                        if not isinstance(payload, dict):
-                            continue
-                        try:
-                            completed = int(payload.get("completed_regions", 0))
-                        except Exception:
-                            continue
-                        start_regions_by_component[str(component)] = max(0, int(completed))
-
-            _materialize_data_pyramid(
-                store_path=store_path,
-                base_chunks_tpczyx=normalized_chunks,
-                pyramid_factors=pyramid_factors,
-                client=client,
-                progress_callback=progress_callback,
-                progress_start=72,
-                progress_end=96,
-                start_regions_by_component=start_regions_by_component,
-                preserve_existing=resume_from_checkpoint,
-                level_progress_callback=_persist_level_progress,
-            )
-            _emit_progress(97, "Finalizing store metadata")
+        _materialize_data_pyramid(
+            store_path=store_path,
+            base_chunks_tpczyx=normalized_chunks,
+            pyramid_factors=pyramid_factors,
+            client=client,
+            progress_callback=progress_callback,
+            progress_start=72,
+            progress_end=96,
+            start_regions_by_component=start_regions_by_component,
+            preserve_existing=resume_from_checkpoint,
+            level_progress_callback=_persist_level_progress,
+        )
+        _emit_progress(97, "Finalizing store metadata")
 
         _mark_ingestion_completed(record=ingestion_record)
         _write_ingestion_progress_record(
@@ -3808,7 +3992,13 @@ def materialize_experiment_data_store(
             record=ingestion_record,
         )
 
-    root = zarr.open_group(str(store_path), mode="a")
+    _ = replace_store_path(
+        staging_path=store_path,
+        target_path=final_store_path,
+        keep_backup=False,
+    )
+
+    root = zarr.open_group(str(final_store_path), mode="a")
     source_axes_attr = list(source_axes) if source_axes is not None else None
     source_metadata_path = str(source_meta.get("source_path", source_resolved))
     voxel_size_um_zyx = None
@@ -3890,7 +4080,7 @@ def materialize_experiment_data_store(
         metadata=dict(source_meta),
     )
     data_image_info = ImageInfo(
-        path=store_path,
+        path=final_store_path,
         shape=canonical_shape,
         dtype=source_dtype,
         axes="TPCZYX",
@@ -3899,7 +4089,7 @@ def materialize_experiment_data_store(
     _emit_progress(100, "Materialization complete")
     return MaterializedDataStore(
         source_path=source_resolved,
-        store_path=store_path,
+        store_path=final_store_path,
         source_component=source_component,
         source_image_info=source_image_info,
         data_image_info=data_image_info,
@@ -5002,6 +5192,7 @@ def initialize_analysis_store(
 
     output_path = Path(zarr_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    target_zarr_format = int(str(os.environ.get("CLEAREX_TARGET_ZARR_FORMAT", "3")))
 
     if shape_tpczyx is None:
         z_size, y_size, x_size = infer_zyx_shape(
@@ -5050,7 +5241,11 @@ def initialize_analysis_store(
             float(experiment.xy_pixel_size_um),
         ]
 
-    root = zarr.open_group(str(output_path), mode="a")
+    root = open_zarr_group(
+        output_path,
+        mode="a",
+        zarr_format=target_zarr_format if detect_store_format(output_path) is None else None,
+    )
     root.require_group("results")
     root.require_group("provenance")
     spatial_calibration_payload = spatial_calibration_to_dict(
@@ -5058,7 +5253,7 @@ def initialize_analysis_store(
     )
     if "data" in root:
         if overwrite:
-            del root["data"]
+            clear_component(root, "data")
         else:
             existing = root["data"]
             existing_chunks = (
@@ -5097,7 +5292,8 @@ def initialize_analysis_store(
             )
             return output_path
 
-    root.create_dataset(
+    create_or_overwrite_array(
+        root=root,
         name="data",
         shape=shape,
         chunks=normalized_chunks,

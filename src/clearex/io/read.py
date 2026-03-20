@@ -41,6 +41,7 @@ import h5py
 from numpy.typing import NDArray
 
 # Local Imports
+from clearex.io.zarr_storage import extract_raw_axes_metadata
 
 ArrayLike = Union[NDArray[Any], da.Array]
 
@@ -561,12 +562,7 @@ class ZarrReader(Reader):
         try:
             group_attrs = dict(getattr(grp, "attrs", {}))
             attrs = getattr(array, "attrs", {})
-            axes = (
-                attrs.get("multiscales", [{}])[0].get("axes")
-                or group_attrs.get("multiscales", [{}])[0].get("axes")
-                or attrs.get("axes")
-                or group_attrs.get("axes")
-            )
+            axes = extract_raw_axes_metadata(array, group_attrs)
             meta = dict(group_attrs)
             meta.update(dict(attrs))
             meta["selected_array_path"] = array_path

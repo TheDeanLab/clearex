@@ -85,3 +85,10 @@ def test_stage_axis_map_flag_parses_string():
     args = create_parser().parse_args(["--stage-axis-map", "z=+x,y=none,x=+y"])
 
     assert args.stage_axis_map == "z=+x,y=none,x=+y"
+
+
+def test_migrate_store_subcommand_parses_path():
+    args = create_parser().parse_args(["migrate-store", "/tmp/example.zarr"])
+
+    assert args.command == "migrate-store"
+    assert args.store_path == "/tmp/example.zarr"

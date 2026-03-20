@@ -44,11 +44,13 @@ import zarr
 # Local Imports
 from clearex.io.read import ImageInfo, ImageOpener
 from clearex.io.experiment import (
+    _create_synthetic_experiment,
     create_dask_client,
     is_navigate_experiment_file,
     load_navigate_experiment,
     load_store_spatial_calibration,
     materialize_experiment_data_store,
+    migrate_analysis_store,
     resolve_data_store_path,
     resolve_experiment_data_path,
     save_store_spatial_calibration,
@@ -61,6 +63,7 @@ from clearex.io.provenance import (
     register_latest_output_reference,
     summarize_analysis_history,
 )
+from clearex.io.zarr_storage import is_clearex_analysis_store
 from clearex.detect.pipeline import (
     run_particle_detection_analysis,
 )
@@ -1357,24 +1360,67 @@ def _run_workflow(
                     }
                 )
             else:
-                opener = ImageOpener()
-                _, info = opener.open(
-                    input_path,
-                    prefer_dask=workflow.prefer_dask,
-                    chunks=workflow.chunks,
-                )
-                image_info = info
-                _log_loaded_image(info, logger)
-
                 if input_path and is_zarr_store_path(input_path):
-                    provenance_store_path = input_path
-                    runtime_spatial_calibration = (
-                        _resolve_effective_store_spatial_calibration(
-                            store_path=input_path,
-                            desired_calibration=workflow.spatial_calibration,
-                            persist=workflow.spatial_calibration_explicit,
+                    resolved_input = Path(input_path).expanduser().resolve()
+                    if is_clearex_analysis_store(resolved_input):
+                        opener = ImageOpener()
+                        _, info = opener.open(
+                            input_path,
+                            prefer_dask=workflow.prefer_dask,
+                            chunks=workflow.chunks,
                         )
+                        image_info = info
+                        _log_loaded_image(info, logger)
+                        provenance_store_path = input_path
+                        runtime_spatial_calibration = (
+                            _resolve_effective_store_spatial_calibration(
+                                store_path=input_path,
+                                desired_calibration=workflow.spatial_calibration,
+                                persist=workflow.spatial_calibration_explicit,
+                            )
+                        )
+                    else:
+                        synthetic_experiment = _create_synthetic_experiment(
+                            source_path=resolved_input,
+                            source_shape=tuple(),
+                            source_axes=None,
+                        )
+                        materialized = materialize_experiment_data_store(
+                            experiment=synthetic_experiment,
+                            source_path=resolved_input,
+                            chunks=workflow.zarr_save.chunks_tpczyx(),
+                            pyramid_factors=workflow.zarr_save.pyramid_tpczyx(),
+                        )
+                        image_info = materialized.source_image_info
+                        provenance_store_path = str(materialized.store_path)
+                        runtime_spatial_calibration = (
+                            _resolve_effective_store_spatial_calibration(
+                                store_path=provenance_store_path,
+                                desired_calibration=workflow.spatial_calibration,
+                                persist=workflow.spatial_calibration_explicit,
+                            )
+                        )
+                        _log_loaded_image(image_info, logger)
+                        step_records.append(
+                            {
+                                "name": "materialize_external_store",
+                                "parameters": {
+                                    "source_path": str(materialized.source_path),
+                                    "store_path": str(materialized.store_path),
+                                    "target_component": "data",
+                                    "chunks_tpczyx": list(materialized.chunks_tpczyx),
+                                },
+                            }
+                        )
+                else:
+                    opener = ImageOpener()
+                    _, info = opener.open(
+                        input_path,
+                        prefer_dask=workflow.prefer_dask,
+                        chunks=workflow.chunks,
                     )
+                    image_info = info
+                    _log_loaded_image(info, logger)
 
         step_records.append(
             {
@@ -2700,6 +2746,11 @@ def main() -> None:
     parser = create_parser()
     args = parser.parse_args()
     bootstrap_logger = _create_bootstrap_logger()
+
+    if getattr(args, "command", None) == "migrate-store":
+        migrated_path = migrate_analysis_store(str(args.store_path))
+        bootstrap_logger.info(f"Migrated ClearEx store to Zarr v3: {migrated_path}")
+        return
 
     try:
         workflow = _build_workflow_config(args)

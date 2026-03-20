@@ -48,6 +48,7 @@ import zarr
 
 # Local Imports
 from clearex.io.read import ImageInfo
+from clearex.io.zarr_storage import create_or_overwrite_array, write_dask_array
 from clearex.workflow import (
     WorkflowConfig,
     dask_backend_to_dict,
@@ -890,15 +891,21 @@ def store_latest_analysis_output(
 
     if isinstance(output_array, da.Array):
         data = output_array.rechunk(chunks) if chunks is not None else output_array
-        da.to_zarr(data, url=str(zarr_path), component=component, overwrite=True)
+        write_dask_array(
+            zarr_path=zarr_path,
+            component=component,
+            array=data,
+            overwrite=True,
+        )
     else:
         root = zarr.open_group(str(zarr_path), mode="a")
         results_group = root.require_group("results")
         analysis_group = results_group.require_group(key)
-        if "latest" in analysis_group:
-            del analysis_group["latest"]
-        analysis_group.create_dataset(
+        create_or_overwrite_array(
+            root=analysis_group,
             name="latest",
+            shape=tuple(int(v) for v in output_array.shape),
+            dtype=output_array.dtype,
             data=output_array,
             chunks=chunks,
             overwrite=True,

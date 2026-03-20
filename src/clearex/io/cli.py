@@ -282,6 +282,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Force non-interactive mode (overrides --gui)",
     )
 
+    subparsers = parser.add_subparsers(dest="command")
+    migrate_parser = subparsers.add_parser(
+        "migrate-store",
+        help="Convert an existing ClearEx-managed analysis store to Zarr v3.",
+    )
+    migrate_parser.add_argument("store_path", help="Path to the ClearEx store to migrate.")
+
     return parser
 
 

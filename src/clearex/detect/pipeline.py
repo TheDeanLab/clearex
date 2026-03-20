@@ -48,6 +48,7 @@ from clearex.detect.particles import (
     remove_close_blobs,
 )
 from clearex.io.provenance import register_latest_output_reference
+from clearex.io.zarr_storage import create_or_overwrite_array
 
 if TYPE_CHECKING:
     from dask.distributed import Client
@@ -553,8 +554,11 @@ def save_particle_detections_to_store(
 
     detection_array = np.asarray(detections, dtype=np.float32)
     row_chunks = int(min(max(1, detection_array.shape[0]), 16384))
-    latest_group.create_dataset(
+    create_or_overwrite_array(
+        root=latest_group,
         name="detections",
+        shape=tuple(int(v) for v in detection_array.shape),
+        dtype=detection_array.dtype,
         data=detection_array,
         chunks=(row_chunks, len(_PARTICLE_COLUMNS)),
         overwrite=True,
@@ -572,8 +576,11 @@ def save_particle_detections_to_store(
         else np.empty((0, 4), dtype=np.float32)
     )
     points_chunks = int(min(max(1, napari_points.shape[0]), 16384))
-    latest_group.create_dataset(
+    create_or_overwrite_array(
+        root=latest_group,
         name="points_tzyx",
+        shape=tuple(int(v) for v in napari_points.shape),
+        dtype=napari_points.dtype,
         data=napari_points,
         chunks=(points_chunks, 4),
         overwrite=True,

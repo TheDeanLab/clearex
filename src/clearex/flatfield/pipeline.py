@@ -46,6 +46,7 @@ from numpy.typing import NDArray
 import zarr
 
 from clearex.io.provenance import register_latest_output_reference
+from clearex.io.zarr_storage import write_dask_array
 
 if TYPE_CHECKING:
     from dask.distributed import Client
@@ -1368,10 +1369,11 @@ def _materialize_output_pyramid(
             downsampled = downsampled.rechunk(level_chunks)
 
         level_component = f"{base_parent}/data_pyramid/level_{level_index}"
-        write_task = da.to_zarr(
-            downsampled,
-            url=str(zarr_path),
+        write_task = write_dask_array(
+            zarr_path=zarr_path,
             component=level_component,
+            array=downsampled,
+            chunks=level_chunks,
             overwrite=True,
             compute=False,
         )

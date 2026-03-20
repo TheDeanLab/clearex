@@ -51,6 +51,7 @@ import zarr
 # Local Imports
 from clearex.io.experiment import load_navigate_experiment
 from clearex.io.provenance import register_latest_output_reference
+from clearex.io.zarr_storage import write_dask_array
 from clearex.workflow import (
     SpatialCalibrationConfig,
     format_spatial_calibration,
@@ -2053,7 +2054,6 @@ def _build_visualization_multiscale_components(
     source_chunks = (
         tuple(source_array.chunks) if source_array.chunks is not None else None
     )
-    source_dtype = np.dtype(source_array.dtype)
     level_paths: list[str] = [str(source_component)]
     factor_payload: list[list[int]] = [
         [int(value) for value in level_factors_tpczyx[0]]
@@ -2111,19 +2111,13 @@ def _build_visualization_multiscale_components(
             ),
             chunks_tpczyx=level_chunks,
         ):
-            root.create_dataset(
-                name=level_component,
-                shape=level_shape,
-                chunks=level_chunks,
-                dtype=source_dtype.name,
-                overwrite=True,
-            )
             with dask.config.set({"array.rechunk.method": "tasks"}):
                 rechunked = downsampled.rechunk(level_chunks)
-            da.to_zarr(
-                rechunked,
-                str(zarr_path),
+            write_dask_array(
+                zarr_path=zarr_path,
                 component=level_component,
+                array=rechunked,
+                chunks=level_chunks,
                 overwrite=True,
                 compute=True,
             )

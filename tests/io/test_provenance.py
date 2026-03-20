@@ -43,7 +43,58 @@ from clearex.io.provenance import (
     verify_provenance_chain,
 )
 from clearex.io.read import ImageInfo
+from clearex.io.zarr_storage import (
+    create_or_overwrite_array,
+    open_group as open_zarr_group,
+)
 from clearex.workflow import SpatialCalibrationConfig, WorkflowConfig
+
+
+def _wrap_test_zarr_group(group):
+    class _CompatZarrGroup:
+        def __init__(self, inner_group):
+            self._inner_group = inner_group
+
+        def __getattr__(self, name):
+            return getattr(self._inner_group, name)
+
+        def __contains__(self, key):
+            return key in self._inner_group
+
+        def __delitem__(self, key):
+            del self._inner_group[key]
+
+        def __getitem__(self, key):
+            item = self._inner_group[key]
+            if hasattr(item, "array_keys") and hasattr(item, "group_keys"):
+                return _wrap_test_zarr_group(item)
+            return item
+
+        def create_dataset(self, name, **kwargs):
+            return create_or_overwrite_array(root=self._inner_group, name=name, **kwargs)
+
+        def create_group(self, name, **kwargs):
+            return _wrap_test_zarr_group(self._inner_group.create_group(name, **kwargs))
+
+        def require_group(self, name, **kwargs):
+            return _wrap_test_zarr_group(
+                self._inner_group.require_group(name, **kwargs)
+            )
+
+    return _CompatZarrGroup(group)
+
+
+def _open_test_zarr_group(
+    path: Path | str,
+    *,
+    mode: str = "a",
+    zarr_format: int | None = None,
+):
+    if zarr_format is None and mode in {"w", "w-"}:
+        zarr_format = 2
+    return _wrap_test_zarr_group(
+        open_zarr_group(path, mode=mode, zarr_format=zarr_format)
+    )
 
 
 def test_is_zarr_store_path():
@@ -54,7 +105,7 @@ def test_is_zarr_store_path():
 
 def test_persist_run_provenance_hash_chain(tmp_path: Path):
     store_path = tmp_path / "provenance_test.zarr"
-    zarr.open_group(str(store_path), mode="w")
+    _open_test_zarr_group(store_path, mode="w")
 
     workflow = WorkflowConfig(
         file=str(store_path),
@@ -107,7 +158,7 @@ def test_persist_run_provenance_hash_chain(tmp_path: Path):
 
 def test_persist_run_provenance_records_spatial_calibration(tmp_path: Path) -> None:
     store_path = tmp_path / "spatial_provenance.zarr"
-    zarr.open_group(str(store_path), mode="w")
+    _open_test_zarr_group(store_path, mode="w")
     workflow = WorkflowConfig(
         file=str(store_path),
         visualization=True,
@@ -136,7 +187,7 @@ def test_persist_run_provenance_records_spatial_calibration(tmp_path: Path) -> N
 
 def test_verify_provenance_chain_detects_tampering(tmp_path: Path):
     store_path = tmp_path / "tamper_test.zarr"
-    zarr.open_group(str(store_path), mode="w")
+    _open_test_zarr_group(store_path, mode="w")
 
     workflow = WorkflowConfig(file=str(store_path), visualization=True)
     image_info = ImageInfo(path=store_path, shape=(2, 2), dtype=np.uint8)
@@ -160,7 +211,7 @@ def test_verify_provenance_chain_detects_tampering(tmp_path: Path):
 
 def test_store_latest_analysis_output_overwrites_previous_version(tmp_path: Path):
     store_path = tmp_path / "output_policy_test.zarr"
-    zarr.open_group(str(store_path), mode="w")
+    _open_test_zarr_group(store_path, mode="w")
 
     first = np.zeros((4, 4), dtype=np.uint8)
     second = np.ones((4, 4), dtype=np.uint8)
@@ -196,7 +247,7 @@ def test_store_latest_analysis_output_overwrites_previous_version(tmp_path: Path
 
 def test_summarize_analysis_history_reports_matching_parameters(tmp_path: Path):
     store_path = tmp_path / "history_test.zarr"
-    root = zarr.open_group(str(store_path), mode="w")
+    root = _open_test_zarr_group(store_path, mode="w")
     root.create_dataset(
         name="data",
         shape=(1, 1, 1, 2, 2, 2),
@@ -254,7 +305,7 @@ def test_summarize_analysis_history_reports_matching_parameters(tmp_path: Path):
 
 def test_summarize_analysis_history_ignores_skipped_steps(tmp_path: Path):
     store_path = tmp_path / "history_skip_test.zarr"
-    root = zarr.open_group(str(store_path), mode="w")
+    root = _open_test_zarr_group(store_path, mode="w")
     root.create_dataset(
         name="data",
         shape=(1, 1, 1, 2, 2, 2),
@@ -304,7 +355,7 @@ def test_load_latest_completed_workflow_state_skips_cancelled_runs(
     tmp_path: Path,
 ) -> None:
     store_path = tmp_path / "latest_completed_workflow.zarr"
-    zarr.open_group(str(store_path), mode="w")
+    _open_test_zarr_group(store_path, mode="w")
 
     completed_workflow = WorkflowConfig(file=str(store_path), visualization=True)
     image_info = ImageInfo(path=store_path, shape=(2, 2), dtype=np.uint8)
@@ -333,7 +384,7 @@ def test_load_latest_completed_workflow_state_skips_cancelled_runs(
 
 def test_latest_analysis_gui_state_round_trip(tmp_path: Path) -> None:
     store_path = tmp_path / "analysis_gui_state.zarr"
-    zarr.open_group(str(store_path), mode="w")
+    _open_test_zarr_group(store_path, mode="w")
     payload = {
         "flatfield": True,
         "deconvolution": False,

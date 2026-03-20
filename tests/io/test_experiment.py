@@ -27,6 +27,7 @@
 # Standard Library Imports
 from pathlib import Path
 import json
+import subprocess
 
 # Third Party Imports
 import dask.array as da
@@ -48,12 +49,19 @@ from clearex.io.experiment import (
     load_navigate_experiment,
     load_store_spatial_calibration,
     materialize_experiment_data_store,
+    migrate_analysis_store,
     resolve_data_store_path,
     resolve_experiment_data_path,
     save_store_spatial_calibration,
     write_zyx_block,
 )
 from clearex.io.read import ImageInfo
+from clearex.io.zarr_storage import (
+    create_or_overwrite_array,
+    open_group as open_zarr_group,
+    resolve_external_analysis_store_path,
+    resolve_staging_store_path,
+)
 from clearex.workflow import SpatialCalibrationConfig
 
 
@@ -86,6 +94,77 @@ def _write_minimal_experiment(
         "MultiPositions": [[0, 0, 0], [1, 1, 1], [2, 2, 2]],
     }
     path.write_text(json.dumps(payload, indent=2))
+
+
+def _wrap_test_zarr_group(group):
+    class _CompatZarrGroup:
+        def __init__(self, inner_group):
+            self._inner_group = inner_group
+
+        def __getattr__(self, name):
+            return getattr(self._inner_group, name)
+
+        def __contains__(self, key):
+            return key in self._inner_group
+
+        def __delitem__(self, key):
+            del self._inner_group[key]
+
+        def __getitem__(self, key):
+            item = self._inner_group[key]
+            if hasattr(item, "array_keys") and hasattr(item, "group_keys"):
+                return _wrap_test_zarr_group(item)
+            return item
+
+        def create_dataset(self, name, **kwargs):
+            return create_or_overwrite_array(root=self._inner_group, name=name, **kwargs)
+
+        def create_group(self, name, **kwargs):
+            return _wrap_test_zarr_group(self._inner_group.create_group(name, **kwargs))
+
+        def require_group(self, name, **kwargs):
+            return _wrap_test_zarr_group(
+                self._inner_group.require_group(name, **kwargs)
+            )
+
+    return _CompatZarrGroup(group)
+
+
+def _open_test_zarr_group(
+    path: Path | str,
+    *,
+    mode: str = "a",
+    zarr_format: int | None = None,
+):
+    if zarr_format is None and mode in {"w", "w-"}:
+        zarr_format = 2
+    return _wrap_test_zarr_group(
+        open_zarr_group(path, mode=mode, zarr_format=zarr_format)
+    )
+
+
+def _write_real_n5_store(path: Path, entries: dict[str, np.ndarray]) -> None:
+    python_executable = experiment_module._legacy_n5_helper_python()
+    if python_executable is None:
+        pytest.skip("No zarr2-compatible Python with N5Store is available.")
+
+    payload = {name: np.asarray(array).tolist() for name, array in entries.items()}
+    command = [
+        python_executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            "import json, numpy as np, sys, zarr; "
+            "target = Path(sys.argv[1]); "
+            "entries = json.loads(sys.argv[2]); "
+            "root = zarr.group(store=zarr.N5Store(str(target)), overwrite=True); "
+            "[root.create_dataset(name, data=np.asarray(values, dtype=np.uint16), "
+            "chunks=(1, 3, 4), overwrite=True) for name, values in entries.items()]"
+        ),
+        str(path),
+        json.dumps(payload),
+    ]
+    subprocess.run(command, check=True)
 
 
 def _write_multipositions_sidecar(path: Path, count: int) -> None:
@@ -232,6 +311,8 @@ def test_create_dask_client_gpu_worker_env_merges_inherited_library_path(
         lambda: ["/cuda/runtime/lib", "/cuda/cudnn/lib"],
     )
     path_env_var = experiment_module._library_path_env_vars_for_platform()[0]
+    for extra_env_var in experiment_module._library_path_env_vars_for_platform()[1:]:
+        monkeypatch.delenv(extra_env_var, raising=False)
     monkeypatch.setenv(path_env_var, "/cluster/custom/lib")
 
     _ = experiment_module.create_dask_client(
@@ -435,7 +516,7 @@ def test_load_store_spatial_calibration_defaults_to_identity_for_legacy_store(
     tmp_path: Path,
 ):
     store_path = tmp_path / "legacy_store.zarr"
-    root = zarr.open_group(str(store_path), mode="w")
+    root = _open_test_zarr_group(store_path, mode="w")
     root.create_dataset(
         name="data",
         shape=(1, 1, 1, 2, 2, 2),
@@ -456,7 +537,7 @@ def test_save_store_spatial_calibration_round_trip_and_preserves_existing_mappin
     _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="H5")
     experiment = load_navigate_experiment(experiment_path)
     store_path = tmp_path / "store_with_mapping.zarr"
-    root = zarr.open_group(str(store_path), mode="w")
+    root = _open_test_zarr_group(store_path, mode="w")
     root.create_dataset(
         name="data",
         shape=(1, 1, 1, 2, 2, 2),
@@ -638,6 +719,45 @@ def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(tmp_p
     )
 
 
+def test_resolve_data_store_path_uses_sibling_store_for_external_zarr(tmp_path: Path):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="OME-ZARR",
+    )
+    experiment = load_navigate_experiment(experiment_path)
+    source_store = tmp_path / "input.ome.zarr"
+    _open_test_zarr_group(source_store, mode="w")
+
+    resolved = resolve_data_store_path(experiment, source_store)
+
+    assert resolved == resolve_external_analysis_store_path(source_store)
+
+
+def test_migrate_analysis_store_converts_v2_store_in_place(tmp_path: Path):
+    store_path = tmp_path / "analysis_store.zarr"
+    root = _open_test_zarr_group(store_path, mode="w")
+    root.attrs["schema"] = "clearex.analysis_store.v1"
+    root.attrs["axes"] = ["t", "p", "c", "z", "y", "x"]
+    root.create_dataset(
+        "data",
+        data=np.arange(24, dtype=np.uint16).reshape(1, 1, 1, 2, 3, 4),
+        chunks=(1, 1, 1, 1, 3, 4),
+        overwrite=True,
+    )
+
+    migrated = migrate_analysis_store(store_path)
+
+    assert migrated == store_path.resolve()
+    assert (store_path / "zarr.json").exists()
+    reopened = zarr.open_group(str(store_path), mode="r")
+    assert np.array_equal(
+        np.asarray(reopened["data"]),
+        np.arange(24, dtype=np.uint16).reshape(1, 1, 1, 2, 3, 4),
+    )
+
+
 def test_materialize_experiment_data_store_batches_chunk_writes(
     tmp_path: Path, monkeypatch
 ):
@@ -673,6 +793,7 @@ def test_materialize_experiment_data_store_batches_chunk_writes(
     expected_store = (experiment_path.parent / "data_store.zarr").resolve()
     root = zarr.open_group(str(expected_store), mode="r")
     assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert not resolve_staging_store_path(expected_store).exists()
     assert len(compute_calls) == 8
 
 
@@ -714,8 +835,9 @@ def test_materialize_experiment_data_store_resumes_after_interrupted_base_write(
             pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
         )
 
-    expected_store = (experiment_path.parent / "data_store.zarr").resolve()
-    root = zarr.open_group(str(expected_store), mode="r")
+    staging_store = resolve_staging_store_path(experiment_path.parent / "data_store.zarr")
+    assert not (experiment_path.parent / "data_store.zarr").exists()
+    root = zarr.open_group(str(staging_store), mode="r")
     progress = dict(root.attrs["ingestion_progress"])
     assert progress["status"] == "in_progress"
     assert progress["base_progress"]["completed_regions"] == 3
@@ -739,6 +861,7 @@ def test_materialize_experiment_data_store_resumes_after_interrupted_base_write(
     assert resume_call_count["value"] == 5
     root = zarr.open_group(str(materialized.store_path), mode="r")
     assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert not staging_store.exists()
     progress = dict(root.attrs["ingestion_progress"])
     assert progress["status"] == "completed"
     assert progress["base_progress"]["completed_regions"] == 8
@@ -771,7 +894,9 @@ def test_materialize_experiment_data_store_handles_multibatch_base_and_pyramid(
     )
 
 
-def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: Path):
+def test_materialize_experiment_data_store_materializes_external_zarr_store_to_sibling_store(
+    tmp_path: Path,
+):
     experiment_path = tmp_path / "experiment.yml"
     _write_minimal_experiment(
         experiment_path, save_directory=tmp_path, file_type="OME-ZARR"
@@ -780,7 +905,7 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
 
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
     source_store = tmp_path / "source.ome.zarr"
-    source_root = zarr.open_group(str(source_store), mode="w")
+    source_root = _open_test_zarr_group(source_store, mode="w")
     source_root.create_dataset("raw", data=source_data, chunks=(1, 3, 4), overwrite=True)
     source_root["raw"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
 
@@ -791,8 +916,9 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
         pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
     )
 
-    assert materialized.store_path == source_store.resolve()
-    root = zarr.open_group(str(source_store), mode="r")
+    expected_store = resolve_external_analysis_store_path(source_store)
+    assert materialized.store_path == expected_store
+    root = zarr.open_group(str(materialized.store_path), mode="r")
     assert "data" in root
     assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
     assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
@@ -800,11 +926,14 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
     assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
     assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
     assert not (experiment_path.parent / "data_store.zarr").exists()
+    source_root = zarr.open_group(str(source_store), mode="r")
+    assert "raw" in source_root
+    assert "data" not in source_root
 
 
 def test_has_canonical_data_component_detects_ready_store(tmp_path: Path):
     store_path = tmp_path / "ready_store.n5"
-    root = zarr.open_group(str(store_path), mode="w")
+    root = _open_test_zarr_group(store_path, mode="w")
     root.create_dataset(
         "data",
         shape=(1, 2, 3, 4, 5, 6),
@@ -819,7 +948,7 @@ def test_has_canonical_data_component_detects_ready_store(tmp_path: Path):
 
 def test_has_canonical_data_component_rejects_noncanonical_store(tmp_path: Path):
     store_path = tmp_path / "raw_source.n5"
-    root = zarr.open_group(str(store_path), mode="w")
+    root = _open_test_zarr_group(store_path, mode="w")
     root.create_dataset(
         "data",
         shape=(2, 3, 4),
@@ -836,7 +965,7 @@ def test_has_complete_canonical_data_store_rejects_missing_expected_pyramid(
     tmp_path: Path,
 ):
     store_path = tmp_path / "incomplete_store.n5"
-    root = zarr.open_group(str(store_path), mode="w")
+    root = _open_test_zarr_group(store_path, mode="w")
     root.create_dataset(
         "data",
         shape=(1, 1, 1, 2, 4, 4),
@@ -943,7 +1072,9 @@ def test_materialize_experiment_data_store_reuses_complete_store_by_default_and_
     assert rebuilt_root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
 
 
-def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_path: Path):
+def test_materialize_experiment_data_store_keeps_external_source_store_immutable(
+    tmp_path: Path,
+):
     experiment_path = tmp_path / "experiment.yml"
     _write_minimal_experiment(
         experiment_path, save_directory=tmp_path, file_type="OME-ZARR"
@@ -952,11 +1083,11 @@ def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_pa
 
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
     source_store = tmp_path / "source_data.zarr"
-    source_root = zarr.open_group(str(source_store), mode="w")
+    source_root = _open_test_zarr_group(source_store, mode="w")
     source_root.create_dataset("data", data=source_data, chunks=(1, 3, 4), overwrite=True)
     source_root["data"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
 
-    materialize_experiment_data_store(
+    materialized = materialize_experiment_data_store(
         experiment=experiment,
         source_path=source_store,
         chunks=(1, 1, 1, 2, 2, 2),
@@ -964,11 +1095,13 @@ def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_pa
     )
 
     root = zarr.open_group(str(source_store), mode="r")
-    assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
-    assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
-    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
-    assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
-    assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
+    assert tuple(root["data"].shape) == (2, 3, 4)
+    assert tuple(root["data"].chunks) == (1, 3, 4)
+    assert np.array_equal(np.array(root["data"][:]), source_data)
+    assert "data_pyramid" not in root
+    sibling_root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert tuple(sibling_root["data"].shape) == (1, 1, 1, 2, 3, 4)
+    assert tuple(sibling_root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
 
 
 def test_materialize_experiment_data_store_stacks_tiff_positions_and_channels(
@@ -1113,42 +1246,21 @@ def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
     experiment = load_navigate_experiment(experiment_path)
 
     source_path = tmp_path / "CH00_000000.n5"
-    source_root = zarr.open_group(str(source_path), mode="w")
     expected_blocks = {
         (0, 0): np.full((2, 3, 4), fill_value=11, dtype=np.uint16),
         (1, 0): np.full((2, 3, 4), fill_value=21, dtype=np.uint16),
         (0, 1): np.full((2, 3, 4), fill_value=31, dtype=np.uint16),
         (1, 1): np.full((2, 3, 4), fill_value=41, dtype=np.uint16),
     }
-    source_root.create_dataset(
-        "setup0/timepoint0/s0",
-        data=expected_blocks[(0, 0)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup1/timepoint0/s0",
-        data=expected_blocks[(1, 0)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup2/timepoint0/s0",
-        data=expected_blocks[(0, 1)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup3/timepoint0/s0",
-        data=expected_blocks[(1, 1)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup99/timepoint0/s0",
-        data=np.zeros((2, 3, 4), dtype=np.uint16),
-        chunks=(1, 3, 4),
-        overwrite=True,
+    _write_real_n5_store(
+        source_path,
+        {
+            "setup0/timepoint0/s0": expected_blocks[(0, 0)],
+            "setup1/timepoint0/s0": expected_blocks[(1, 0)],
+            "setup2/timepoint0/s0": expected_blocks[(0, 1)],
+            "setup3/timepoint0/s0": expected_blocks[(1, 1)],
+            "setup99/timepoint0/s0": np.zeros((2, 3, 4), dtype=np.uint16),
+        },
     )
 
     _write_bdv_xml(
@@ -1196,7 +1308,7 @@ def test_materialize_experiment_data_store_stacks_bdv_ome_zarr_setups(
     experiment = load_navigate_experiment(experiment_path)
 
     source_path = tmp_path / "CH00_000000.ome.zarr"
-    source_root = zarr.open_group(str(source_path), mode="w")
+    source_root = _open_test_zarr_group(source_path, mode="w")
     expected_blocks = {
         (0, 0): np.full((2, 3, 4), fill_value=12, dtype=np.uint16),
         (1, 0): np.full((2, 3, 4), fill_value=22, dtype=np.uint16),
@@ -1304,7 +1416,7 @@ def test_materialize_experiment_data_store_uses_source_aligned_plane_writes(
 
     source_data = np.arange(4 * 8 * 10, dtype=np.uint16).reshape(4, 8, 10)
     source_store = tmp_path / "source.ome.zarr"
-    source_root = zarr.open_group(str(source_store), mode="w")
+    source_root = _open_test_zarr_group(source_store, mode="w")
     source_root.create_dataset("raw", data=source_data, chunks=(1, 8, 10), overwrite=True)
     source_root["raw"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
 
@@ -1361,7 +1473,7 @@ def test_materialize_experiment_data_store_falls_back_to_chunk_batched_writes(
 
     source_data = np.arange(4 * 8 * 10, dtype=np.uint16).reshape(4, 8, 10)
     source_store = tmp_path / "source.ome.zarr"
-    source_root = zarr.open_group(str(source_store), mode="w")
+    source_root = _open_test_zarr_group(source_store, mode="w")
     source_root.create_dataset("raw", data=source_data, chunks=(2, 8, 10), overwrite=True)
     source_root["raw"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
 
