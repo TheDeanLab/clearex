@@ -10,9 +10,7 @@ for all channels to produce one blended multi-channel mosaic TIFF per timepoint.
 Transforms are estimated against a fixed anchor position using only expected
 left-right overlap regions to suppress spurious global matches.
 
-uv run scripts/register_mip_tiles_antspy.py --input-dir /endosome/archive/bioinformatics/Danuser_lab/Dean/dean/2026-03-12-dvOPM-liver/
-  │ CH00_000000.n5_mip_export/latest --projection xy --time-index 0 --registration-channel 0 --overlap-fraction 0.05 --aff-iterations 50x25x10x0 --aff-shrink-factors 8x4x2x1
-  │ --aff-smoothing-sigmas 3x2x1x0 --aff-random-sampling-rate 0.2
+uv run scripts/register_mip_tiles_antspy.py --input-dir /endosome/archive/bioinformatics/Danuser_lab/Dean/dean/2026-03-12-dvOPM-liver/CH00_000000.n5_mip_export/latest --projection xy --time-index 0 --registration-channel 0 --overlap-fraction 0.05 --aff-iterations 50x25x10x0 --aff-shrink-factors 8x4x2x1 --aff-smoothing-sigmas 3x2x1x0 --aff-random-sampling-rate 0.2
 """
 
 from __future__ import annotations
