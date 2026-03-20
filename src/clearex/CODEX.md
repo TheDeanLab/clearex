@@ -23,6 +23,9 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Canonical source array component is `data`.
 - Analysis outputs use `results/<analysis>/latest/...` (latest-only replacement).
 - Provenance records are append-only and include workflow + runtime parameters.
+- Root store attr `spatial_calibration` is the canonical store-level
+  stage-to-world axis mapping for Navigate multiposition placement; missing
+  attrs mean identity mapping.
 
 ## Dask Workload Policy
 
@@ -83,6 +86,30 @@ This directory contains the runtime orchestration surface for ClearEx.
     are persisted in workflow parameters/provenance metadata,
   - auto-built pyramids are cached under
     `results/visualization_cache/pyramids/...`.
+
+## Recent Runtime Updates (2026-03-20)
+
+- Added store-level spatial calibration for Navigate multiposition datasets:
+  - `WorkflowConfig` now carries `SpatialCalibrationConfig`,
+  - canonical text form is `z=...,y=...,x=...`,
+  - allowed bindings are `+/-x`, `+/-y`, `+/-z`, `+/-f`, and `none`,
+  - the root store attr `spatial_calibration` persists schema, mapping, and
+    `theta_mode`,
+  - missing attrs resolve to identity instead of requiring backfilled config.
+- Setup flow now exposes a lightweight `Spatial Calibration` control per
+  experiment:
+  - one draft is kept per experiment while setup is open,
+  - existing stores prefill the current mapping,
+  - `Next` writes the resolved mapping to every reused or newly prepared store.
+- Headless workflows now accept `--stage-axis-map` for Navigate
+  `experiment.yml` inputs and existing Zarr/N5 stores.
+- Visualization position affines now derive world `z/y/x` translations from
+  the stored calibration:
+  - Navigate `F` is available as a placement source,
+  - `none` zeroes a world axis translation,
+  - sign inversion is supported,
+  - `THETA` remains rotation of the `z/y` plane about world `x`.
+- Provenance now records the effective spatial calibration used by the run.
 
 ## Sequencing and Inputs
 
