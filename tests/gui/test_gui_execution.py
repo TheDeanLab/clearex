@@ -539,6 +539,22 @@ def test_reset_analysis_selection_for_next_run_preserves_scope() -> None:
     assert reset.registration is False
 
 
+def test_reset_analysis_selection_for_next_run_preserves_spatial_calibration() -> None:
+    workflow = app_module.WorkflowConfig(
+        file="/tmp/cell_001/data_store.zarr",
+        spatial_calibration=app_module.SpatialCalibrationConfig(
+            stage_axis_map_zyx=("+x", "none", "+y")
+        ),
+        spatial_calibration_explicit=True,
+        visualization=True,
+    )
+
+    reset = app_module._reset_analysis_selection_for_next_run(workflow)
+
+    assert reset.spatial_calibration == workflow.spatial_calibration
+    assert reset.spatial_calibration_explicit is True
+
+
 def test_load_experiment_list_file_rejects_invalid_format(tmp_path) -> None:
     list_path = tmp_path / f"broken{app_module._CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
     list_path.write_text('{"format":"wrong","experiments":["a"]}\n', encoding="utf-8")
@@ -612,6 +628,193 @@ def test_apply_experiment_overrides_populates_pixel_size_field() -> None:
     )
 
     assert updated["pixel_size"] == "z=0.45, y=0.12, x=0.12"
+
+
+def test_workflows_for_selected_analysis_scope_uses_store_spatial_calibration(
+    tmp_path: Path,
+) -> None:
+    first_store = tmp_path / "cell_001" / "data_store.zarr"
+    second_store = tmp_path / "cell_002" / "data_store.zarr"
+    for store in (first_store, second_store):
+        store.parent.mkdir(parents=True, exist_ok=True)
+        root = app_module.zarr.open_group(str(store), mode="w")
+        root.create_dataset(
+            name="data",
+            shape=(1, 1, 1, 2, 2, 2),
+            chunks=(1, 1, 1, 2, 2, 2),
+            dtype="uint16",
+            overwrite=True,
+        )
+    app_module.save_store_spatial_calibration(
+        first_store,
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y")),
+    )
+    app_module.save_store_spatial_calibration(
+        second_store,
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+f", "-y", "+x")),
+    )
+
+    workflow = app_module.WorkflowConfig(
+        file=str(second_store),
+        analysis_targets=(
+            app_module.AnalysisTarget(
+                experiment_path=str(tmp_path / "cell_001" / "experiment.yml"),
+                store_path=str(first_store),
+            ),
+            app_module.AnalysisTarget(
+                experiment_path=str(tmp_path / "cell_002" / "experiment.yml"),
+                store_path=str(second_store),
+            ),
+        ),
+        analysis_selected_experiment_path=str(tmp_path / "cell_002" / "experiment.yml"),
+        analysis_apply_to_all=True,
+        visualization=True,
+    )
+
+    scoped = app_module._workflows_for_selected_analysis_scope(workflow)
+
+    assert [entry.spatial_calibration.stage_axis_map_zyx for entry in scoped] == [
+        ("+x", "none", "+y"),
+        ("+f", "-y", "+x"),
+    ]
+
+
+def test_setup_dialog_resolves_spatial_calibration_drafts_per_experiment() -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    first = Path("/tmp/cell_001/experiment.yml")
+    second = Path("/tmp/cell_002/experiment.yml")
+    dialog._spatial_calibration_drafts[first.resolve()] = (
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y"))
+    )
+    dialog._spatial_calibration_drafts[second.resolve()] = (
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+f", "-y", "+x"))
+    )
+
+    dialog._set_current_spatial_calibration(experiment_path=first)
+    assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
+        "+x",
+        "none",
+        "+y",
+    )
+
+    dialog._set_current_spatial_calibration(experiment_path=second)
+    assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
+        "+f",
+        "-y",
+        "+x",
+    )
+
+    dialog.close()
+
+
+def test_setup_dialog_prefills_spatial_calibration_from_existing_store(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    store_path = tmp_path / "existing_store.zarr"
+    root = app_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    app_module.save_store_spatial_calibration(
+        store_path,
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y")),
+    )
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    dialog._set_current_spatial_calibration(
+        experiment_path=tmp_path / "experiment.yml",
+        target_store=store_path,
+    )
+
+    assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
+        "+x",
+        "none",
+        "+y",
+    )
+    assert "z=+x,y=none,x=+y" in dialog._spatial_calibration_summary.text()
+
+    dialog.close()
+
+
+def test_setup_dialog_persists_spatial_calibration_for_all_requests(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    experiment_a = tmp_path / "cell_001" / "experiment.yml"
+    experiment_b = tmp_path / "cell_002" / "experiment.yml"
+    store_a = tmp_path / "cell_001" / "data_store.zarr"
+    store_b = tmp_path / "cell_002" / "data_store.zarr"
+    for store in (store_a, store_b):
+        store.parent.mkdir(parents=True, exist_ok=True)
+        root = app_module.zarr.open_group(str(store), mode="w")
+        root.create_dataset(
+            name="data",
+            shape=(1, 1, 1, 2, 2, 2),
+            chunks=(1, 1, 1, 2, 2, 2),
+            dtype="uint16",
+            overwrite=True,
+        )
+
+    dialog._spatial_calibration_drafts[experiment_a.resolve()] = (
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y"))
+    )
+    dialog._spatial_calibration_drafts[experiment_b.resolve()] = (
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+f", "-y", "+x"))
+    )
+    requests = (
+        app_module.ExperimentStorePreparationRequest(
+            experiment_path=experiment_a.resolve(),
+            experiment=_make_navigate_experiment(experiment_a),
+            source_data_path=tmp_path / "cell_001" / "raw.tif",
+            target_store=store_a.resolve(),
+        ),
+        app_module.ExperimentStorePreparationRequest(
+            experiment_path=experiment_b.resolve(),
+            experiment=_make_navigate_experiment(experiment_b),
+            source_data_path=tmp_path / "cell_002" / "raw.tif",
+            target_store=store_b.resolve(),
+        ),
+    )
+
+    persisted = dialog._persist_spatial_calibration_for_requests(requests)
+
+    assert persisted[store_a.resolve()].stage_axis_map_zyx == ("+x", "none", "+y")
+    assert persisted[store_b.resolve()].stage_axis_map_zyx == ("+f", "-y", "+x")
+    assert (
+        app_module.load_store_spatial_calibration(store_a).stage_axis_map_zyx
+        == ("+x", "none", "+y")
+    )
+    assert (
+        app_module.load_store_spatial_calibration(store_b).stage_axis_map_zyx
+        == ("+f", "-y", "+x")
+    )
+
+    dialog.close()
 
 
 def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(

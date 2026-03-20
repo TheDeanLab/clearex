@@ -46,12 +46,15 @@ from clearex.io.experiment import (
     initialize_analysis_store,
     is_navigate_experiment_file,
     load_navigate_experiment,
+    load_store_spatial_calibration,
     materialize_experiment_data_store,
     resolve_data_store_path,
     resolve_experiment_data_path,
+    save_store_spatial_calibration,
     write_zyx_block,
 )
 from clearex.io.read import ImageInfo
+from clearex.workflow import SpatialCalibrationConfig
 
 
 def _write_minimal_experiment(
@@ -411,6 +414,71 @@ def test_initialize_analysis_store_applies_custom_chunks_and_pyramid(tmp_path: P
         [1, 2],
         [1, 2, 4],
     ]
+
+
+def test_initialize_analysis_store_backfills_identity_spatial_calibration(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="H5")
+    experiment = load_navigate_experiment(experiment_path)
+    store_path = default_analysis_store_path(experiment)
+
+    initialize_analysis_store(experiment=experiment, zarr_path=store_path, overwrite=True)
+
+    calibration = load_store_spatial_calibration(store_path)
+
+    assert calibration == SpatialCalibrationConfig()
+
+
+def test_load_store_spatial_calibration_defaults_to_identity_for_legacy_store(
+    tmp_path: Path,
+):
+    store_path = tmp_path / "legacy_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    calibration = load_store_spatial_calibration(store_path)
+
+    assert calibration == SpatialCalibrationConfig()
+
+
+def test_save_store_spatial_calibration_round_trip_and_preserves_existing_mapping(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="H5")
+    experiment = load_navigate_experiment(experiment_path)
+    store_path = tmp_path / "store_with_mapping.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    saved = save_store_spatial_calibration(
+        store_path,
+        SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y")),
+    )
+    initialize_analysis_store(
+        experiment=experiment,
+        zarr_path=store_path,
+        overwrite=False,
+    )
+
+    reloaded = load_store_spatial_calibration(store_path)
+
+    assert saved == SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y"))
+    assert reloaded == saved
 
 
 def test_write_zyx_block_numpy(tmp_path: Path):

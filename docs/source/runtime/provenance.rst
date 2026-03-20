@@ -31,6 +31,7 @@ Run Record Content
 - input summary and input fingerprint hash,
 - normalized workflow settings,
 - effective Dask backend payload and chunk/pyramid settings,
+- effective spatial-calibration payload/text/explicitness,
 - selected analyses and per-analysis parameters,
 - ordered step records and output references,
 - software metadata (package version, git commit/branch/dirty),
@@ -60,6 +61,19 @@ Latest Output References
 
 This decouples large arrays from the append-only provenance history while
 keeping latest output pointers searchable.
+
+Spatial Placement Reproducibility
+---------------------------------
+
+Store-level Navigate placement metadata is part of the reproducibility record:
+
+- workflow provenance stores the effective ``spatial_calibration`` payload,
+  canonical text form, and whether it was explicitly supplied by the operator;
+- visualization latest metadata stores the effective spatial calibration used
+  for multiposition placement.
+
+This keeps historical runs interpretable even when microscope stage axes do not
+match camera/world axes.
 
 History Summaries and Dedup-Aware Execution
 -------------------------------------------

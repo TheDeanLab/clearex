@@ -17,7 +17,11 @@ import pytest
 import clearex.main as main_module
 from clearex.io.provenance import persist_run_provenance
 from clearex.io.read import ImageInfo
-from clearex.workflow import WorkflowConfig, WorkflowExecutionCancelled
+from clearex.workflow import (
+    SpatialCalibrationConfig,
+    WorkflowConfig,
+    WorkflowExecutionCancelled,
+)
 from clearex.workflow import DaskBackendConfig, LocalClusterConfig
 
 
@@ -731,6 +735,32 @@ def test_build_workflow_config_maps_usegment3d_input_resolution_level() -> None:
     assert params["input_resolution_level"] == 2
 
 
+def test_build_workflow_config_parses_stage_axis_map() -> None:
+    args = SimpleNamespace(
+        file=None,
+        dask=True,
+        chunks=None,
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        usegment3d=False,
+        channel_indices=None,
+        input_resolution_level=None,
+        registration=False,
+        visualization=False,
+        mip_export=False,
+        stage_axis_map="z=+x,y=none,x=+y",
+    )
+
+    workflow = main_module._build_workflow_config(args)
+
+    assert workflow.spatial_calibration == SpatialCalibrationConfig(
+        stage_axis_map_zyx=("+x", "none", "+y")
+    )
+    assert workflow.spatial_calibration_explicit is True
+
+
 def test_build_workflow_config_rejects_invalid_input_resolution_level() -> None:
     args = SimpleNamespace(
         file=None,
@@ -789,12 +819,14 @@ def test_run_workflow_experiment_file_starts_io_dask_startup(
         axes="TPCZYX",
         metadata={},
     )
+    store_path = tmp_path / "store.zarr"
+    main_module.zarr.open_group(str(store_path), mode="w")
     materialized = SimpleNamespace(
         source_image_info=image_info,
         data_image_info=image_info,
         source_path=source_path,
         source_component="data",
-        store_path=tmp_path / "store.tmp",
+        store_path=store_path,
         chunks_tpczyx=(1, 1, 1, 1, 1, 1),
     )
 
@@ -830,6 +862,218 @@ def test_run_workflow_experiment_file_starts_io_dask_startup(
     )
 
     assert workloads == ["io"]
+
+
+def test_run_workflow_existing_store_persists_explicit_spatial_calibration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    persisted: dict[str, object] = {}
+
+    class _DummyOpener:
+        def open(self, path, *, prefer_dask, chunks):
+            del prefer_dask, chunks
+            return None, ImageInfo(
+                path=Path(path),
+                shape=(1, 1, 1, 2, 2, 2),
+                dtype=np.uint16,
+                axes="TPCZYX",
+                metadata={},
+            )
+
+    monkeypatch.setattr(main_module, "ImageOpener", _DummyOpener)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+    monkeypatch.setattr(
+        main_module,
+        "save_store_spatial_calibration",
+        lambda path, calibration: persisted.update(
+            {"path": str(path), "calibration": calibration}
+        )
+        or calibration,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "persist_run_provenance",
+        lambda *, zarr_path, workflow, image_info, **kwargs: persisted.update(
+            {
+                "provenance_store": str(zarr_path),
+                "provenance_calibration": workflow.spatial_calibration,
+                "image_shape": tuple(image_info.shape),
+            }
+        )
+        or "run-1",
+    )
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        spatial_calibration=SpatialCalibrationConfig(
+            stage_axis_map_zyx=("+x", "none", "+y")
+        ),
+        spatial_calibration_explicit=True,
+    )
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.spatial_existing_store"),
+    )
+
+    assert persisted["path"] == str(store_path)
+    assert persisted["calibration"] == SpatialCalibrationConfig(
+        stage_axis_map_zyx=("+x", "none", "+y")
+    )
+    assert persisted["provenance_store"] == str(store_path)
+    assert persisted["provenance_calibration"] == SpatialCalibrationConfig(
+        stage_axis_map_zyx=("+x", "none", "+y")
+    )
+
+
+def test_run_workflow_experiment_input_persists_explicit_identity_spatial_calibration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_path = tmp_path / "source.tif"
+    store_path = tmp_path / "prepared_store.zarr"
+    experiment = SimpleNamespace(
+        file_type="TIFF",
+        timepoints=1,
+        multiposition_count=1,
+        channel_count=1,
+        number_z_steps=1,
+    )
+    image_info = ImageInfo(
+        path=source_path,
+        shape=(1, 1, 1, 1, 1, 1),
+        dtype=np.uint16,
+        axes="TPCZYX",
+        metadata={},
+    )
+    materialized = SimpleNamespace(
+        source_image_info=image_info,
+        data_image_info=image_info,
+        source_path=source_path,
+        source_component="data",
+        store_path=store_path,
+        chunks_tpczyx=(1, 1, 1, 1, 1, 1),
+    )
+    persisted: dict[str, object] = {}
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", lambda **kwargs: None)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: True)
+    monkeypatch.setattr(main_module, "load_navigate_experiment", lambda path: experiment)
+    monkeypatch.setattr(
+        main_module, "resolve_experiment_data_path", lambda experiment: source_path
+    )
+    monkeypatch.setattr(
+        main_module,
+        "materialize_experiment_data_store",
+        lambda *, experiment, source_path, chunks, pyramid_factors, client: materialized,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "save_store_spatial_calibration",
+        lambda path, calibration: persisted.update(
+            {"path": str(path), "calibration": calibration}
+        )
+        or calibration,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "persist_run_provenance",
+        lambda *, zarr_path, workflow, image_info, **kwargs: persisted.update(
+            {
+                "provenance_store": str(zarr_path),
+                "provenance_calibration": workflow.spatial_calibration,
+            }
+        )
+        or "run-1",
+    )
+
+    workflow = WorkflowConfig(
+        file=str(tmp_path / "experiment.yml"),
+        spatial_calibration=SpatialCalibrationConfig(),
+        spatial_calibration_explicit=True,
+    )
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.spatial_experiment_input"),
+    )
+
+    assert persisted["path"] == str(store_path)
+    assert persisted["calibration"] == SpatialCalibrationConfig()
+    assert persisted["provenance_store"] == str(store_path)
+    assert persisted["provenance_calibration"] == SpatialCalibrationConfig()
+
+
+def test_run_workflow_experiment_input_without_override_preserves_store_mapping(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_path = tmp_path / "source.tif"
+    store_path = tmp_path / "prepared_store.zarr"
+    experiment = SimpleNamespace(
+        file_type="TIFF",
+        timepoints=1,
+        multiposition_count=1,
+        channel_count=1,
+        number_z_steps=1,
+    )
+    image_info = ImageInfo(
+        path=source_path,
+        shape=(1, 1, 1, 1, 1, 1),
+        dtype=np.uint16,
+        axes="TPCZYX",
+        metadata={},
+    )
+    materialized = SimpleNamespace(
+        source_image_info=image_info,
+        data_image_info=image_info,
+        source_path=source_path,
+        source_component="data",
+        store_path=store_path,
+        chunks_tpczyx=(1, 1, 1, 1, 1, 1),
+    )
+    calls: dict[str, object] = {"saved": False}
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", lambda **kwargs: None)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: True)
+    monkeypatch.setattr(main_module, "load_navigate_experiment", lambda path: experiment)
+    monkeypatch.setattr(
+        main_module, "resolve_experiment_data_path", lambda experiment: source_path
+    )
+    monkeypatch.setattr(
+        main_module,
+        "materialize_experiment_data_store",
+        lambda *, experiment, source_path, chunks, pyramid_factors, client: materialized,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_store_spatial_calibration",
+        lambda path: SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "save_store_spatial_calibration",
+        lambda path, calibration: calls.update({"saved": True}) or calibration,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "persist_run_provenance",
+        lambda *, zarr_path, workflow, image_info, **kwargs: calls.update(
+            {"provenance_calibration": workflow.spatial_calibration}
+        )
+        or "run-1",
+    )
+
+    workflow = WorkflowConfig(file=str(tmp_path / "experiment.yml"))
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.spatial_experiment_preserve"),
+    )
+
+    assert calls["saved"] is False
+    assert calls["provenance_calibration"] == SpatialCalibrationConfig(
+        stage_axis_map_zyx=("+x", "none", "+y")
+    )
 
 
 def test_run_workflow_skips_matching_provenance_analysis(

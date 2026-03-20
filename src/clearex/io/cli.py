@@ -232,6 +232,15 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Chunk spec for Dask, e.g. '256,256,64' or single int",
     )
+    parser.add_argument(
+        "--stage-axis-map",
+        type=str,
+        default=None,
+        help=(
+            "Store-level world z/y/x mapping for Navigate multiposition stage "
+            "coordinates, for example 'z=+x,y=none,x=+y'."
+        ),
+    )
 
     parser.add_argument(
         "--gui",

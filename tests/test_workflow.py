@@ -44,22 +44,27 @@ from clearex.workflow import (
     LocalClusterConfig,
     SlurmClusterConfig,
     SlurmRunnerConfig,
+    SpatialCalibrationConfig,
     WorkflowConfig,
     ZarrSaveConfig,
     dask_backend_from_dict,
     dask_backend_to_dict,
+    format_spatial_calibration,
     format_dask_backend_summary,
     format_local_cluster_recommendation_summary,
     format_chunks,
     format_pyramid_levels,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
+    normalize_spatial_calibration,
     parse_chunks,
     parse_pyramid_levels,
+    parse_spatial_calibration,
     normalize_analysis_operation_parameters,
     recommend_local_cluster_config,
     resolve_analysis_input_component,
     resolve_analysis_execution_sequence,
+    spatial_calibration_to_dict,
     validate_analysis_input_references,
     to_tpczyx_chunks,
     to_tpczyx_pyramid,
@@ -102,6 +107,53 @@ class TestFormatChunks:
 
     def test_format_tuple(self):
         assert format_chunks((1, 128, 128)) == "1,128,128"
+
+
+class TestSpatialCalibration:
+    def test_parse_round_trip(self):
+        parsed = parse_spatial_calibration("x=+y,z=-f,y=none")
+
+        assert parsed == SpatialCalibrationConfig(
+            stage_axis_map_zyx=("-f", "none", "+y")
+        )
+        assert format_spatial_calibration(parsed) == "z=-f,y=none,x=+y"
+
+    def test_default_identity(self):
+        cfg = WorkflowConfig()
+
+        assert cfg.spatial_calibration == SpatialCalibrationConfig()
+        assert format_spatial_calibration(cfg.spatial_calibration) == "z=+z,y=+y,x=+x"
+
+    def test_rejects_duplicate_non_none_sources(self):
+        with pytest.raises(ValueError, match="Duplicate source axis 'x'"):
+            parse_spatial_calibration("z=+x,y=-x,x=none")
+
+    def test_supports_none_binding(self):
+        parsed = parse_spatial_calibration("z=none,y=+y,x=-f")
+
+        assert parsed.stage_axis_map_zyx == ("none", "+y", "-f")
+
+    def test_normalizes_mapping_payload(self):
+        parsed = normalize_spatial_calibration(
+            {
+                "schema": "clearex.spatial_calibration.v1",
+                "stage_axis_map_zyx": {"z": "+x", "y": "none", "x": "+y"},
+                "theta_mode": "rotate_zy_about_x",
+            }
+        )
+
+        assert parsed == SpatialCalibrationConfig(
+            stage_axis_map_zyx=("+x", "none", "+y")
+        )
+        assert spatial_calibration_to_dict(parsed) == {
+            "schema": "clearex.spatial_calibration.v1",
+            "stage_axis_map_zyx": {"z": "+x", "y": "none", "x": "+y"},
+            "theta_mode": "rotate_zy_about_x",
+        }
+
+    def test_rejects_partial_top_level_mapping_payload(self):
+        with pytest.raises(ValueError, match="must define z, y, and x bindings"):
+            normalize_spatial_calibration({"z": "+x", "x": "+y"})
 
 
 class TestWorkflowConfig:
