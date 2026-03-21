@@ -33,16 +33,19 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
 import math
 from pathlib import Path
 import re
 import subprocess
 import sys
 import threading
+import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 # Third Party Imports
 import dask.array as da
+from dask.callbacks import Callback
 import numpy as np
 import zarr
 
@@ -79,6 +82,8 @@ _DISPLAY_CONTRAST_LIMITS_ATTR = "display_contrast_limits_by_channel"
 _DISPLAY_CONTRAST_PERCENTILES_ATTR = "display_contrast_percentiles"
 _DISPLAY_CONTRAST_LEVEL_SOURCE_ATTR = "display_contrast_source_component"
 _DISPLAY_CONTRAST_SAMPLE_TARGET_VOXELS = 2_000_000
+_DISPLAY_PYRAMID_BUILD_PROGRESS_TASK_STEP = 1_024
+_DISPLAY_PYRAMID_BUILD_PROGRESS_MIN_INTERVAL_SECONDS = 1.5
 _SOFTWARE_RENDERER_HINTS = (
     "llvmpipe",
     "softpipe",
@@ -104,6 +109,7 @@ _GPU_VENDOR_HINTS = (
     "tesla",
     "rtx",
 )
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -2058,6 +2064,189 @@ def _component_matches_shape_chunks(
     return array_chunks == tuple(int(v) for v in chunks_tpczyx)
 
 
+def _estimate_chunk_region_count_tpczyx(
+    *,
+    shape_tpczyx: Sequence[int],
+    chunks_tpczyx: Sequence[int],
+) -> int:
+    """Estimate chunk-region count for one canonical ``(t,p,c,z,y,x)`` array.
+
+    Parameters
+    ----------
+    shape_tpczyx : sequence[int]
+        Array shape in canonical axis order.
+    chunks_tpczyx : sequence[int]
+        Chunk shape in canonical axis order.
+
+    Returns
+    -------
+    int
+        Estimated chunk-region count. Returns ``0`` for invalid payloads.
+    """
+    if len(tuple(shape_tpczyx)) != 6 or len(tuple(chunks_tpczyx)) != 6:
+        return 0
+    region_counts = [
+        int(max(1, math.ceil(float(max(1, int(size))) / float(max(1, int(chunk))))))
+        for size, chunk in zip(shape_tpczyx, chunks_tpczyx, strict=False)
+    ]
+    return int(math.prod(region_counts))
+
+
+def _write_display_pyramid_level_with_progress(
+    *,
+    level_array: da.Array,
+    zarr_path: Union[str, Path],
+    level_component: str,
+    source_component: str,
+    level_index: int,
+    total_levels: int,
+    absolute_factors_tpczyx: Sequence[int],
+    level_shape_tpczyx: Sequence[int],
+    level_chunks_tpczyx: Sequence[int],
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_start: int = 0,
+    progress_end: int = 100,
+) -> None:
+    """Write one display-pyramid level and emit incremental progress updates.
+
+    Parameters
+    ----------
+    level_array : dask.array.Array
+        Prepared downsampled level data.
+    zarr_path : str or pathlib.Path
+        Analysis-store path.
+    level_component : str
+        Target level component path.
+    source_component : str
+        Source component path used to derive this level.
+    level_index : int
+        One-based level index currently being written.
+    total_levels : int
+        Total number of generated levels.
+    absolute_factors_tpczyx : sequence[int]
+        Absolute level factors in canonical order.
+    level_shape_tpczyx : sequence[int]
+        Target level shape in canonical order.
+    level_chunks_tpczyx : sequence[int]
+        Target level chunks in canonical order.
+    progress_callback : callable, optional
+        Callback receiving ``(percent, message)`` updates.
+    progress_start : int, default=0
+        Start percent for this level write stage.
+    progress_end : int, default=100
+        End percent for this level write stage.
+
+    Returns
+    -------
+    None
+        Writes the level into the configured Zarr/N5 store.
+    """
+
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
+    normalized_shape = tuple(int(max(1, int(v))) for v in level_shape_tpczyx)
+    normalized_chunks = tuple(int(max(1, int(v))) for v in level_chunks_tpczyx)
+    estimated_chunks = _estimate_chunk_region_count_tpczyx(
+        shape_tpczyx=normalized_shape,
+        chunks_tpczyx=normalized_chunks,
+    )
+
+    write_graph = da.to_zarr(
+        level_array,
+        str(zarr_path),
+        component=level_component,
+        overwrite=True,
+        compute=False,
+    )
+    total_tasks = max(1, int(len(getattr(write_graph, "dask", {}))))
+    progress_start_int = int(progress_start)
+    progress_end_int = int(max(progress_start_int, int(progress_end)))
+    progress_span = max(1, progress_end_int - progress_start_int)
+
+    _LOGGER.info(
+        "[display_pyramid] writing level %d/%d component=%s source=%s "
+        "shape=%s chunks=%s estimated_chunks=%d tasks=%d factors_tpczyx=%s",
+        int(level_index),
+        int(total_levels),
+        str(level_component),
+        str(source_component),
+        normalized_shape,
+        normalized_chunks,
+        int(estimated_chunks),
+        int(total_tasks),
+        [int(value) for value in absolute_factors_tpczyx],
+    )
+    _emit(
+        progress_start_int,
+        "Writing pyramid level "
+        f"{int(level_index)}/{int(total_levels)} "
+        f"(estimated_chunks={int(estimated_chunks):,})",
+    )
+
+    if progress_callback is None or total_tasks <= 1:
+        da.compute(write_graph)
+        _emit(
+            progress_end_int,
+            f"Wrote pyramid level {int(level_index)}/{int(total_levels)}",
+        )
+        return
+
+    class _TaskProgressCallback(Callback):
+        """Throttle task-level updates for UI-friendly progress reporting."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._completed = 0
+            self._last_emitted_completed = 0
+            self._last_emitted_time = 0.0
+
+        def _posttask(
+            self,
+            key: object,
+            result: object,
+            dsk: object,
+            state: object,
+            worker_id: object,
+        ) -> None:
+            del key, result, dsk, state, worker_id
+            self._completed += 1
+            now = float(time.monotonic())
+            due_by_count = (
+                int(self._completed) - int(self._last_emitted_completed)
+            ) >= int(_DISPLAY_PYRAMID_BUILD_PROGRESS_TASK_STEP)
+            due_by_time = (float(now) - float(self._last_emitted_time)) >= float(
+                _DISPLAY_PYRAMID_BUILD_PROGRESS_MIN_INTERVAL_SECONDS
+            )
+            is_final = int(self._completed) >= int(total_tasks)
+            if not is_final and not due_by_count and not due_by_time:
+                return
+
+            fraction = max(
+                0.0,
+                min(1.0, float(self._completed) / float(max(1, int(total_tasks)))),
+            )
+            mapped_percent = progress_start_int + int(round(fraction * progress_span))
+            _emit(
+                mapped_percent,
+                "Writing pyramid level "
+                f"{int(level_index)}/{int(total_levels)} "
+                f"(tasks={int(self._completed):,}/{int(total_tasks):,})",
+            )
+            self._last_emitted_completed = int(self._completed)
+            self._last_emitted_time = float(now)
+
+    with _TaskProgressCallback():
+        da.compute(write_graph)
+
+    _emit(
+        progress_end_int,
+        f"Wrote pyramid level {int(level_index)}/{int(total_levels)}",
+    )
+
+
 def _display_pyramid_level_component(
     *,
     source_component: str,
@@ -2222,6 +2411,9 @@ def _build_visualization_multiscale_components(
     root: zarr.hierarchy.Group,
     source_component: str,
     level_factors_tpczyx: tuple[tuple[int, int, int, int, int, int], ...],
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_start: int = 30,
+    progress_end: int = 68,
 ) -> tuple[str, ...]:
     """Materialize reusable display-pyramid levels for one source component.
 
@@ -2235,6 +2427,13 @@ def _build_visualization_multiscale_components(
         Base component path.
     level_factors_tpczyx : tuple[tuple[int, int, int, int, int, int], ...]
         Absolute level factors including base level.
+    progress_callback : callable, optional
+        Callback receiving ``(percent, message)`` updates while levels are
+        generated.
+    progress_start : int, default=30
+        Start percent for level-generation progress.
+    progress_end : int, default=68
+        End percent for level-generation progress.
 
     Returns
     -------
@@ -2252,7 +2451,24 @@ def _build_visualization_multiscale_components(
     ]
     prior_component = str(source_component)
     prior_factors = tuple(int(value) for value in level_factors_tpczyx[0])
+    total_generated_levels = max(1, int(len(level_factors_tpczyx) - 1))
+    progress_start_int = int(progress_start)
+    progress_end_int = int(max(progress_start_int, int(progress_end)))
+    progress_span = max(0, int(progress_end_int - progress_start_int))
+
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
     for level_index, absolute_factors in enumerate(level_factors_tpczyx[1:], start=1):
+        level_progress_start = progress_start_int + int(
+            ((int(level_index) - 1) / float(total_generated_levels))
+            * float(progress_span)
+        )
+        level_progress_end = progress_start_int + int(
+            (int(level_index) / float(total_generated_levels)) * float(progress_span)
+        )
         all_relative = all(
             int(current) % int(previous) == 0
             for current, previous in zip(absolute_factors, prior_factors, strict=False)
@@ -2312,12 +2528,39 @@ def _build_visualization_multiscale_components(
                 dtype=source_dtype.name,
                 overwrite=True,
             )
-            da.to_zarr(
-                downsampled,
-                str(zarr_path),
-                component=level_component,
-                overwrite=True,
-                compute=True,
+            _write_display_pyramid_level_with_progress(
+                level_array=downsampled,
+                zarr_path=zarr_path,
+                level_component=level_component,
+                source_component=source_level_component,
+                level_index=int(level_index),
+                total_levels=int(total_generated_levels),
+                absolute_factors_tpczyx=absolute_factors,
+                level_shape_tpczyx=level_shape,
+                level_chunks_tpczyx=level_chunks,
+                progress_callback=progress_callback,
+                progress_start=int(level_progress_start),
+                progress_end=int(level_progress_end),
+            )
+        else:
+            estimated_chunks = _estimate_chunk_region_count_tpczyx(
+                shape_tpczyx=level_shape,
+                chunks_tpczyx=level_chunks,
+            )
+            _LOGGER.info(
+                "[display_pyramid] reusing existing level %d/%d component=%s "
+                "shape=%s chunks=%s estimated_chunks=%d factors_tpczyx=%s",
+                int(level_index),
+                int(total_generated_levels),
+                str(level_component),
+                tuple(int(v) for v in level_shape),
+                tuple(int(v) for v in level_chunks),
+                int(estimated_chunks),
+                [int(value) for value in absolute_factors],
+            )
+            _emit(
+                int(level_progress_end),
+                f"Reusing existing pyramid level {int(level_index)}/{int(total_generated_levels)}",
             )
 
         root[level_component].attrs.update(
@@ -3961,6 +4204,9 @@ def run_display_pyramid_analysis(
             root=root,
             source_component=source_component,
             level_factors_tpczyx=level_factors,
+            progress_callback=_emit,
+            progress_start=32,
+            progress_end=68,
         )
 
     level_factors = _resolve_visualization_pyramid_factors_tpczyx(

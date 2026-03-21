@@ -447,6 +447,65 @@ def test_run_display_pyramid_analysis_avoids_forced_rechunk(
     assert len(summary.source_components) > 1
 
 
+def test_run_display_pyramid_analysis_emits_level_write_progress(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="results/shear_transform/latest/data",
+        shape=(1, 1, 1, 16, 16, 16),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    events: list[tuple[int, str]] = []
+    run_display_pyramid_analysis(
+        zarr_path=store_path,
+        parameters={"input_source": "results/shear_transform/latest/data"},
+        progress_callback=lambda percent, message: events.append(
+            (int(percent), str(message))
+        ),
+    )
+
+    level_messages = [
+        str(message) for _, message in events if "pyramid level" in message
+    ]
+    assert any("Writing pyramid level 1/" in message for message in level_messages)
+    assert any("Wrote pyramid level 1/" in message for message in level_messages)
+    assert any(
+        30 < int(percent) < 70
+        for percent, message in events
+        if "pyramid level" in str(message)
+    )
+
+
+def test_run_display_pyramid_analysis_logs_level_chunk_estimates(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="results/shear_transform/latest/data",
+        shape=(1, 1, 1, 16, 16, 16),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    with caplog.at_level("INFO", logger="clearex.visualization.pipeline"):
+        run_display_pyramid_analysis(
+            zarr_path=store_path,
+            parameters={"input_source": "results/shear_transform/latest/data"},
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("writing level 1/" in message for message in messages)
+    assert any("estimated_chunks=" in message for message in messages)
+
+
 def test_run_display_pyramid_analysis_rebuilds_legacy_component_layout(
     tmp_path: Path,
 ) -> None:
