@@ -45,6 +45,33 @@ def _test_logger(name: str) -> logging.Logger:
     return logger
 
 
+def test_zarr_component_exists_prefers_membership_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ImplicitGroupRoot:
+        def __contains__(self, key: object) -> bool:
+            return str(key) == "data"
+
+        def __getitem__(self, key: object) -> object:
+            del key
+            return object()
+
+    monkeypatch.setattr(
+        main_module.zarr,
+        "open_group",
+        lambda _path, mode="r": _ImplicitGroupRoot(),
+    )
+
+    assert main_module._zarr_component_exists("/tmp/fake_store.n5", "data") is True
+    assert (
+        main_module._zarr_component_exists(
+            "/tmp/fake_store.n5",
+            "results/display_pyramid/latest",
+        )
+        is False
+    )
+
+
 def test_resolve_log_directory_for_workflow_uses_parent_for_missing_navigate_store(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

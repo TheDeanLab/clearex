@@ -381,12 +381,21 @@ def _zarr_component_exists(zarr_path: str, component: str) -> bool:
     bool
         ``True`` if the component can be resolved, otherwise ``False``.
     """
+    path = str(component).strip()
+    if not path:
+        return False
     try:
         root = zarr.open_group(str(zarr_path), mode="r")
-        _ = root[component]
     except Exception:
         return False
-    return True
+    try:
+        return bool(path in root)
+    except Exception:
+        try:
+            _ = root[path]
+        except Exception:
+            return False
+        return True
 
 
 def _create_bootstrap_logger() -> logging.Logger:

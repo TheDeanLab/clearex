@@ -1518,6 +1518,32 @@ def test_discover_available_operation_output_components(monkeypatch) -> None:
     assert discovered == {"flatfield": "results/flatfield/latest/data"}
 
 
+def test_zarr_component_exists_in_root_uses_membership_semantics() -> None:
+    class _ImplicitGroupRoot:
+        def __contains__(self, key: object) -> bool:
+            return str(key) == "results/flatfield/latest/data"
+
+        def __getitem__(self, key: object) -> object:
+            del key
+            return object()
+
+    root = _ImplicitGroupRoot()
+    assert (
+        app_module._zarr_component_exists_in_root(
+            root,
+            "results/flatfield/latest/data",
+        )
+        is True
+    )
+    assert (
+        app_module._zarr_component_exists_in_root(
+            root,
+            "results/deconvolution/latest/data",
+        )
+        is False
+    )
+
+
 def test_particle_overlay_available_when_particle_detection_runs_first() -> None:
     available = app_module._particle_overlay_available_for_visualization(
         selected_order=["particle_detection", "visualization"],
@@ -1648,6 +1674,64 @@ def test_collect_visualization_parameters_syncs_combo_with_primary_layer() -> No
     assert (
         params["volume_layers"][0]["component"] == "results/shear_transform/latest/data"
     )
+
+
+def test_on_run_propagates_display_pyramid_flag_into_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    class _FakeCheckbox:
+        def __init__(self, checked: bool) -> None:
+            self._checked = bool(checked)
+
+        def isChecked(self) -> bool:
+            return bool(self._checked)
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    base_config = app_module.WorkflowConfig(file="/tmp/data_store.zarr")
+    dialog._base_config = base_config
+    dialog._analysis_targets = ()
+    dialog._analysis_apply_to_all_checkbox = None
+    dialog._dask_backend_config = base_config.dask_backend
+    dialog._refresh_operation_provenance_statuses = lambda: None
+    dialog._current_analysis_target = lambda: None
+    dialog._persist_analysis_gui_state_for_target = lambda _target: None
+    dialog._validate_selected_analysis_dependencies = lambda _params: ()
+    dialog._selected_operations_in_sequence = lambda: ["display_pyramid"]
+    dialog._set_status = lambda _message: None
+
+    selected = {
+        operation_name: _FakeCheckbox(False)
+        for operation_name in dialog._OPERATION_KEYS
+    }
+    selected["display_pyramid"] = _FakeCheckbox(True)
+    dialog._operation_checkboxes = selected
+
+    normalized_defaults = app_module.normalize_analysis_operation_parameters(
+        base_config.analysis_parameters
+    )
+    dialog._collect_operation_parameters = lambda operation_name: dict(
+        normalized_defaults.get(str(operation_name), {})
+    )
+
+    accept_state = {"called": False}
+    dialog.accept = lambda: accept_state.__setitem__("called", True)
+
+    monkeypatch.setattr(
+        app_module,
+        "_save_last_used_dask_backend_config",
+        lambda _config: None,
+    )
+
+    app_module.AnalysisSelectionDialog._on_run(dialog)
+
+    assert accept_state["called"] is True
+    assert dialog.result_config.display_pyramid is True
+    assert dialog.result_config.visualization is False
 
 
 def test_validate_selected_analysis_dependencies_rejects_later_scheduled_producer() -> (

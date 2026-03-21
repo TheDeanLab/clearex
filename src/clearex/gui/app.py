@@ -1188,10 +1188,13 @@ def _zarr_component_exists_in_root(root: Any, component: str) -> bool:
     if not path:
         return False
     try:
-        root[path]
+        return bool(path in root)
     except Exception:
-        return False
-    return True
+        try:
+            root[path]
+        except Exception:
+            return False
+        return True
 
 
 def _discover_available_operation_output_components(
@@ -14456,6 +14459,7 @@ if HAS_PYQT6:
                 "shear_transform": selected_flags["shear_transform"],
                 "particle_detection": selected_flags["particle_detection"],
                 "registration": selected_flags["registration"],
+                "display_pyramid": selected_flags["display_pyramid"],
                 "visualization": selected_flags["visualization"],
                 "mip_export": selected_flags["mip_export"],
                 "zarr_save": self._base_config.zarr_save,
