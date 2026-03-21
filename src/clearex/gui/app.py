@@ -7232,6 +7232,10 @@ if HAS_PYQT6:
                 "When enabled, napari loads pyramid levels as a multiscale image "
                 "for faster navigation across zoom levels."
             ),
+            "use_3d_view": (
+                "Launch napari in 3D mode (ndisplay=3). Disable to launch in 2D "
+                "mode (ndisplay=2)."
+            ),
             "overlay_particle_detections": (
                 "Overlay particle detections as a napari points layer when "
                 "particle detections already exist in the store or are selected "
@@ -9702,6 +9706,14 @@ if HAS_PYQT6:
             self._register_parameter_hint(
                 self._visualization_multiscale_checkbox,
                 self._PARAMETER_HINTS["use_multiscale"],
+            )
+
+            self._visualization_3d_checkbox = QCheckBox("Launch in 3D mode")
+            self._visualization_3d_checkbox.setChecked(True)
+            form.addRow("Display mode", self._visualization_3d_checkbox)
+            self._register_parameter_hint(
+                self._visualization_3d_checkbox,
+                self._PARAMETER_HINTS["use_3d_view"],
             )
 
             self._visualization_require_gpu_checkbox = QCheckBox(
@@ -12482,6 +12494,7 @@ if HAS_PYQT6:
                 visualization_enabled and not show_all_positions
             )
             self._visualization_multiscale_checkbox.setEnabled(visualization_enabled)
+            self._visualization_3d_checkbox.setEnabled(visualization_enabled)
             gpu_hint = self._PARAMETER_HINTS["require_gpu_rendering"]
             if not bool(self._local_gpu_available):
                 gpu_hint = (
@@ -13328,6 +13341,9 @@ if HAS_PYQT6:
             )
             self._visualization_multiscale_checkbox.setChecked(
                 bool(visualization_params.get("use_multiscale", True))
+            )
+            self._visualization_3d_checkbox.setChecked(
+                bool(visualization_params.get("use_3d_view", True))
             )
             self._visualization_require_gpu_checkbox.setChecked(
                 bool(visualization_params.get("require_gpu_rendering", True))
@@ -14177,6 +14193,7 @@ if HAS_PYQT6:
                 "use_multiscale": bool(
                     self._visualization_multiscale_checkbox.isChecked()
                 ),
+                "use_3d_view": bool(self._visualization_3d_checkbox.isChecked()),
                 "require_gpu_rendering": bool(
                     self._visualization_require_gpu_checkbox.isChecked()
                 ),

@@ -929,6 +929,7 @@ def _normalize_visualization_parameters(
     normalized["show_all_positions"] = bool(normalized.get("show_all_positions", False))
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
+    normalized["use_3d_view"] = bool(normalized.get("use_3d_view", True))
     normalized["overlay_particle_detections"] = bool(
         normalized.get("overlay_particle_detections", True)
     )
@@ -1819,7 +1820,9 @@ def _resolve_display_level_arrays_for_voxel_budget(
                 break
         if selected_index > 0:
             resolved_arrays = tuple(resolved_arrays[selected_index:])
-            selected_shape = tuple(int(value) for value in tuple(resolved_arrays[0].shape))
+            selected_shape = tuple(
+                int(value) for value in tuple(resolved_arrays[0].shape)
+            )
             for axis_index, (base_dim, selected_dim) in enumerate(
                 zip(finest_shape[-3:], selected_shape[-3:], strict=False)
             ):
@@ -2583,7 +2586,7 @@ def _resolve_position_affines_tczyx(
     root_attrs: Mapping[str, Any],
     selected_positions: Sequence[int],
     scale_tczyx: Sequence[float],
-    ) -> tuple[dict[int, np.ndarray], list[dict[str, float]], SpatialCalibrationConfig]:
+) -> tuple[dict[int, np.ndarray], list[dict[str, float]], SpatialCalibrationConfig]:
     """Resolve per-position affines for napari rendering.
 
     Parameters
@@ -3036,11 +3039,27 @@ def _launch_napari_viewer(
 
         if resolved_scale is None:
             resolved_scale = scale
-        normalized = _normalize_scale_tczyx(tuple(float(value) for value in resolved_scale))
+        normalized = _normalize_scale_tczyx(
+            tuple(float(value) for value in resolved_scale)
+        )
         layer_scale_cache[key] = normalized
         return normalized
 
-    viewer = napari.Viewer(ndisplay=3, show=True)
+    requested_ndisplay = int(
+        max(
+            2,
+            round(
+                _safe_float(
+                    image_metadata.get("viewer_ndisplay", 3),
+                    default=3.0,
+                )
+            ),
+        )
+    )
+    viewer = napari.Viewer(
+        ndisplay=(3 if int(requested_ndisplay) >= 3 else 2),
+        show=True,
+    )
     axis_labels_tuple = tuple(str(label) for label in axis_labels)
     axis_labels_applied = False
     renderer_info = _probe_napari_opengl_renderer(viewer)
@@ -3113,12 +3132,15 @@ def _launch_napari_viewer(
             ]
             if not level_arrays:
                 continue
-            display_level_arrays, display_scale, display_factors_zyx, display_strategy = (
-                _resolve_display_level_arrays_for_voxel_budget(
-                    level_arrays=level_arrays,
-                    layer_scale_tczyx=layer_scale,
-                    max_display_voxels=_MAX_LAYER_DISPLAY_VOXELS,
-                )
+            (
+                display_level_arrays,
+                display_scale,
+                display_factors_zyx,
+                display_strategy,
+            ) = _resolve_display_level_arrays_for_voxel_budget(
+                level_arrays=level_arrays,
+                layer_scale_tczyx=layer_scale,
+                max_display_voxels=_MAX_LAYER_DISPLAY_VOXELS,
             )
             if not display_level_arrays:
                 continue
@@ -3188,7 +3210,9 @@ def _launch_napari_viewer(
                 layer_metadata["multiscale_policy"] = str(layer.multiscale_policy)
                 layer_metadata["multiscale_status"] = str(layer.multiscale_status)
                 layer_metadata["volume_layers"] = serialized_volume_layers
-                layer_metadata["scale_tczyx"] = [float(value) for value in display_scale]
+                layer_metadata["scale_tczyx"] = [
+                    float(value) for value in display_scale
+                ]
                 layer_metadata["display_downsample_strategy"] = str(display_strategy)
                 layer_metadata["display_downsample_factors_zyx"] = [
                     float(display_factors_zyx[0]),
@@ -3553,9 +3577,7 @@ def _save_visualization_metadata(
         "selected_positions": [int(value) for value in selected_positions],
         "show_all_positions": bool(show_all_positions),
         "spatial_calibration": spatial_calibration_to_dict(spatial_calibration),
-        "spatial_calibration_text": format_spatial_calibration(
-            spatial_calibration
-        ),
+        "spatial_calibration_text": format_spatial_calibration(spatial_calibration),
         "overlay_points_count": int(overlay_points_count),
         "renderer": _sanitize_metadata_value(dict(renderer or {})),
         "launch_mode": str(launch_mode),
@@ -3723,6 +3745,9 @@ def run_visualization_analysis(
         int(value) for value in selected_positions
     ]
     napari_payload.points_metadata["show_all_positions"] = bool(show_all_positions)
+    viewer_ndisplay = 3 if bool(normalized.get("use_3d_view", True)) else 2
+    napari_payload.image_metadata["viewer_ndisplay"] = int(viewer_ndisplay)
+    napari_payload.points_metadata["viewer_ndisplay"] = int(viewer_ndisplay)
 
     _emit(20, "Preparing napari visualization layers")
     effective_launch_mode = _resolve_effective_launch_mode(

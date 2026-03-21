@@ -665,6 +665,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "show_all_positions": False,
         "position_index": 0,
         "use_multiscale": True,
+        "use_3d_view": True,
         "overlay_particle_detections": True,
         "particle_detection_component": "results/particle_detection/latest/detections",
         "launch_mode": "auto",
@@ -2040,6 +2041,7 @@ def _normalize_visualization_parameters(
     normalized["show_all_positions"] = bool(normalized.get("show_all_positions", False))
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
+    normalized["use_3d_view"] = bool(normalized.get("use_3d_view", True))
     normalized["overlay_particle_detections"] = bool(
         normalized.get("overlay_particle_detections", True)
     )
