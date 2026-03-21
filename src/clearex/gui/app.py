@@ -6865,10 +6865,9 @@ if HAS_PYQT6:
         _OPERATION_TABS: tuple[tuple[str, tuple[str, ...]], ...] = (
             (
                 "Preprocessing",
-                ("flatfield", "deconvolution", "shear_transform"),
+                ("flatfield", "deconvolution", "shear_transform", "registration"),
             ),
             ("Segmentation", ("particle_detection", "usegment3d")),
-            ("Postprocessing", ("registration",)),
             ("Visualization", ("display_pyramid", "visualization", "mip_export")),
         )
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
@@ -6884,7 +6883,7 @@ if HAS_PYQT6:
             "results/particle_detection/latest/detections"
         )
         _DEFAULT_USEGMENT3D_PARAMETERS: Dict[str, Any] = {
-            "execution_order": 5,
+            "execution_order": 6,
             "input_source": "data",
             "force_rerun": False,
             "chunk_basis": "3d",
@@ -6939,6 +6938,22 @@ if HAS_PYQT6:
             "postprocess_dtform_method": "cellpose_improve",
             "postprocess_edt_fixed_point_percentile": 0.01,
             "output_dtype": "uint32",
+        }
+        _DEFAULT_REGISTRATION_PARAMETERS: Dict[str, Any] = {
+            "execution_order": 4,
+            "input_source": "data",
+            "force_rerun": False,
+            "chunk_basis": "3d",
+            "detect_2d_per_slice": False,
+            "use_map_overlap": True,
+            "overlap_zyx": [8, 32, 32],
+            "memory_overhead_factor": 2.5,
+            "registration_channel": 0,
+            "registration_type": "rigid",
+            "input_resolution_level": 0,
+            "anchor_mode": "central",
+            "anchor_position": None,
+            "blend_mode": "feather",
         }
         _PARAMETER_HINTS: Dict[str, str] = {
             "input_source": (
@@ -7157,6 +7172,29 @@ if HAS_PYQT6:
                 "Input pyramid level used for segmentation (0 = full resolution). "
                 "Higher levels reduce memory/runtime."
             ),
+            "registration_channel": (
+                "Source channel used to estimate pairwise tile transforms. "
+                "The solved transforms are then applied to all channels."
+            ),
+            "registration_type": (
+                "Pairwise ANTsPy transform family for overlap registration: "
+                "translation, rigid, or similarity."
+            ),
+            "registration_resolution_level": (
+                "Input pyramid level used only for pairwise registration "
+                "(0 = full resolution). Final fusion always uses full resolution."
+            ),
+            "registration_anchor_mode": (
+                "Fix either the most central tile automatically or a manually "
+                "selected anchor position during global optimization."
+            ),
+            "registration_anchor_position": (
+                "Tile index held fixed when anchor mode is set to manual."
+            ),
+            "registration_blend_mode": (
+                "Overlap fusion mode for the final stitched volume. Feather "
+                "weights edges to reduce seams; average uses uniform weights."
+            ),
             "usegment3d_output_reference_space": (
                 "Choose whether final labels are stored at level 0 (original "
                 "resolution) or native selected input level."
@@ -7342,6 +7380,15 @@ if HAS_PYQT6:
                 )
             )
             self._operation_defaults["usegment3d"] = dict(self._usegment3d_defaults)
+            self._registration_defaults = dict(
+                self._operation_defaults.get(
+                    "registration",
+                    self._DEFAULT_REGISTRATION_PARAMETERS,
+                )
+            )
+            self._operation_defaults["registration"] = dict(
+                self._registration_defaults
+            )
             self._visualization_defaults = dict(
                 self._operation_defaults.get("visualization", {})
             )
@@ -8269,6 +8316,9 @@ if HAS_PYQT6:
             self._usegment3d_resolution_level_spin.valueChanged.connect(
                 self._set_usegment3d_parameter_enabled_state
             )
+            self._registration_anchor_mode_combo.currentIndexChanged.connect(
+                self._set_registration_parameter_enabled_state
+            )
             self._usegment3d_output_reference_combo.currentIndexChanged.connect(
                 self._set_usegment3d_parameter_enabled_state
             )
@@ -8460,6 +8510,8 @@ if HAS_PYQT6:
                 self._build_particle_parameter_rows(form)
             elif operation_name == "usegment3d":
                 self._build_usegment3d_parameter_rows(form)
+            elif operation_name == "registration":
+                self._build_registration_parameter_rows(form)
             elif operation_name == "visualization":
                 self._build_visualization_parameter_rows(form)
             elif operation_name == "mip_export":
@@ -9601,6 +9653,121 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["usegment3d_postprocess_dtform"],
             )
             form.addRow(postprocess_section)
+
+        def _build_registration_parameter_rows(self, form: QFormLayout) -> None:
+            """Add registration parameter controls to a form.
+
+            Parameters
+            ----------
+            form : QFormLayout
+                Parent form layout receiving registration controls.
+
+            Returns
+            -------
+            None
+                Widgets are created and attached in-place.
+            """
+            pairwise_section, pairwise_form = self._build_parameter_section_card(
+                "Pairwise Registration"
+            )
+            self._registration_channel_spin = QSpinBox()
+            self._registration_channel_spin.setRange(0, 0)
+            pairwise_form.addRow("channel", self._registration_channel_spin)
+            self._register_parameter_hint(
+                self._registration_channel_spin,
+                self._PARAMETER_HINTS["registration_channel"],
+            )
+
+            self._registration_type_combo = QComboBox()
+            self._registration_type_combo.addItem("Translation", "translation")
+            self._registration_type_combo.addItem("Rigid", "rigid")
+            self._registration_type_combo.addItem("Similarity", "similarity")
+            pairwise_form.addRow("type", self._registration_type_combo)
+            self._register_parameter_hint(
+                self._registration_type_combo,
+                self._PARAMETER_HINTS["registration_type"],
+            )
+
+            self._registration_resolution_level_spin = QSpinBox()
+            self._registration_resolution_level_spin.setRange(0, 0)
+            pairwise_form.addRow(
+                "resolution level",
+                self._registration_resolution_level_spin,
+            )
+            self._register_parameter_hint(
+                self._registration_resolution_level_spin,
+                self._PARAMETER_HINTS["registration_resolution_level"],
+            )
+            form.addRow(pairwise_section)
+
+            global_section, global_form = self._build_parameter_section_card(
+                "Global Optimization"
+            )
+            self._registration_anchor_mode_combo = QComboBox()
+            self._registration_anchor_mode_combo.addItem(
+                "Central tile", "central"
+            )
+            self._registration_anchor_mode_combo.addItem(
+                "Manual tile", "manual"
+            )
+            global_form.addRow("anchor mode", self._registration_anchor_mode_combo)
+            self._register_parameter_hint(
+                self._registration_anchor_mode_combo,
+                self._PARAMETER_HINTS["registration_anchor_mode"],
+            )
+
+            self._registration_anchor_position_spin = QSpinBox()
+            self._registration_anchor_position_spin.setRange(0, 0)
+            global_form.addRow(
+                "anchor tile",
+                self._registration_anchor_position_spin,
+            )
+            self._register_parameter_hint(
+                self._registration_anchor_position_spin,
+                self._PARAMETER_HINTS["registration_anchor_position"],
+            )
+            form.addRow(global_section)
+
+            fusion_section, fusion_form = self._build_parameter_section_card("Fusion")
+            overlap_row = QHBoxLayout()
+            apply_compact_row_spacing(overlap_row)
+            self._registration_overlap_z_spin = QSpinBox()
+            self._registration_overlap_z_spin.setRange(0, 1_000_000)
+            self._registration_overlap_y_spin = QSpinBox()
+            self._registration_overlap_y_spin.setRange(0, 1_000_000)
+            self._registration_overlap_x_spin = QSpinBox()
+            self._registration_overlap_x_spin.setRange(0, 1_000_000)
+            overlap_row.addWidget(QLabel("z"))
+            overlap_row.addWidget(self._registration_overlap_z_spin)
+            overlap_row.addWidget(QLabel("y"))
+            overlap_row.addWidget(self._registration_overlap_y_spin)
+            overlap_row.addWidget(QLabel("x"))
+            overlap_row.addWidget(self._registration_overlap_x_spin)
+            overlap_widget = QWidget()
+            overlap_widget.setLayout(overlap_row)
+            fusion_form.addRow("overlap pad", overlap_widget)
+            self._register_parameter_hint(
+                self._registration_overlap_z_spin,
+                self._PARAMETER_HINTS["overlap_zyx"],
+            )
+            self._register_parameter_hint(
+                self._registration_overlap_y_spin,
+                self._PARAMETER_HINTS["overlap_zyx"],
+            )
+            self._register_parameter_hint(
+                self._registration_overlap_x_spin,
+                self._PARAMETER_HINTS["overlap_zyx"],
+            )
+
+            self._registration_blend_mode_combo = QComboBox()
+            self._registration_blend_mode_combo.addItem("Feather", "feather")
+            self._registration_blend_mode_combo.addItem("Average", "average")
+            fusion_form.addRow("blend mode", self._registration_blend_mode_combo)
+            self._register_parameter_hint(
+                self._registration_blend_mode_combo,
+                self._PARAMETER_HINTS["registration_blend_mode"],
+            )
+            form.addRow(fusion_section)
 
         def _rebuild_usegment3d_channel_checkboxes(
             self,
@@ -12007,6 +12174,7 @@ if HAS_PYQT6:
             self._set_shear_parameter_enabled_state()
             self._set_particle_parameter_enabled_state()
             self._set_usegment3d_parameter_enabled_state()
+            self._set_registration_parameter_enabled_state()
             self._set_visualization_parameter_enabled_state()
             self._set_mip_export_parameter_enabled_state()
 
@@ -12446,6 +12614,41 @@ if HAS_PYQT6:
             )
             self._usegment3d_postprocess_dtform_combo.setEnabled(postprocess_enabled)
 
+        def _set_registration_parameter_enabled_state(self) -> None:
+            """Enable/disable registration widgets based on selection and anchor mode.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            None
+                Widget enabled states are updated in-place.
+            """
+            registration_enabled = self._operation_checkboxes["registration"].isChecked()
+            widgets = (
+                self._registration_channel_spin,
+                self._registration_type_combo,
+                self._registration_resolution_level_spin,
+                self._registration_anchor_mode_combo,
+                self._registration_overlap_z_spin,
+                self._registration_overlap_y_spin,
+                self._registration_overlap_x_spin,
+                self._registration_blend_mode_combo,
+            )
+            for widget in widgets:
+                widget.setEnabled(registration_enabled)
+
+            anchor_mode = (
+                str(self._registration_anchor_mode_combo.currentData() or "central")
+                .strip()
+                .lower()
+                or "central"
+            )
+            manual_anchor = registration_enabled and anchor_mode == "manual"
+            self._registration_anchor_position_spin.setEnabled(manual_anchor)
+
         def _set_flatfield_parameter_enabled_state(self) -> None:
             """Enable/disable flatfield widgets based on selection and overlap mode.
 
@@ -12624,6 +12827,9 @@ if HAS_PYQT6:
             usegment3d_params = dict(
                 normalized_parameters.get("usegment3d", self._usegment3d_defaults)
             )
+            registration_params = dict(
+                normalized_parameters.get("registration", self._registration_defaults)
+            )
             visualization_params = dict(
                 normalized_parameters.get("visualization", self._visualization_defaults)
             )
@@ -12754,6 +12960,11 @@ if HAS_PYQT6:
             self._usegment3d_resolution_level_spin.setMaximum(
                 max(0, int(max_usegment3d_resolution_level))
             )
+            self._registration_channel_spin.setMaximum(channel_count - 1)
+            self._registration_resolution_level_spin.setMaximum(
+                max(0, int(max_usegment3d_resolution_level))
+            )
+            self._registration_anchor_position_spin.setMaximum(position_count - 1)
             requested_usegment_channels = usegment3d_params.get("channel_indices", [])
             if isinstance(requested_usegment_channels, str):
                 requested_channel_values: list[Any] = self._split_csv_values(
@@ -13342,6 +13553,107 @@ if HAS_PYQT6:
                 )
                 dtform_index = self._usegment3d_postprocess_dtform_combo.count() - 1
             self._usegment3d_postprocess_dtform_combo.setCurrentIndex(dtform_index)
+
+            self._registration_channel_spin.setValue(
+                max(
+                    0,
+                    min(
+                        int(self._registration_channel_spin.maximum()),
+                        int(registration_params.get("registration_channel", 0)),
+                    ),
+                )
+            )
+            registration_type = (
+                str(registration_params.get("registration_type", "rigid"))
+                .strip()
+                .lower()
+                or "rigid"
+            )
+            registration_type_index = self._registration_type_combo.findData(
+                registration_type
+            )
+            if registration_type_index < 0:
+                registration_type_index = self._registration_type_combo.findData(
+                    "rigid"
+                )
+            if registration_type_index < 0:
+                registration_type_index = 0
+            self._registration_type_combo.setCurrentIndex(registration_type_index)
+
+            registration_resolution_level = max(
+                0,
+                int(registration_params.get("input_resolution_level", 0)),
+            )
+            self._registration_resolution_level_spin.setValue(
+                min(
+                    int(self._registration_resolution_level_spin.maximum()),
+                    int(registration_resolution_level),
+                )
+            )
+
+            anchor_mode = (
+                str(registration_params.get("anchor_mode", "central"))
+                .strip()
+                .lower()
+                or "central"
+            )
+            if anchor_mode not in {"central", "manual"}:
+                anchor_mode = "central"
+            anchor_mode_index = self._registration_anchor_mode_combo.findData(
+                anchor_mode
+            )
+            if anchor_mode_index < 0:
+                anchor_mode_index = self._registration_anchor_mode_combo.findData(
+                    "central"
+                )
+            if anchor_mode_index < 0:
+                anchor_mode_index = 0
+            self._registration_anchor_mode_combo.setCurrentIndex(anchor_mode_index)
+            anchor_position = registration_params.get("anchor_position")
+            if anchor_position in {None, ""}:
+                parsed_anchor_position = 0
+            else:
+                parsed_anchor_position = int(anchor_position)
+            self._registration_anchor_position_spin.setValue(
+                max(
+                    0,
+                    min(
+                        int(self._registration_anchor_position_spin.maximum()),
+                        int(parsed_anchor_position),
+                    ),
+                )
+            )
+            registration_overlap_zyx = registration_params.get("overlap_zyx", [8, 32, 32])
+            if (
+                not isinstance(registration_overlap_zyx, (tuple, list))
+                or len(registration_overlap_zyx) != 3
+            ):
+                registration_overlap_zyx = [8, 32, 32]
+            self._registration_overlap_z_spin.setValue(
+                max(0, int(registration_overlap_zyx[0]))
+            )
+            self._registration_overlap_y_spin.setValue(
+                max(0, int(registration_overlap_zyx[1]))
+            )
+            self._registration_overlap_x_spin.setValue(
+                max(0, int(registration_overlap_zyx[2]))
+            )
+            registration_blend_mode = (
+                str(registration_params.get("blend_mode", "feather")).strip().lower()
+                or "feather"
+            )
+            registration_blend_index = self._registration_blend_mode_combo.findData(
+                registration_blend_mode
+            )
+            if registration_blend_index < 0:
+                registration_blend_index = self._registration_blend_mode_combo.findData(
+                    "feather"
+                )
+            if registration_blend_index < 0:
+                registration_blend_index = 0
+            self._registration_blend_mode_combo.setCurrentIndex(
+                registration_blend_index
+            )
 
             self._visualization_show_all_positions_checkbox.setChecked(
                 bool(visualization_params.get("show_all_positions", False))
@@ -14169,6 +14481,58 @@ if HAS_PYQT6:
                 "postprocess_dtform_method": dtform_method,
             }
 
+        def _collect_registration_parameters(self) -> Dict[str, Any]:
+            """Collect registration parameter values from widgets.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            dict[str, Any]
+                Registration parameter mapping.
+            """
+            anchor_mode = (
+                str(self._registration_anchor_mode_combo.currentData() or "central")
+                .strip()
+                .lower()
+                or "central"
+            )
+            anchor_position: Optional[int]
+            if anchor_mode == "manual":
+                anchor_position = int(self._registration_anchor_position_spin.value())
+            else:
+                anchor_position = None
+
+            return {
+                "chunk_basis": "3d",
+                "detect_2d_per_slice": False,
+                "use_map_overlap": True,
+                "overlap_zyx": [
+                    int(self._registration_overlap_z_spin.value()),
+                    int(self._registration_overlap_y_spin.value()),
+                    int(self._registration_overlap_x_spin.value()),
+                ],
+                "memory_overhead_factor": float(
+                    self._registration_defaults.get("memory_overhead_factor", 2.5)
+                ),
+                "registration_channel": int(self._registration_channel_spin.value()),
+                "registration_type": str(
+                    self._registration_type_combo.currentData() or "rigid"
+                ).strip()
+                or "rigid",
+                "input_resolution_level": int(
+                    self._registration_resolution_level_spin.value()
+                ),
+                "anchor_mode": anchor_mode,
+                "anchor_position": anchor_position,
+                "blend_mode": str(
+                    self._registration_blend_mode_combo.currentData() or "feather"
+                ).strip()
+                or "feather",
+            }
+
         def _collect_visualization_parameters(self) -> Dict[str, Any]:
             """Collect visualization parameter values from widgets.
 
@@ -14308,6 +14672,8 @@ if HAS_PYQT6:
                 defaults.update(self._collect_particle_parameters())
             elif operation_name == "usegment3d":
                 defaults.update(self._collect_usegment3d_parameters())
+            elif operation_name == "registration":
+                defaults.update(self._collect_registration_parameters())
             elif operation_name == "visualization":
                 defaults.update(self._collect_visualization_parameters())
             elif operation_name == "mip_export":

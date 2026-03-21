@@ -64,6 +64,7 @@ ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS: Dict[str, str] = {
     "deconvolution": "results/deconvolution/latest/data",
     "shear_transform": "results/shear_transform/latest/data",
     "usegment3d": "results/usegment3d/latest/data",
+    "registration": "results/registration/latest/data",
 }
 ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
     "data": "data",
@@ -568,7 +569,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "roi_padding_zyx": [2, 2, 2],
     },
     "particle_detection": {
-        "execution_order": 4,
+        "execution_order": 5,
         "input_source": "data",
         "force_rerun": False,
         "channel_index": 0,
@@ -589,7 +590,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "min_distance_sigma": 10.0,
     },
     "usegment3d": {
-        "execution_order": 5,
+        "execution_order": 6,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -647,7 +648,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "output_dtype": "uint32",
     },
     "registration": {
-        "execution_order": 6,
+        "execution_order": 4,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -655,6 +656,12 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "use_map_overlap": True,
         "overlap_zyx": [8, 32, 32],
         "memory_overhead_factor": 2.5,
+        "registration_channel": 0,
+        "registration_type": "rigid",
+        "input_resolution_level": 0,
+        "anchor_mode": "central",
+        "anchor_position": None,
+        "blend_mode": "feather",
     },
     "display_pyramid": {
         "execution_order": 7,
@@ -1703,6 +1710,70 @@ def _normalize_usegment3d_parameters(
     return normalized
 
 
+def _normalize_registration_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize registration runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate registration parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized registration parameter mapping.
+
+    Raises
+    ------
+    ValueError
+        If required values are invalid.
+    """
+    normalized = _normalize_common_operation_parameters("registration", params)
+    normalized["detect_2d_per_slice"] = False
+    normalized["use_map_overlap"] = bool(normalized.get("use_map_overlap", True))
+    normalized["registration_channel"] = max(
+        0, int(normalized.get("registration_channel", 0))
+    )
+
+    registration_type = (
+        str(normalized.get("registration_type", "rigid")).strip().lower() or "rigid"
+    )
+    if registration_type not in {"translation", "rigid", "similarity"}:
+        raise ValueError(
+            "registration registration_type must be one of translation, rigid, or similarity."
+        )
+    normalized["registration_type"] = registration_type
+
+    input_resolution_level = int(normalized.get("input_resolution_level", 0))
+    if input_resolution_level < 0:
+        raise ValueError("registration input_resolution_level must be >= 0.")
+    normalized["input_resolution_level"] = input_resolution_level
+
+    anchor_mode = (
+        str(normalized.get("anchor_mode", "central")).strip().lower() or "central"
+    )
+    if anchor_mode not in {"central", "manual"}:
+        raise ValueError("registration anchor_mode must be 'central' or 'manual'.")
+    normalized["anchor_mode"] = anchor_mode
+
+    anchor_position = normalized.get("anchor_position")
+    if anchor_position in {None, ""}:
+        normalized["anchor_position"] = None
+    else:
+        parsed_anchor = int(anchor_position)
+        if parsed_anchor < 0:
+            raise ValueError("registration anchor_position must be >= 0.")
+        normalized["anchor_position"] = parsed_anchor
+
+    blend_mode = str(normalized.get("blend_mode", "feather")).strip().lower()
+    if blend_mode not in {"average", "feather"}:
+        raise ValueError("registration blend_mode must be 'average' or 'feather'.")
+    normalized["blend_mode"] = blend_mode
+    return normalized
+
+
 def _normalize_shear_transform_parameters(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -2212,6 +2283,10 @@ def normalize_analysis_operation_parameters(
             )
         elif operation_name == "usegment3d":
             merged[operation_name] = _normalize_usegment3d_parameters(
+                merged[operation_name]
+            )
+        elif operation_name == "registration":
+            merged[operation_name] = _normalize_registration_parameters(
                 merged[operation_name]
             )
         elif operation_name == "visualization":

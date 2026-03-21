@@ -178,12 +178,21 @@ class TestWorkflowConfig:
         assert "shear_transform" in cfg.analysis_parameters
         assert cfg.analysis_parameters["shear_transform"]["execution_order"] == 3
         assert cfg.analysis_parameters["shear_transform"]["interpolation"] == "linear"
+        assert "registration" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["registration"]["execution_order"] == 4
+        assert cfg.analysis_parameters["registration"]["input_source"] == "data"
+        assert cfg.analysis_parameters["registration"]["registration_channel"] == 0
+        assert cfg.analysis_parameters["registration"]["registration_type"] == "rigid"
+        assert cfg.analysis_parameters["registration"]["input_resolution_level"] == 0
+        assert cfg.analysis_parameters["registration"]["anchor_mode"] == "central"
+        assert cfg.analysis_parameters["registration"]["anchor_position"] is None
+        assert cfg.analysis_parameters["registration"]["blend_mode"] == "feather"
         assert "particle_detection" in cfg.analysis_parameters
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
-        assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 4
+        assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 5
         assert cfg.analysis_parameters["particle_detection"]["input_source"] == "data"
         assert "usegment3d" in cfg.analysis_parameters
-        assert cfg.analysis_parameters["usegment3d"]["execution_order"] == 5
+        assert cfg.analysis_parameters["usegment3d"]["execution_order"] == 6
         assert cfg.analysis_parameters["usegment3d"]["input_source"] == "data"
         assert cfg.analysis_parameters["usegment3d"]["all_channels"] is False
         assert cfg.analysis_parameters["usegment3d"]["channel_indices"] == [0]
@@ -629,6 +638,49 @@ class TestWorkflowConfig:
         assert params["output_reference_space"] == "native_level"
         assert params["save_native_labels"] is True
 
+    def test_normalizes_registration_parameters(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "registration": {
+                    "execution_order": "9",
+                    "input_source": "deconvolution",
+                    "memory_overhead_factor": "4.5",
+                    "overlap_zyx": [2, 6, 10],
+                    "registration_channel": "2",
+                    "registration_type": "similarity",
+                    "input_resolution_level": "3",
+                    "anchor_mode": "manual",
+                    "anchor_position": "4",
+                    "blend_mode": "average",
+                    "force_rerun": 1,
+                }
+            }
+        )
+        params = cfg.analysis_parameters["registration"]
+        assert params["execution_order"] == 9
+        assert params["input_source"] == "deconvolution"
+        assert params["memory_overhead_factor"] == 4.5
+        assert params["overlap_zyx"] == [2, 6, 10]
+        assert params["registration_channel"] == 2
+        assert params["registration_type"] == "similarity"
+        assert params["input_resolution_level"] == 3
+        assert params["anchor_mode"] == "manual"
+        assert params["anchor_position"] == 4
+        assert params["blend_mode"] == "average"
+        assert params["force_rerun"] is True
+
+    def test_rejects_invalid_registration_resolution_level(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={"registration": {"input_resolution_level": -1}}
+            )
+
+    def test_rejects_invalid_registration_type(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={"registration": {"registration_type": "affine"}}
+            )
+
     def test_rejects_invalid_usegment3d_resolution_level(self):
         with pytest.raises(ValueError):
             WorkflowConfig(
@@ -913,7 +965,8 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     assert normalized["deconvolution"]["execution_order"] == 2
     assert normalized["flatfield"]["execution_order"] == 1
     assert normalized["shear_transform"]["execution_order"] == 3
-    assert normalized["usegment3d"]["execution_order"] == 5
+    assert normalized["registration"]["execution_order"] == 4
+    assert normalized["usegment3d"]["execution_order"] == 6
     assert normalized["display_pyramid"]["execution_order"] == 7
     assert normalized["visualization"]["input_source"] == "data"
     assert normalized["visualization"]["show_all_positions"] is False
@@ -993,6 +1046,12 @@ def test_resolve_analysis_input_component_prefers_same_run_outputs() -> None:
     )
 
     assert resolved == "results/flatfield/latest/data_run_2"
+
+
+def test_resolve_analysis_input_component_supports_registration_alias() -> None:
+    resolved = resolve_analysis_input_component("registration")
+
+    assert resolved == "results/registration/latest/data"
 
 
 def test_validate_analysis_input_references_accepts_scheduled_chainable_input() -> None:

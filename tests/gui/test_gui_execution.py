@@ -286,6 +286,69 @@ def test_analysis_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     dialog.close()
 
 
+def test_registration_operation_moves_to_preprocessing_tab() -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    tab_map = dict(app_module.AnalysisSelectionDialog._OPERATION_TABS)
+
+    assert "registration" in tab_map["Preprocessing"]
+    assert "registration" not in tab_map.get("Postprocessing", ())
+
+
+def test_analysis_dialog_persists_registration_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module,
+        "_save_last_used_dask_backend_config",
+        lambda _config: None,
+    )
+
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(file="/tmp/test/data_store.fake")
+    )
+    dialog._persist_analysis_gui_state_for_target = lambda _target: None
+    dialog._operation_checkboxes["registration"].setChecked(True)
+    dialog._registration_type_combo.setCurrentIndex(
+        dialog._registration_type_combo.findData("similarity")
+    )
+    dialog._registration_anchor_mode_combo.setCurrentIndex(
+        dialog._registration_anchor_mode_combo.findData("manual")
+    )
+    dialog._registration_anchor_position_spin.setMaximum(3)
+    dialog._registration_anchor_position_spin.setValue(2)
+    dialog._registration_overlap_z_spin.setValue(5)
+    dialog._registration_overlap_y_spin.setValue(12)
+    dialog._registration_overlap_x_spin.setValue(20)
+    dialog._registration_blend_mode_combo.setCurrentIndex(
+        dialog._registration_blend_mode_combo.findData("average")
+    )
+    dialog._registration_resolution_level_spin.setMaximum(3)
+    dialog._registration_resolution_level_spin.setValue(1)
+    app_module.AnalysisSelectionDialog._set_registration_parameter_enabled_state(
+        dialog
+    )
+
+    dialog._on_run()
+
+    params = dialog.result_config.analysis_parameters["registration"]
+    assert dialog.result_config.registration is True
+    assert params["registration_type"] == "similarity"
+    assert params["anchor_mode"] == "manual"
+    assert params["anchor_position"] == 2
+    assert params["overlap_zyx"] == [5, 12, 20]
+    assert params["blend_mode"] == "average"
+    assert params["input_resolution_level"] == 1
+
+
 def test_zarr_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     if not app_module.HAS_PYQT6:
         return

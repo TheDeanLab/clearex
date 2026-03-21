@@ -79,6 +79,41 @@ from clearex.visualization.pipeline import (
 from clearex.mip_export.pipeline import (
     run_mip_export_analysis,
 )
+try:
+    from clearex.registration.pipeline import (
+        run_registration_analysis,
+    )
+except ImportError:
+
+    def run_registration_analysis(*, zarr_path, parameters, client, progress_callback):
+        """Fallback when the optional registration runtime module is unavailable.
+
+        Parameters
+        ----------
+        zarr_path : str
+            Canonical analysis-store path.
+        parameters : dict[str, Any]
+            Runtime parameter mapping.
+        client : Any
+            Dask client handle.
+        progress_callback : callable
+            Progress callback.
+
+        Returns
+        -------
+        None
+            This fallback always raises before returning.
+
+        Raises
+        ------
+        RuntimeError
+            Always raised to indicate missing registration implementation.
+        """
+        del zarr_path, parameters, client, progress_callback
+        raise RuntimeError(
+            "registration analysis is unavailable: "
+            "could not import clearex.registration.pipeline."
+        )
 
 try:
     from clearex.usegment3d.pipeline import (
@@ -156,6 +191,7 @@ _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
         "shear_transform",
         "particle_detection",
         "usegment3d",
+        "registration",
         "display_pyramid",
         "mip_export",
     }
@@ -2144,6 +2180,7 @@ def _run_workflow(
                     continue
 
                 if operation_name == "registration":
+                    registration_parameters = dict(operation_parameters)
                     _emit_analysis_progress(
                         operation_start,
                         "Running registration workflow.",
@@ -2155,23 +2192,232 @@ def _run_workflow(
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
-                        logger.warning(
-                            "Registration is enabled but is not yet integrated with "
-                            "canonical 6D store inputs. Skipping registration."
+                        progress_state = {"last_percent": -5}
+
+                        def _registration_progress(
+                            percent: int, message: str
+                        ) -> None:
+                            """Throttle registration progress logs.
+
+                            Parameters
+                            ----------
+                            percent : int
+                                Progress percent.
+                            message : str
+                                Progress message.
+
+                            Returns
+                            -------
+                            None
+                                Logger side effects only.
+                            """
+                            last_percent = int(progress_state["last_percent"])
+                            if percent >= 100 or percent - last_percent >= 5:
+                                progress_state["last_percent"] = int(percent)
+                                logger.info(
+                                    f"[registration] {int(percent)}% - {message}"
+                                )
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            _emit_analysis_progress(
+                                mapped,
+                                f"registration: {message}",
+                            )
+
+                        summary = run_registration_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=registration_parameters,
+                            client=analysis_client,
+                            progress_callback=_registration_progress,
+                        )
+                        registration_component = str(
+                            getattr(summary, "component", "results/registration/latest")
+                        )
+                        registration_data_component = str(
+                            getattr(
+                                summary,
+                                "data_component",
+                                f"{registration_component}/data",
+                            )
+                        )
+                        registration_affines_component = str(
+                            getattr(
+                                summary,
+                                "affines_component",
+                                f"{registration_component}/affines_tpx44",
+                            )
+                        )
+                        registration_source_component = str(
+                            getattr(
+                                summary,
+                                "source_component",
+                                registration_parameters.get("input_source", "data"),
+                            )
+                        )
+                        produced_components["registration"] = (
+                            registration_data_component
+                        )
+                        output_records["registration"] = {
+                            "component": registration_component,
+                            "data_component": registration_data_component,
+                            "affines_component": registration_affines_component,
+                            "source_component": registration_source_component,
+                            "pairwise_source_component": str(
+                                getattr(
+                                    summary,
+                                    "pairwise_source_component",
+                                    registration_source_component,
+                                )
+                            ),
+                            "requested_source_component": str(
+                                getattr(
+                                    summary,
+                                    "requested_source_component",
+                                    registration_parameters.get("input_source", "data"),
+                                )
+                            ),
+                            "requested_input_resolution_level": int(
+                                getattr(
+                                    summary,
+                                    "requested_input_resolution_level",
+                                    registration_parameters.get(
+                                        "input_resolution_level", 0
+                                    ),
+                                )
+                            ),
+                            "input_resolution_level": int(
+                                getattr(summary, "input_resolution_level", 0)
+                            ),
+                            "registration_channel": int(
+                                getattr(summary, "registration_channel", 0)
+                            ),
+                            "registration_type": str(
+                                getattr(
+                                    summary,
+                                    "registration_type",
+                                    registration_parameters.get(
+                                        "registration_type", "rigid"
+                                    ),
+                                )
+                            ),
+                            "edge_count": int(getattr(summary, "edge_count", 0)),
+                            "active_edge_count": int(
+                                getattr(summary, "active_edge_count", 0)
+                            ),
+                            "dropped_edge_count": int(
+                                getattr(summary, "dropped_edge_count", 0)
+                            ),
+                            "output_shape_tpczyx": list(
+                                getattr(summary, "output_shape_tpczyx", ())
+                            ),
+                            "output_chunks_tpczyx": list(
+                                getattr(summary, "output_chunks_tpczyx", ())
+                            ),
+                            "blend_mode": str(
+                                getattr(
+                                    summary,
+                                    "blend_mode",
+                                    registration_parameters.get(
+                                        "blend_mode", "feather"
+                                    ),
+                                )
+                            ),
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Registration completed: "
+                            f"component={registration_component}, "
+                            f"data_component={registration_data_component}, "
+                            f"source={registration_source_component}, "
+                            f"pairwise_source={getattr(summary, 'pairwise_source_component', registration_source_component)}, "
+                            f"edges={getattr(summary, 'edge_count', 0)}, "
+                            f"active_edges={getattr(summary, 'active_edge_count', 0)}, "
+                            f"output_shape={getattr(summary, 'output_shape_tpczyx', ())}."
                         )
                         step_records.append(
                             {
                                 "name": "registration",
                                 "parameters": {
-                                    **operation_parameters,
-                                    "status": "skipped",
-                                    "reason": "not_integrated_with_canonical_store",
+                                    **registration_parameters,
+                                    "component": registration_component,
+                                    "data_component": registration_data_component,
+                                    "affines_component": registration_affines_component,
+                                    "source_component": registration_source_component,
+                                    "pairwise_source_component": str(
+                                        getattr(
+                                            summary,
+                                            "pairwise_source_component",
+                                            registration_source_component,
+                                        )
+                                    ),
+                                    "requested_source_component": str(
+                                        getattr(
+                                            summary,
+                                            "requested_source_component",
+                                            registration_parameters.get(
+                                                "input_source", "data"
+                                            ),
+                                        )
+                                    ),
+                                    "requested_input_resolution_level": int(
+                                        getattr(
+                                            summary,
+                                            "requested_input_resolution_level",
+                                            registration_parameters.get(
+                                                "input_resolution_level", 0
+                                            ),
+                                        )
+                                    ),
+                                    "input_resolution_level": int(
+                                        getattr(summary, "input_resolution_level", 0)
+                                    ),
+                                    "registration_channel": int(
+                                        getattr(summary, "registration_channel", 0)
+                                    ),
+                                    "registration_type": str(
+                                        getattr(
+                                            summary,
+                                            "registration_type",
+                                            registration_parameters.get(
+                                                "registration_type", "rigid"
+                                            ),
+                                        )
+                                    ),
+                                    "anchor_positions": list(
+                                        getattr(summary, "anchor_positions", ())
+                                    ),
+                                    "edge_count": int(
+                                        getattr(summary, "edge_count", 0)
+                                    ),
+                                    "active_edge_count": int(
+                                        getattr(summary, "active_edge_count", 0)
+                                    ),
+                                    "dropped_edge_count": int(
+                                        getattr(summary, "dropped_edge_count", 0)
+                                    ),
+                                    "output_shape_tpczyx": list(
+                                        getattr(summary, "output_shape_tpczyx", ())
+                                    ),
+                                    "output_chunks_tpczyx": list(
+                                        getattr(summary, "output_chunks_tpczyx", ())
+                                    ),
+                                    "blend_mode": str(
+                                        getattr(
+                                            summary,
+                                            "blend_mode",
+                                            registration_parameters.get(
+                                                "blend_mode", "feather"
+                                            ),
+                                        )
+                                    ),
                                 },
                             }
                         )
                         _emit_analysis_progress(
                             operation_end,
-                            "Registration skipped (not yet integrated with canonical store).",
+                            "Registration complete.",
                         )
                     else:
                         logger.warning(
@@ -2181,7 +2427,7 @@ def _run_workflow(
                             {
                                 "name": "registration",
                                 "parameters": {
-                                    **operation_parameters,
+                                    **registration_parameters,
                                     "status": "skipped",
                                     "reason": "no_zarr_store",
                                 },
