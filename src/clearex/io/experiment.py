@@ -3479,6 +3479,27 @@ def _legacy_n5_helper_command_prefix() -> Optional[tuple[str, ...]]:
     return None
 
 
+def _is_subprocess_reachable_scheduler_address(address: str) -> bool:
+    """Return whether a scheduler address can be used from a subprocess.
+
+    Parameters
+    ----------
+    address : str
+        Candidate scheduler address.
+
+    Returns
+    -------
+    bool
+        ``True`` when the address scheme is process-external and connectable
+        from a separate helper process.
+    """
+    text = str(address).strip()
+    if not text or "://" not in text:
+        return False
+    scheme = text.split("://", 1)[0].strip().lower()
+    return scheme in {"tcp", "tls", "ucx", "ws", "wss"}
+
+
 def _extract_client_scheduler_address(client: Optional["Client"]) -> Optional[str]:
     """Return scheduler address for a connected Dask client.
 
@@ -3498,27 +3519,92 @@ def _extract_client_scheduler_address(client: Optional["Client"]) -> Optional[st
     attributes and scheduler metadata for compatibility across distributed
     versions.
     """
+    candidates: list[str] = []
     if client is None:
         return None
-
     try:
         scheduler = getattr(client, "scheduler", None)
         address = getattr(scheduler, "address", None)
         if isinstance(address, str) and address.strip():
-            return address.strip()
+            candidates.append(address.strip())
     except Exception:
         pass
 
     try:
         scheduler_info = client.scheduler_info()
     except Exception:
+        scheduler_info = None
+    if isinstance(scheduler_info, dict):
+        address_value = scheduler_info.get("address")
+        if isinstance(address_value, str) and address_value.strip():
+            candidates.append(address_value.strip())
+
+    for candidate in candidates:
+        if _is_subprocess_reachable_scheduler_address(candidate):
+            return candidate
+    return None
+
+
+def _extract_client_local_cluster_hints(
+    client: Optional["Client"],
+) -> Optional[tuple[int, int, Optional[int]]]:
+    """Return local-cluster sizing hints from a connected Dask client.
+
+    Parameters
+    ----------
+    client : dask.distributed.Client, optional
+        Connected client instance.
+
+    Returns
+    -------
+    tuple[int, int, int | None], optional
+        ``(n_workers, threads_per_worker, min_worker_memory_limit_bytes)`` when
+        scheduler worker metadata is available; otherwise ``None``.
+    """
+    if client is None:
+        return None
+    try:
+        scheduler_info = client.scheduler_info()
+    except Exception:
         return None
     if not isinstance(scheduler_info, dict):
         return None
-    address_value = scheduler_info.get("address")
-    if isinstance(address_value, str) and address_value.strip():
-        return address_value.strip()
-    return None
+    workers = scheduler_info.get("workers")
+    if not isinstance(workers, dict) or not workers:
+        return None
+
+    n_workers = max(1, int(len(workers)))
+    thread_counts: list[int] = []
+    memory_limits: list[int] = []
+    for worker_payload in workers.values():
+        if not isinstance(worker_payload, dict):
+            continue
+        raw_threads = worker_payload.get("nthreads")
+        raw_memory = worker_payload.get("memory_limit")
+        try:
+            parsed_threads = int(raw_threads)
+            if parsed_threads > 0:
+                thread_counts.append(parsed_threads)
+        except Exception:
+            pass
+        try:
+            parsed_memory = int(raw_memory)
+            if parsed_memory > 0:
+                memory_limits.append(parsed_memory)
+        except Exception:
+            pass
+
+    threads_per_worker = (
+        max(1, min(thread_counts))
+        if thread_counts
+        else 1
+    )
+    min_worker_memory_limit = min(memory_limits) if memory_limits else None
+    return (
+        int(n_workers),
+        int(threads_per_worker),
+        None if min_worker_memory_limit is None else int(min_worker_memory_limit),
+    )
 
 
 def _materialize_n5_via_legacy_helper(
@@ -3594,6 +3680,25 @@ def _materialize_n5_via_legacy_helper(
                 str(scheduler_address),
             ]
         )
+    else:
+        local_hints = _extract_client_local_cluster_hints(client)
+        if local_hints is not None:
+            n_workers, threads_per_worker, memory_limit_bytes = local_hints
+            command.extend(
+                [
+                    "--local-n-workers",
+                    str(int(n_workers)),
+                    "--local-threads-per-worker",
+                    str(int(threads_per_worker)),
+                ]
+            )
+            if memory_limit_bytes is not None:
+                command.extend(
+                    [
+                        "--local-memory-limit",
+                        str(int(memory_limit_bytes)),
+                    ]
+                )
     subprocess.run(
         command,
         check=True,

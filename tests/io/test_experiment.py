@@ -244,6 +244,19 @@ def test_extract_client_scheduler_address_falls_back_to_scheduler_info() -> None
     )
 
 
+def test_extract_client_scheduler_address_ignores_inproc() -> None:
+    class _FakeScheduler:
+        address = "inproc://127.0.0.1/1/1"
+
+    class _FakeClient:
+        scheduler = _FakeScheduler()
+
+        def scheduler_info(self):
+            return {"address": "inproc://127.0.0.1/1/1"}
+
+    assert experiment_module._extract_client_scheduler_address(_FakeClient()) is None
+
+
 def test_materialize_n5_via_legacy_helper_forwards_scheduler_address(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -290,6 +303,61 @@ def test_materialize_n5_via_legacy_helper_forwards_scheduler_address(
     flag_index = command.index("--scheduler-address")
     assert command[flag_index + 1] == "tcp://127.0.0.1:8786"
     assert returned == output_store.with_name(f"{output_store.name}.legacy-v2.zarr")
+
+
+def test_materialize_n5_via_legacy_helper_forwards_local_hints_when_inproc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="N5")
+    experiment = load_navigate_experiment(experiment_path)
+    source_path = tmp_path / "CH00_000000.n5"
+    source_path.mkdir()
+    output_store = tmp_path / "CH00_000000.n5.clearex.zarr"
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_legacy_n5_helper_command_prefix",
+        lambda: ("/usr/bin/python3",),
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "_extract_client_scheduler_address",
+        lambda _client: None,
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "_extract_client_local_cluster_hints",
+        lambda _client: (5, 2, 987654321),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = dict(kwargs)
+        return None
+
+    monkeypatch.setattr(experiment_module.subprocess, "run", _fake_run)
+
+    class _Client:
+        pass
+
+    _ = experiment_module._materialize_n5_via_legacy_helper(
+        experiment=experiment,
+        source_path=source_path,
+        output_store_path=output_store,
+        chunks=(1, 1, 1, 64, 64, 64),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+        client=_Client(),
+    )
+
+    command = captured["command"]
+    assert "--scheduler-address" not in command
+    assert "--local-n-workers" in command
+    assert "--local-threads-per-worker" in command
+    assert "--local-memory-limit" in command
 
 
 def test_materialize_n5_via_legacy_helper_omits_scheduler_address_without_client(

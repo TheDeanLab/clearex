@@ -31,6 +31,9 @@ def main() -> int:
     parser.add_argument("--chunks", required=True)
     parser.add_argument("--pyramid-factors", required=True)
     parser.add_argument("--scheduler-address", default=None)
+    parser.add_argument("--local-n-workers", type=int, default=None)
+    parser.add_argument("--local-threads-per-worker", type=int, default=None)
+    parser.add_argument("--local-memory-limit", default=None)
     args = parser.parse_args()
 
     chunks = _parse_chunks(str(args.chunks))
@@ -53,6 +56,21 @@ def main() -> int:
         if scheduler_address:
             helper_client = create_dask_client(
                 scheduler_address=scheduler_address
+            )
+        elif args.local_n_workers is not None:
+            helper_client = create_dask_client(
+                n_workers=max(1, int(args.local_n_workers)),
+                threads_per_worker=max(
+                    1,
+                    int(args.local_threads_per_worker or 1),
+                ),
+                processes=False,
+                memory_limit=(
+                    str(args.local_memory_limit).strip()
+                    if args.local_memory_limit is not None
+                    and str(args.local_memory_limit).strip()
+                    else "auto"
+                ),
             )
 
         experiment = load_navigate_experiment(Path(args.experiment_path))
