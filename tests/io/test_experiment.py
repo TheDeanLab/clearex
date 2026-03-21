@@ -292,6 +292,105 @@ def test_materialize_n5_via_legacy_helper_forwards_scheduler_address(
     assert returned == output_store.with_name(f"{output_store.name}.legacy-v2.zarr")
 
 
+def test_materialize_n5_via_legacy_helper_omits_scheduler_address_without_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="N5")
+    experiment = load_navigate_experiment(experiment_path)
+    source_path = tmp_path / "CH00_000000.n5"
+    source_path.mkdir()
+    output_store = tmp_path / "CH00_000000.n5.clearex.zarr"
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_legacy_n5_helper_command_prefix",
+        lambda: ("/usr/bin/python3",),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = dict(kwargs)
+        return None
+
+    monkeypatch.setattr(experiment_module.subprocess, "run", _fake_run)
+
+    _ = experiment_module._materialize_n5_via_legacy_helper(
+        experiment=experiment,
+        source_path=source_path,
+        output_store_path=output_store,
+        chunks=(1, 1, 1, 64, 64, 64),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+        client=None,
+    )
+
+    command = captured["command"]
+    assert "--scheduler-address" not in command
+
+
+def test_materialize_experiment_data_store_passes_client_to_legacy_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="N5")
+    experiment = load_navigate_experiment(experiment_path)
+    source_path = tmp_path / "CH00_000000.n5"
+    source_path.mkdir()
+    final_store = source_path.with_name(f"{source_path.name}.clearex.zarr")
+    root = _open_test_zarr_group(final_store, mode="w", zarr_format=3)
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    class _Client:
+        pass
+
+    client = _Client()
+    captured: dict[str, object] = {}
+
+    def _fake_legacy_helper(**kwargs):
+        captured["legacy_client"] = kwargs.get("client")
+        legacy_store = tmp_path / "legacy-output.zarr"
+        legacy_store.mkdir(exist_ok=True)
+        return legacy_store
+
+    monkeypatch.setattr(experiment_module, "is_clearex_analysis_store", lambda _path: False)
+    monkeypatch.setattr(
+        experiment_module,
+        "_materialize_n5_via_legacy_helper",
+        _fake_legacy_helper,
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "migrate_analysis_store",
+        lambda _path, keep_backup=False: tmp_path / "legacy-migrated.zarr",
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "replace_store_path",
+        lambda **kwargs: None,
+    )
+
+    result = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+        client=client,
+    )
+
+    assert captured["legacy_client"] is client
+    assert result.store_path == final_store.resolve()
+
+
 def _write_multipositions_sidecar(path: Path, count: int) -> None:
     header = ["X", "Y", "Z", "THETA", "F", "X_PIXEL", "Y_PIXEL"]
     rows = [header]
