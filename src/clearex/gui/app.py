@@ -1237,6 +1237,261 @@ def _discover_available_operation_output_components(
     return available
 
 
+def _parse_source_component_level(
+    *,
+    component: str,
+    full_resolution_source: str,
+) -> Optional[int]:
+    """Parse one component path into a pyramid resolution level.
+
+    Parameters
+    ----------
+    component : str
+        Candidate component token or full component path.
+    full_resolution_source : str
+        Full-resolution source component path associated with the token.
+
+    Returns
+    -------
+    int, optional
+        Parsed non-negative level when the component represents a pyramid level;
+        otherwise ``None``.
+    """
+    token = str(component).strip()
+    if not token:
+        return None
+
+    suffix_text: Optional[str] = None
+    if token.startswith("level_"):
+        suffix_text = token.split("_", maxsplit=1)[1]
+    elif full_resolution_source == "data" and token.startswith("data_pyramid/level_"):
+        suffix_text = token.split("data_pyramid/level_", maxsplit=1)[1]
+    else:
+        prefix = f"{full_resolution_source}_pyramid/level_"
+        if token.startswith(prefix):
+            suffix_text = token.split(prefix, maxsplit=1)[1]
+
+    if suffix_text is None:
+        return None
+    suffix_text = str(suffix_text).split("/", maxsplit=1)[0]
+    try:
+        parsed = int(suffix_text)
+    except Exception:
+        return None
+    if parsed < 0:
+        return None
+    return parsed
+
+
+def _full_resolution_source_component(source_component: str) -> str:
+    """Return the full-resolution source component for a requested path.
+
+    Parameters
+    ----------
+    source_component : str
+        Requested source component path.
+
+    Returns
+    -------
+    str
+        Corresponding full-resolution component path.
+    """
+    requested = str(source_component).strip() or "data"
+    if requested.startswith("data_pyramid/level_"):
+        return "data"
+    if "_pyramid/level_" in requested:
+        return requested.split("_pyramid/level_", maxsplit=1)[0]
+    return requested
+
+
+def _component_channel_count(
+    *,
+    root: Any,
+    component: str,
+) -> Optional[int]:
+    """Return channel count for a 6D-like source component when available.
+
+    Parameters
+    ----------
+    root : Any
+        Open Zarr root group.
+    component : str
+        Candidate component path.
+
+    Returns
+    -------
+    int, optional
+        Positive channel count, or ``None`` if unavailable.
+    """
+    candidate = str(component).strip()
+    if not candidate or not _zarr_component_exists_in_root(root, candidate):
+        return None
+    try:
+        source = root[candidate]
+    except Exception:
+        return None
+
+    shape = getattr(source, "shape", None)
+    if not isinstance(shape, (tuple, list)) or len(shape) < 3:
+        return None
+    try:
+        count = int(shape[2])
+    except Exception:
+        return None
+    if count <= 0:
+        return None
+    return int(count)
+
+
+def _discover_component_resolution_levels(
+    *,
+    root: Any,
+    source_component: str,
+) -> tuple[int, ...]:
+    """Discover available resolution levels for one source component.
+
+    Parameters
+    ----------
+    root : Any
+        Open Zarr root group.
+    source_component : str
+        Resolved source component path requested by the user.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Sorted unique resolution levels available for the requested source.
+
+    Notes
+    -----
+    This helper is GUI-facing and intentionally tolerant to missing metadata.
+    Resolution level ``0`` is always retained as a safe fallback.
+    """
+    requested = str(source_component).strip() or "data"
+    full_resolution_source = _full_resolution_source_component(requested)
+
+    available_levels: set[int] = set()
+    if _zarr_component_exists_in_root(root, full_resolution_source):
+        available_levels.add(0)
+
+    direct_level = _parse_source_component_level(
+        component=requested,
+        full_resolution_source=full_resolution_source,
+    )
+    if direct_level is not None and _zarr_component_exists_in_root(root, requested):
+        available_levels.add(int(direct_level))
+
+    pyramid_group_component = (
+        "data_pyramid"
+        if full_resolution_source == "data"
+        else f"{full_resolution_source}_pyramid"
+    )
+    if _zarr_component_exists_in_root(root, pyramid_group_component):
+        try:
+            pyramid_group = root[pyramid_group_component]
+        except Exception:
+            pyramid_group = None
+        if pyramid_group is not None:
+            member_keys: set[str] = set()
+            try:
+                member_keys.update(
+                    str(key).strip() for key in pyramid_group.group_keys()
+                )
+            except Exception:
+                pass
+            try:
+                member_keys.update(
+                    str(key).strip() for key in pyramid_group.array_keys()
+                )
+            except Exception:
+                pass
+            for key in member_keys:
+                parsed_level = _parse_source_component_level(
+                    component=key,
+                    full_resolution_source=full_resolution_source,
+                )
+                if parsed_level is None:
+                    continue
+                component = f"{pyramid_group_component}/{key}"
+                if _zarr_component_exists_in_root(root, component):
+                    available_levels.add(int(parsed_level))
+
+    metadata_components: list[str] = []
+    if full_resolution_source == "data":
+        try:
+            data_levels = root.attrs.get("data_pyramid_levels")
+        except Exception:
+            data_levels = None
+        if isinstance(data_levels, (tuple, list)):
+            metadata_components.extend(str(value).strip() for value in data_levels)
+    try:
+        source_node = root[full_resolution_source]
+    except Exception:
+        source_node = None
+    if source_node is not None:
+        try:
+            pyramid_levels = source_node.attrs.get("pyramid_levels")
+        except Exception:
+            pyramid_levels = None
+        if isinstance(pyramid_levels, (tuple, list)):
+            metadata_components.extend(str(value).strip() for value in pyramid_levels)
+    for component in metadata_components:
+        if not component:
+            continue
+        parsed_level = _parse_source_component_level(
+            component=component,
+            full_resolution_source=full_resolution_source,
+        )
+        if parsed_level is None:
+            continue
+        if _zarr_component_exists_in_root(root, component):
+            available_levels.add(int(parsed_level))
+
+    if not available_levels:
+        available_levels.add(0)
+    return tuple(sorted(available_levels))
+
+
+def _discover_component_channels(
+    *,
+    root: Any,
+    source_component: str,
+) -> tuple[int, ...]:
+    """Discover available channel indices for one source component.
+
+    Parameters
+    ----------
+    root : Any
+        Open Zarr root group.
+    source_component : str
+        Resolved source component path requested by the user.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Sorted channel indices available for the requested source.
+
+    Notes
+    -----
+    This helper is GUI-facing and intentionally tolerant to missing metadata.
+    Channel index ``0`` is always retained as a safe fallback.
+    """
+    requested = str(source_component).strip() or "data"
+    full_resolution_source = _full_resolution_source_component(requested)
+
+    channel_count = _component_channel_count(
+        root=root, component=full_resolution_source
+    )
+    if channel_count is None:
+        channel_count = _component_channel_count(root=root, component=requested)
+    if channel_count is None:
+        channel_count = _component_channel_count(root=root, component="data")
+
+    if channel_count is None:
+        return (0,)
+    return tuple(int(index) for index in range(int(channel_count)))
+
+
 def _build_input_source_options(
     *,
     operation_name: str,
@@ -2014,8 +2269,7 @@ def _format_spatial_calibration_summary(config: SpatialCalibrationConfig) -> str
         Human-readable summary for setup and analysis dialogs.
     """
     binding_labels = {
-        binding: label
-        for label, binding in _spatial_calibration_binding_choices()
+        binding: label for label, binding in _spatial_calibration_binding_choices()
     }
     lines = [
         f"Canonical: {format_spatial_calibration(config)}",
@@ -2026,8 +2280,7 @@ def _format_spatial_calibration_summary(config: SpatialCalibrationConfig) -> str
         strict=False,
     ):
         lines.append(
-            f"World {axis_name.upper()}: "
-            f"{binding_labels.get(binding, binding)}"
+            f"World {axis_name.upper()}: " f"{binding_labels.get(binding, binding)}"
         )
     lines.append("Theta: Rotate Z/Y about world X")
     return "\n".join(lines)
@@ -2889,12 +3142,8 @@ if HAS_PYQT6:
             self._defaults_button = _configure_fixed_height_button(
                 QPushButton("Reset Defaults")
             )
-            self._cancel_button = _configure_fixed_height_button(
-                QPushButton("Cancel")
-            )
-            self._apply_button = _configure_fixed_height_button(
-                QPushButton("Apply")
-            )
+            self._cancel_button = _configure_fixed_height_button(QPushButton("Cancel"))
+            self._apply_button = _configure_fixed_height_button(QPushButton("Apply"))
             self._apply_button.setObjectName("runButton")
             footer.addWidget(self._defaults_button)
             footer.addStretch(1)
@@ -3107,12 +3356,8 @@ if HAS_PYQT6:
             self._defaults_button = _configure_fixed_height_button(
                 QPushButton("Reset Identity")
             )
-            self._cancel_button = _configure_fixed_height_button(
-                QPushButton("Cancel")
-            )
-            self._apply_button = _configure_fixed_height_button(
-                QPushButton("Apply")
-            )
+            self._cancel_button = _configure_fixed_height_button(QPushButton("Cancel"))
+            self._apply_button = _configure_fixed_height_button(QPushButton("Apply"))
             self._apply_button.setObjectName("runButton")
             footer.addWidget(self._defaults_button)
             footer.addStretch(1)
@@ -3311,12 +3556,8 @@ if HAS_PYQT6:
             self._defaults_button = _configure_fixed_height_button(
                 QPushButton("Reset Defaults")
             )
-            self._cancel_button = _configure_fixed_height_button(
-                QPushButton("Cancel")
-            )
-            self._apply_button = _configure_fixed_height_button(
-                QPushButton("Apply")
-            )
+            self._cancel_button = _configure_fixed_height_button(QPushButton("Cancel"))
+            self._apply_button = _configure_fixed_height_button(QPushButton("Apply"))
             self._apply_button.setObjectName("runButton")
             footer.addWidget(self._defaults_button)
             footer.addStretch(1)
@@ -3388,7 +3629,10 @@ if HAS_PYQT6:
             self._local_recommendation_label.setWordWrap(True)
             self._local_recommendation_label.setObjectName("metadataFieldValue")
             self._local_recommendation_label.setMinimumHeight(
-                max(28, int(self._local_recommendation_label.fontMetrics().height()) + 10)
+                max(
+                    28,
+                    int(self._local_recommendation_label.fontMetrics().height()) + 10,
+                )
             )
             form.addRow("", self._local_recommendation_label)
             return page
@@ -4838,9 +5082,7 @@ if HAS_PYQT6:
             spatial_button_row = QHBoxLayout()
             apply_row_spacing(spatial_button_row)
             spatial_button_row.addStretch(1)
-            self._spatial_calibration_button = QPushButton(
-                "Edit Spatial Calibration"
-            )
+            self._spatial_calibration_button = QPushButton("Edit Spatial Calibration")
             spatial_button_row.addWidget(self._spatial_calibration_button)
             spatial_layout.addLayout(spatial_button_row)
             root.addWidget(spatial_group)
@@ -7386,9 +7628,7 @@ if HAS_PYQT6:
                     self._DEFAULT_REGISTRATION_PARAMETERS,
                 )
             )
-            self._operation_defaults["registration"] = dict(
-                self._registration_defaults
-            )
+            self._operation_defaults["registration"] = dict(self._registration_defaults)
             self._visualization_defaults = dict(
                 self._operation_defaults.get("visualization", {})
             )
@@ -7495,7 +7735,10 @@ if HAS_PYQT6:
             self._analysis_scope_summary_label.setObjectName("statusLabel")
             self._analysis_scope_summary_label.setWordWrap(True)
             self._analysis_scope_summary_label.setMinimumHeight(
-                max(28, int(self._analysis_scope_summary_label.fontMetrics().height()) + 10)
+                max(
+                    28,
+                    int(self._analysis_scope_summary_label.fontMetrics().height()) + 10,
+                )
             )
             layout.addWidget(self._analysis_scope_summary_label)
 
@@ -7507,7 +7750,10 @@ if HAS_PYQT6:
             self._analysis_state_source_label.setObjectName("statusLabel")
             self._analysis_state_source_label.setWordWrap(True)
             self._analysis_state_source_label.setMinimumHeight(
-                max(28, int(self._analysis_state_source_label.fontMetrics().height()) + 10)
+                max(
+                    28,
+                    int(self._analysis_state_source_label.fontMetrics().height()) + 10,
+                )
             )
             restore_row.addWidget(self._analysis_state_source_label, 1)
 
@@ -8498,6 +8744,10 @@ if HAS_PYQT6:
             if operation_name == "visualization":
                 input_combo.currentIndexChanged.connect(
                     self._on_visualization_input_source_changed
+                )
+            if operation_name == "registration":
+                input_combo.currentIndexChanged.connect(
+                    self._on_registration_input_source_changed
                 )
 
             if operation_name == "deconvolution":
@@ -9670,11 +9920,11 @@ if HAS_PYQT6:
             pairwise_section, pairwise_form = self._build_parameter_section_card(
                 "Pairwise Registration"
             )
-            self._registration_channel_spin = QSpinBox()
-            self._registration_channel_spin.setRange(0, 0)
-            pairwise_form.addRow("channel", self._registration_channel_spin)
+            self._registration_channel_combo = QComboBox()
+            self._registration_channel_combo.addItem("Channel 0", 0)
+            pairwise_form.addRow("channel", self._registration_channel_combo)
             self._register_parameter_hint(
-                self._registration_channel_spin,
+                self._registration_channel_combo,
                 self._PARAMETER_HINTS["registration_channel"],
             )
 
@@ -9688,14 +9938,14 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["registration_type"],
             )
 
-            self._registration_resolution_level_spin = QSpinBox()
-            self._registration_resolution_level_spin.setRange(0, 0)
+            self._registration_resolution_level_combo = QComboBox()
+            self._registration_resolution_level_combo.addItem("Level 0", 0)
             pairwise_form.addRow(
                 "resolution level",
-                self._registration_resolution_level_spin,
+                self._registration_resolution_level_combo,
             )
             self._register_parameter_hint(
-                self._registration_resolution_level_spin,
+                self._registration_resolution_level_combo,
                 self._PARAMETER_HINTS["registration_resolution_level"],
             )
             form.addRow(pairwise_section)
@@ -9704,12 +9954,8 @@ if HAS_PYQT6:
                 "Global Optimization"
             )
             self._registration_anchor_mode_combo = QComboBox()
-            self._registration_anchor_mode_combo.addItem(
-                "Central tile", "central"
-            )
-            self._registration_anchor_mode_combo.addItem(
-                "Manual tile", "manual"
-            )
+            self._registration_anchor_mode_combo.addItem("Central tile", "central")
+            self._registration_anchor_mode_combo.addItem("Manual tile", "manual")
             global_form.addRow("anchor mode", self._registration_anchor_mode_combo)
             self._register_parameter_hint(
                 self._registration_anchor_mode_combo,
@@ -9718,8 +9964,9 @@ if HAS_PYQT6:
 
             self._registration_anchor_position_spin = QSpinBox()
             self._registration_anchor_position_spin.setRange(0, 0)
+            self._registration_anchor_position_label = QLabel("anchor tile")
             global_form.addRow(
-                "anchor tile",
+                self._registration_anchor_position_label,
                 self._registration_anchor_position_spin,
             )
             self._register_parameter_hint(
@@ -10155,9 +10402,12 @@ if HAS_PYQT6:
                 ).strip()
                 or "data"
             )
-            selected_value = str(
-                analysis_operation_for_output_component(component) or component
-            ).strip() or "data"
+            selected_value = (
+                str(
+                    analysis_operation_for_output_component(component) or component
+                ).strip()
+                or "data"
+            )
             combo.blockSignals(True)
             combo_index = combo.findData(selected_value)
             if combo_index < 0:
@@ -10229,6 +10479,196 @@ if HAS_PYQT6:
             self._sync_visualization_volume_layers_from_input_source(
                 refresh_summary=True
             )
+
+        def _registration_selected_input_source(self) -> str:
+            """Return the registration input-source selector value.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            str
+                Selected registration input-source alias or component path.
+            """
+            combo = self._operation_input_combos.get("registration")
+            if combo is None:
+                return "data"
+            selected = combo.currentData()
+            return (str(selected).strip() if selected is not None else "data") or "data"
+
+        def _registration_available_resolution_levels(self) -> tuple[int, ...]:
+            """Return available registration resolution levels for current source.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            tuple[int, ...]
+                Sorted level values available for the selected registration input.
+            """
+            store_path = str(self._base_config.file or "").strip()
+            if not store_path or not is_zarr_store_path(store_path):
+                return (0,)
+
+            requested_source = self._registration_selected_input_source()
+            resolved_source = resolve_analysis_input_component(requested_source)
+            try:
+                root = zarr.open_group(store_path, mode="r")
+            except Exception:
+                return (0,)
+            return _discover_component_resolution_levels(
+                root=root,
+                source_component=resolved_source,
+            )
+
+        def _registration_available_channels(self) -> tuple[int, ...]:
+            """Return available registration channel indices for current source.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            tuple[int, ...]
+                Sorted channel values available for the selected registration input.
+            """
+            store_path = str(self._base_config.file or "").strip()
+            if not store_path or not is_zarr_store_path(store_path):
+                return (0,)
+
+            requested_source = self._registration_selected_input_source()
+            resolved_source = resolve_analysis_input_component(requested_source)
+            try:
+                root = zarr.open_group(store_path, mode="r")
+            except Exception:
+                return (0,)
+            return _discover_component_channels(
+                root=root,
+                source_component=resolved_source,
+            )
+
+        def _refresh_registration_channel_options(
+            self,
+            *,
+            preferred_channel: Optional[int] = None,
+        ) -> None:
+            """Refresh registration channel combo options.
+
+            Parameters
+            ----------
+            preferred_channel : int, optional
+                Preferred selected channel after options are rebuilt.
+
+            Returns
+            -------
+            None
+                Combo items and selected index are updated in-place.
+            """
+            combo = getattr(self, "_registration_channel_combo", None)
+            if combo is None:
+                return
+
+            current_data = combo.currentData()
+            try:
+                current_channel = max(0, int(current_data))
+            except (TypeError, ValueError):
+                current_channel = 0
+
+            if preferred_channel is None:
+                target_channel = current_channel
+            else:
+                target_channel = max(0, int(preferred_channel))
+
+            available_channels = self._registration_available_channels()
+            selected_channel = int(available_channels[0])
+            for channel in available_channels:
+                if int(channel) <= target_channel:
+                    selected_channel = int(channel)
+
+            combo.blockSignals(True)
+            combo.clear()
+            for channel in available_channels:
+                channel_value = int(channel)
+                combo.addItem(f"Channel {channel_value}", channel_value)
+            selected_index = combo.findData(int(selected_channel))
+            if selected_index < 0:
+                selected_index = 0
+            combo.setCurrentIndex(selected_index)
+            combo.blockSignals(False)
+
+        def _refresh_registration_resolution_level_options(
+            self,
+            *,
+            preferred_level: Optional[int] = None,
+        ) -> None:
+            """Refresh registration resolution-level combo options.
+
+            Parameters
+            ----------
+            preferred_level : int, optional
+                Preferred selected level after options are rebuilt.
+
+            Returns
+            -------
+            None
+                Combo items and selected index are updated in-place.
+            """
+            combo = getattr(self, "_registration_resolution_level_combo", None)
+            if combo is None:
+                return
+
+            current_data = combo.currentData()
+            try:
+                current_level = max(
+                    0,
+                    int(current_data),
+                )
+            except (TypeError, ValueError):
+                current_level = 0
+
+            if preferred_level is None:
+                target_level = current_level
+            else:
+                target_level = max(0, int(preferred_level))
+
+            available_levels = self._registration_available_resolution_levels()
+            selected_level = int(available_levels[0])
+            for level in available_levels:
+                if int(level) <= target_level:
+                    selected_level = int(level)
+
+            combo.blockSignals(True)
+            combo.clear()
+            for level in available_levels:
+                level_value = int(level)
+                combo.addItem(f"Level {level_value}", level_value)
+            selected_index = combo.findData(int(selected_level))
+            if selected_index < 0:
+                selected_index = 0
+            combo.setCurrentIndex(selected_index)
+            combo.blockSignals(False)
+
+        def _on_registration_input_source_changed(self, _index: int) -> None:
+            """Refresh registration source-dependent choices after input changes.
+
+            Parameters
+            ----------
+            _index : int
+                Selected combo index (unused).
+
+            Returns
+            -------
+            None
+                Registration channel and resolution options are rebuilt in-place.
+            """
+            self._refresh_registration_channel_options()
+            self._refresh_registration_channel_options()
+            self._refresh_registration_resolution_level_options()
 
         def _refresh_visualization_volume_layers_summary(self) -> None:
             """Refresh summary text for visualization volume-layer rows."""
@@ -11399,6 +11839,8 @@ if HAS_PYQT6:
                 combo.setCurrentIndex(selected_index)
                 combo.setEnabled(self._operation_checkboxes[operation_name].isChecked())
                 combo.blockSignals(False)
+
+            self._refresh_registration_resolution_level_options()
 
         def _has_particle_detection_output(self) -> bool:
             """Return whether the active store already contains detections.
@@ -12626,11 +13068,13 @@ if HAS_PYQT6:
             None
                 Widget enabled states are updated in-place.
             """
-            registration_enabled = self._operation_checkboxes["registration"].isChecked()
+            registration_enabled = self._operation_checkboxes[
+                "registration"
+            ].isChecked()
             widgets = (
-                self._registration_channel_spin,
+                self._registration_channel_combo,
                 self._registration_type_combo,
-                self._registration_resolution_level_spin,
+                self._registration_resolution_level_combo,
                 self._registration_anchor_mode_combo,
                 self._registration_overlap_z_spin,
                 self._registration_overlap_y_spin,
@@ -12648,6 +13092,8 @@ if HAS_PYQT6:
             )
             manual_anchor = registration_enabled and anchor_mode == "manual"
             self._registration_anchor_position_spin.setEnabled(manual_anchor)
+            self._registration_anchor_position_spin.setVisible(manual_anchor)
+            self._registration_anchor_position_label.setVisible(manual_anchor)
 
         def _set_flatfield_parameter_enabled_state(self) -> None:
             """Enable/disable flatfield widgets based on selection and overlap mode.
@@ -12960,10 +13406,8 @@ if HAS_PYQT6:
             self._usegment3d_resolution_level_spin.setMaximum(
                 max(0, int(max_usegment3d_resolution_level))
             )
-            self._registration_channel_spin.setMaximum(channel_count - 1)
-            self._registration_resolution_level_spin.setMaximum(
-                max(0, int(max_usegment3d_resolution_level))
-            )
+            self._refresh_registration_channel_options()
+            self._refresh_registration_resolution_level_options()
             self._registration_anchor_position_spin.setMaximum(position_count - 1)
             requested_usegment_channels = usegment3d_params.get("channel_indices", [])
             if isinstance(requested_usegment_channels, str):
@@ -13554,13 +13998,10 @@ if HAS_PYQT6:
                 dtform_index = self._usegment3d_postprocess_dtform_combo.count() - 1
             self._usegment3d_postprocess_dtform_combo.setCurrentIndex(dtform_index)
 
-            self._registration_channel_spin.setValue(
-                max(
+            self._refresh_registration_channel_options(
+                preferred_channel=max(
                     0,
-                    min(
-                        int(self._registration_channel_spin.maximum()),
-                        int(registration_params.get("registration_channel", 0)),
-                    ),
+                    int(registration_params.get("registration_channel", 0)),
                 )
             )
             registration_type = (
@@ -13584,17 +14025,12 @@ if HAS_PYQT6:
                 0,
                 int(registration_params.get("input_resolution_level", 0)),
             )
-            self._registration_resolution_level_spin.setValue(
-                min(
-                    int(self._registration_resolution_level_spin.maximum()),
-                    int(registration_resolution_level),
-                )
+            self._refresh_registration_resolution_level_options(
+                preferred_level=int(registration_resolution_level)
             )
 
             anchor_mode = (
-                str(registration_params.get("anchor_mode", "central"))
-                .strip()
-                .lower()
+                str(registration_params.get("anchor_mode", "central")).strip().lower()
                 or "central"
             )
             if anchor_mode not in {"central", "manual"}:
@@ -13623,7 +14059,9 @@ if HAS_PYQT6:
                     ),
                 )
             )
-            registration_overlap_zyx = registration_params.get("overlap_zyx", [8, 32, 32])
+            registration_overlap_zyx = registration_params.get(
+                "overlap_zyx", [8, 32, 32]
+            )
             if (
                 not isinstance(registration_overlap_zyx, (tuple, list))
                 or len(registration_overlap_zyx) != 3
@@ -14505,6 +14943,19 @@ if HAS_PYQT6:
             else:
                 anchor_position = None
 
+            resolution_level_data = (
+                self._registration_resolution_level_combo.currentData()
+            )
+            try:
+                input_resolution_level = max(0, int(resolution_level_data))
+            except (TypeError, ValueError):
+                input_resolution_level = 0
+            channel_data = self._registration_channel_combo.currentData()
+            try:
+                registration_channel = max(0, int(channel_data))
+            except (TypeError, ValueError):
+                registration_channel = 0
+
             return {
                 "chunk_basis": "3d",
                 "detect_2d_per_slice": False,
@@ -14517,14 +14968,12 @@ if HAS_PYQT6:
                 "memory_overhead_factor": float(
                     self._registration_defaults.get("memory_overhead_factor", 2.5)
                 ),
-                "registration_channel": int(self._registration_channel_spin.value()),
+                "registration_channel": int(registration_channel),
                 "registration_type": str(
                     self._registration_type_combo.currentData() or "rigid"
                 ).strip()
                 or "rigid",
-                "input_resolution_level": int(
-                    self._registration_resolution_level_spin.value()
-                ),
+                "input_resolution_level": int(input_resolution_level),
                 "anchor_mode": anchor_mode,
                 "anchor_position": anchor_position,
                 "blend_mode": str(
