@@ -6834,6 +6834,7 @@ if HAS_PYQT6:
             "particle_detection",
             "usegment3d",
             "registration",
+            "display_pyramid",
             "visualization",
             "mip_export",
         )
@@ -6844,6 +6845,7 @@ if HAS_PYQT6:
             "particle_detection",
             "usegment3d",
             "registration",
+            "display_pyramid",
             "mip_export",
         )
         _OPERATION_LABELS: Dict[str, str] = {
@@ -6853,6 +6855,7 @@ if HAS_PYQT6:
             "particle_detection": "Particle Detection",
             "usegment3d": "uSegment3D",
             "registration": "Registration",
+            "display_pyramid": "Display Pyramid",
             "visualization": "Napari",
             "mip_export": "MIP Export",
         }
@@ -6863,7 +6866,7 @@ if HAS_PYQT6:
             ),
             ("Segmentation", ("particle_detection", "usegment3d")),
             ("Postprocessing", ("registration",)),
-            ("Visualization", ("visualization", "mip_export")),
+            ("Visualization", ("display_pyramid", "visualization", "mip_export")),
         )
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
             "flatfield": "results/flatfield/latest/data",
@@ -6871,6 +6874,7 @@ if HAS_PYQT6:
             "shear_transform": "results/shear_transform/latest/data",
             "usegment3d": "results/usegment3d/latest/data",
             "registration": "results/registration/latest/data",
+            "display_pyramid": "results/display_pyramid/latest",
             "mip_export": "results/mip_export/latest",
         }
         _PARTICLE_DETECTION_OVERLAY_COMPONENT = (
@@ -7228,13 +7232,20 @@ if HAS_PYQT6:
                 "Render every position in the acquisition using stage transforms "
                 "from multi_positions.yml."
             ),
+            "display_pyramid": (
+                "Prepare reusable display pyramids and stored per-channel 1/95 "
+                "contrast limits for the selected source component before napari "
+                "launch."
+            ),
             "use_multiscale": (
-                "When enabled, napari loads pyramid levels as a multiscale image "
-                "for faster navigation across zoom levels."
+                "When enabled, napari uses existing display pyramids for 2D "
+                "navigation. ClearEx no longer auto-builds or auto-downsamples "
+                "viewer data at launch."
             ),
             "use_3d_view": (
-                "Launch napari in 3D mode (ndisplay=3). Disable to launch in 2D "
-                "mode (ndisplay=2)."
+                "Request napari 3D mode (ndisplay=3). Oversized image volumes "
+                "trigger a warning and fall back to 2D instead of launch-time "
+                "downsampling."
             ),
             "overlay_particle_detections": (
                 "Overlay particle detections as a napari points layer when "
@@ -7249,7 +7260,7 @@ if HAS_PYQT6:
             "volume_layers": (
                 "Configure image/labels volume overlays for napari. "
                 "Each row can select source component, type, channels, display "
-                "settings, and multiscale policy (inherit/require/auto_build/off)."
+                "settings, and multiscale policy (inherit/require/off)."
             ),
             "keyframe_layer_overrides": (
                 "Optional per-layer keyframe overrides used in the manifest. "
@@ -9928,7 +9939,9 @@ if HAS_PYQT6:
                     str(raw_row.get("multiscale_policy", "inherit")).strip().lower()
                     or "inherit"
                 )
-                if multiscale_policy not in {"inherit", "require", "auto_build", "off"}:
+                if multiscale_policy == "auto_build":
+                    multiscale_policy = "inherit"
+                if multiscale_policy not in {"inherit", "require", "off"}:
                     multiscale_policy = "inherit"
                 blending = str(raw_row.get("blending", "")).strip().lower()
                 if blending in {"auto", "default"}:
@@ -10286,7 +10299,6 @@ if HAS_PYQT6:
                 combo = _configure_combo_size(QComboBox(table))
                 combo.addItem("Inherit", "inherit")
                 combo.addItem("Require", "require")
-                combo.addItem("Auto build", "auto_build")
                 combo.addItem("Off", "off")
                 index = combo.findData(str(current_value).strip().lower() or "inherit")
                 combo.setCurrentIndex(index if index >= 0 else 0)
@@ -12626,6 +12638,7 @@ if HAS_PYQT6:
                 "particle_detection": bool(initial.particle_detection),
                 "usegment3d": bool(getattr(initial, "usegment3d", False)),
                 "registration": bool(initial.registration),
+                "display_pyramid": bool(getattr(initial, "display_pyramid", False)),
                 "visualization": bool(initial.visualization),
                 "mip_export": bool(initial.mip_export),
             }
@@ -14640,6 +14653,7 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         "particle_detection",
         "usegment3d",
         "registration",
+        "display_pyramid",
         "mip_export",
     ):
         params = dict(analysis_parameters.get(operation_name, {}))
@@ -14661,6 +14675,7 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         "shear_transform": False,
         "particle_detection": False,
         "registration": False,
+        "display_pyramid": False,
         "visualization": False,
         "mip_export": False,
         "zarr_save": workflow.zarr_save,

@@ -1,112 +1,194 @@
-# Visualization Agent Notes
+# Visualization Strategy
 
-This folder owns napari-facing visualization workflows.
+This `README.md` is the canonical agent-reference and runtime-strategy file for
+`src/clearex/visualization`.
 
-## Runtime Entry Points
+## Scope
 
-- Main analysis hook: `src/clearex/visualization/pipeline.py::run_visualization_analysis`
-- Subprocess viewer entry: `python -m clearex.visualization.pipeline`
+- Main runtime file: `src/clearex/visualization/pipeline.py`
+- Primary analysis hooks:
+  - `run_display_pyramid_analysis`
+  - `run_visualization_analysis`
+- Subprocess entrypoint:
+  - `python -m clearex.visualization.pipeline`
 
-## Data Expectations
+## Large-Data Principles
 
-- Visualization reads canonical 6D arrays in `(t, p, c, z, y, x)` order.
-- Default source is `data`.
-- Multiposition/channel rendering is only as complete as canonical `data`
-  materialization. For Navigate TIFF inputs, verify ingestion stacked
-  `Position*/CH*` files (otherwise visualization will only show one `p/c` slot).
-- Multiscale defaults to enabled and resolves levels from:
-  - `data.attrs["pyramid_levels"]`, and
-  - root attrs `data_pyramid_levels` for canonical base data.
+ClearEx follows napari's lazy-array guidance for large datasets.
 
-## Overlay Behavior
+- Napari should receive lazy Dask-backed arrays whenever possible.
+- ClearEx must not mutate image payloads at viewer launch to force them under a
+  render budget.
+- ClearEx must not compute percentiles or min/max reductions on lazy arrays
+  during viewer launch.
+- ClearEx only uses multiscale when an explicit pyramid already exists.
+- Viewer launch is not allowed to auto-build pyramids.
 
-- Particle overlays are read from `results/particle_detection/latest/detections` by default.
-- Overlay points are emitted in napari coordinate order `(t, c, z, y, x)`.
-- Position filtering is applied when detection tables include `(t, p, c, z, y, x, ...)`.
-- Detection layer defaults:
-  - `border_color="white"`,
-  - `opacity=0.5`,
-  - `blending="translucent"`,
-  - transparent faces.
+The practical consequence is that visualization is now split into:
+
+- `display_pyramid`: an explicit preparation task
+- `visualization`: a viewer-launch task
+
+## Display Pyramid Task
+
+`display_pyramid` is a first-class analysis operation that prepares reusable
+display pyramids for one selected source component.
+
+### Input contract
+
+- Input source is one canonical 6D component in `(t, p, c, z, y, x)` order.
+- The operation uses `analysis_parameters["display_pyramid"]["input_source"]`.
+- The task is explicit and per-component. ClearEx does not auto-build display
+  pyramids for every downstream result.
+
+### Storage contract
+
+- Latest task metadata is stored at:
+  - `results/display_pyramid/latest`
+- Prepared levels are written under:
+  - `results/display_pyramid/by_component/<sanitized_component_hash>/level_n`
+- Source-component attrs store lookup metadata:
+  - `display_pyramid_levels`
+  - `display_pyramid_factors_tpczyx`
+- Root attrs store lookup metadata:
+  - `display_pyramid_levels_by_component`
+
+Compatibility attrs from older visualization-driven behavior are still written
+and still read:
+
+- `visualization_pyramid_levels`
+- `visualization_pyramid_factors_tpczyx`
+- `visualization_pyramid_levels_by_component`
+
+### Reuse policy
+
+- If matching pyramid levels already exist for the selected component, ClearEx
+  reuses them unless `force_rerun=True`.
+- Existing ingest-time raw-data pyramids are still valid display sources.
+- Re-running `display_pyramid` only overwrites the selected component's explicit
+  display-pyramid namespace.
+
+### Contrast metadata
+
+`display_pyramid` also computes and stores per-channel display contrast limits.
+
+- Fixed percentiles: `1` and `95`
+- Stored on the source component attrs:
+  - `display_contrast_limits_by_channel`
+  - `display_contrast_percentiles`
+- These values are intended for later napari launch and should be reused
+  instead of recomputing viewer-time display ranges.
+
+## Visualization Policy
+
+### 2D behavior
+
+- ClearEx passes lazy arrays directly to napari.
+- If `use_multiscale=True` and explicit pyramid levels exist, ClearEx passes
+  the prepared levels as a multiscale image.
+- If no explicit pyramid exists, ClearEx passes the single base lazy array.
+
+### 3D behavior
+
+- ClearEx always uses the base single-scale array in 3D.
+- ClearEx does not switch to a coarser level for 3D.
+- ClearEx does not stride/downsample the array for 3D.
+- If any image layer exceeds the ClearEx 3D safety limit
+  (`_MAX_LAYER_DISPLAY_VOXELS` in `pipeline.py`), ClearEx emits a warning and
+  forces the effective display mode to 2D.
+
+This is intentional. The policy is:
+
+- warn
+- persist the fallback reason
+- force 2D
+
+not:
+
+- downsample silently
+- auto-build pyramids
+- compute a launch-time surrogate
+
+### Multiscale policy values
+
+Supported runtime/UI policies are now:
+
+- `inherit`
+- `require`
+- `off`
+
+Legacy saved `auto_build` values are normalized to `inherit`.
+
+## Contrast-Limit Policy
+
+Visualization resolves image contrast limits in this order:
+
+1. stored `display_contrast_limits_by_channel`
+2. dtype fallback with no compute
+
+Fallback behavior:
+
+- integer dtype: full dtype range
+- bool/float dtype: `[0.0, 1.0]`
+
+ClearEx should not run percentile, min, or max reductions on Dask-backed image
+data during napari launch.
+
+## Multiposition Policy
+
+Multiposition rendering continues to use store-level `spatial_calibration` and
+Navigate position metadata for affine placement.
+
+Default image blending has changed:
+
+- single-position image layers with no explicit blending: `additive`
+- multiposition image layers with no explicit blending: `translucent`
+- labels layers with no explicit blending: `translucent`
+
+This avoids stripe artifacts from overlapping multiposition regions.
 
 ## Napari Metadata Contract
 
-- `run_visualization_analysis` builds a layer payload in `pipeline.py::_build_napari_layer_payload`.
-- Image and points layers both receive:
-  - axis labels `(t, c, z, y, x)`,
-  - matched `scale` values for aligned physical/index coordinates,
-  - metadata dictionaries with source/store/pyramid details.
-- Image channel rendering defaults in napari:
-  - separate image layers per channel (`c` sliced as singleton per layer),
-  - no synthetic channel-axis affine offsets (avoids napari status-thread
-    out-of-bounds lookups when the cursor axis position changes),
-  - `blending="additive"` and `rendering="attenuated_mip"`,
-  - per-channel contrast limits from `1st/95th` percentiles,
-  - colormap order starts with `green`, `magenta`, `bop orange`, then high-contrast additions (`cyan`, `yellow`, `blue`, ...),
-  - channel opacity decreases with channel count (1: `1.0`, 2: `0.9`, 3: `0.8`, floor `0.55`).
-- Scale resolution precedence is:
-  1. explicit Zarr attrs (for example `scale_tpczyx`, `scale_tczyx`, `voxel_size_um_zyx`, `voxel_size_*`),
-  2. `source_experiment` metadata (`timepoint_interval`, `step_size`, camera profile `fov_* / img_*`, then `pixel_size / zoom` with binning fallback),
-  3. fallback to `(1, 1, 1, 1, 1)`.
+Visualization metadata is stored at:
 
-## Multiposition Affine Contract
+- `results/visualization/latest`
 
-- Visualization supports:
-  - single-position mode (`show_all_positions=False`, use `position_index`), and
-  - multiposition mode (`show_all_positions=True`, render all positions).
-- Stage coordinates are resolved from `multi_positions.yml` adjacent to `source_experiment` when available (fallback: `MultiPositions` in experiment metadata).
-- Parsed stage rows use fields `X`, `Y`, `Z`, `F`, and `THETA`.
-- Root store attr `spatial_calibration` defines how world `z/y/x`
-  translations are derived from Navigate stage coordinates. Missing attrs
-  resolve to identity mapping `z=+z,y=+y,x=+x`.
-- Per-position napari affine uses homogeneous `6x6` matrix in `(t, c, z, y, x)` coordinates:
-  - world-axis bindings support `+/-x`, `+/-y`, `+/-z`, `+/-f`, and `none`,
-  - `none` forces zero translation on that world axis,
-  - sign inversion is applied before translation,
-  - `THETA` rotates the `z/y` plane (sample rotation around x axis).
-  - stage coordinates are in microns and affine translations are applied directly in world-space microns.
-- Napari image-layer metadata includes:
-  - `position_affines_tczyx`,
-  - `stage_positions_xyztheta`,
-  - `stage_positions_xyzthetaf`,
-  - `spatial_calibration`,
-  - `spatial_calibration_text`.
-- Latest visualization metadata includes:
-  - `selected_positions`,
-  - `show_all_positions`,
-  - `spatial_calibration`,
-  - `spatial_calibration_text`.
+The latest metadata must include:
 
-## GUI/Threading Contract
+- requested vs effective viewer mode:
+  - `viewer_ndisplay_requested`
+  - `viewer_ndisplay_effective`
+- `display_mode_fallback_reason` when 3D is forced to 2D
+- display-pyramid lookup references:
+  - `display_pyramid_lookup`
+- display-contrast metadata references:
+  - `display_contrast_metadata_reference`
+- rendered source component information:
+  - `source_component`
+  - `source_components`
+- rendered position information:
+  - `position_index`
+  - `selected_positions`
+  - `show_all_positions`
 
-- GUI analysis execution runs in a worker thread.
-- `launch_mode=auto` must choose subprocess mode off the main thread to avoid Qt/napari thread violations.
-- In CLI/main-thread contexts, `launch_mode=auto` should run in-process.
+Image-layer metadata built in `_build_napari_layer_payload(...)` should carry
+the same display-policy information so downstream inspection can reconstruct why
+napari opened in 2D or 3D.
 
+## GUI / Workflow Notes
 
-## Keyframe Capture Contract
+- `display_pyramid` is ordered between `registration` and `visualization`.
+- The visualization GUI should describe `use_multiscale` as using existing
+  display pyramids, not auto-building them.
+- The visualization GUI should describe 3D as a request that may fall back to
+  2D for oversized image layers.
 
-- Visualization keyframe capture is enabled by default (`capture_keyframes=True`).
-- In the napari viewer:
-  - press `K` to capture a keyframe,
-  - press `Shift-K` to remove the most recent keyframe.
-- Keyframe manifests now record reproducible viewer state, including:
-  - camera angles/zoom/center/perspective,
-  - dims state (`current_step`, axis labels, order, and 2D/3D view type),
-  - layer order and selected/active layer names,
-  - per-layer display settings (visibility, opacity, blending, LUT/colormap, contrast limits, rendering mode, interpolation/depiction fields when available),
-  - optional per-layer `annotation` text from GUI overrides.
-- Default manifest path is `<analysis_store>.visualization_keyframes.json`; override with `keyframe_manifest_path`.
-- GUI provides a popup keyframe layer table (`Layer/View Table...`) with columns:
-  - `Layer`, `Visible`, `LUT/Colormap`, `Rendering`, `Annotation`.
-- Latest visualization metadata includes:
-  - `capture_keyframes`,
-  - `keyframe_manifest_path` (when set),
-  - `keyframe_count`,
-  - `keyframe_layer_overrides`.
+## Agent Expectations
 
-## Provenance/Metadata
+When editing this area:
 
-- Visualization metadata is stored at `results/visualization/latest`.
-- Latest-output provenance registration uses analysis key `visualization`.
-- Main workflow later backfills `run_id` after provenance run persistence.
+- treat this `README.md` as the authoritative file for visualization strategy
+- keep `CODEX.md` as a short compatibility pointer only
+- update tests with behavior changes in the same change set
+- preserve compatibility reads for older stored visualization pyramid attrs
+  until migration is intentional and explicit

@@ -73,6 +73,7 @@ from clearex.flatfield.pipeline import (
     run_flatfield_analysis,
 )
 from clearex.visualization.pipeline import (
+    run_display_pyramid_analysis,
     run_visualization_analysis,
 )
 from clearex.mip_export.pipeline import (
@@ -155,6 +156,7 @@ _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
         "shear_transform",
         "particle_detection",
         "usegment3d",
+        "display_pyramid",
         "mip_export",
     }
 )
@@ -182,6 +184,7 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "particle_detection": ("results/particle_detection/latest/detections",),
     "usegment3d": ("results/usegment3d/latest/data",),
     "registration": ("results/registration/latest/data",),
+    "display_pyramid": ("results/display_pyramid/latest",),
     "mip_export": ("results/mip_export/latest",),
 }
 
@@ -534,6 +537,7 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         particle_detection=args.particle_detection,
         usegment3d=args.usegment3d,
         registration=args.registration,
+        display_pyramid=bool(getattr(args, "display_pyramid", False)),
         visualization=args.visualization,
         mip_export=args.mip_export,
         spatial_calibration=spatial_calibration,
@@ -1255,6 +1259,7 @@ def _run_workflow(
             particle_detection=workflow.particle_detection,
             usegment3d=workflow.usegment3d,
             registration=workflow.registration,
+            display_pyramid=workflow.display_pyramid,
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,
             analysis_parameters=runtime_analysis_parameters,
@@ -2078,6 +2083,110 @@ def _run_workflow(
                         )
                     continue
 
+                if operation_name == "display_pyramid":
+                    display_pyramid_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
+                        def _display_pyramid_progress(
+                            percent: int, message: str
+                        ) -> None:
+                            """Map display-pyramid progress into workflow-scale progress.
+
+                            Parameters
+                            ----------
+                            percent : int
+                                Display-pyramid progress percent.
+                            message : str
+                                Progress status text.
+
+                            Returns
+                            -------
+                            None
+                                Logger and progress-callback side effects only.
+                            """
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            logger.info(
+                                f"[display_pyramid] {int(percent)}% - {message}"
+                            )
+                            _emit_analysis_progress(
+                                mapped,
+                                f"display_pyramid: {message}",
+                            )
+
+                        summary = run_display_pyramid_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=display_pyramid_parameters,
+                            client=analysis_client,
+                            progress_callback=_display_pyramid_progress,
+                        )
+                        output_records["display_pyramid"] = {
+                            "component": summary.component,
+                            "source_component": summary.source_component,
+                            "source_components": list(summary.source_components),
+                            "channel_count": summary.channel_count,
+                            "contrast_limits_by_channel": [
+                                [float(row[0]), float(row[1])]
+                                for row in summary.contrast_limits_by_channel
+                            ],
+                            "reused_existing_levels": summary.reused_existing_levels,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Display pyramid preparation completed: "
+                            f"component={summary.component}, "
+                            f"source={summary.source_component}, "
+                            f"levels={len(summary.source_components)}, "
+                            f"channels={summary.channel_count}, "
+                            f"reused_existing_levels={summary.reused_existing_levels}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "display_pyramid",
+                                "parameters": {
+                                    **display_pyramid_parameters,
+                                    "component": summary.component,
+                                    "source_component": summary.source_component,
+                                    "source_components": list(
+                                        summary.source_components
+                                    ),
+                                    "channel_count": summary.channel_count,
+                                    "contrast_limits_by_channel": [
+                                        [float(row[0]), float(row[1])]
+                                        for row in summary.contrast_limits_by_channel
+                                    ],
+                                    "reused_existing_levels": summary.reused_existing_levels,
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Display pyramid preparation complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "Display pyramid preparation requires a canonical Zarr/N5 "
+                            "data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "display_pyramid",
+                                "parameters": {
+                                    **display_pyramid_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Display pyramid preparation skipped (no Zarr/N5 store).",
+                        )
+                    continue
+
                 if operation_name == "visualization":
                     visualization_parameters = dict(operation_parameters)
                     raw_volume_layers = visualization_parameters.get(
@@ -2206,6 +2315,21 @@ def _run_workflow(
                             parameters=visualization_parameters,
                             progress_callback=_visualization_progress,
                         )
+                        viewer_ndisplay_requested = int(
+                            getattr(summary, "viewer_ndisplay_requested", 3)
+                        )
+                        viewer_ndisplay_effective = int(
+                            getattr(
+                                summary,
+                                "viewer_ndisplay_effective",
+                                viewer_ndisplay_requested,
+                            )
+                        )
+                        display_mode_fallback_reason = getattr(
+                            summary,
+                            "display_mode_fallback_reason",
+                            None,
+                        )
                         output_records["visualization"] = {
                             "component": summary.component,
                             "source_component": summary.source_component,
@@ -2217,6 +2341,9 @@ def _run_workflow(
                             "overlay_points_count": summary.overlay_points_count,
                             "launch_mode": summary.launch_mode,
                             "viewer_pid": summary.viewer_pid,
+                            "viewer_ndisplay_requested": viewer_ndisplay_requested,
+                            "viewer_ndisplay_effective": viewer_ndisplay_effective,
+                            "display_mode_fallback_reason": display_mode_fallback_reason,
                             "renderer": dict(getattr(summary, "renderer", None) or {}),
                             "keyframe_manifest_path": summary.keyframe_manifest_path,
                             "keyframe_count": summary.keyframe_count,
@@ -2228,6 +2355,7 @@ def _run_workflow(
                             f"source={summary.source_component}, "
                             f"position={summary.position_index}, "
                             f"multiscale_levels={len(summary.source_components)}, "
+                            f"viewer_ndisplay={viewer_ndisplay_effective}, "
                             f"overlay_points={summary.overlay_points_count}, "
                             f"launch_mode={summary.launch_mode}, "
                             f"keyframes={summary.keyframe_count}, "
@@ -2247,6 +2375,9 @@ def _run_workflow(
                                     "overlay_points_count": summary.overlay_points_count,
                                     "launch_mode": summary.launch_mode,
                                     "viewer_pid": summary.viewer_pid,
+                                    "viewer_ndisplay_requested": viewer_ndisplay_requested,
+                                    "viewer_ndisplay_effective": viewer_ndisplay_effective,
+                                    "display_mode_fallback_reason": display_mode_fallback_reason,
                                     "keyframe_manifest_path": summary.keyframe_manifest_path,
                                     "keyframe_count": summary.keyframe_count,
                                 },
@@ -2454,6 +2585,7 @@ def _run_workflow(
             particle_detection=workflow.particle_detection,
             usegment3d=workflow.usegment3d,
             registration=workflow.registration,
+            display_pyramid=workflow.display_pyramid,
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,
             zarr_save=workflow.zarr_save,

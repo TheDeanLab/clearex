@@ -544,6 +544,7 @@ def test_reset_analysis_selection_for_next_run_preserves_scope() -> None:
     assert reset.analysis_apply_to_all is True
     assert reset.flatfield is False
     assert reset.registration is False
+    assert reset.display_pyramid is False
 
 
 def test_reset_analysis_selection_for_next_run_preserves_spatial_calibration() -> None:
@@ -1699,9 +1700,10 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
 
     dialog_cls = app_module.AnalysisSelectionDialog
     assert dialog_cls._OPERATION_LABELS["visualization"] == "Napari"
+    assert dialog_cls._OPERATION_LABELS["display_pyramid"] == "Display Pyramid"
     assert (
         "Visualization",
-        ("visualization", "mip_export"),
+        ("display_pyramid", "visualization", "mip_export"),
     ) in dialog_cls._OPERATION_TABS
 
 

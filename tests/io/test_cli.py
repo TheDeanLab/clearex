@@ -50,6 +50,7 @@ def test_analysis_flags_are_parsed():
             "--particle-detection",
             "--usegment3d",
             "--registration",
+            "--display-pyramid",
             "--visualization",
             "--mip-export",
             "--headless",
@@ -62,6 +63,7 @@ def test_analysis_flags_are_parsed():
     assert args.particle_detection is True
     assert args.usegment3d is True
     assert args.registration is True
+    assert args.display_pyramid is True
     assert args.visualization is True
     assert args.mip_export is True
     assert args.headless is True
