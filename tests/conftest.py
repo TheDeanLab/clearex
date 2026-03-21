@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Any, Optional, Tuple
 
 import pytest
 
@@ -23,6 +24,62 @@ _FAKE_GPU_RENDERER_INFO = {
     "gpu_renderer": True,
     "gpu_vendor_hint": True,
 }
+
+
+def _zarr_shape_from_data(data: Any) -> Optional[Tuple[int, ...]]:
+    """Return a concrete tuple shape for array-like input when available."""
+    shape = getattr(data, "shape", None)
+    if shape is None:
+        return None
+    try:
+        return tuple(int(v) for v in shape)
+    except Exception:
+        return None
+
+
+def _zarr_dtype_from_data(data: Any) -> Any:
+    """Return a dtype-like object inferred from array-like input when available."""
+    return getattr(data, "dtype", None)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _compat_zarr_v3_create_dataset_with_data() -> None:
+    """Backfill v2-style ``create_dataset(data=...)`` semantics for tests.
+
+    Notes
+    -----
+    Zarr v3 requires ``shape=...`` even when ``data=...`` is provided. A large
+    portion of existing tests still use v2-style calls that omit ``shape``.
+    This shim keeps test fixtures readable while preserving production behavior.
+    """
+    import zarr
+    from _pytest.monkeypatch import MonkeyPatch
+
+    original = zarr.core.group.Group.create_dataset
+    monkeypatch = MonkeyPatch()
+
+    def _compat_create_dataset(
+        self: Any,
+        name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if "shape" not in kwargs and "data" in kwargs:
+            data = kwargs.get("data")
+            inferred_shape = _zarr_shape_from_data(data)
+            if inferred_shape is not None:
+                kwargs["shape"] = inferred_shape
+                if "dtype" not in kwargs:
+                    inferred_dtype = _zarr_dtype_from_data(data)
+                    if inferred_dtype is not None:
+                        kwargs["dtype"] = inferred_dtype
+        return original(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zarr.core.group.Group, "create_dataset", _compat_create_dataset)
+    try:
+        yield
+    finally:
+        monkeypatch.undo()
 
 
 @pytest.fixture(autouse=True)

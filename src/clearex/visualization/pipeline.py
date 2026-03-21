@@ -2238,7 +2238,7 @@ def _build_visualization_multiscale_components(
                 downsampled,
                 str(zarr_path),
                 component=level_component,
-                overwrite=True,
+                zarr_array_kwargs={"overwrite": True},
                 compute=True,
             )
 

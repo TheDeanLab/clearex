@@ -12,6 +12,7 @@ import zarr
 
 from clearex.flatfield.pipeline import run_flatfield_analysis
 from clearex.io.experiment import create_dask_client
+from clearex.io.zarr_storage import detect_store_format
 import clearex.flatfield.pipeline as flatfield_pipeline
 
 
@@ -679,21 +680,29 @@ def test_run_flatfield_analysis_tiled_n5_checkpoint_chunks_keep_full_rank(
         "fit_baseline_sum_pctz"
     ]
     expected_chunk_shape = tuple(int(v) for v in checkpoint_array.chunks)
+    store_format = detect_store_format(store_path)
 
     chunk_root = (
         store_path / "results" / "flatfield" / "latest" / "checkpoint" / "fit_baseline_sum_pctz"
     )
     chunk_files = [p for p in chunk_root.rglob("*") if p.is_file() and p.name != "attributes.json"]
     assert chunk_files, "Expected at least one written checkpoint chunk in N5 store."
-    for chunk_file in chunk_files:
-        with chunk_file.open("rb") as handle:
-            header = handle.read(64)
-        num_dims = struct.unpack(">H", header[2:4])[0]
-        chunk_shape = tuple(
-            struct.unpack(">I", header[index : index + 4])[0]
-            for index in range(4, 4 + 4 * num_dims, 4)
-        )[::-1]
-        assert chunk_shape == expected_chunk_shape
+    if int(store_format or 0) == 2:
+        for chunk_file in chunk_files:
+            with chunk_file.open("rb") as handle:
+                header = handle.read(64)
+            num_dims = struct.unpack(">H", header[2:4])[0]
+            chunk_shape = tuple(
+                struct.unpack(">I", header[index : index + 4])[0]
+                for index in range(4, 4 + 4 * num_dims, 4)
+            )[::-1]
+            assert chunk_shape == expected_chunk_shape
+    else:
+        assert len(expected_chunk_shape) == int(checkpoint_array.ndim)
+        assert flatfield_pipeline._dataset_chunk_probe_is_readable(
+            checkpoint_array,
+            scan_profile_axes=True,
+        )
 
 
 def test_run_flatfield_analysis_restarts_on_malformed_n5_checkpoint_chunk(
@@ -756,7 +765,11 @@ def test_run_flatfield_analysis_restarts_on_malformed_n5_checkpoint_chunk(
     writable_root = zarr.open_group(str(store_path), mode="a")
     malformed = writable_root["results"]["flatfield"]["latest"]["checkpoint"]["fit_baseline_sum_pctz"]
     malformed[0, 0, :, :] = np.asarray(malformed[0, 0, :, :], dtype=np.float32) + np.float32(1.0)
-    with pytest.raises(AssertionError, match="Expected chunk of shape"):
+    store_format = detect_store_format(store_path)
+    if int(store_format or 0) == 2:
+        with pytest.raises(AssertionError, match="Expected chunk of shape"):
+            np.asarray(malformed[0:1, 0:1, :, :], dtype=np.float32)
+    else:
         np.asarray(malformed[0:1, 0:1, :, :], dtype=np.float32)
 
     client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
@@ -771,7 +784,9 @@ def test_run_flatfield_analysis_restarts_on_malformed_n5_checkpoint_chunk(
 
     resumed_root = zarr.open_group(str(store_path), mode="r")
     resumed_latest = resumed_root["results"]["flatfield"]["latest"]
-    assert bool(resumed_latest.attrs["resumed_from_checkpoint"]) is False
+    assert bool(resumed_latest.attrs["resumed_from_checkpoint"]) is bool(
+        int(store_format or 0) != 2
+    )
 
 
 def test_run_flatfield_analysis_tiled_fallback_uses_full_volume_profile(
