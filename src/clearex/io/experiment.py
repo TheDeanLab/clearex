@@ -1238,7 +1238,7 @@ def _open_navigate_bdv_collection_as_dask(
     else:
         root = zarr.open_group(str(source_path), mode="r")
         group_attrs = dict(getattr(root, "attrs", {}))
-        entries: list[tuple[int, int, str, AxesSpec]] = []
+        entries: list[tuple[int, int, str, AxesSpec, Any]] = []
 
         def _walk(group_node: Any, prefix: str = "") -> None:
             for key in sorted(group_node.array_keys()):
@@ -1253,6 +1253,7 @@ def _open_navigate_bdv_collection_as_dask(
                         int(match.group(1)),
                         component,
                         _extract_zarr_axes(array, group_attrs),
+                        array,
                     )
                 )
             for key in sorted(group_node.group_keys()):
@@ -1262,7 +1263,7 @@ def _open_navigate_bdv_collection_as_dask(
         if len(entries) <= 1:
             return None
 
-        for time_index, setup_index, component, source_axes in sorted(
+        for time_index, setup_index, component, source_axes, source_zarr_array in sorted(
             entries, key=lambda item: (item[0], item[1], item[2])
         ):
             if setup_map is not None and setup_index not in setup_map:
@@ -1277,7 +1278,7 @@ def _open_navigate_bdv_collection_as_dask(
             if key in arrays_by_index:
                 continue
 
-            source_array = da.from_zarr(str(source_path), component=component)
+            source_array = da.from_zarr(source_zarr_array)
             normalized_axes = tuple(
                 source_axes or _infer_source_axes(tuple(source_array.shape), experiment)
             )
@@ -3410,6 +3411,74 @@ def _legacy_n5_helper_python() -> Optional[str]:
     return None
 
 
+def _legacy_n5_helper_command_prefix() -> Optional[tuple[str, ...]]:
+    """Return a command prefix that can run Python with ``zarr.N5Store``.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    tuple[str, ...], optional
+        Command prefix ending in ``python``. Returns a direct Python executable
+        when available, otherwise falls back to ``uv run --with zarr<3 python``
+        when that probe succeeds.
+
+    Notes
+    -----
+    The ``uv`` fallback avoids requiring users to pre-create a separate
+    legacy environment in common setups where ClearEx already runs under uv.
+    """
+    legacy_python = _legacy_n5_helper_python()
+    if legacy_python is not None:
+        return (legacy_python,)
+
+    uv_candidates: list[str] = []
+    uv_from_path = shutil.which("uv")
+    if uv_from_path:
+        uv_candidates.append(str(uv_from_path))
+    uv_tool_bin_dir = str(os.environ.get("UV_TOOL_BIN_DIR", "")).strip()
+    if uv_tool_bin_dir:
+        uv_candidates.append(str((Path(uv_tool_bin_dir).expanduser() / "uv")))
+    uv_install_dir = str(os.environ.get("UV_INSTALL_DIR", "")).strip()
+    if uv_install_dir:
+        uv_candidates.append(str((Path(uv_install_dir).expanduser() / "uv")))
+
+    seen: set[str] = set()
+    for uv_executable in uv_candidates:
+        if not uv_executable or uv_executable in seen:
+            continue
+        seen.add(uv_executable)
+        probe_command = [
+            uv_executable,
+            "run",
+            "--with",
+            "zarr<3",
+            "python",
+            "-c",
+            "import zarr,sys; sys.exit(0 if hasattr(zarr, 'N5Store') else 1)",
+        ]
+        try:
+            probe = subprocess.run(
+                probe_command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            continue
+        if probe.returncode == 0:
+            return (
+                uv_executable,
+                "run",
+                "--with",
+                "zarr<3",
+                "python",
+            )
+    return None
+
+
 def _materialize_n5_via_legacy_helper(
     *,
     experiment: "NavigateExperiment",
@@ -3426,17 +3495,19 @@ def _materialize_n5_via_legacy_helper(
     ],
 ) -> Path:
     """Materialize an N5 source into an intermediate v2 ClearEx store."""
-    legacy_python = _legacy_n5_helper_python()
-    if legacy_python is None:
+    helper_command_prefix = _legacy_n5_helper_command_prefix()
+    if helper_command_prefix is None:
         raise RuntimeError(
             "N5 ingestion requires a legacy Python environment with zarr.N5Store. "
-            "Set CLEAREX_LEGACY_N5_PYTHON to a compatible interpreter."
+            "Set CLEAREX_LEGACY_N5_PYTHON to a compatible interpreter or "
+            "ensure `uv` is available so ClearEx can run the helper with "
+            "`zarr<3` automatically."
         )
 
     legacy_output = resolve_legacy_v2_store_path(output_store_path)
     repo_root = Path(__file__).resolve().parents[3]
     command = [
-        legacy_python,
+        *helper_command_prefix,
         "-m",
         "clearex.io.n5_legacy_helper",
         "--experiment-path",

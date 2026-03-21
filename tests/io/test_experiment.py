@@ -144,13 +144,13 @@ def _open_test_zarr_group(
 
 
 def _write_real_n5_store(path: Path, entries: dict[str, np.ndarray]) -> None:
-    python_executable = experiment_module._legacy_n5_helper_python()
-    if python_executable is None:
+    command_prefix = experiment_module._legacy_n5_helper_command_prefix()
+    if command_prefix is None:
         pytest.skip("No zarr2-compatible Python with N5Store is available.")
 
     payload = {name: np.asarray(array).tolist() for name, array in entries.items()}
     command = [
-        python_executable,
+        *command_prefix,
         "-c",
         (
             "from pathlib import Path; "
@@ -165,6 +165,54 @@ def _write_real_n5_store(path: Path, entries: dict[str, np.ndarray]) -> None:
         json.dumps(payload),
     ]
     subprocess.run(command, check=True)
+
+
+def test_legacy_n5_helper_command_prefix_prefers_direct_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        experiment_module,
+        "_legacy_n5_helper_python",
+        lambda: "/tmp/legacy-python",
+    )
+
+    prefix = experiment_module._legacy_n5_helper_command_prefix()
+
+    assert prefix == ("/tmp/legacy-python",)
+
+
+def test_legacy_n5_helper_command_prefix_falls_back_to_uv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(experiment_module, "_legacy_n5_helper_python", lambda: None)
+    monkeypatch.setattr(experiment_module.shutil, "which", lambda name: "/usr/bin/uv")
+
+    class _ProbeResult:
+        returncode = 0
+
+    commands: list[list[str]] = []
+
+    def _fake_run(command: list[str], **kwargs: object) -> _ProbeResult:
+        del kwargs
+        commands.append(command)
+        return _ProbeResult()
+
+    monkeypatch.setattr(experiment_module.subprocess, "run", _fake_run)
+
+    prefix = experiment_module._legacy_n5_helper_command_prefix()
+
+    assert prefix == ("/usr/bin/uv", "run", "--with", "zarr<3", "python")
+    assert commands == [
+        [
+            "/usr/bin/uv",
+            "run",
+            "--with",
+            "zarr<3",
+            "python",
+            "-c",
+            "import zarr,sys; sys.exit(0 if hasattr(zarr, 'N5Store') else 1)",
+        ]
+    ]
 
 
 def _write_multipositions_sidecar(path: Path, count: int) -> None:
