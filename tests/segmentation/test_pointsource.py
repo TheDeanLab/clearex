@@ -26,8 +26,11 @@
 
 import numpy as np
 import pytest
-from clearex.detect.particles import remove_close_blobs, sort_by_point_source_intensity, \
-    eliminate_insignificant_point_sources
+from clearex.detect.particles import (
+    remove_close_blobs,
+    sort_by_point_source_intensity,
+    eliminate_insignificant_point_sources,
+)
 
 
 def test_remove_close_blobs_isotropic():

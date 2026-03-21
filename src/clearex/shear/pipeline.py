@@ -32,7 +32,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Optional, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterator,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+)
 
 # Third Party Imports
 import ants
@@ -932,11 +941,17 @@ def _source_bounds_for_output_region(
 
     pad_z, pad_y, pad_x = roi_padding_zyx
     src_z0 = max(0, int(np.floor(min_xyz[2] / z_um)) - int(pad_z))
-    src_z1 = min(int(source_shape_zyx[0]), int(np.ceil(max_xyz[2] / z_um)) + int(pad_z) + 1)
+    src_z1 = min(
+        int(source_shape_zyx[0]), int(np.ceil(max_xyz[2] / z_um)) + int(pad_z) + 1
+    )
     src_y0 = max(0, int(np.floor(min_xyz[1] / y_um)) - int(pad_y))
-    src_y1 = min(int(source_shape_zyx[1]), int(np.ceil(max_xyz[1] / y_um)) + int(pad_y) + 1)
+    src_y1 = min(
+        int(source_shape_zyx[1]), int(np.ceil(max_xyz[1] / y_um)) + int(pad_y) + 1
+    )
     src_x0 = max(0, int(np.floor(min_xyz[0] / x_um)) - int(pad_x))
-    src_x1 = min(int(source_shape_zyx[2]), int(np.ceil(max_xyz[0] / x_um)) + int(pad_x) + 1)
+    src_x1 = min(
+        int(source_shape_zyx[2]), int(np.ceil(max_xyz[0] / x_um)) + int(pad_x) + 1
+    )
 
     if src_z0 >= src_z1 or src_y0 >= src_y1 or src_x0 >= src_x1:
         return None
@@ -1202,8 +1217,7 @@ def run_shear_transform_analysis(
             normalized["shear_yz"] = float(np.tan(np.deg2rad(estimated_shear_yz_deg)))
             _emit(
                 4,
-                "Auto-estimated shear_yz_deg="
-                f"{float(estimated_shear_yz_deg):.3f}",
+                "Auto-estimated shear_yz_deg=" f"{float(estimated_shear_yz_deg):.3f}",
             )
         else:
             _emit(4, "Auto-estimation failed; using configured shear parameters")

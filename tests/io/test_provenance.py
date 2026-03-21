@@ -100,7 +100,10 @@ def test_persist_run_provenance_hash_chain(tmp_path: Path):
     assert "display_pyramid" in record_1["workflow"]["selected_analyses"]
     assert "usegment3d" in record_1["workflow"]["selected_analyses"]
     assert record_1["workflow"]["spatial_calibration_text"] == "z=+z,y=+y,x=+x"
-    assert record_1["workflow"]["zarr_chunks_ptczyx"] == "p=1, t=1, c=1, z=256, y=256, x=256"
+    assert (
+        record_1["workflow"]["zarr_chunks_ptczyx"]
+        == "p=1, t=1, c=1, z=256, y=256, x=256"
+    )
     assert "z=1,2,4,8" in record_1["workflow"]["zarr_pyramid_ptczyx"]
 
     valid, issues = verify_provenance_chain(store_path)
@@ -361,4 +364,6 @@ def test_latest_analysis_gui_state_round_trip(tmp_path: Path) -> None:
     assert loaded["source"] == "unit_test"
     assert loaded["updated_utc"] is not None
     assert loaded["workflow"]["flatfield"] is True
-    assert loaded["workflow"]["analysis_parameters"]["flatfield"]["execution_order"] == 1
+    assert (
+        loaded["workflow"]["analysis_parameters"]["flatfield"]["execution_order"] == 1
+    )

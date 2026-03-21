@@ -156,7 +156,9 @@ def test_run_mip_export_analysis_writes_uint16_ome_tiff_outputs_with_calibration
     assert yz_pixels["PhysicalSizeY"] == "2.0"
 
     latest_attrs = dict(
-        zarr.open_group(str(store_path), mode="r")["results"]["mip_export"]["latest"].attrs
+        zarr.open_group(str(store_path), mode="r")["results"]["mip_export"][
+            "latest"
+        ].attrs
     )
     assert latest_attrs["exported_files"] == 6
     assert latest_attrs["export_format"] == "ome-tiff"
@@ -174,9 +176,7 @@ def test_run_mip_export_analysis_writes_multi_position_zarr_outputs(
 ) -> None:
     store_path = tmp_path / "mip_zarr_store.zarr"
     root = zarr.open_group(str(store_path), mode="w")
-    data = np.arange(2 * 3 * 2 * 4 * 3 * 5, dtype=np.uint16).reshape(
-        (2, 3, 2, 4, 3, 5)
-    )
+    data = np.arange(2 * 3 * 2 * 4 * 3 * 5, dtype=np.uint16).reshape((2, 3, 2, 4, 3, 5))
     root.create_dataset(
         name="data",
         data=data,
@@ -219,17 +219,23 @@ def test_run_mip_export_analysis_writes_multi_position_zarr_outputs(
     assert list(yz_root["data"].attrs["axes"]) == ["p", "z", "y"]
 
 
-@pytest.mark.parametrize(("projection", "expected_axis"), [("xy", 0), ("xz", 1), ("yz", 2)])
+@pytest.mark.parametrize(
+    ("projection", "expected_axis"), [("xy", 0), ("xz", 1), ("yz", 2)]
+)
 def test_run_export_task_reads_single_position_source_in_blocks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     projection: str,
     expected_axis: int,
 ) -> None:
-    data = np.arange(1 * 1 * 1 * 4 * 6 * 8, dtype=np.float32).reshape((1, 1, 1, 4, 6, 8))
+    data = np.arange(1 * 1 * 1 * 4 * 6 * 8, dtype=np.float32).reshape(
+        (1, 1, 1, 4, 6, 8)
+    )
     guarded = _GuardedSourceArray(data, chunks=(1, 1, 1, 2, 3, 4))
     fake_group = {"data": guarded}
-    monkeypatch.setattr(pipeline.zarr, "open_group", lambda *_args, **_kwargs: fake_group)
+    monkeypatch.setattr(
+        pipeline.zarr, "open_group", lambda *_args, **_kwargs: fake_group
+    )
 
     task = pipeline._MipExportTask(
         projection=projection,
@@ -258,10 +264,14 @@ def test_run_export_task_reads_multi_position_source_in_blocks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    data = np.arange(1 * 3 * 1 * 4 * 6 * 8, dtype=np.float32).reshape((1, 3, 1, 4, 6, 8))
+    data = np.arange(1 * 3 * 1 * 4 * 6 * 8, dtype=np.float32).reshape(
+        (1, 3, 1, 4, 6, 8)
+    )
     guarded = _GuardedSourceArray(data, chunks=(1, 3, 1, 2, 3, 4))
     fake_group = {"data": guarded}
-    monkeypatch.setattr(pipeline.zarr, "open_group", lambda *_args, **_kwargs: fake_group)
+    monkeypatch.setattr(
+        pipeline.zarr, "open_group", lambda *_args, **_kwargs: fake_group
+    )
 
     task = pipeline._MipExportTask(
         projection="xy",
@@ -293,9 +303,7 @@ def test_run_mip_export_analysis_distributed_writes_expected_outputs(
 
     store_path = tmp_path / "mip_distributed_store.zarr"
     root = zarr.open_group(str(store_path), mode="w")
-    data = np.arange(1 * 2 * 1 * 4 * 6 * 8, dtype=np.uint16).reshape(
-        (1, 2, 1, 4, 6, 8)
-    )
+    data = np.arange(1 * 2 * 1 * 4 * 6 * 8, dtype=np.uint16).reshape((1, 2, 1, 4, 6, 8))
     root.create_dataset(
         name="data",
         data=data,

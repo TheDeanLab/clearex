@@ -7,7 +7,6 @@ import sys
 
 import pytest
 
-
 if sys.platform == "darwin":
     # Use Qt's offscreen platform during tests so transient dialogs/viewers do
     # not flash on the interactive desktop. Callers can still override this by

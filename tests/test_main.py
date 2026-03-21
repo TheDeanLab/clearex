@@ -1194,7 +1194,9 @@ def test_run_workflow_experiment_input_persists_explicit_identity_spatial_calibr
 
     monkeypatch.setattr(main_module, "_configure_dask_backend", lambda **kwargs: None)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: True)
-    monkeypatch.setattr(main_module, "load_navigate_experiment", lambda path: experiment)
+    monkeypatch.setattr(
+        main_module, "load_navigate_experiment", lambda path: experiment
+    )
     monkeypatch.setattr(
         main_module, "resolve_experiment_data_path", lambda experiment: source_path
     )
@@ -1271,7 +1273,9 @@ def test_run_workflow_experiment_input_without_override_preserves_store_mapping(
 
     monkeypatch.setattr(main_module, "_configure_dask_backend", lambda **kwargs: None)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: True)
-    monkeypatch.setattr(main_module, "load_navigate_experiment", lambda path: experiment)
+    monkeypatch.setattr(
+        main_module, "load_navigate_experiment", lambda path: experiment
+    )
     monkeypatch.setattr(
         main_module, "resolve_experiment_data_path", lambda experiment: source_path
     )
@@ -1894,7 +1898,9 @@ def test_run_workflow_fails_when_scheduled_output_is_missing(
 
     def _should_not_run(*args, **kwargs):
         del args, kwargs
-        raise AssertionError("deconvolution should not run when upstream output is missing")
+        raise AssertionError(
+            "deconvolution should not run when upstream output is missing"
+        )
 
     monkeypatch.setattr(
         main_module, "_configure_dask_backend", _fake_configure_dask_backend
@@ -1939,8 +1945,7 @@ def test_run_workflow_fails_when_scheduled_output_is_missing(
     assert any(
         str(step.get("name")) == "deconvolution"
         and dict(step.get("parameters", {})).get("status") == "failed"
-        and dict(step.get("parameters", {})).get("reason")
-        == "missing_input_dependency"
+        and dict(step.get("parameters", {})).get("reason") == "missing_input_dependency"
         and dict(step.get("parameters", {})).get("requested_input") == "flatfield"
         and dict(step.get("parameters", {})).get("resolved_input")
         == "results/flatfield/latest/data"

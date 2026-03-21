@@ -32,7 +32,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -56,7 +55,6 @@ from clearex.workflow import (
     spatial_calibration_from_dict,
     spatial_calibration_to_dict,
 )
-
 
 ProgressCallback = Callable[[int, str], None]
 _AXIS_LABELS_TCZYX = ("t", "c", "z", "y", "x")
@@ -715,12 +713,16 @@ def _extract_scale_tczyx_from_navigate_raw(
     )
     lateral_from_fov = _first_positive_float(
         (
-            (fov_x / img_x)
-            if fov_x is not None and img_x is not None and img_x > 0
-            else None,
-            (fov_y / img_y)
-            if fov_y is not None and img_y is not None and img_y > 0
-            else None,
+            (
+                (fov_x / img_x)
+                if fov_x is not None and img_x is not None and img_x > 0
+                else None
+            ),
+            (
+                (fov_y / img_y)
+                if fov_y is not None and img_y is not None and img_y > 0
+                else None
+            ),
         )
     )
 
@@ -2056,14 +2058,81 @@ def _component_matches_shape_chunks(
     return array_chunks == tuple(int(v) for v in chunks_tpczyx)
 
 
-def _visualization_multiscale_cache_prefix(source_component: str) -> str:
-    """Return deterministic component prefix used for prepared display pyramids."""
+def _display_pyramid_level_component(
+    *,
+    source_component: str,
+    level: int,
+) -> str:
+    """Return canonical component path for one generated display-pyramid level.
+
+    Parameters
+    ----------
+    source_component : str
+        Base source component path.
+    level : int
+        Pyramid level index (must be >= 1).
+
+    Returns
+    -------
+    str
+        Target component path for this level.
+
+    Raises
+    ------
+    ValueError
+        If ``level`` is less than 1.
+
+    Notes
+    -----
+    Raw data keeps canonical root-level ``data_pyramid`` naming to remain
+    compatible with existing analysis readers. Derived components are written
+    alongside their source at ``<source_component>_pyramid/level_<n>``.
+    """
+    level_index = int(level)
+    if level_index < 1:
+        raise ValueError("display-pyramid level index must be >= 1.")
     component = str(source_component).strip() or "data"
-    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", component).strip("_")
-    if not safe_name:
-        safe_name = "data"
-    digest = hashlib.sha1(component.encode("utf-8")).hexdigest()[:10]
-    return f"results/display_pyramid/by_component/{safe_name}_{digest}"
+    if component == "data":
+        return f"data_pyramid/level_{level_index}"
+    return f"{component}_pyramid/level_{level_index}"
+
+
+def _is_source_pyramid_layout_compatible(
+    *,
+    source_component: str,
+    source_components: Sequence[str],
+) -> bool:
+    """Return whether a discovered multiscale set follows canonical layout.
+
+    Parameters
+    ----------
+    source_component : str
+        Base source component path.
+    source_components : sequence[str]
+        Ordered component paths discovered for multiscale rendering.
+
+    Returns
+    -------
+    bool
+        ``True`` when all levels follow canonical source-adjacent pyramid
+        component naming.
+    """
+    components = [str(item).strip() for item in source_components]
+    if not components:
+        return False
+
+    base_component = str(source_component).strip() or "data"
+    if components[0] != base_component:
+        return False
+
+    for level_index, component in enumerate(components[1:], start=1):
+        expected = _display_pyramid_level_component(
+            source_component=base_component,
+            level=level_index,
+        )
+        if str(component).strip() != expected:
+            return False
+    return True
 
 
 def _collect_existing_multiscale_components(
@@ -2181,8 +2250,6 @@ def _build_visualization_multiscale_components(
     factor_payload: list[list[int]] = [
         [int(value) for value in level_factors_tpczyx[0]]
     ]
-    cache_prefix = _visualization_multiscale_cache_prefix(str(source_component))
-
     prior_component = str(source_component)
     prior_factors = tuple(int(value) for value in level_factors_tpczyx[0])
     for level_index, absolute_factors in enumerate(level_factors_tpczyx[1:], start=1):
@@ -2212,7 +2279,10 @@ def _build_visualization_multiscale_components(
                 int(absolute_factors[5]),
             )
 
-        level_component = f"{cache_prefix}/level_{level_index}"
+        level_component = _display_pyramid_level_component(
+            source_component=str(source_component),
+            level=int(level_index),
+        )
         source_level = da.from_zarr(str(zarr_path), component=source_level_component)
         downsampled = _downsample_tpczyx_by_stride(source_level, downsample_factors)
         level_shape = tuple(int(size) for size in tuple(downsampled.shape))
@@ -2283,9 +2353,7 @@ def _build_visualization_multiscale_components(
     if not isinstance(component_map, dict):
         component_map = {}
     component_map[str(source_component)] = [str(item) for item in level_paths]
-    root.attrs[_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = _sanitize_metadata_value(
-        component_map
-    )
+    root.attrs[_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = _sanitize_metadata_value(component_map)
     legacy_component_map = root.attrs.get(_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
     if not isinstance(legacy_component_map, dict):
         legacy_component_map = {}
@@ -2514,9 +2582,7 @@ def _load_display_contrast_limits_by_channel(
         attrs = dict(root[str(source_component)].attrs)
     except Exception:
         return None
-    return _coerce_contrast_limits_by_channel(
-        attrs.get(_DISPLAY_CONTRAST_LIMITS_ATTR)
-    )
+    return _coerce_contrast_limits_by_channel(attrs.get(_DISPLAY_CONTRAST_LIMITS_ATTR))
 
 
 def _save_display_contrast_metadata(
@@ -2602,9 +2668,7 @@ def _sample_channel_for_display_contrast(
     if sampled_voxels <= target:
         return sampled
 
-    tp_stride = int(
-        max(1, math.ceil(math.sqrt(float(sampled_voxels) / float(target))))
-    )
+    tp_stride = int(max(1, math.ceil(math.sqrt(float(sampled_voxels) / float(target)))))
     return sampled[::tp_stride, ::tp_stride, :, :, :]
 
 
@@ -3291,10 +3355,13 @@ def _launch_napari_viewer(
         key = str(component).strip() or "data"
         cached = layer_display_contrast_cache.get(key)
         if cached is None:
-            cached = _load_display_contrast_limits_by_channel(
-                root=scale_root,
-                source_component=key,
-            ) or tuple()
+            cached = (
+                _load_display_contrast_limits_by_channel(
+                    root=scale_root,
+                    source_component=key,
+                )
+                or tuple()
+            )
             layer_display_contrast_cache[key] = cached
         if len(cached) >= int(channel_count):
             return tuple(cached[: int(channel_count)])
@@ -3419,7 +3486,9 @@ def _launch_napari_viewer(
             display_strategy = "none"
             if not display_level_arrays:
                 continue
-            is_multiscale = int(effective_ndisplay) < 3 and len(display_level_arrays) > 1
+            is_multiscale = (
+                int(effective_ndisplay) < 3 and len(display_level_arrays) > 1
+            )
             channel_count = max(1, int(display_level_arrays[0].shape[1]))
             requested_channels = tuple(
                 int(index)
@@ -3764,9 +3833,9 @@ def _launch_napari_viewer(
     napari.run()
     _persist_keyframes()
     return {
-        "keyframe_manifest_path": str(manifest_path)
-        if manifest_path is not None
-        else None,
+        "keyframe_manifest_path": (
+            str(manifest_path) if manifest_path is not None else None
+        ),
         "keyframe_count": int(len(keyframes)),
         "renderer": dict(renderer_info),
     }
@@ -3862,11 +3931,26 @@ def run_display_pyramid_analysis(
         root=root,
         source_component=source_component,
     )
-    reused_existing_levels = bool(len(existing_components) > 1 and not force_rerun)
+    has_multiscale_levels = bool(len(existing_components) > 1)
+    layout_compatible = _is_source_pyramid_layout_compatible(
+        source_component=source_component,
+        source_components=existing_components,
+    )
+    reused_existing_levels = bool(
+        has_multiscale_levels and not force_rerun and layout_compatible
+    )
+    should_rebuild_for_layout = bool(
+        has_multiscale_levels and not force_rerun and not layout_compatible
+    )
     if reused_existing_levels:
         _emit(30, f"Reusing existing display pyramid for {source_component}")
         source_components = tuple(str(item) for item in existing_components)
     else:
+        if should_rebuild_for_layout:
+            _emit(
+                15,
+                "Existing display pyramid uses legacy layout; rebuilding source-adjacent levels.",
+            )
         _emit(30, f"Preparing display pyramid for {source_component}")
         level_factors = _resolve_visualization_pyramid_factors_tpczyx(
             root_attrs=root_attrs,
@@ -3884,8 +3968,7 @@ def run_display_pyramid_analysis(
         source_attrs=source_attrs,
     )
     persisted_factors = [
-        list(row)
-        for row in level_factors[: max(1, len(tuple(source_components)))]
+        list(row) for row in level_factors[: max(1, len(tuple(source_components)))]
     ]
     root[str(source_component)].attrs[_DISPLAY_PYRAMID_LEVELS_ATTR] = [
         str(item) for item in source_components
@@ -4070,9 +4153,10 @@ def _save_visualization_metadata(
     }
     if viewer_pid is not None:
         payload["viewer_pid"] = int(viewer_pid)
-    if display_mode_fallback_reason is not None and str(
-        display_mode_fallback_reason
-    ).strip():
+    if (
+        display_mode_fallback_reason is not None
+        and str(display_mode_fallback_reason).strip()
+    ):
         payload["display_mode_fallback_reason"] = str(display_mode_fallback_reason)
     if keyframe_manifest_path is not None and str(keyframe_manifest_path).strip():
         payload["keyframe_manifest_path"] = str(keyframe_manifest_path)

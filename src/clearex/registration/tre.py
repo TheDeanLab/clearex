@@ -42,7 +42,6 @@ from clearex.detect.particles import (
     intensity_weighted_centroids,
 )
 
-
 TransformModel = SimilarityTransform | AffineTransform
 
 

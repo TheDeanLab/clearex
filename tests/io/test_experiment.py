@@ -112,8 +112,7 @@ def _write_bdv_xml(
     setup_blocks = []
     for setup_index in sorted(setup_channel_tile):
         channel_index, tile_index = setup_channel_tile[setup_index]
-        setup_blocks.append(
-            f"""
+        setup_blocks.append(f"""
       <ViewSetup>
         <id>{setup_index}</id>
         <name>{setup_index}</name>
@@ -129,8 +128,7 @@ def _write_bdv_xml(
           <angle>0</angle>
         </attributes>
       </ViewSetup>
-""".rstrip()
-        )
+""".rstrip())
 
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <SpimData version="0.2">
@@ -185,7 +183,9 @@ def test_library_path_env_vars_for_platform_linux() -> None:
     ) == ("LD_LIBRARY_PATH",)
 
 
-def test_build_library_path_environment_updates_merges_discovered_and_inherited() -> None:
+def test_build_library_path_environment_updates_merges_discovered_and_inherited() -> (
+    None
+):
     updates = experiment_module._build_library_path_environment_updates(
         ["/cuda/runtime/lib", "/cuda/cudnn/lib"],
         env={"LD_LIBRARY_PATH": "/cluster/custom/lib"},
@@ -424,7 +424,9 @@ def test_initialize_analysis_store_backfills_identity_spatial_calibration(
     experiment = load_navigate_experiment(experiment_path)
     store_path = default_analysis_store_path(experiment)
 
-    initialize_analysis_store(experiment=experiment, zarr_path=store_path, overwrite=True)
+    initialize_analysis_store(
+        experiment=experiment, zarr_path=store_path, overwrite=True
+    )
 
     calibration = load_store_spatial_calibration(store_path)
 
@@ -486,7 +488,9 @@ def test_write_zyx_block_numpy(tmp_path: Path):
     _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="H5")
     experiment = load_navigate_experiment(experiment_path)
     store_path = default_analysis_store_path(experiment)
-    initialize_analysis_store(experiment=experiment, zarr_path=store_path, overwrite=True)
+    initialize_analysis_store(
+        experiment=experiment, zarr_path=store_path, overwrite=True
+    )
 
     block = np.ones((4, 8, 16), dtype=np.uint16)
     write_zyx_block(
@@ -597,7 +601,9 @@ def test_resolve_data_store_path_uses_experiment_directory_for_non_zarr(tmp_path
     save_directory.mkdir(parents=True, exist_ok=True)
 
     experiment_path = experiment_dir / "experiment.yml"
-    _write_minimal_experiment(experiment_path, save_directory=save_directory, file_type="H5")
+    _write_minimal_experiment(
+        experiment_path, save_directory=save_directory, file_type="H5"
+    )
     experiment = load_navigate_experiment(experiment_path)
 
     source_path = save_directory / "source.npy"
@@ -608,9 +614,13 @@ def test_resolve_data_store_path_uses_experiment_directory_for_non_zarr(tmp_path
     assert resolved == (experiment_dir / "data_store.zarr").resolve()
 
 
-def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(tmp_path: Path):
+def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(
+    tmp_path: Path,
+):
     experiment_path = tmp_path / "experiment.yml"
-    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="TIFF"
+    )
     experiment = load_navigate_experiment(experiment_path)
 
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
@@ -642,7 +652,9 @@ def test_materialize_experiment_data_store_batches_chunk_writes(
     tmp_path: Path, monkeypatch
 ):
     experiment_path = tmp_path / "experiment.yml"
-    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="TIFF"
+    )
     experiment = load_navigate_experiment(experiment_path)
 
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
@@ -681,7 +693,9 @@ def test_materialize_experiment_data_store_resumes_after_interrupted_base_write(
     monkeypatch,
 ):
     experiment_path = tmp_path / "experiment.yml"
-    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="TIFF"
+    )
     experiment = load_navigate_experiment(experiment_path)
 
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
@@ -749,7 +763,9 @@ def test_materialize_experiment_data_store_handles_multibatch_base_and_pyramid(
     tmp_path: Path,
 ):
     experiment_path = tmp_path / "experiment.yml"
-    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="TIFF"
+    )
     experiment = load_navigate_experiment(experiment_path)
 
     source_data = np.arange(5 * 17 * 17, dtype=np.uint16).reshape(5, 17, 17)
@@ -781,7 +797,9 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
     source_store = tmp_path / "source.ome.zarr"
     source_root = zarr.open_group(str(source_store), mode="w")
-    source_root.create_dataset("raw", data=source_data, chunks=(1, 3, 4), overwrite=True)
+    source_root.create_dataset(
+        "raw", data=source_data, chunks=(1, 3, 4), overwrite=True
+    )
     source_root["raw"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
 
     materialized = materialize_experiment_data_store(
@@ -860,7 +878,9 @@ def test_has_complete_canonical_data_store_requires_completed_progress_record(
     tmp_path: Path,
 ):
     experiment_path = tmp_path / "experiment.yml"
-    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="TIFF"
+    )
     experiment = load_navigate_experiment(experiment_path)
 
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
@@ -902,7 +922,9 @@ def test_materialize_experiment_data_store_reuses_complete_store_by_default_and_
     tmp_path: Path,
 ):
     experiment_path = tmp_path / "experiment.yml"
-    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="TIFF")
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="TIFF"
+    )
     experiment = load_navigate_experiment(experiment_path)
 
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
@@ -943,7 +965,9 @@ def test_materialize_experiment_data_store_reuses_complete_store_by_default_and_
     assert rebuilt_root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
 
 
-def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_path: Path):
+def test_materialize_experiment_data_store_handles_same_component_rewrite(
+    tmp_path: Path,
+):
     experiment_path = tmp_path / "experiment.yml"
     _write_minimal_experiment(
         experiment_path, save_directory=tmp_path, file_type="OME-ZARR"
@@ -953,7 +977,9 @@ def test_materialize_experiment_data_store_handles_same_component_rewrite(tmp_pa
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
     source_store = tmp_path / "source_data.zarr"
     source_root = zarr.open_group(str(source_store), mode="w")
-    source_root.create_dataset("data", data=source_data, chunks=(1, 3, 4), overwrite=True)
+    source_root.create_dataset(
+        "data", data=source_data, chunks=(1, 3, 4), overwrite=True
+    )
     source_root["data"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
 
     materialize_experiment_data_store(
@@ -1011,9 +1037,7 @@ def test_materialize_experiment_data_store_stacks_tiff_positions_and_channels(
 
     for position_index in range(3):
         for channel_index in range(2):
-            loaded = np.array(
-                root["data"][0, position_index, channel_index, :, :, :]
-            )
+            loaded = np.array(root["data"][0, position_index, channel_index, :, :, :])
             assert np.array_equal(
                 loaded,
                 expected_blocks[(position_index, channel_index)],
@@ -1093,10 +1117,10 @@ def test_materialize_experiment_data_store_stacks_bdv_h5_setups(
 
     for position_index in range(2):
         for channel_index in range(2):
-            loaded = np.array(
-                root["data"][0, position_index, channel_index, :, :, :]
+            loaded = np.array(root["data"][0, position_index, channel_index, :, :, :])
+            assert np.array_equal(
+                loaded, expected_blocks[(position_index, channel_index)]
             )
-            assert np.array_equal(loaded, expected_blocks[(position_index, channel_index)])
 
 
 def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
@@ -1176,10 +1200,10 @@ def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
 
     for position_index in range(2):
         for channel_index in range(2):
-            loaded = np.array(
-                root["data"][0, position_index, channel_index, :, :, :]
+            loaded = np.array(root["data"][0, position_index, channel_index, :, :, :])
+            assert np.array_equal(
+                loaded, expected_blocks[(position_index, channel_index)]
             )
-            assert np.array_equal(loaded, expected_blocks[(position_index, channel_index)])
 
 
 def test_materialize_experiment_data_store_stacks_bdv_ome_zarr_setups(
@@ -1261,10 +1285,10 @@ def test_materialize_experiment_data_store_stacks_bdv_ome_zarr_setups(
 
     for position_index in range(2):
         for channel_index in range(2):
-            loaded = np.array(
-                root["data"][0, position_index, channel_index, :, :, :]
+            loaded = np.array(root["data"][0, position_index, channel_index, :, :, :])
+            assert np.array_equal(
+                loaded, expected_blocks[(position_index, channel_index)]
             )
-            assert np.array_equal(loaded, expected_blocks[(position_index, channel_index)])
 
 
 def test_should_use_source_aligned_plane_writes_detects_plane_chunk_pattern():
@@ -1305,10 +1329,14 @@ def test_materialize_experiment_data_store_uses_source_aligned_plane_writes(
     source_data = np.arange(4 * 8 * 10, dtype=np.uint16).reshape(4, 8, 10)
     source_store = tmp_path / "source.ome.zarr"
     source_root = zarr.open_group(str(source_store), mode="w")
-    source_root.create_dataset("raw", data=source_data, chunks=(1, 8, 10), overwrite=True)
+    source_root.create_dataset(
+        "raw", data=source_data, chunks=(1, 8, 10), overwrite=True
+    )
     source_root["raw"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
 
-    original_source_writer = experiment_module._write_dask_array_source_aligned_plane_batches
+    original_source_writer = (
+        experiment_module._write_dask_array_source_aligned_plane_batches
+    )
     original_chunk_writer = experiment_module._write_dask_array_in_batches
     writer_calls = {"source_aligned": 0, "chunk_batched": 0}
 
@@ -1342,7 +1370,9 @@ def test_materialize_experiment_data_store_uses_source_aligned_plane_writes(
     assert writer_calls["source_aligned"] == 1
     assert writer_calls["chunk_batched"] == 0
     assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
-    assert root.attrs["materialization_write_strategy"] == "source_aligned_plane_batches"
+    assert (
+        root.attrs["materialization_write_strategy"] == "source_aligned_plane_batches"
+    )
     assert root.attrs["source_aligned_z_batch_depth"] == 2
     assert root.attrs["source_aligned_worker_count"] is None
     assert root.attrs["source_aligned_worker_memory_limit_bytes"] is None
@@ -1362,10 +1392,14 @@ def test_materialize_experiment_data_store_falls_back_to_chunk_batched_writes(
     source_data = np.arange(4 * 8 * 10, dtype=np.uint16).reshape(4, 8, 10)
     source_store = tmp_path / "source.ome.zarr"
     source_root = zarr.open_group(str(source_store), mode="w")
-    source_root.create_dataset("raw", data=source_data, chunks=(2, 8, 10), overwrite=True)
+    source_root.create_dataset(
+        "raw", data=source_data, chunks=(2, 8, 10), overwrite=True
+    )
     source_root["raw"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
 
-    original_source_writer = experiment_module._write_dask_array_source_aligned_plane_batches
+    original_source_writer = (
+        experiment_module._write_dask_array_source_aligned_plane_batches
+    )
     original_chunk_writer = experiment_module._write_dask_array_in_batches
     writer_calls = {"source_aligned": 0, "chunk_batched": 0}
 
@@ -1415,8 +1449,8 @@ def test_detect_client_worker_resources_extracts_min_limit():
                 }
             }
 
-    worker_count, worker_memory_limit = experiment_module._detect_client_worker_resources(
-        _FakeClient()
+    worker_count, worker_memory_limit = (
+        experiment_module._detect_client_worker_resources(_FakeClient())
     )
 
     assert worker_count == 2

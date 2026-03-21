@@ -32,11 +32,11 @@ import cv2
 import numpy as np
 from skimage import filters as skfilters
 
-
 # Local Imports
 
+
 def fwhm_to_sigma(fwhm_px: float) -> float:
-    """ Convert from FWHM to sigma.
+    """Convert from FWHM to sigma.
 
     FWHM = 2*sqrt(2*ln2)*sigma ≈ 2.35482*sigma
 

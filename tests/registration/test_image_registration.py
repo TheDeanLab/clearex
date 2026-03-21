@@ -150,8 +150,16 @@ class TestImageRegistration:
             # Mock the internal methods to avoid actual registration
             mock_image = MagicMock()
             mock_mask = MagicMock()
-            with patch.object(reg, '_perform_linear_registration', return_value=(mock_image, mock_mask)):
-                with patch.object(reg, '_perform_nonlinear_registration', return_value=(mock_image, mock_mask)):
+            with patch.object(
+                reg,
+                "_perform_linear_registration",
+                return_value=(mock_image, mock_mask),
+            ):
+                with patch.object(
+                    reg,
+                    "_perform_nonlinear_registration",
+                    return_value=(mock_image, mock_mask),
+                ):
                     reg.register()
 
             # Verify that logging was initialized
@@ -176,7 +184,7 @@ class TestRegisterRound:
             np.save(moving_path, moving_arr)
 
             # Mock ImageRegistration to avoid actual registration
-            with patch('clearex.registration.ImageRegistration') as MockReg:
+            with patch("clearex.registration.ImageRegistration") as MockReg:
                 mock_instance = MockReg.return_value
 
                 register_round(
@@ -200,4 +208,3 @@ class TestRegisterRound:
 
                 # Verify register was called
                 mock_instance.register.assert_called_once()
-

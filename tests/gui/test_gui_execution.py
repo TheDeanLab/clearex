@@ -334,6 +334,7 @@ def test_registration_operation_moves_to_preprocessing_tab() -> None:
 
     tab_map = dict(app_module.AnalysisSelectionDialog._OPERATION_TABS)
 
+    assert "display_pyramid" in tab_map["Preprocessing"]
     assert "registration" in tab_map["Preprocessing"]
     assert "registration" not in tab_map.get("Postprocessing", ())
 
@@ -2011,10 +2012,16 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
 
     dialog_cls = app_module.AnalysisSelectionDialog
     assert dialog_cls._OPERATION_LABELS["visualization"] == "Napari"
-    assert dialog_cls._OPERATION_LABELS["display_pyramid"] == "Display Pyramid"
+    assert dialog_cls._OPERATION_LABELS["display_pyramid"] == "Pyramidal Downsampling"
     assert (
-        "Visualization",
-        ("display_pyramid", "visualization", "mip_export"),
+        "Preprocessing",
+        (
+            "flatfield",
+            "deconvolution",
+            "shear_transform",
+            "display_pyramid",
+            "registration",
+        ),
     ) in dialog_cls._OPERATION_TABS
 
 

@@ -80,9 +80,11 @@ def _create_registration_store(
     }
     experiment_path = _write_multiposition_sidecar(
         tmp_path,
-        rows=[[0.0, 0.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0, 0.0], [8.0, 0.0, 0.0, 0.0, 0.0]][
-            :positions
-        ],
+        rows=[
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0, 0.0, 0.0],
+            [8.0, 0.0, 0.0, 0.0, 0.0],
+        ][:positions],
     )
     root.attrs["source_experiment"] = str(experiment_path)
     root.attrs["data_pyramid_factors_tpczyx"] = [
@@ -166,6 +168,39 @@ def test_resolve_source_components_for_level_rejects_missing_level(
         )
 
 
+def test_resolve_source_components_for_level_uses_source_adjacent_pyramid(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "registration_source_adjacent_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="results/shear_transform/latest/data",
+        shape=(1, 2, 1, 4, 4, 4),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.create_dataset(
+        name="results/shear_transform/latest/data_pyramid/level_1",
+        shape=(1, 2, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    source_component, pairwise_component, level = (
+        registration_pipeline._resolve_source_components_for_level(
+            root=root,
+            requested_source_component="results/shear_transform/latest/data",
+            input_resolution_level=1,
+        )
+    )
+
+    assert source_component == "results/shear_transform/latest/data"
+    assert pairwise_component == "results/shear_transform/latest/data_pyramid/level_1"
+    assert level == 1
+
+
 def test_position_centroid_anchor_prefers_central_tile() -> None:
     stage_rows = [
         {"x": 0.0, "y": 0.0, "z": 0.0, "theta": 0.0, "f": 0.0},
@@ -190,9 +225,7 @@ def test_solve_with_pruning_recovers_translation_and_prunes_outlier() -> None:
         registration_pipeline._EdgeSpec(
             1, 2, ((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)), 10_000
         ),
-        registration_pipeline._EdgeSpec(
-            0, 2, ((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)), 1
-        ),
+        registration_pipeline._EdgeSpec(0, 2, ((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)), 1),
     ]
     results = [
         _edge_result(edges[0], _translation_matrix(1.0)),
@@ -298,7 +331,11 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
         edge = kwargs["edge"]
         t_index = int(kwargs["t_index"])
         correction = np.eye(4, dtype=np.float64)
-        if t_index == 1 and int(edge.fixed_position) == 1 and int(edge.moving_position) == 2:
+        if (
+            t_index == 1
+            and int(edge.fixed_position) == 1
+            and int(edge.moving_position) == 2
+        ):
             correction[0, 3] = -1.0
         return {
             "fixed_position": int(edge.fixed_position),

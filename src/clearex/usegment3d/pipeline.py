@@ -336,10 +336,7 @@ def _summarize_client_worker_state(client: "Client") -> str:
     try:
         scheduler_info = client.scheduler_info()
     except Exception as exc:
-        return (
-            "scheduler_info_unavailable="
-            f"{type(exc).__name__}: {exc}"
-        )
+        return "scheduler_info_unavailable=" f"{type(exc).__name__}: {exc}"
 
     worker_infos = dict(scheduler_info.get("workers", {}))
     active_workers = len(worker_infos)
@@ -1415,7 +1412,9 @@ def run_usegment3d_analysis(
         output_array = root[data_component]
         output_array.attrs.update(
             {
-                "voxel_size_um_zyx": [float(value) for value in output_voxel_size_um_zyx],
+                "voxel_size_um_zyx": [
+                    float(value) for value in output_voxel_size_um_zyx
+                ],
                 "scale_tczyx": [
                     1.0,
                     1.0,

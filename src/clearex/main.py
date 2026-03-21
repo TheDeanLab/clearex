@@ -36,7 +36,6 @@ import logging
 import math
 import os
 
-
 # Third Party Imports
 import zarr
 
@@ -79,6 +78,7 @@ from clearex.visualization.pipeline import (
 from clearex.mip_export.pipeline import (
     run_mip_export_analysis,
 )
+
 try:
     from clearex.registration.pipeline import (
         run_registration_analysis,
@@ -114,6 +114,7 @@ except ImportError:
             "registration analysis is unavailable: "
             "could not import clearex.registration.pipeline."
         )
+
 
 try:
     from clearex.usegment3d.pipeline import (
@@ -691,9 +692,7 @@ def _resolve_persisted_dask_backend_settings_path() -> Path:
         Full JSON path used for persisted Dask backend settings.
     """
     return (
-        Path.home()
-        / _CLEAREX_SETTINGS_DIR_NAME
-        / _CLEAREX_DASK_BACKEND_SETTINGS_FILE
+        Path.home() / _CLEAREX_SETTINGS_DIR_NAME / _CLEAREX_DASK_BACKEND_SETTINGS_FILE
     ).expanduser()
 
 
@@ -1612,9 +1611,11 @@ def _run_workflow(
                                 "Matching provenance run found for %s, but required output "
                                 "components are missing (%s). Re-running operation.",
                                 operation_name,
-                                ", ".join(missing_components)
-                                if missing_components
-                                else "none",
+                                (
+                                    ", ".join(missing_components)
+                                    if missing_components
+                                    else "none"
+                                ),
                             )
 
                 if (
@@ -2194,9 +2195,7 @@ def _run_workflow(
                     ):
                         progress_state = {"last_percent": -5}
 
-                        def _registration_progress(
-                            percent: int, message: str
-                        ) -> None:
+                        def _registration_progress(percent: int, message: str) -> None:
                             """Throttle registration progress logs.
 
                             Parameters
@@ -2444,6 +2443,7 @@ def _run_workflow(
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
+
                         def _display_pyramid_progress(
                             percent: int, message: str
                         ) -> None:
@@ -2774,6 +2774,7 @@ def _run_workflow(
                     if provenance_store_path and is_zarr_store_path(
                         provenance_store_path
                     ):
+
                         def _mip_export_progress(percent: int, message: str) -> None:
                             """Map MIP-export progress into workflow-scale progress.
 
@@ -2871,12 +2872,9 @@ def _run_workflow(
                 current_operation_name,
                 provenance_store_path,
             )
-            if (
-                current_operation_name
-                and (
-                    not step_records
-                    or str(step_records[-1].get("name")) != current_operation_name
-                )
+            if current_operation_name and (
+                not step_records
+                or str(step_records[-1].get("name")) != current_operation_name
             ):
                 step_records.append(
                     {
@@ -2901,14 +2899,11 @@ def _run_workflow(
                 current_resolved_source,
                 current_operation_parameters,
             )
-            if (
-                current_operation_name
-                and (
-                    not step_records
-                    or str(step_records[-1].get("name")) != current_operation_name
-                    or str(step_records[-1].get("parameters", {}).get("status", ""))
-                    not in {"failed", "cancelled"}
-                )
+            if current_operation_name and (
+                not step_records
+                or str(step_records[-1].get("name")) != current_operation_name
+                or str(step_records[-1].get("parameters", {}).get("status", ""))
+                not in {"failed", "cancelled"}
             ):
                 reason = (
                     "missing_input_dependency"

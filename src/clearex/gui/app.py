@@ -7076,10 +7076,10 @@ if HAS_PYQT6:
             "flatfield",
             "deconvolution",
             "shear_transform",
+            "display_pyramid",
+            "registration",
             "particle_detection",
             "usegment3d",
-            "registration",
-            "display_pyramid",
             "visualization",
             "mip_export",
         )
@@ -7100,17 +7100,23 @@ if HAS_PYQT6:
             "particle_detection": "Particle Detection",
             "usegment3d": "uSegment3D",
             "registration": "Registration",
-            "display_pyramid": "Display Pyramid",
+            "display_pyramid": "Pyramidal Downsampling",
             "visualization": "Napari",
             "mip_export": "MIP Export",
         }
         _OPERATION_TABS: tuple[tuple[str, tuple[str, ...]], ...] = (
             (
                 "Preprocessing",
-                ("flatfield", "deconvolution", "shear_transform", "registration"),
+                (
+                    "flatfield",
+                    "deconvolution",
+                    "shear_transform",
+                    "display_pyramid",
+                    "registration",
+                ),
             ),
             ("Segmentation", ("particle_detection", "usegment3d")),
-            ("Visualization", ("display_pyramid", "visualization", "mip_export")),
+            ("Visualization", ("visualization", "mip_export")),
         )
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
             "flatfield": "results/flatfield/latest/data",
@@ -7125,7 +7131,7 @@ if HAS_PYQT6:
             "results/particle_detection/latest/detections"
         )
         _DEFAULT_USEGMENT3D_PARAMETERS: Dict[str, Any] = {
-            "execution_order": 6,
+            "execution_order": 7,
             "input_source": "data",
             "force_rerun": False,
             "chunk_basis": "3d",
@@ -7182,7 +7188,7 @@ if HAS_PYQT6:
             "output_dtype": "uint32",
         }
         _DEFAULT_REGISTRATION_PARAMETERS: Dict[str, Any] = {
-            "execution_order": 4,
+            "execution_order": 5,
             "input_source": "data",
             "force_rerun": False,
             "chunk_basis": "3d",
@@ -7516,9 +7522,9 @@ if HAS_PYQT6:
                 "from multi_positions.yml."
             ),
             "display_pyramid": (
-                "Prepare reusable display pyramids and stored per-channel 1/95 "
-                "contrast limits for the selected source component before napari "
-                "launch."
+                "Prepare reusable pyramidal downsampling levels and stored "
+                "per-channel 1/95 contrast limits for the selected source "
+                "component."
             ),
             "use_multiscale": (
                 "When enabled, napari uses existing display pyramids for 2D "

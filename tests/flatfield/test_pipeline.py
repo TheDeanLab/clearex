@@ -20,9 +20,7 @@ def test_run_flatfield_analysis_writes_latest_results(
 ) -> None:
     store_path = tmp_path / "analysis_store.zarr"
     root = zarr.open_group(str(store_path), mode="w")
-    data = np.arange(2 * 1 * 2 * 3 * 4 * 4, dtype=np.uint16).reshape(
-        (2, 1, 2, 3, 4, 4)
-    )
+    data = np.arange(2 * 1 * 2 * 3 * 4 * 4, dtype=np.uint16).reshape((2, 1, 2, 3, 4, 4))
     root.create_dataset(
         name="data",
         data=data,
@@ -96,7 +94,9 @@ def test_run_flatfield_analysis_writes_latest_results(
     assert baseline.shape == (1, 2, 2, 3)
     assert np.allclose(flatfield, 2.0)
     assert np.allclose(darkfield, 0.5)
-    assert np.array_equal(baseline[0, 0], np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.float32))
+    assert np.array_equal(
+        baseline[0, 0], np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.float32)
+    )
     assert np.isclose(corrected[0, 0, 0, 0, 0, 0], (data[0, 0, 0, 0, 0, 0] - 0.5) / 2.0)
     assert latest.attrs["source_component"] == "data"
     assert latest.attrs["data_component"] == "results/flatfield/latest/data"
@@ -113,9 +113,7 @@ def test_run_flatfield_analysis_materializes_output_pyramid(
 ) -> None:
     store_path = tmp_path / "analysis_store_pyramid.zarr"
     root = zarr.open_group(str(store_path), mode="w")
-    data = np.arange(1 * 1 * 1 * 2 * 4 * 4, dtype=np.uint16).reshape(
-        (1, 1, 1, 2, 4, 4)
-    )
+    data = np.arange(1 * 1 * 1 * 2 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 2, 4, 4))
     root.create_dataset(
         name="data",
         data=data,
@@ -206,7 +204,9 @@ def test_run_flatfield_analysis_defaults_darkfield_off(
     root = zarr.open_group(str(store_path), mode="w")
     root.create_dataset(
         name="data",
-        data=np.arange(1 * 1 * 1 * 2 * 2 * 2, dtype=np.uint16).reshape((1, 1, 1, 2, 2, 2)),
+        data=np.arange(1 * 1 * 1 * 2 * 2 * 2, dtype=np.uint16).reshape(
+            (1, 1, 1, 2, 2, 2)
+        ),
         chunks=(1, 1, 1, 2, 2, 2),
         overwrite=True,
     )
@@ -337,7 +337,9 @@ def test_run_flatfield_analysis_tiled_fit_without_blending(
     )
 
 
-def test_run_flatfield_analysis_tiled_fit_blends_tiles(tmp_path: Path, monkeypatch) -> None:
+def test_run_flatfield_analysis_tiled_fit_blends_tiles(
+    tmp_path: Path, monkeypatch
+) -> None:
     store_path = tmp_path / "analysis_store_tiled_blend.zarr"
     root = zarr.open_group(str(store_path), mode="w")
     data = np.arange(1 * 1 * 1 * 1 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 1, 4, 4))
@@ -474,8 +476,16 @@ def test_run_flatfield_analysis_resumes_pending_transform_chunks(
 
     output_root = zarr.open_group(str(store_path), mode="r")
     checkpoint = output_root["results"]["flatfield"]["latest"]["checkpoint"]
-    assert int(np.count_nonzero(np.asarray(checkpoint["fit_tile_done_pcyx"], dtype=bool))) == 4
-    assert int(np.count_nonzero(np.asarray(checkpoint["transform_done_tpcyx"], dtype=bool))) == 2
+    assert (
+        int(np.count_nonzero(np.asarray(checkpoint["fit_tile_done_pcyx"], dtype=bool)))
+        == 4
+    )
+    assert (
+        int(
+            np.count_nonzero(np.asarray(checkpoint["transform_done_tpcyx"], dtype=bool))
+        )
+        == 2
+    )
     assert fit_calls["count"] == 4
 
     resumed_transform_trace = tmp_path / "resumed_transform_calls.txt"
@@ -579,7 +589,9 @@ def test_run_flatfield_analysis_restarts_when_parameters_change(
 
     first_run_fit_calls = int(fit_calls["count"])
     assert first_run_fit_calls == 4
-    first_latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    first_latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"][
+        "latest"
+    ]
     first_fingerprint = str(first_latest.attrs["resume_parameter_fingerprint"])
 
     client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
@@ -592,7 +604,9 @@ def test_run_flatfield_analysis_restarts_when_parameters_change(
     finally:
         client.close()
 
-    second_latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    second_latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"][
+        "latest"
+    ]
     second_fingerprint = str(second_latest.attrs["resume_parameter_fingerprint"])
     assert fit_calls["count"] == first_run_fit_calls
     assert second_fingerprint == first_fingerprint
@@ -610,7 +624,9 @@ def test_run_flatfield_analysis_restarts_when_parameters_change(
     finally:
         client.close()
 
-    third_latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    third_latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"][
+        "latest"
+    ]
     third_fingerprint = str(third_latest.attrs["resume_parameter_fingerprint"])
     assert fit_calls["count"] == first_run_fit_calls + 4
     assert third_fingerprint != first_fingerprint
@@ -681,9 +697,16 @@ def test_run_flatfield_analysis_tiled_n5_checkpoint_chunks_keep_full_rank(
     expected_chunk_shape = tuple(int(v) for v in checkpoint_array.chunks)
 
     chunk_root = (
-        store_path / "results" / "flatfield" / "latest" / "checkpoint" / "fit_baseline_sum_pctz"
+        store_path
+        / "results"
+        / "flatfield"
+        / "latest"
+        / "checkpoint"
+        / "fit_baseline_sum_pctz"
     )
-    chunk_files = [p for p in chunk_root.rglob("*") if p.is_file() and p.name != "attributes.json"]
+    chunk_files = [
+        p for p in chunk_root.rglob("*") if p.is_file() and p.name != "attributes.json"
+    ]
     assert chunk_files, "Expected at least one written checkpoint chunk in N5 store."
     for chunk_file in chunk_files:
         with chunk_file.open("rb") as handle:
@@ -754,8 +777,12 @@ def test_run_flatfield_analysis_restarts_on_malformed_n5_checkpoint_chunk(
         client.close()
 
     writable_root = zarr.open_group(str(store_path), mode="a")
-    malformed = writable_root["results"]["flatfield"]["latest"]["checkpoint"]["fit_baseline_sum_pctz"]
-    malformed[0, 0, :, :] = np.asarray(malformed[0, 0, :, :], dtype=np.float32) + np.float32(1.0)
+    malformed = writable_root["results"]["flatfield"]["latest"]["checkpoint"][
+        "fit_baseline_sum_pctz"
+    ]
+    malformed[0, 0, :, :] = np.asarray(
+        malformed[0, 0, :, :], dtype=np.float32
+    ) + np.float32(1.0)
     with pytest.raises(AssertionError, match="Expected chunk of shape"):
         np.asarray(malformed[0:1, 0:1, :, :], dtype=np.float32)
 
@@ -834,7 +861,9 @@ def test_run_flatfield_analysis_tiled_fallback_uses_full_volume_profile(
         )
 
     monkeypatch.setattr(flatfield_pipeline, "_fit_profile_tile", _failing_tile)
-    monkeypatch.setattr(flatfield_pipeline, "_fit_profile_full_volume", _full_volume_profile)
+    monkeypatch.setattr(
+        flatfield_pipeline, "_fit_profile_full_volume", _full_volume_profile
+    )
 
     client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
     try:
@@ -856,7 +885,9 @@ def test_run_flatfield_analysis_tiled_fallback_uses_full_volume_profile(
     finally:
         client.close()
 
-    latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"][
+        "latest"
+    ]
     checkpoint = latest["checkpoint"]
     fallback_records = list(checkpoint.attrs["fit_fallback_records"])
 
@@ -914,7 +945,9 @@ def test_run_flatfield_analysis_tiled_fallback_uses_identity_when_retry_fails(
         raise RuntimeError("full-volume fallback failed")
 
     monkeypatch.setattr(flatfield_pipeline, "_fit_profile_tile", _always_failing_tile)
-    monkeypatch.setattr(flatfield_pipeline, "_fit_profile_full_volume", _failing_full_volume)
+    monkeypatch.setattr(
+        flatfield_pipeline, "_fit_profile_full_volume", _failing_full_volume
+    )
 
     client = create_dask_client(n_workers=1, threads_per_worker=1, processes=False)
     try:
@@ -936,7 +969,9 @@ def test_run_flatfield_analysis_tiled_fallback_uses_identity_when_retry_fails(
     finally:
         client.close()
 
-    latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"]["latest"]
+    latest = zarr.open_group(str(store_path), mode="r")["results"]["flatfield"][
+        "latest"
+    ]
     checkpoint = latest["checkpoint"]
     fallback_records = list(checkpoint.attrs["fit_fallback_records"])
 

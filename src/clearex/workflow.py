@@ -29,8 +29,17 @@ from dataclasses import dataclass, field
 import math
 import os
 import subprocess
-from typing import Any, Collection, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union
-
+from typing import (
+    Any,
+    Collection,
+    Dict,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 ChunkSpec = Optional[Union[int, Tuple[int, ...]]]
 ZarrAxisSpec = Tuple[int, int, int, int, int, int]
@@ -50,10 +59,10 @@ ANALYSIS_OPERATION_ORDER = (
     "flatfield",
     "deconvolution",
     "shear_transform",
+    "display_pyramid",
+    "registration",
     "particle_detection",
     "usegment3d",
-    "registration",
-    "display_pyramid",
     "visualization",
     "mip_export",
 )
@@ -357,7 +366,9 @@ def _validate_analysis_input_reference(
                 resolved_component=resolved_component,
             )
         if producer_operation in order_map:
-            consumer_index = order_map.get(str(reference.consumer_operation).strip(), -1)
+            consumer_index = order_map.get(
+                str(reference.consumer_operation).strip(), -1
+            )
             producer_index = order_map[producer_operation]
             if producer_index >= consumer_index:
                 return AnalysisInputDependencyIssue(
@@ -569,7 +580,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "roi_padding_zyx": [2, 2, 2],
     },
     "particle_detection": {
-        "execution_order": 5,
+        "execution_order": 6,
         "input_source": "data",
         "force_rerun": False,
         "channel_index": 0,
@@ -590,7 +601,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "min_distance_sigma": 10.0,
     },
     "usegment3d": {
-        "execution_order": 6,
+        "execution_order": 7,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -648,7 +659,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "output_dtype": "uint32",
     },
     "registration": {
-        "execution_order": 4,
+        "execution_order": 5,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -664,7 +675,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "blend_mode": "feather",
     },
     "display_pyramid": {
-        "execution_order": 7,
+        "execution_order": 4,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -1611,9 +1622,11 @@ def _normalize_usegment3d_parameters(
             shape_zyx = normalized["aggregation_tile_shape_zyx"]
             overlap_values = [max(0, int(v)) for v in tile_overlap_zyx]
             ratio_candidates = [
-                (float(overlap_values[idx]) / float(shape_zyx[idx]))
-                if int(shape_zyx[idx]) > 0
-                else 0.0
+                (
+                    (float(overlap_values[idx]) / float(shape_zyx[idx]))
+                    if int(shape_zyx[idx]) > 0
+                    else 0.0
+                )
                 for idx in range(3)
             ]
             tile_overlap_ratio = max(ratio_candidates) if ratio_candidates else 0.0
@@ -2352,14 +2365,14 @@ def selected_analysis_operations(
         selected.append("deconvolution")
     if shear_transform:
         selected.append("shear_transform")
+    if display_pyramid:
+        selected.append("display_pyramid")
+    if registration:
+        selected.append("registration")
     if particle_detection:
         selected.append("particle_detection")
     if usegment3d:
         selected.append("usegment3d")
-    if registration:
-        selected.append("registration")
-    if display_pyramid:
-        selected.append("display_pyramid")
     if visualization:
         selected.append("visualization")
     if mip_export:
@@ -4309,9 +4322,7 @@ def parse_spatial_calibration(
         axis_name, binding = item.split("=", 1)
         key = str(axis_name).strip().lower()
         if key not in SPATIAL_CALIBRATION_WORLD_AXES:
-            raise ValueError(
-                "Spatial calibration world axes must be z, y, or x."
-            )
+            raise ValueError("Spatial calibration world axes must be z, y, or x.")
         if key in assignments:
             raise ValueError(
                 f"Spatial calibration world axis '{key}' is assigned more than once."
@@ -4364,16 +4375,12 @@ def normalize_spatial_calibration(
         )
 
     theta_mode = (
-        str(
-            value.get("theta_mode", SPATIAL_CALIBRATION_DEFAULT_THETA_MODE)
-        ).strip()
+        str(value.get("theta_mode", SPATIAL_CALIBRATION_DEFAULT_THETA_MODE)).strip()
         or SPATIAL_CALIBRATION_DEFAULT_THETA_MODE
     )
     schema = str(value.get("schema", SPATIAL_CALIBRATION_SCHEMA)).strip()
     if schema and schema != SPATIAL_CALIBRATION_SCHEMA:
-        raise ValueError(
-            f"Unsupported spatial calibration schema '{schema}'."
-        )
+        raise ValueError(f"Unsupported spatial calibration schema '{schema}'.")
 
     if "stage_axis_map_zyx" in value:
         stage_axis_payload = value.get("stage_axis_map_zyx")
@@ -4683,9 +4690,7 @@ class WorkflowConfig:
                 )
                 if selected_target is None:
                     selected_target = self.analysis_targets[0]
-            self.analysis_selected_experiment_path = (
-                selected_target.experiment_path
-            )
+            self.analysis_selected_experiment_path = selected_target.experiment_path
             self.file = selected_target.store_path
         else:
             self.analysis_selected_experiment_path = (
@@ -4727,9 +4732,9 @@ class WorkflowConfig:
             Selected target resolved from ``analysis_targets`` and
             ``analysis_selected_experiment_path``.
         """
-        selected_experiment_path = (
-            str(self.analysis_selected_experiment_path or "").strip()
-        )
+        selected_experiment_path = str(
+            self.analysis_selected_experiment_path or ""
+        ).strip()
         if not selected_experiment_path:
             return None
         for target in self.analysis_targets:

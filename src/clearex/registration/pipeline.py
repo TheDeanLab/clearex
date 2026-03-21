@@ -118,7 +118,9 @@ class _EdgeSpec:
 
     fixed_position: int
     moving_position: int
-    overlap_bbox_xyz: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    overlap_bbox_xyz: tuple[
+        tuple[float, float], tuple[float, float], tuple[float, float]
+    ]
     overlap_voxels: int
 
 
@@ -386,7 +388,11 @@ def _resolve_source_components_for_level(
         return full_resolution_source, full_resolution_source, 0
 
     direct_level = _component_level_suffix(requested)
-    if direct_level is not None and requested in root and direct_level == effective_level:
+    if (
+        direct_level is not None
+        and requested in root
+        and direct_level == effective_level
+    ):
         return full_resolution_source, requested, effective_level
 
     candidate_components = [
@@ -442,10 +448,15 @@ def _tile_extent_xyz(
     )
 
 
-def _transform_points_xyz(transform_xyz: np.ndarray, points_xyz: np.ndarray) -> np.ndarray:
+def _transform_points_xyz(
+    transform_xyz: np.ndarray, points_xyz: np.ndarray
+) -> np.ndarray:
     """Apply a homogeneous affine to point rows."""
     homogeneous = np.concatenate(
-        [points_xyz.astype(np.float64), np.ones((points_xyz.shape[0], 1), dtype=np.float64)],
+        [
+            points_xyz.astype(np.float64),
+            np.ones((points_xyz.shape[0], 1), dtype=np.float64),
+        ],
         axis=1,
     )
     return (transform_xyz @ homogeneous.T).T[:, :3]
@@ -507,7 +518,9 @@ def _bbox_volume_voxels(
         ],
         dtype=np.float64,
     )
-    counts = np.maximum(1, np.floor(shape_xyz / np.maximum(voxel_xyz, 1e-6))).astype(int)
+    counts = np.maximum(1, np.floor(shape_xyz / np.maximum(voxel_xyz, 1e-6))).astype(
+        int
+    )
     return int(np.prod(counts, dtype=np.int64))
 
 
@@ -520,7 +533,9 @@ def _build_edge_specs(
 ) -> list[_EdgeSpec]:
     """Build overlap graph edges from nominal transformed tile boxes."""
     bboxes = {
-        int(position): _tile_bbox_xyz(nominal_transforms_xyz[int(position)], tile_extent_xyz)
+        int(position): _tile_bbox_xyz(
+            nominal_transforms_xyz[int(position)], tile_extent_xyz
+        )
         for position in positions
     }
     edges: list[_EdgeSpec] = []
@@ -574,7 +589,9 @@ def _world_to_input_affine_zyx(
         float(voxel_size_um_zyx[0]),
     )
     scale_xyz = _xyz_scale_diagonal(voxel_size_xyz)
-    scale_inv_xyz = np.diag([1.0 / value for value in voxel_size_xyz]).astype(np.float64)
+    scale_inv_xyz = np.diag([1.0 / value for value in voxel_size_xyz]).astype(
+        np.float64
+    )
     world_to_local_xyz = np.linalg.inv(local_to_world_xyz)
     matrix = (
         _PERMUTE_ZYX_TO_XYZ
@@ -583,8 +600,13 @@ def _world_to_input_affine_zyx(
         @ scale_xyz
         @ _PERMUTE_ZYX_TO_XYZ
     )
-    offset = _PERMUTE_ZYX_TO_XYZ @ scale_inv_xyz @ (
-        (world_to_local_xyz[:3, :3] @ reference_origin_xyz) + world_to_local_xyz[:3, 3]
+    offset = (
+        _PERMUTE_ZYX_TO_XYZ
+        @ scale_inv_xyz
+        @ (
+            (world_to_local_xyz[:3, :3] @ reference_origin_xyz)
+            + world_to_local_xyz[:3, 3]
+        )
     )
     return matrix.astype(np.float64), offset.astype(np.float64)
 
@@ -618,7 +640,9 @@ def _resample_source_to_world_grid(
 
 
 def _crop_from_overlap_bbox(
-    overlap_bbox_xyz: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    overlap_bbox_xyz: tuple[
+        tuple[float, float], tuple[float, float], tuple[float, float]
+    ],
     *,
     voxel_size_um_zyx: Sequence[float],
     overlap_zyx: Sequence[int],
@@ -632,14 +656,20 @@ def _crop_from_overlap_bbox(
         ],
         dtype=np.float64,
     )
-    minimum_xyz = np.asarray(
-        [overlap_bbox_xyz[0][0], overlap_bbox_xyz[1][0], overlap_bbox_xyz[2][0]],
-        dtype=np.float64,
-    ) - pad_xyz
-    maximum_xyz = np.asarray(
-        [overlap_bbox_xyz[0][1], overlap_bbox_xyz[1][1], overlap_bbox_xyz[2][1]],
-        dtype=np.float64,
-    ) + pad_xyz
+    minimum_xyz = (
+        np.asarray(
+            [overlap_bbox_xyz[0][0], overlap_bbox_xyz[1][0], overlap_bbox_xyz[2][0]],
+            dtype=np.float64,
+        )
+        - pad_xyz
+    )
+    maximum_xyz = (
+        np.asarray(
+            [overlap_bbox_xyz[0][1], overlap_bbox_xyz[1][1], overlap_bbox_xyz[2][1]],
+            dtype=np.float64,
+        )
+        + pad_xyz
+    )
     voxel_xyz = np.asarray(
         [
             float(voxel_size_um_zyx[2]),
@@ -649,7 +679,9 @@ def _crop_from_overlap_bbox(
         dtype=np.float64,
     )
     size_xyz = np.maximum(voxel_xyz, maximum_xyz - minimum_xyz)
-    shape_xyz = np.maximum(1, np.ceil(size_xyz / np.maximum(voxel_xyz, 1e-6))).astype(int)
+    shape_xyz = np.maximum(1, np.ceil(size_xyz / np.maximum(voxel_xyz, 1e-6))).astype(
+        int
+    )
     shape_zyx = (int(shape_xyz[2]), int(shape_xyz[1]), int(shape_xyz[0]))
     return minimum_xyz, shape_zyx
 
@@ -716,11 +748,15 @@ def _register_pairwise_overlap(
     root = zarr.open_group(str(zarr_path), mode="r")
     source = root[source_component]
     fixed_source = np.asarray(
-        source[int(t_index), int(edge.fixed_position), int(registration_channel), :, :, :],
+        source[
+            int(t_index), int(edge.fixed_position), int(registration_channel), :, :, :
+        ],
         dtype=np.float32,
     )
     moving_source = np.asarray(
-        source[int(t_index), int(edge.moving_position), int(registration_channel), :, :, :],
+        source[
+            int(t_index), int(edge.moving_position), int(registration_channel), :, :, :
+        ],
         dtype=np.float32,
     )
     crop_origin_xyz, crop_shape_zyx = _crop_from_overlap_bbox(
@@ -749,7 +785,11 @@ def _register_pairwise_overlap(
     fixed_mask = np.asarray(fixed_crop > 0, dtype=np.float32)
     moving_mask = np.asarray(moving_crop > 0, dtype=np.float32)
     overlap_pixels = int(np.count_nonzero((fixed_mask > 0) & (moving_mask > 0)))
-    if overlap_pixels <= 0 or float(np.std(fixed_crop)) <= 1e-6 or float(np.std(moving_crop)) <= 1e-6:
+    if (
+        overlap_pixels <= 0
+        or float(np.std(fixed_crop)) <= 1e-6
+        or float(np.std(moving_crop)) <= 1e-6
+    ):
         return {
             "fixed_position": int(edge.fixed_position),
             "moving_position": int(edge.moving_position),
@@ -761,7 +801,9 @@ def _register_pairwise_overlap(
         }
 
     try:
-        fixed_image = _ants_image_from_zyx(fixed_crop, voxel_size_um_zyx=voxel_size_um_zyx)
+        fixed_image = _ants_image_from_zyx(
+            fixed_crop, voxel_size_um_zyx=voxel_size_um_zyx
+        )
         moving_image = _ants_image_from_zyx(
             moving_crop, voxel_size_um_zyx=voxel_size_um_zyx
         )
@@ -814,7 +856,9 @@ def _matrix_from_pose(params: np.ndarray, registration_type: str) -> np.ndarray:
         matrix[:3, 3] = np.asarray(params[:3], dtype=np.float64)
         return matrix
 
-    rotation = Rotation.from_rotvec(np.asarray(params[:3], dtype=np.float64)).as_matrix()
+    rotation = Rotation.from_rotvec(
+        np.asarray(params[:3], dtype=np.float64)
+    ).as_matrix()
     translation = np.asarray(params[3:6], dtype=np.float64)
     if registration_type == "rigid":
         matrix[:3, :3] = rotation
@@ -838,7 +882,9 @@ def _pose_from_matrix(matrix_xyz: np.ndarray, registration_type: str) -> np.ndar
         scale = float(np.cbrt(max(np.linalg.det(linear), 1e-12)))
         rotation_matrix = linear / max(scale, 1e-12)
         rotation = Rotation.from_matrix(rotation_matrix)
-        return np.concatenate([rotation.as_rotvec(), translation, np.asarray([math.log(scale)])])
+        return np.concatenate(
+            [rotation.as_rotvec(), translation, np.asarray([math.log(scale)])]
+        )
 
     rotation = Rotation.from_matrix(linear)
     return np.concatenate([rotation.as_rotvec(), translation])
@@ -857,7 +903,9 @@ def _translation_residual_voxels(
 
 
 def _component_positions(
-    positions: Sequence[int], active_edge_indices: Sequence[int], edges: Sequence[_EdgeSpec]
+    positions: Sequence[int],
+    active_edge_indices: Sequence[int],
+    edges: Sequence[_EdgeSpec],
 ) -> list[list[int]]:
     """Return connected position components for the active edge graph."""
     adjacency: dict[int, set[int]] = {int(position): set() for position in positions}
@@ -896,9 +944,13 @@ def _solve_translation_component(
     anchor_position: int,
 ) -> dict[int, np.ndarray]:
     """Solve translation-only correction poses for one connected component."""
-    solved = {int(position): np.eye(4, dtype=np.float64) for position in component_positions}
+    solved = {
+        int(position): np.eye(4, dtype=np.float64) for position in component_positions
+    }
     variable_positions = [
-        int(position) for position in component_positions if int(position) != int(anchor_position)
+        int(position)
+        for position in component_positions
+        if int(position) != int(anchor_position)
     ]
     if not variable_positions:
         return solved
@@ -910,9 +962,17 @@ def _solve_translation_component(
         edge = edges[int(edge_index)]
         fixed_position = int(edge.fixed_position)
         moving_position = int(edge.moving_position)
-        if fixed_position not in column_index and fixed_position != int(anchor_position) and fixed_position not in component_positions:
+        if (
+            fixed_position not in column_index
+            and fixed_position != int(anchor_position)
+            and fixed_position not in component_positions
+        ):
             continue
-        if moving_position not in column_index and moving_position != int(anchor_position) and moving_position not in component_positions:
+        if (
+            moving_position not in column_index
+            and moving_position != int(anchor_position)
+            and moving_position not in component_positions
+        ):
             continue
         measurement = np.asarray(
             edge_results[int(edge_index)]["correction_matrix_xyz"], dtype=np.float64
@@ -955,9 +1015,13 @@ def _solve_nonlinear_component(
     voxel_size_um_zyx: Sequence[float],
 ) -> dict[int, np.ndarray]:
     """Solve rigid/similarity correction poses for one connected component."""
-    solved = {int(position): np.eye(4, dtype=np.float64) for position in component_positions}
+    solved = {
+        int(position): np.eye(4, dtype=np.float64) for position in component_positions
+    }
     variable_positions = [
-        int(position) for position in component_positions if int(position) != int(anchor_position)
+        int(position)
+        for position in component_positions
+        if int(position) != int(anchor_position)
     ]
     if not variable_positions:
         return solved
@@ -1003,11 +1067,17 @@ def _solve_nonlinear_component(
             measured_linear = np.asarray(measured[:3, :3], dtype=np.float64)
             predicted_linear = np.asarray(predicted[:3, :3], dtype=np.float64)
             if registration_type == "similarity":
-                measured_scale = float(np.cbrt(max(np.linalg.det(measured_linear), 1e-12)))
-                predicted_scale = float(np.cbrt(max(np.linalg.det(predicted_linear), 1e-12)))
+                measured_scale = float(
+                    np.cbrt(max(np.linalg.det(measured_linear), 1e-12))
+                )
+                predicted_scale = float(
+                    np.cbrt(max(np.linalg.det(predicted_linear), 1e-12))
+                )
                 measured_rotation = measured_linear / max(measured_scale, 1e-12)
                 predicted_rotation = predicted_linear / max(predicted_scale, 1e-12)
-                scale_residual = math.log(max(predicted_scale, 1e-12) / max(measured_scale, 1e-12))
+                scale_residual = math.log(
+                    max(predicted_scale, 1e-12) / max(measured_scale, 1e-12)
+                )
             else:
                 measured_rotation = measured_linear
                 predicted_rotation = predicted_linear
@@ -1016,10 +1086,9 @@ def _solve_nonlinear_component(
             delta_rotation = Rotation.from_matrix(
                 measured_rotation.T @ predicted_rotation
             ).as_rotvec()
-            delta_translation = (
-                np.asarray(predicted[:3, 3] - measured[:3, 3], dtype=np.float64)
-                / max(mean_voxel, 1e-6)
-            )
+            delta_translation = np.asarray(
+                predicted[:3, 3] - measured[:3, 3], dtype=np.float64
+            ) / max(mean_voxel, 1e-6)
             residual_values.extend((weight * delta_rotation).tolist())
             residual_values.extend((weight * delta_translation).tolist())
             if registration_type == "similarity":
@@ -1033,7 +1102,9 @@ def _solve_nonlinear_component(
         x_scale="jac",
         max_nfev=200,
     )
-    solved = {int(position): np.eye(4, dtype=np.float64) for position in component_positions}
+    solved = {
+        int(position): np.eye(4, dtype=np.float64) for position in component_positions
+    }
     for position in variable_positions:
         base = variable_index[int(position)] * pose_size
         solved[int(position)] = _matrix_from_pose(
@@ -1105,9 +1176,10 @@ def _solve_with_pruning(
             measured = np.asarray(
                 edge_results[int(edge_index)]["correction_matrix_xyz"], dtype=np.float64
             )
-            predicted = np.linalg.inv(solved[int(edge.fixed_position)]) @ solved[
-                int(edge.moving_position)
-            ]
+            predicted = (
+                np.linalg.inv(solved[int(edge.fixed_position)])
+                @ solved[int(edge.moving_position)]
+            )
             residuals[int(edge_index)] = _translation_residual_voxels(
                 measured, predicted, voxel_size_um_zyx=voxel_size_um_zyx
             )
@@ -1118,9 +1190,11 @@ def _solve_with_pruning(
         worst_edge_index = int(np.nanargmax(residuals))
         worst_residual = float(residuals[worst_edge_index])
         mean_residual = float(np.mean(active_residuals))
-        if (
-            worst_residual <= float(_ABSOLUTE_RESIDUAL_THRESHOLD_PX)
-            or worst_residual <= max(float(_ABSOLUTE_RESIDUAL_THRESHOLD_PX), mean_residual * float(_RELATIVE_RESIDUAL_THRESHOLD))
+        if worst_residual <= float(
+            _ABSOLUTE_RESIDUAL_THRESHOLD_PX
+        ) or worst_residual <= max(
+            float(_ABSOLUTE_RESIDUAL_THRESHOLD_PX),
+            mean_residual * float(_RELATIVE_RESIDUAL_THRESHOLD),
         ):
             break
 
@@ -1128,7 +1202,8 @@ def _solve_with_pruning(
         component_positions = next(
             component
             for component in components
-            if int(edge.fixed_position) in component and int(edge.moving_position) in component
+            if int(edge.fixed_position) in component
+            and int(edge.moving_position) in component
         )
         component_active = [
             int(edge_index)
@@ -1159,9 +1234,7 @@ def _blend_weight_volume(
         profile = np.ones(int(axis_size), dtype=np.float32)
         width = max(0, min(int(ramp_width), max(0, int(axis_size // 2))))
         if width > 0:
-            ramp = 0.5 - 0.5 * np.cos(
-                np.linspace(0.0, np.pi, width, dtype=np.float32)
-            )
+            ramp = 0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, width, dtype=np.float32))
             profile[:width] = ramp
             profile[-width:] = np.minimum(profile[-width:], ramp[::-1])
         profiles.append(profile)
@@ -1224,9 +1297,21 @@ def _process_and_write_registration_chunk(
     )
     chunk_bbox_xyz = np.asarray(
         [
-            [float(chunk_origin_xyz[0]), float(chunk_origin_xyz[0]) + (float(chunk_shape_zyx[2]) * float(voxel_size_um_zyx[2]))],
-            [float(chunk_origin_xyz[1]), float(chunk_origin_xyz[1]) + (float(chunk_shape_zyx[1]) * float(voxel_size_um_zyx[1]))],
-            [float(chunk_origin_xyz[2]), float(chunk_origin_xyz[2]) + (float(chunk_shape_zyx[0]) * float(voxel_size_um_zyx[0]))],
+            [
+                float(chunk_origin_xyz[0]),
+                float(chunk_origin_xyz[0])
+                + (float(chunk_shape_zyx[2]) * float(voxel_size_um_zyx[2])),
+            ],
+            [
+                float(chunk_origin_xyz[1]),
+                float(chunk_origin_xyz[1])
+                + (float(chunk_shape_zyx[1]) * float(voxel_size_um_zyx[1])),
+            ],
+            [
+                float(chunk_origin_xyz[2]),
+                float(chunk_origin_xyz[2])
+                + (float(chunk_shape_zyx[0]) * float(voxel_size_um_zyx[0])),
+            ],
         ],
         dtype=np.float64,
     )
@@ -1242,7 +1327,9 @@ def _process_and_write_registration_chunk(
         )
         bbox_min = bbox_payload[:3]
         bbox_max = bbox_payload[3:]
-        if np.any(bbox_max <= chunk_bbox_xyz[:, 0]) or np.any(chunk_bbox_xyz[:, 1] <= bbox_min):
+        if np.any(bbox_max <= chunk_bbox_xyz[:, 0]) or np.any(
+            chunk_bbox_xyz[:, 1] <= bbox_min
+        ):
             continue
         source_volume = np.asarray(
             source[int(t_index), int(position_index), int(c_index), :, :, :],
@@ -1283,8 +1370,8 @@ def _process_and_write_registration_chunk(
         where=chunk_weight > 0,
     )
     write_root = zarr.open_group(str(zarr_path), mode="a")
-    write_root[output_component][int(t_index), 0, int(c_index), z0:z1, y0:y1, x0:x1] = _cast_to_dtype(
-        normalized, np.dtype(output_dtype)
+    write_root[output_component][int(t_index), 0, int(c_index), z0:z1, y0:y1, x0:x1] = (
+        _cast_to_dtype(normalized, np.dtype(output_dtype))
     )
     return 1
 
@@ -1390,12 +1477,18 @@ def run_registration_analysis(
         If source components or required stage metadata are missing.
     """
     root = zarr.open_group(str(zarr_path), mode="r")
-    requested_source_component = str(parameters.get("input_source", "data")).strip() or "data"
-    requested_resolution_level = max(0, int(parameters.get("input_resolution_level", 0)))
-    source_component, pairwise_source_component, effective_level = _resolve_source_components_for_level(
-        root=root,
-        requested_source_component=requested_source_component,
-        input_resolution_level=requested_resolution_level,
+    requested_source_component = (
+        str(parameters.get("input_source", "data")).strip() or "data"
+    )
+    requested_resolution_level = max(
+        0, int(parameters.get("input_resolution_level", 0))
+    )
+    source_component, pairwise_source_component, effective_level = (
+        _resolve_source_components_for_level(
+            root=root,
+            requested_source_component=requested_source_component,
+            input_resolution_level=requested_resolution_level,
+        )
     )
     full_source = root[source_component]
     pairwise_source = root[pairwise_source_component]
@@ -1418,20 +1511,29 @@ def run_registration_analysis(
         )
 
     root_attrs = dict(root.attrs)
-    spatial_calibration = spatial_calibration_from_dict(root_attrs.get("spatial_calibration"))
+    spatial_calibration = spatial_calibration_from_dict(
+        root_attrs.get("spatial_calibration")
+    )
     stage_rows = _load_stage_rows(root_attrs)
     if len(positions) > 1 and len(stage_rows) < len(positions):
         raise ValueError(
             "registration requires multiposition stage metadata when more than one position is present."
         )
     if not stage_rows:
-        stage_rows = [{"x": 0.0, "y": 0.0, "z": 0.0, "theta": 0.0, "f": 0.0} for _ in positions]
+        stage_rows = [
+            {"x": 0.0, "y": 0.0, "z": 0.0, "theta": 0.0, "f": 0.0} for _ in positions
+        ]
 
     configured_anchor = parameters.get("anchor_position")
-    if str(parameters.get("anchor_mode", "central")).strip().lower() == "manual" and configured_anchor is not None:
+    if (
+        str(parameters.get("anchor_mode", "central")).strip().lower() == "manual"
+        and configured_anchor is not None
+    ):
         anchor_position = int(configured_anchor)
     else:
-        anchor_position = _position_centroid_anchor(stage_rows, spatial_calibration, positions)
+        anchor_position = _position_centroid_anchor(
+            stage_rows, spatial_calibration, positions
+        )
     if anchor_position < 0 or anchor_position >= len(positions):
         raise ValueError("registration anchor_position is out of bounds.")
 
@@ -1464,8 +1566,12 @@ def run_registration_analysis(
     correction_affines_tex44 = np.zeros(
         (int(source_shape_tpczyx[0]), int(edge_count), 4, 4), dtype=np.float64
     )
-    edge_status_te = np.zeros((int(source_shape_tpczyx[0]), int(edge_count)), dtype=np.uint8)
-    edge_residual_te = np.full((int(source_shape_tpczyx[0]), int(edge_count)), np.nan, dtype=np.float32)
+    edge_status_te = np.zeros(
+        (int(source_shape_tpczyx[0]), int(edge_count)), dtype=np.uint8
+    )
+    edge_residual_te = np.full(
+        (int(source_shape_tpczyx[0]), int(edge_count)), np.nan, dtype=np.float32
+    )
     anchor_positions: list[int] = []
     effective_corrections_tpx44 = np.repeat(
         np.eye(4, dtype=np.float64)[np.newaxis, np.newaxis, :, :],
@@ -1490,11 +1596,19 @@ def run_registration_analysis(
                 t_index=int(t_index),
                 registration_channel=int(registration_channel),
                 edge=edge,
-                nominal_fixed_transform_xyz=nominal_transforms_xyz[int(edge.fixed_position)],
-                nominal_moving_transform_xyz=nominal_transforms_xyz[int(edge.moving_position)],
+                nominal_fixed_transform_xyz=nominal_transforms_xyz[
+                    int(edge.fixed_position)
+                ],
+                nominal_moving_transform_xyz=nominal_transforms_xyz[
+                    int(edge.moving_position)
+                ],
                 voxel_size_um_zyx=pairwise_voxel_size_um_zyx,
-                overlap_zyx=[int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])],
-                registration_type=str(parameters.get("registration_type", "rigid")).strip().lower(),
+                overlap_zyx=[
+                    int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])
+                ],
+                registration_type=str(parameters.get("registration_type", "rigid"))
+                .strip()
+                .lower(),
             )
             for edge in edge_specs
         ]
@@ -1524,11 +1638,15 @@ def run_registration_analysis(
             edges=edge_specs,
             edge_results=pairwise_results,
             anchor_position=anchor_position,
-            registration_type=str(parameters.get("registration_type", "rigid")).strip().lower(),
+            registration_type=str(parameters.get("registration_type", "rigid"))
+            .strip()
+            .lower(),
             voxel_size_um_zyx=pairwise_voxel_size_um_zyx,
         )
         for position_index in positions:
-            effective_corrections_tpx44[int(t_index), int(position_index)] = solved[int(position_index)]
+            effective_corrections_tpx44[int(t_index), int(position_index)] = solved[
+                int(position_index)
+            ]
         for edge_index, result in enumerate(pairwise_results):
             correction_affines_tex44[int(t_index), int(edge_index)] = np.asarray(
                 result["correction_matrix_xyz"], dtype=np.float64
@@ -1548,7 +1666,9 @@ def run_registration_analysis(
         (int(source_shape_tpczyx[0]), int(source_shape_tpczyx[1]), 6),
         dtype=np.float64,
     )
-    full_tile_extent_xyz = _tile_extent_xyz(source_shape_tpczyx[3:], full_voxel_size_um_zyx)
+    full_tile_extent_xyz = _tile_extent_xyz(
+        source_shape_tpczyx[3:], full_voxel_size_um_zyx
+    )
     all_bbox_mins: list[np.ndarray] = []
     all_bbox_maxs: list[np.ndarray] = []
     for t_index in range(int(source_shape_tpczyx[0])):
@@ -1557,8 +1677,12 @@ def run_registration_analysis(
                 effective_corrections_tpx44[int(t_index), int(position_index)]
                 @ nominal_transforms_xyz[int(position_index)]
             )
-            effective_transforms_tpx44[int(t_index), int(position_index)] = effective_transform
-            bbox_min, bbox_max = _tile_bbox_xyz(effective_transform, full_tile_extent_xyz)
+            effective_transforms_tpx44[int(t_index), int(position_index)] = (
+                effective_transform
+            )
+            bbox_min, bbox_max = _tile_bbox_xyz(
+                effective_transform, full_tile_extent_xyz
+            )
             transformed_bboxes_tpx6[int(t_index), int(position_index), :3] = bbox_min
             transformed_bboxes_tpx6[int(t_index), int(position_index), 3:] = bbox_max
             all_bbox_mins.append(bbox_min)
@@ -1683,7 +1807,9 @@ def run_registration_analysis(
             output_origin_xyz=output_min_xyz,
             voxel_size_um_zyx=full_voxel_size_um_zyx,
             blend_mode=str(parameters.get("blend_mode", "feather")).strip().lower(),
-            overlap_zyx=[int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])],
+            overlap_zyx=[
+                int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])
+            ],
             output_dtype=str(full_source.dtype),
         )
         for t_index, c_index, z_chunk, y_chunk, x_chunk in fusion_tasks
@@ -1786,7 +1912,9 @@ def run_registration_analysis(
         input_resolution_level=int(effective_level),
         requested_input_resolution_level=int(requested_resolution_level),
         registration_channel=int(registration_channel),
-        registration_type=str(parameters.get("registration_type", "rigid")).strip().lower(),
+        registration_type=str(parameters.get("registration_type", "rigid"))
+        .strip()
+        .lower(),
         anchor_positions=tuple(int(value) for value in anchor_positions),
         positions=int(source_shape_tpczyx[1]),
         timepoints=int(source_shape_tpczyx[0]),

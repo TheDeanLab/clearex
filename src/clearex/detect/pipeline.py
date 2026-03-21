@@ -54,7 +54,14 @@ if TYPE_CHECKING:
 
 
 DetectionsArray = np.ndarray
-RegionBounds = tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int]]
+RegionBounds = tuple[
+    tuple[int, int],
+    tuple[int, int],
+    tuple[int, int],
+    tuple[int, int],
+    tuple[int, int],
+    tuple[int, int],
+]
 ProgressCallback = Callable[[int, str], None]
 
 _PARTICLE_COLUMNS = (
@@ -134,9 +141,7 @@ def _normalize_particle_parameters(
     normalized["remove_close_particles"] = bool(
         normalized.get("remove_close_particles", False)
     )
-    normalized["min_distance_sigma"] = float(
-        normalized.get("min_distance_sigma", 10.0)
-    )
+    normalized["min_distance_sigma"] = float(normalized.get("min_distance_sigma", 10.0))
     overlap_zyx = normalized.get("overlap_zyx", [0, 0, 0])
     if not isinstance(overlap_zyx, (tuple, list)) or len(overlap_zyx) != 3:
         raise ValueError(
@@ -162,12 +167,13 @@ def _axis_chunk_bounds(size: int, chunk_size: int) -> list[tuple[int, int]]:
         Ordered ``(start, stop)`` bounds covering the full axis.
     """
     return [
-        (start, min(start + chunk_size, size))
-        for start in range(0, size, chunk_size)
+        (start, min(start + chunk_size, size)) for start in range(0, size, chunk_size)
     ]
 
 
-def _region_to_slices(region: RegionBounds) -> tuple[slice, slice, slice, slice, slice, slice]:
+def _region_to_slices(
+    region: RegionBounds,
+) -> tuple[slice, slice, slice, slice, slice, slice]:
     """Convert six-axis integer bounds into Python slices.
 
     Parameters
@@ -635,6 +641,7 @@ def run_particle_detection_analysis(
     ValueError
         If required source data are missing or channel index is out of bounds.
     """
+
     def _emit(percent: int, message: str) -> None:
         if progress_callback is None:
             return

@@ -53,7 +53,11 @@ def download_test_registration_data() -> str:
     # The zip extracts files directly into downloaded_data/
     if output_dir.exists() and output_dir.is_dir():
         # Verify that the expected files exist
-        expected_files = ["cropped_fixed.tif", "cropped_moving.tif", "GenericAffine.mat"]
+        expected_files = [
+            "cropped_fixed.tif",
+            "cropped_moving.tif",
+            "GenericAffine.mat",
+        ]
         files_exist = all((output_dir / f).exists() for f in expected_files)
 
         if files_exist:

@@ -179,7 +179,7 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["shear_transform"]["execution_order"] == 3
         assert cfg.analysis_parameters["shear_transform"]["interpolation"] == "linear"
         assert "registration" in cfg.analysis_parameters
-        assert cfg.analysis_parameters["registration"]["execution_order"] == 4
+        assert cfg.analysis_parameters["registration"]["execution_order"] == 5
         assert cfg.analysis_parameters["registration"]["input_source"] == "data"
         assert cfg.analysis_parameters["registration"]["registration_channel"] == 0
         assert cfg.analysis_parameters["registration"]["registration_type"] == "rigid"
@@ -189,10 +189,10 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["registration"]["blend_mode"] == "feather"
         assert "particle_detection" in cfg.analysis_parameters
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
-        assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 5
+        assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 6
         assert cfg.analysis_parameters["particle_detection"]["input_source"] == "data"
         assert "usegment3d" in cfg.analysis_parameters
-        assert cfg.analysis_parameters["usegment3d"]["execution_order"] == 6
+        assert cfg.analysis_parameters["usegment3d"]["execution_order"] == 7
         assert cfg.analysis_parameters["usegment3d"]["input_source"] == "data"
         assert cfg.analysis_parameters["usegment3d"]["all_channels"] is False
         assert cfg.analysis_parameters["usegment3d"]["channel_indices"] == [0]
@@ -202,7 +202,7 @@ class TestWorkflowConfig:
         )
         assert cfg.analysis_parameters["usegment3d"]["save_native_labels"] is False
         assert "display_pyramid" in cfg.analysis_parameters
-        assert cfg.analysis_parameters["display_pyramid"]["execution_order"] == 7
+        assert cfg.analysis_parameters["display_pyramid"]["execution_order"] == 4
         assert cfg.analysis_parameters["display_pyramid"]["input_source"] == "data"
         assert cfg.analysis_parameters["visualization"]["show_all_positions"] is False
         assert cfg.analysis_parameters["visualization"]["position_index"] == 0
@@ -965,9 +965,9 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     assert normalized["deconvolution"]["execution_order"] == 2
     assert normalized["flatfield"]["execution_order"] == 1
     assert normalized["shear_transform"]["execution_order"] == 3
-    assert normalized["registration"]["execution_order"] == 4
-    assert normalized["usegment3d"]["execution_order"] == 6
-    assert normalized["display_pyramid"]["execution_order"] == 7
+    assert normalized["registration"]["execution_order"] == 5
+    assert normalized["usegment3d"]["execution_order"] == 7
+    assert normalized["display_pyramid"]["execution_order"] == 4
     assert normalized["visualization"]["input_source"] == "data"
     assert normalized["visualization"]["show_all_positions"] is False
     assert normalized["visualization"]["use_multiscale"] is True
@@ -1030,10 +1030,10 @@ def test_analysis_operation_order_contains_expected_keys():
         "flatfield",
         "deconvolution",
         "shear_transform",
+        "display_pyramid",
+        "registration",
         "particle_detection",
         "usegment3d",
-        "registration",
-        "display_pyramid",
         "visualization",
         "mip_export",
     )

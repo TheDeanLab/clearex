@@ -51,7 +51,6 @@ from clearex.io.read import (
 )
 from tests import download_test_registration_data
 
-
 # =============================================================================
 # Test ImageInfo Dataclass
 # =============================================================================

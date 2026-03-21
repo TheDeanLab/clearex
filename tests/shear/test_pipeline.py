@@ -126,9 +126,7 @@ def test_run_shear_transform_auto_estimate_updates_applied_shear(
 def test_run_shear_transform_identity_preserves_data(tmp_path: Path) -> None:
     store_path = tmp_path / "shear_identity.zarr"
     root = zarr.open_group(str(store_path), mode="w")
-    data = np.arange(1 * 1 * 1 * 4 * 4 * 4, dtype=np.uint16).reshape(
-        (1, 1, 1, 4, 4, 4)
-    )
+    data = np.arange(1 * 1 * 1 * 4 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 4, 4, 4))
     root.create_dataset(
         name="data",
         data=data,
@@ -157,7 +155,9 @@ def test_run_shear_transform_identity_preserves_data(tmp_path: Path) -> None:
     )
 
     output = np.asarray(
-        zarr.open_group(str(store_path), mode="r")["results/shear_transform/latest/data"]
+        zarr.open_group(str(store_path), mode="r")[
+            "results/shear_transform/latest/data"
+        ]
     )
     assert summary.data_component == "results/shear_transform/latest/data"
     assert output.shape == data.shape
@@ -194,7 +194,9 @@ def test_run_shear_transform_emits_larger_bounds_for_nonzero_shear(
     )
 
     output = np.asarray(
-        zarr.open_group(str(store_path), mode="r")["results/shear_transform/latest/data"]
+        zarr.open_group(str(store_path), mode="r")[
+            "results/shear_transform/latest/data"
+        ]
     )
     assert output.shape == summary.output_shape_tpczyx
     assert np.max(output) > 0.0
@@ -229,7 +231,9 @@ def test_run_shear_transform_linear_normalizes_edge_support(tmp_path: Path) -> N
     )
 
     output = np.asarray(
-        zarr.open_group(str(store_path), mode="r")["results/shear_transform/latest/data"]
+        zarr.open_group(str(store_path), mode="r")[
+            "results/shear_transform/latest/data"
+        ]
     )
     positive = output[output > 0.0]
     assert positive.size > 0
@@ -244,9 +248,7 @@ def test_run_shear_transform_identity_with_distributed_client(
 
     store_path = tmp_path / "shear_identity_distributed.zarr"
     root = zarr.open_group(str(store_path), mode="w")
-    data = np.arange(1 * 1 * 1 * 4 * 4 * 4, dtype=np.uint16).reshape(
-        (1, 1, 1, 4, 4, 4)
-    )
+    data = np.arange(1 * 1 * 1 * 4 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 4, 4, 4))
     root.create_dataset(
         name="data",
         data=data,
@@ -282,7 +284,9 @@ def test_run_shear_transform_identity_with_distributed_client(
             )
 
     output = np.asarray(
-        zarr.open_group(str(store_path), mode="r")["results/shear_transform/latest/data"]
+        zarr.open_group(str(store_path), mode="r")[
+            "results/shear_transform/latest/data"
+        ]
     )
     assert output.shape == data.shape
     assert summary.output_shape_tpczyx == data.shape
