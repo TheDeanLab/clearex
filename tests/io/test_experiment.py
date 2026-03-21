@@ -215,6 +215,83 @@ def test_legacy_n5_helper_command_prefix_falls_back_to_uv(
     ]
 
 
+def test_extract_client_scheduler_address_prefers_scheduler_attr() -> None:
+    class _FakeScheduler:
+        address = "tcp://127.0.0.1:8786"
+
+    class _FakeClient:
+        scheduler = _FakeScheduler()
+
+        def scheduler_info(self):  # pragma: no cover - should not be called
+            raise AssertionError("scheduler_info should not be queried")
+
+    assert (
+        experiment_module._extract_client_scheduler_address(_FakeClient())
+        == "tcp://127.0.0.1:8786"
+    )
+
+
+def test_extract_client_scheduler_address_falls_back_to_scheduler_info() -> None:
+    class _FakeClient:
+        scheduler = None
+
+        def scheduler_info(self):
+            return {"address": "tcp://10.0.0.2:8786"}
+
+    assert (
+        experiment_module._extract_client_scheduler_address(_FakeClient())
+        == "tcp://10.0.0.2:8786"
+    )
+
+
+def test_materialize_n5_via_legacy_helper_forwards_scheduler_address(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(experiment_path, save_directory=tmp_path, file_type="N5")
+    experiment = load_navigate_experiment(experiment_path)
+    source_path = tmp_path / "CH00_000000.n5"
+    source_path.mkdir()
+    output_store = tmp_path / "CH00_000000.n5.clearex.zarr"
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_legacy_n5_helper_command_prefix",
+        lambda: ("/usr/bin/python3",),
+    )
+
+    class _Scheduler:
+        address = "tcp://127.0.0.1:8786"
+
+    class _Client:
+        scheduler = _Scheduler()
+
+    captured: dict[str, object] = {}
+
+    def _fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = dict(kwargs)
+        return None
+
+    monkeypatch.setattr(experiment_module.subprocess, "run", _fake_run)
+
+    returned = experiment_module._materialize_n5_via_legacy_helper(
+        experiment=experiment,
+        source_path=source_path,
+        output_store_path=output_store,
+        chunks=(1, 1, 1, 64, 64, 64),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+        client=_Client(),
+    )
+
+    command = captured["command"]
+    assert "--scheduler-address" in command
+    flag_index = command.index("--scheduler-address")
+    assert command[flag_index + 1] == "tcp://127.0.0.1:8786"
+    assert returned == output_store.with_name(f"{output_store.name}.legacy-v2.zarr")
+
+
 def _write_multipositions_sidecar(path: Path, count: int) -> None:
     header = ["X", "Y", "Z", "THETA", "F", "X_PIXEL", "Y_PIXEL"]
     rows = [header]

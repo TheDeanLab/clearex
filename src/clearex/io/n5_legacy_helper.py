@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from clearex.io.experiment import (
+    create_dask_client,
     load_navigate_experiment,
     materialize_experiment_data_store,
 )
@@ -29,6 +30,7 @@ def main() -> int:
     parser.add_argument("--output-store", required=True)
     parser.add_argument("--chunks", required=True)
     parser.add_argument("--pyramid-factors", required=True)
+    parser.add_argument("--scheduler-address", default=None)
     args = parser.parse_args()
 
     chunks = _parse_chunks(str(args.chunks))
@@ -45,14 +47,29 @@ def main() -> int:
         Path(args.output_store).expanduser().resolve()
     )
 
-    experiment = load_navigate_experiment(Path(args.experiment_path))
-    materialize_experiment_data_store(
-        experiment=experiment,
-        source_path=Path(args.source_path),
-        chunks=chunks,
-        pyramid_factors=pyramid_factors,
-        force_rebuild=True,
-    )
+    helper_client = None
+    try:
+        scheduler_address = str(args.scheduler_address or "").strip()
+        if scheduler_address:
+            helper_client = create_dask_client(
+                scheduler_address=scheduler_address
+            )
+
+        experiment = load_navigate_experiment(Path(args.experiment_path))
+        materialize_experiment_data_store(
+            experiment=experiment,
+            source_path=Path(args.source_path),
+            chunks=chunks,
+            pyramid_factors=pyramid_factors,
+            client=helper_client,
+            force_rebuild=True,
+        )
+    finally:
+        if helper_client is not None:
+            try:
+                helper_client.close()
+            except Exception:
+                pass
     return 0
 
 

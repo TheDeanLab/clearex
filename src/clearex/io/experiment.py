@@ -3479,6 +3479,48 @@ def _legacy_n5_helper_command_prefix() -> Optional[tuple[str, ...]]:
     return None
 
 
+def _extract_client_scheduler_address(client: Optional["Client"]) -> Optional[str]:
+    """Return scheduler address for a connected Dask client.
+
+    Parameters
+    ----------
+    client : dask.distributed.Client, optional
+        Connected client instance.
+
+    Returns
+    -------
+    str, optional
+        Scheduler address when it can be resolved from the client.
+
+    Notes
+    -----
+    This helper is best-effort and never raises. It checks both direct client
+    attributes and scheduler metadata for compatibility across distributed
+    versions.
+    """
+    if client is None:
+        return None
+
+    try:
+        scheduler = getattr(client, "scheduler", None)
+        address = getattr(scheduler, "address", None)
+        if isinstance(address, str) and address.strip():
+            return address.strip()
+    except Exception:
+        pass
+
+    try:
+        scheduler_info = client.scheduler_info()
+    except Exception:
+        return None
+    if not isinstance(scheduler_info, dict):
+        return None
+    address_value = scheduler_info.get("address")
+    if isinstance(address_value, str) and address_value.strip():
+        return address_value.strip()
+    return None
+
+
 def _materialize_n5_via_legacy_helper(
     *,
     experiment: "NavigateExperiment",
@@ -3493,8 +3535,31 @@ def _materialize_n5_via_legacy_helper(
         tuple[int, ...],
         tuple[int, ...],
     ],
+    client: Optional["Client"] = None,
 ) -> Path:
-    """Materialize an N5 source into an intermediate v2 ClearEx store."""
+    """Materialize an N5 source into an intermediate v2 ClearEx store.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    source_path : pathlib.Path
+        Source N5 path.
+    output_store_path : pathlib.Path
+        Canonical analysis-store destination path.
+    chunks : tuple[int, int, int, int, int, int]
+        Canonical write chunks.
+    pyramid_factors : tuple[tuple[int, ...], ...]
+        Canonical pyramid factors.
+    client : dask.distributed.Client, optional
+        Active Dask client. When provided, the helper reconnects to this
+        scheduler so legacy N5 writes honor the selected backend.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the produced legacy-v2 handoff store.
+    """
     helper_command_prefix = _legacy_n5_helper_command_prefix()
     if helper_command_prefix is None:
         raise RuntimeError(
@@ -3521,6 +3586,14 @@ def _materialize_n5_via_legacy_helper(
         "--pyramid-factors",
         json.dumps([[int(value) for value in axis_levels] for axis_levels in pyramid_factors]),
     ]
+    scheduler_address = _extract_client_scheduler_address(client)
+    if scheduler_address:
+        command.extend(
+            [
+                "--scheduler-address",
+                str(scheduler_address),
+            ]
+        )
     subprocess.run(
         command,
         check=True,
@@ -3681,6 +3754,7 @@ def materialize_experiment_data_store(
             output_store_path=final_store_path,
             chunks=chunks,
             pyramid_factors=pyramid_factors,
+            client=client,
         )
         migrated_legacy_store = migrate_analysis_store(
             legacy_store_path,
