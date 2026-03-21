@@ -161,7 +161,7 @@ class TestWorkflowConfig:
         cfg = WorkflowConfig()
         assert cfg.has_analysis_selection() is False
 
-        cfg.registration = True
+        cfg.display_pyramid = True
         assert cfg.has_analysis_selection() is True
 
     def test_default_zarr_save_config(self):
@@ -192,9 +192,13 @@ class TestWorkflowConfig:
             cfg.analysis_parameters["usegment3d"]["output_reference_space"] == "level0"
         )
         assert cfg.analysis_parameters["usegment3d"]["save_native_labels"] is False
+        assert "display_pyramid" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["display_pyramid"]["execution_order"] == 7
+        assert cfg.analysis_parameters["display_pyramid"]["input_source"] == "data"
         assert cfg.analysis_parameters["visualization"]["show_all_positions"] is False
         assert cfg.analysis_parameters["visualization"]["position_index"] == 0
         assert cfg.analysis_parameters["visualization"]["use_multiscale"] is True
+        assert cfg.analysis_parameters["visualization"]["use_3d_view"] is True
         assert cfg.analysis_parameters["visualization"]["require_gpu_rendering"] is True
         assert cfg.analysis_parameters["visualization"]["capture_keyframes"] is True
         assert cfg.analysis_parameters["visualization"]["keyframe_manifest_path"] == ""
@@ -216,7 +220,7 @@ class TestWorkflowConfig:
             }
         ]
         assert "mip_export" in cfg.analysis_parameters
-        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 8
+        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 9
         assert (
             cfg.analysis_parameters["mip_export"]["position_mode"] == "multi_position"
         )
@@ -427,6 +431,7 @@ class TestWorkflowConfig:
                     "show_all_positions": 1,
                     "position_index": "3",
                     "use_multiscale": 0,
+                    "use_3d_view": 0,
                     "require_gpu_rendering": 0,
                     "overlay_particle_detections": 1,
                     "launch_mode": "subprocess",
@@ -462,6 +467,7 @@ class TestWorkflowConfig:
         assert params["show_all_positions"] is True
         assert params["position_index"] == 3
         assert params["use_multiscale"] is False
+        assert params["use_3d_view"] is False
         assert params["require_gpu_rendering"] is False
         assert params["overlay_particle_detections"] is True
         assert params["launch_mode"] == "subprocess"
@@ -487,7 +493,7 @@ class TestWorkflowConfig:
                 "blending": "translucent",
                 "colormap": "",
                 "rendering": "",
-                "multiscale_policy": "auto_build",
+                "multiscale_policy": "inherit",
             }
         ]
 
@@ -908,14 +914,16 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     assert normalized["flatfield"]["execution_order"] == 1
     assert normalized["shear_transform"]["execution_order"] == 3
     assert normalized["usegment3d"]["execution_order"] == 5
+    assert normalized["display_pyramid"]["execution_order"] == 7
     assert normalized["visualization"]["input_source"] == "data"
     assert normalized["visualization"]["show_all_positions"] is False
     assert normalized["visualization"]["use_multiscale"] is True
+    assert normalized["visualization"]["use_3d_view"] is True
     assert normalized["visualization"]["require_gpu_rendering"] is True
     assert normalized["visualization"]["capture_keyframes"] is True
     assert normalized["visualization"]["keyframe_layer_overrides"] == []
     assert normalized["visualization"]["volume_layers"] == []
-    assert normalized["mip_export"]["execution_order"] == 8
+    assert normalized["mip_export"]["execution_order"] == 9
     assert normalized["mip_export"]["position_mode"] == "multi_position"
     assert normalized["mip_export"]["export_format"] == "ome-tiff"
 
@@ -928,6 +936,7 @@ def test_resolve_analysis_execution_sequence_uses_execution_order():
         particle_detection=True,
         usegment3d=False,
         registration=True,
+        display_pyramid=False,
         visualization=False,
         mip_export=False,
         analysis_parameters={
@@ -955,11 +964,12 @@ def test_resolve_analysis_execution_sequence_includes_mip_export_last_by_default
         particle_detection=False,
         usegment3d=False,
         registration=False,
+        display_pyramid=True,
         visualization=True,
         mip_export=True,
         analysis_parameters=None,
     )
-    assert sequence == ("visualization", "mip_export")
+    assert sequence == ("display_pyramid", "visualization", "mip_export")
 
 
 def test_analysis_operation_order_contains_expected_keys():
@@ -970,6 +980,7 @@ def test_analysis_operation_order_contains_expected_keys():
         "particle_detection",
         "usegment3d",
         "registration",
+        "display_pyramid",
         "visualization",
         "mip_export",
     )
@@ -1011,13 +1022,14 @@ def test_validate_analysis_input_references_rejects_later_producer() -> None:
             "visualization": {"execution_order": 1, "input_source": "flatfield"},
             "flatfield": {"execution_order": 2, "input_source": "data"},
         },
-        available_components={"data", ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS["flatfield"]},
+        available_components={
+            "data",
+            ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS["flatfield"],
+        },
     )
 
     assert issues
-    assert all(
-        issue.reason == "producer_scheduled_after_consumer" for issue in issues
-    )
+    assert all(issue.reason == "producer_scheduled_after_consumer" for issue in issues)
 
 
 def test_validate_analysis_input_references_rejects_nonchainable_known_output() -> None:

@@ -82,10 +82,53 @@ This directory contains the runtime orchestration surface for ClearEx.
   - configurable `volume_layers` rows support image/labels overlays with
     channel/display controls,
   - GUI includes a popup `Volume Layers...` table for these rows,
-  - per-layer multiscale policies (`inherit`, `require`, `auto_build`, `off`)
-    are persisted in workflow parameters/provenance metadata,
-  - auto-built pyramids are cached under
-    `results/visualization_cache/pyramids/...`.
+  - per-layer multiscale policies are now `inherit`, `require`, and `off`,
+  - legacy saved `auto_build` values are normalized to `inherit`,
+  - reusable display pyramids are prepared explicitly via the
+    `display_pyramid` analysis task under
+    `results/display_pyramid/by_component/...`.
+
+## Recent Runtime Updates (2026-03-20)
+
+- Added store-level spatial calibration for Navigate multiposition datasets:
+  - `WorkflowConfig` now carries `SpatialCalibrationConfig`,
+  - canonical text form is `z=...,y=...,x=...`,
+  - allowed bindings are `+/-x`, `+/-y`, `+/-z`, `+/-f`, and `none`,
+  - the root store attr `spatial_calibration` persists schema, mapping, and
+    `theta_mode`,
+  - missing attrs resolve to identity instead of requiring backfilled config.
+- Setup flow now exposes a lightweight `Spatial Calibration` control per
+  experiment:
+  - one draft is kept per experiment while setup is open,
+  - existing stores prefill the current mapping,
+  - `Next` writes the resolved mapping to every reused or newly prepared store.
+- Headless workflows now accept `--stage-axis-map` for Navigate
+  `experiment.yml` inputs and existing Zarr/N5 stores.
+- Visualization position affines now derive world `z/y/x` translations from
+  the stored calibration:
+  - Navigate `F` is available as a placement source,
+  - `none` zeroes a world axis translation,
+  - sign inversion is supported,
+  - `THETA` remains rotation of the `z/y` plane about world `x`.
+- Provenance now records the effective spatial calibration used by the run.
+
+## Recent Runtime Updates (2026-03-21)
+
+- Added `display_pyramid` as a first-class analysis operation between
+  `registration` and `visualization`.
+- `display_pyramid` prepares reusable display pyramids for one selected source
+  component and stores per-channel `1/95` display contrast metadata.
+- Visualization no longer performs viewer-time pyramid auto-build, launch-time
+  percentile/min/max reductions, or hidden coarse-level/stride downsampling.
+- Napari launch policy is now:
+  - 2D uses lazy arrays directly and can use prepared display pyramids,
+  - 3D always uses the base single-scale array,
+  - oversized 3D image layers trigger a warning and force 2D instead of
+    silent downsampling.
+- Multiposition image layers now default to `translucent` blending when the
+  user leaves blending blank/auto.
+- Detailed operational guidance for this area now lives in
+  `src/clearex/visualization/README.md`.
 
 ## Recent Runtime Updates (2026-03-20)
 

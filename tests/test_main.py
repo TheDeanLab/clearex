@@ -46,6 +46,33 @@ def _test_logger(name: str) -> logging.Logger:
     return logger
 
 
+def test_zarr_component_exists_prefers_membership_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ImplicitGroupRoot:
+        def __contains__(self, key: object) -> bool:
+            return str(key) == "data"
+
+        def __getitem__(self, key: object) -> object:
+            del key
+            return object()
+
+    monkeypatch.setattr(
+        main_module.zarr,
+        "open_group",
+        lambda _path, mode="r": _ImplicitGroupRoot(),
+    )
+
+    assert main_module._zarr_component_exists("/tmp/fake_store.n5", "data") is True
+    assert (
+        main_module._zarr_component_exists(
+            "/tmp/fake_store.n5",
+            "results/display_pyramid/latest",
+        )
+        is False
+    )
+
+
 def test_resolve_log_directory_for_workflow_uses_parent_for_missing_navigate_store(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -172,6 +199,66 @@ def test_configure_dask_backend_uses_threads_for_single_worker_io(monkeypatch) -
 
     assert client is not None
     assert captured["processes"] is False
+
+
+def test_close_dask_client_prefers_shutdown_for_local_clusters() -> None:
+    calls: list[object] = []
+
+    class _DummyCluster:
+        def close(self) -> None:
+            calls.append("cluster.close")
+
+    class _DummyClient:
+        cluster = _DummyCluster()
+
+        def retire_workers(self, *args, **kwargs) -> None:
+            calls.append(("retire_workers", args, kwargs))
+
+        def shutdown(self) -> None:
+            calls.append("shutdown")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    main_module._close_dask_client(
+        client=_DummyClient(),
+        logger=_test_logger("clearex.test.main.close_client_shutdown"),
+        allow_shutdown=True,
+        retire_workers=True,
+        close_attached_cluster=True,
+    )
+
+    assert any(
+        isinstance(entry, tuple) and str(entry[0]) == "retire_workers"
+        for entry in calls
+    )
+    assert "shutdown" in calls
+    assert "close" not in calls
+    assert "cluster.close" not in calls
+
+
+def test_close_dask_client_falls_back_to_close_and_cluster_close() -> None:
+    calls: list[str] = []
+
+    class _DummyCluster:
+        def close(self) -> None:
+            calls.append("cluster.close")
+
+    class _DummyClient:
+        cluster = _DummyCluster()
+
+        def close(self) -> None:
+            calls.append("close")
+
+    main_module._close_dask_client(
+        client=_DummyClient(),
+        logger=_test_logger("clearex.test.main.close_client_fallback"),
+        allow_shutdown=False,
+        retire_workers=False,
+        close_attached_cluster=True,
+    )
+
+    assert calls == ["close", "cluster.close"]
 
 
 def test_configure_dask_backend_caps_workers_for_gpu_usegment3d_analysis(
@@ -440,6 +527,33 @@ def test_run_workflow_mip_export_starts_analysis_dask_startup(
     main_module._run_workflow(
         workflow=workflow,
         logger=_test_logger("clearex.test.main.mip_export"),
+    )
+
+    assert workloads == ["analysis"]
+
+
+def test_run_workflow_display_pyramid_starts_analysis_dask_startup(
+    monkeypatch,
+) -> None:
+    workloads: list[str] = []
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack
+        workloads.append(str(workload))
+        return object()
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+
+    workflow = WorkflowConfig(
+        file=None,
+        prefer_dask=True,
+        display_pyramid=True,
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.display_pyramid"),
     )
 
     assert workloads == ["analysis"]

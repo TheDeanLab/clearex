@@ -339,6 +339,8 @@ def _selected_analyses(workflow: WorkflowConfig) -> list[str]:
         selected.append("usegment3d")
     if workflow.registration:
         selected.append("registration")
+    if workflow.display_pyramid:
+        selected.append("display_pyramid")
     if workflow.visualization:
         selected.append("visualization")
     if workflow.mip_export:
@@ -1040,6 +1042,7 @@ def persist_run_provenance(
         "particle_detection": workflow.particle_detection,
         "usegment3d": workflow.usegment3d,
         "registration": workflow.registration,
+        "display_pyramid": workflow.display_pyramid,
         "visualization": workflow.visualization,
         "mip_export": workflow.mip_export,
         "selected_analyses": _selected_analyses(workflow),

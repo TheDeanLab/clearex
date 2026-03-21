@@ -29,7 +29,9 @@
 from typing import Any
 
 __all__ = [
+    "DisplayPyramidSummary",
     "VisualizationSummary",
+    "run_display_pyramid_analysis",
     "run_visualization_analysis",
 ]
 
@@ -52,7 +54,12 @@ def __getattr__(name: str) -> Any:
     AttributeError
         If the attribute is not a supported visualization export.
     """
-    if name in {"VisualizationSummary", "run_visualization_analysis"}:
+    if name in {
+        "DisplayPyramidSummary",
+        "VisualizationSummary",
+        "run_display_pyramid_analysis",
+        "run_visualization_analysis",
+    }:
         from . import pipeline
 
         return getattr(pipeline, name)

@@ -196,6 +196,14 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     input_args.add_argument(
+        "--display-pyramid",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Prepare reusable display pyramids for napari visualization",
+    )
+
+    input_args.add_argument(
         "-v",
         "--visualization",
         required=False,

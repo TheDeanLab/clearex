@@ -46,6 +46,7 @@ from clearex.io.read import ImageInfo, ImageOpener
 from clearex.io.experiment import (
     _create_synthetic_experiment,
     create_dask_client,
+    has_canonical_data_component,
     is_navigate_experiment_file,
     load_navigate_experiment,
     load_store_spatial_calibration,
@@ -77,6 +78,7 @@ from clearex.flatfield.pipeline import (
     run_flatfield_analysis,
 )
 from clearex.visualization.pipeline import (
+    run_display_pyramid_analysis,
     run_visualization_analysis,
 )
 from clearex.mip_export.pipeline import (
@@ -172,6 +174,7 @@ _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
         "shear_transform",
         "particle_detection",
         "usegment3d",
+        "display_pyramid",
         "mip_export",
     }
 )
@@ -199,12 +202,100 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "particle_detection": ("results/particle_detection/latest/detections",),
     "usegment3d": ("results/usegment3d/latest/data",),
     "registration": ("results/registration/latest/data",),
+    "display_pyramid": ("results/display_pyramid/latest",),
     "mip_export": ("results/mip_export/latest",),
 }
+_DISTRIBUTED_TEARDOWN_NOISE_LOGGERS = ("distributed.batched",)
 
 
 class AnalysisDependencyError(RuntimeError):
     """Raised when a workflow requests an unavailable or invalid input."""
+
+
+def _close_dask_client(
+    *,
+    client: Any,
+    logger: logging.Logger,
+    allow_shutdown: bool,
+    retire_workers: bool,
+    close_attached_cluster: bool,
+) -> None:
+    """Close a Dask client with graceful best-effort teardown semantics.
+
+    Parameters
+    ----------
+    client : Any
+        Dask client-like object to close.
+    logger : logging.Logger
+        Logger used for debug diagnostics when best-effort teardown fails.
+    allow_shutdown : bool
+        Whether to call ``client.shutdown()`` before ``client.close()``.
+    retire_workers : bool
+        Whether to request worker retirement before closing the client.
+    close_attached_cluster : bool
+        Whether to close ``client.cluster`` when available and shutdown was not
+        used.
+
+    Returns
+    -------
+    None
+        Teardown side effects only.
+
+    Raises
+    ------
+    None
+        Teardown errors are intentionally swallowed to avoid masking workflow
+        completion state.
+
+    Notes
+    -----
+    Dask can emit verbose comm-close tracebacks while workers are torn down.
+    During teardown this temporarily raises logger thresholds for known noisy
+    distributed channels.
+    """
+    logger_state: list[tuple[logging.Logger, int]] = []
+    for logger_name in _DISTRIBUTED_TEARDOWN_NOISE_LOGGERS:
+        noisy_logger = logging.getLogger(logger_name)
+        logger_state.append((noisy_logger, int(noisy_logger.level)))
+        noisy_logger.setLevel(max(logging.WARNING, int(noisy_logger.level)))
+
+    used_shutdown = False
+    try:
+        if retire_workers:
+            retire = getattr(client, "retire_workers", None)
+            if callable(retire):
+                try:
+                    retire(close_workers=True, remove=True)
+                except TypeError:
+                    try:
+                        retire(close_workers=True)
+                    except TypeError:
+                        retire()
+
+        if allow_shutdown:
+            shutdown = getattr(client, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+                used_shutdown = True
+
+        if not used_shutdown:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+
+        if close_attached_cluster and not used_shutdown:
+            cluster = getattr(client, "cluster", None)
+            cluster_close = getattr(cluster, "close", None) if cluster else None
+            if callable(cluster_close):
+                cluster_close()
+    except Exception:
+        logger.debug(
+            "Dask client teardown encountered a non-fatal exception.",
+            exc_info=True,
+        )
+    finally:
+        for noisy_logger, prior_level in reversed(logger_state):
+            noisy_logger.setLevel(int(prior_level))
 
 
 def _is_zarr_like_path(path: Path) -> bool:
@@ -395,12 +486,21 @@ def _zarr_component_exists(zarr_path: str, component: str) -> bool:
     bool
         ``True`` if the component can be resolved, otherwise ``False``.
     """
+    path = str(component).strip()
+    if not path:
+        return False
     try:
         root = zarr.open_group(str(zarr_path), mode="r")
-        _ = root[component]
     except Exception:
         return False
-    return True
+    try:
+        return bool(path in root)
+    except Exception:
+        try:
+            _ = root[path]
+        except Exception:
+            return False
+        return True
 
 
 def _create_bootstrap_logger() -> logging.Logger:
@@ -584,6 +684,7 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         particle_detection=args.particle_detection,
         usegment3d=args.usegment3d,
         registration=args.registration,
+        display_pyramid=bool(getattr(args, "display_pyramid", False)),
         visualization=args.visualization,
         mip_export=args.mip_export,
         spatial_calibration=spatial_calibration,
@@ -1048,7 +1149,14 @@ def _configure_dask_backend(
                 local_directory=local_cfg.local_directory,
                 gpu_enabled=use_gpu_local_cluster,
             )
-            exit_stack.callback(client.close)
+            exit_stack.callback(
+                _close_dask_client,
+                client=client,
+                logger=logger,
+                allow_shutdown=True,
+                retire_workers=True,
+                close_attached_cluster=True,
+            )
             logger.info(
                 "Connected to LocalCluster backend "
                 f"(processes={use_processes}, gpu_mode={use_gpu_local_cluster})."
@@ -1133,7 +1241,14 @@ def _configure_dask_backend(
             cluster.scale(jobs=cluster_cfg.workers)
 
             client = Client(cluster)
-            exit_stack.callback(client.close)
+            exit_stack.callback(
+                _close_dask_client,
+                client=client,
+                logger=logger,
+                allow_shutdown=False,
+                retire_workers=False,
+                close_attached_cluster=False,
+            )
             client.wait_for_workers(cluster_cfg.workers)
             logger.info(
                 "Connected to SLURMCluster backend "
@@ -1362,7 +1477,9 @@ def _run_workflow(
             else:
                 if input_path and is_zarr_store_path(input_path):
                     resolved_input = Path(input_path).expanduser().resolve()
-                    if is_clearex_analysis_store(resolved_input):
+                    if is_clearex_analysis_store(
+                        resolved_input
+                    ) or has_canonical_data_component(resolved_input):
                         opener = ImageOpener()
                         _, info = opener.open(
                             input_path,
@@ -1379,7 +1496,7 @@ def _run_workflow(
                                 persist=workflow.spatial_calibration_explicit,
                             )
                         )
-                    else:
+                    elif resolved_input.exists():
                         synthetic_experiment = _create_synthetic_experiment(
                             source_path=resolved_input,
                             source_shape=tuple(),
@@ -1411,6 +1528,23 @@ def _run_workflow(
                                     "chunks_tpczyx": list(materialized.chunks_tpczyx),
                                 },
                             }
+                        )
+                    else:
+                        opener = ImageOpener()
+                        _, info = opener.open(
+                            input_path,
+                            prefer_dask=workflow.prefer_dask,
+                            chunks=workflow.chunks,
+                        )
+                        image_info = info
+                        _log_loaded_image(info, logger)
+                        provenance_store_path = input_path
+                        runtime_spatial_calibration = (
+                            _resolve_effective_store_spatial_calibration(
+                                store_path=input_path,
+                                desired_calibration=workflow.spatial_calibration,
+                                persist=workflow.spatial_calibration_explicit,
+                            )
                         )
                 else:
                     opener = ImageOpener()
@@ -1454,6 +1588,7 @@ def _run_workflow(
             particle_detection=workflow.particle_detection,
             usegment3d=workflow.usegment3d,
             registration=workflow.registration,
+            display_pyramid=workflow.display_pyramid,
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,
             analysis_parameters=runtime_analysis_parameters,
@@ -2288,6 +2423,110 @@ def _run_workflow(
                         )
                     continue
 
+                if operation_name == "display_pyramid":
+                    display_pyramid_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
+                        def _display_pyramid_progress(
+                            percent: int, message: str
+                        ) -> None:
+                            """Map display-pyramid progress into workflow-scale progress.
+
+                            Parameters
+                            ----------
+                            percent : int
+                                Display-pyramid progress percent.
+                            message : str
+                                Progress status text.
+
+                            Returns
+                            -------
+                            None
+                                Logger and progress-callback side effects only.
+                            """
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            logger.info(
+                                f"[display_pyramid] {int(percent)}% - {message}"
+                            )
+                            _emit_analysis_progress(
+                                mapped,
+                                f"display_pyramid: {message}",
+                            )
+
+                        summary = run_display_pyramid_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=display_pyramid_parameters,
+                            client=analysis_client,
+                            progress_callback=_display_pyramid_progress,
+                        )
+                        output_records["display_pyramid"] = {
+                            "component": summary.component,
+                            "source_component": summary.source_component,
+                            "source_components": list(summary.source_components),
+                            "channel_count": summary.channel_count,
+                            "contrast_limits_by_channel": [
+                                [float(row[0]), float(row[1])]
+                                for row in summary.contrast_limits_by_channel
+                            ],
+                            "reused_existing_levels": summary.reused_existing_levels,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Display pyramid preparation completed: "
+                            f"component={summary.component}, "
+                            f"source={summary.source_component}, "
+                            f"levels={len(summary.source_components)}, "
+                            f"channels={summary.channel_count}, "
+                            f"reused_existing_levels={summary.reused_existing_levels}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "display_pyramid",
+                                "parameters": {
+                                    **display_pyramid_parameters,
+                                    "component": summary.component,
+                                    "source_component": summary.source_component,
+                                    "source_components": list(
+                                        summary.source_components
+                                    ),
+                                    "channel_count": summary.channel_count,
+                                    "contrast_limits_by_channel": [
+                                        [float(row[0]), float(row[1])]
+                                        for row in summary.contrast_limits_by_channel
+                                    ],
+                                    "reused_existing_levels": summary.reused_existing_levels,
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Display pyramid preparation complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "Display pyramid preparation requires a canonical Zarr/N5 "
+                            "data store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "display_pyramid",
+                                "parameters": {
+                                    **display_pyramid_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Display pyramid preparation skipped (no Zarr/N5 store).",
+                        )
+                    continue
+
                 if operation_name == "visualization":
                     visualization_parameters = dict(operation_parameters)
                     raw_volume_layers = visualization_parameters.get(
@@ -2416,6 +2655,21 @@ def _run_workflow(
                             parameters=visualization_parameters,
                             progress_callback=_visualization_progress,
                         )
+                        viewer_ndisplay_requested = int(
+                            getattr(summary, "viewer_ndisplay_requested", 3)
+                        )
+                        viewer_ndisplay_effective = int(
+                            getattr(
+                                summary,
+                                "viewer_ndisplay_effective",
+                                viewer_ndisplay_requested,
+                            )
+                        )
+                        display_mode_fallback_reason = getattr(
+                            summary,
+                            "display_mode_fallback_reason",
+                            None,
+                        )
                         output_records["visualization"] = {
                             "component": summary.component,
                             "source_component": summary.source_component,
@@ -2427,6 +2681,9 @@ def _run_workflow(
                             "overlay_points_count": summary.overlay_points_count,
                             "launch_mode": summary.launch_mode,
                             "viewer_pid": summary.viewer_pid,
+                            "viewer_ndisplay_requested": viewer_ndisplay_requested,
+                            "viewer_ndisplay_effective": viewer_ndisplay_effective,
+                            "display_mode_fallback_reason": display_mode_fallback_reason,
                             "renderer": dict(getattr(summary, "renderer", None) or {}),
                             "keyframe_manifest_path": summary.keyframe_manifest_path,
                             "keyframe_count": summary.keyframe_count,
@@ -2438,6 +2695,7 @@ def _run_workflow(
                             f"source={summary.source_component}, "
                             f"position={summary.position_index}, "
                             f"multiscale_levels={len(summary.source_components)}, "
+                            f"viewer_ndisplay={viewer_ndisplay_effective}, "
                             f"overlay_points={summary.overlay_points_count}, "
                             f"launch_mode={summary.launch_mode}, "
                             f"keyframes={summary.keyframe_count}, "
@@ -2457,6 +2715,9 @@ def _run_workflow(
                                     "overlay_points_count": summary.overlay_points_count,
                                     "launch_mode": summary.launch_mode,
                                     "viewer_pid": summary.viewer_pid,
+                                    "viewer_ndisplay_requested": viewer_ndisplay_requested,
+                                    "viewer_ndisplay_effective": viewer_ndisplay_effective,
+                                    "display_mode_fallback_reason": display_mode_fallback_reason,
                                     "keyframe_manifest_path": summary.keyframe_manifest_path,
                                     "keyframe_count": summary.keyframe_count,
                                 },
@@ -2666,6 +2927,7 @@ def _run_workflow(
             particle_detection=workflow.particle_detection,
             usegment3d=workflow.usegment3d,
             registration=workflow.registration,
+            display_pyramid=workflow.display_pyramid,
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,
             zarr_save=workflow.zarr_save,

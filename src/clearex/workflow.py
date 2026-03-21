@@ -57,6 +57,7 @@ ANALYSIS_OPERATION_ORDER = (
     "particle_detection",
     "usegment3d",
     "registration",
+    "display_pyramid",
     "visualization",
     "mip_export",
 )
@@ -76,6 +77,7 @@ ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
     "particle_detection": "results/particle_detection/latest/detections",
     "usegment3d": "results/usegment3d/latest/data",
     "registration": "results/registration/latest/data",
+    "display_pyramid": "results/display_pyramid/latest",
     "visualization": "results/visualization/latest",
     "mip_export": "results/mip_export/latest",
 }
@@ -658,8 +660,18 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "overlap_zyx": [8, 32, 32],
         "memory_overhead_factor": 2.5,
     },
-    "visualization": {
+    "display_pyramid": {
         "execution_order": 7,
+        "input_source": "data",
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 1.0,
+    },
+    "visualization": {
+        "execution_order": 8,
         "input_source": "data",
         "chunk_basis": "2d",
         "detect_2d_per_slice": True,
@@ -669,6 +681,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "show_all_positions": False,
         "position_index": 0,
         "use_multiscale": True,
+        "use_3d_view": True,
         "overlay_particle_detections": True,
         "particle_detection_component": "results/particle_detection/latest/detections",
         "launch_mode": "auto",
@@ -679,7 +692,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "volume_layers": [],
     },
     "mip_export": {
-        "execution_order": 8,
+        "execution_order": 9,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -1992,7 +2005,9 @@ def _normalize_visualization_volume_layers(value: Any) -> list[Dict[str, Any]]:
             str(raw_row.get("multiscale_policy", "inherit")).strip().lower()
             or "inherit"
         )
-        if multiscale_policy not in {"inherit", "require", "auto_build", "off"}:
+        if multiscale_policy == "auto_build":
+            multiscale_policy = "inherit"
+        if multiscale_policy not in {"inherit", "require", "off"}:
             multiscale_policy = "inherit"
         blending = str(raw_row.get("blending", "")).strip().lower()
         if blending in {"auto", "default"}:
@@ -2044,6 +2059,7 @@ def _normalize_visualization_parameters(
     normalized["show_all_positions"] = bool(normalized.get("show_all_positions", False))
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
+    normalized["use_3d_view"] = bool(normalized.get("use_3d_view", True))
     normalized["overlay_particle_detections"] = bool(
         normalized.get("overlay_particle_detections", True)
     )
@@ -2226,6 +2242,7 @@ def selected_analysis_operations(
     particle_detection: bool,
     usegment3d: bool,
     registration: bool,
+    display_pyramid: bool,
     visualization: bool,
     mip_export: bool,
 ) -> Tuple[str, ...]:
@@ -2245,6 +2262,8 @@ def selected_analysis_operations(
         Whether usegment3d segmentation is enabled.
     registration : bool
         Whether registration is enabled.
+    display_pyramid : bool
+        Whether display-pyramid preparation is enabled.
     visualization : bool
         Whether visualization is enabled.
     mip_export : bool
@@ -2268,6 +2287,8 @@ def selected_analysis_operations(
         selected.append("usegment3d")
     if registration:
         selected.append("registration")
+    if display_pyramid:
+        selected.append("display_pyramid")
     if visualization:
         selected.append("visualization")
     if mip_export:
@@ -2283,6 +2304,7 @@ def resolve_analysis_execution_sequence(
     particle_detection: bool,
     usegment3d: bool,
     registration: bool,
+    display_pyramid: bool,
     visualization: bool,
     mip_export: bool,
     analysis_parameters: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -2303,6 +2325,8 @@ def resolve_analysis_execution_sequence(
         Whether usegment3d segmentation is enabled.
     registration : bool
         Whether registration is enabled.
+    display_pyramid : bool
+        Whether display-pyramid preparation is enabled.
     visualization : bool
         Whether visualization is enabled.
     mip_export : bool
@@ -2325,6 +2349,7 @@ def resolve_analysis_execution_sequence(
         particle_detection=particle_detection,
         usegment3d=usegment3d,
         registration=registration,
+        display_pyramid=display_pyramid,
         visualization=visualization,
         mip_export=mip_export,
     )
@@ -5255,6 +5280,8 @@ class WorkflowConfig:
         Flag indicating whether usegment3d workflow should run.
     registration : bool
         Flag indicating whether registration workflow should run.
+    display_pyramid : bool
+        Flag indicating whether display-pyramid preparation should run.
     visualization : bool
         Flag indicating whether visualization workflow should run.
     mip_export : bool
@@ -5286,6 +5313,7 @@ class WorkflowConfig:
     particle_detection: bool = False
     usegment3d: bool = False
     registration: bool = False
+    display_pyramid: bool = False
     visualization: bool = False
     mip_export: bool = False
     zarr_save: ZarrSaveConfig = field(default_factory=ZarrSaveConfig)
@@ -5384,6 +5412,7 @@ class WorkflowConfig:
                 self.particle_detection,
                 self.usegment3d,
                 self.registration,
+                self.display_pyramid,
                 self.visualization,
                 self.mip_export,
             )
@@ -5427,6 +5456,7 @@ def _selected_operations_for_execution_plan(
             particle_detection=workflow.particle_detection,
             usegment3d=workflow.usegment3d,
             registration=workflow.registration,
+            display_pyramid=workflow.display_pyramid,
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,
             analysis_parameters=analysis_parameters or workflow.analysis_parameters,
