@@ -187,10 +187,97 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "display_pyramid": ("results/display_pyramid/latest",),
     "mip_export": ("results/mip_export/latest",),
 }
+_DISTRIBUTED_TEARDOWN_NOISE_LOGGERS = ("distributed.batched",)
 
 
 class AnalysisDependencyError(RuntimeError):
     """Raised when a workflow requests an unavailable or invalid input."""
+
+
+def _close_dask_client(
+    *,
+    client: Any,
+    logger: logging.Logger,
+    allow_shutdown: bool,
+    retire_workers: bool,
+    close_attached_cluster: bool,
+) -> None:
+    """Close a Dask client with graceful best-effort teardown semantics.
+
+    Parameters
+    ----------
+    client : Any
+        Dask client-like object to close.
+    logger : logging.Logger
+        Logger used for debug diagnostics when best-effort teardown fails.
+    allow_shutdown : bool
+        Whether to call ``client.shutdown()`` before ``client.close()``.
+    retire_workers : bool
+        Whether to request worker retirement before closing the client.
+    close_attached_cluster : bool
+        Whether to close ``client.cluster`` when available and shutdown was not
+        used.
+
+    Returns
+    -------
+    None
+        Teardown side effects only.
+
+    Raises
+    ------
+    None
+        Teardown errors are intentionally swallowed to avoid masking workflow
+        completion state.
+
+    Notes
+    -----
+    Dask can emit verbose comm-close tracebacks while workers are torn down.
+    During teardown this temporarily raises logger thresholds for known noisy
+    distributed channels.
+    """
+    logger_state: list[tuple[logging.Logger, int]] = []
+    for logger_name in _DISTRIBUTED_TEARDOWN_NOISE_LOGGERS:
+        noisy_logger = logging.getLogger(logger_name)
+        logger_state.append((noisy_logger, int(noisy_logger.level)))
+        noisy_logger.setLevel(max(logging.WARNING, int(noisy_logger.level)))
+
+    used_shutdown = False
+    try:
+        if retire_workers:
+            retire = getattr(client, "retire_workers", None)
+            if callable(retire):
+                try:
+                    retire(close_workers=True, remove=True)
+                except TypeError:
+                    try:
+                        retire(close_workers=True)
+                    except TypeError:
+                        retire()
+
+        if allow_shutdown:
+            shutdown = getattr(client, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+                used_shutdown = True
+
+        if not used_shutdown:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+
+        if close_attached_cluster and not used_shutdown:
+            cluster = getattr(client, "cluster", None)
+            cluster_close = getattr(cluster, "close", None) if cluster else None
+            if callable(cluster_close):
+                cluster_close()
+    except Exception:
+        logger.debug(
+            "Dask client teardown encountered a non-fatal exception.",
+            exc_info=True,
+        )
+    finally:
+        for noisy_logger, prior_level in reversed(logger_state):
+            noisy_logger.setLevel(int(prior_level))
 
 
 def _is_zarr_like_path(path: Path) -> bool:
@@ -948,7 +1035,14 @@ def _configure_dask_backend(
                 local_directory=local_cfg.local_directory,
                 gpu_enabled=use_gpu_local_cluster,
             )
-            exit_stack.callback(client.close)
+            exit_stack.callback(
+                _close_dask_client,
+                client=client,
+                logger=logger,
+                allow_shutdown=True,
+                retire_workers=True,
+                close_attached_cluster=True,
+            )
             logger.info(
                 "Connected to LocalCluster backend "
                 f"(processes={use_processes}, gpu_mode={use_gpu_local_cluster})."
@@ -1035,7 +1129,14 @@ def _configure_dask_backend(
             cluster.scale(jobs=cluster_cfg.workers)
 
             client = Client(cluster)
-            exit_stack.callback(client.close)
+            exit_stack.callback(
+                _close_dask_client,
+                client=client,
+                logger=logger,
+                allow_shutdown=False,
+                retire_workers=False,
+                close_attached_cluster=False,
+            )
             client.wait_for_workers(cluster_cfg.workers)
             logger.info(
                 "Connected to SLURMCluster backend "

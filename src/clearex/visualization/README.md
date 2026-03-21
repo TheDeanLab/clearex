@@ -60,6 +60,21 @@ and still read:
 - `visualization_pyramid_factors_tpczyx`
 - `visualization_pyramid_levels_by_component`
 
+### Performance invariants (do not regress)
+
+The `display_pyramid` pipeline is intentionally optimized to avoid expensive
+Dask shuffles/rechunk graphs.
+
+- Do not force `downsampled.rechunk(...)` before `to_zarr` writes.
+- Do not set `array.rechunk.method="tasks"` in this write path.
+- Level chunking should prefer the generated level array's existing chunk
+  geometry (`chunksize`) and only clamp by array bounds.
+- If chunk-policy changes are required, they must be benchmarked against the
+  large sheared-liver datasets and reviewed for shuffle warnings in logs.
+
+This follows napari + Dask best-practice intent: keep data lazy, chunk-aligned,
+and avoid global graph reshapes for interactive workflows.
+
 ### Reuse policy
 
 - If matching pyramid levels already exist for the selected component, ClearEx
@@ -76,8 +91,19 @@ and still read:
 - Stored on the source component attrs:
   - `display_contrast_limits_by_channel`
   - `display_contrast_percentiles`
+  - `display_contrast_source_component`
 - These values are intended for later napari launch and should be reused
   instead of recomputing viewer-time display ranges.
+
+#### Contrast performance invariants
+
+- Contrast computation should use bounded sampling, not full-data percentiles.
+- Preferred source for contrast estimation is the coarsest prepared display
+  level (when present), recorded in `display_contrast_source_component`.
+- Do not use global `reshape(-1)` + `dask.percentile` on full-resolution arrays
+  for display metadata.
+- Keep viewer launch reduction-free: visualization should consume stored
+  contrast limits or dtype fallbacks only.
 
 ## Visualization Policy
 
@@ -133,6 +159,9 @@ Fallback behavior:
 
 ClearEx should not run percentile, min, or max reductions on Dask-backed image
 data during napari launch.
+
+When display metadata must be regenerated, use the sampled pipeline from
+`run_display_pyramid_analysis` rather than launch-time reductions.
 
 ## Multiposition Policy
 

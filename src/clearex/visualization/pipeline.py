@@ -43,7 +43,6 @@ import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 # Third Party Imports
-import dask
 import dask.array as da
 import numpy as np
 import zarr
@@ -81,6 +80,7 @@ _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR = "visualization_pyramid_levels_by_compone
 _DISPLAY_CONTRAST_LIMITS_ATTR = "display_contrast_limits_by_channel"
 _DISPLAY_CONTRAST_PERCENTILES_ATTR = "display_contrast_percentiles"
 _DISPLAY_CONTRAST_LEVEL_SOURCE_ATTR = "display_contrast_source_component"
+_DISPLAY_CONTRAST_SAMPLE_TARGET_VOXELS = 2_000_000
 _SOFTWARE_RENDERER_HINTS = (
     "llvmpipe",
     "softpipe",
@@ -1978,6 +1978,7 @@ def _resolve_level_chunks_tpczyx(
     *,
     source_chunks: Optional[Sequence[int]],
     level_shape: Sequence[int],
+    level_array: Optional[da.Array] = None,
 ) -> tuple[int, int, int, int, int, int]:
     """Resolve practical chunking for one generated multiscale level.
 
@@ -1987,6 +1988,10 @@ def _resolve_level_chunks_tpczyx(
         Source-array chunk shape.
     level_shape : sequence[int]
         Level array shape.
+    level_array : dask.array.Array, optional
+        Generated level array. When provided, its current chunk geometry is
+        preferred to avoid introducing costly rechunk/shuffle traffic before
+        persistence.
 
     Returns
     -------
@@ -1994,6 +1999,21 @@ def _resolve_level_chunks_tpczyx(
         Chunk shape in canonical order.
     """
     normalized_shape = tuple(max(1, int(size)) for size in level_shape)
+    if level_array is not None:
+        chunksize = getattr(level_array, "chunksize", None)
+        if (
+            isinstance(chunksize, tuple)
+            and len(chunksize) == 6
+            and all(int(size) > 0 for size in chunksize)
+        ):
+            return (
+                int(max(1, min(normalized_shape[0], int(chunksize[0])))),
+                int(max(1, min(normalized_shape[1], int(chunksize[1])))),
+                int(max(1, min(normalized_shape[2], int(chunksize[2])))),
+                int(max(1, min(normalized_shape[3], int(chunksize[3])))),
+                int(max(1, min(normalized_shape[4], int(chunksize[4])))),
+                int(max(1, min(normalized_shape[5], int(chunksize[5])))),
+            )
     if source_chunks is None or len(tuple(source_chunks)) != 6:
         return (
             int(normalized_shape[0]),
@@ -2199,6 +2219,7 @@ def _build_visualization_multiscale_components(
         level_chunks = _resolve_level_chunks_tpczyx(
             source_chunks=source_chunks,
             level_shape=level_shape,
+            level_array=downsampled,
         )
 
         if not _component_matches_shape_chunks(
@@ -2221,10 +2242,8 @@ def _build_visualization_multiscale_components(
                 dtype=source_dtype.name,
                 overwrite=True,
             )
-            with dask.config.set({"array.rechunk.method": "tasks"}):
-                rechunked = downsampled.rechunk(level_chunks)
             da.to_zarr(
-                rechunked,
+                downsampled,
                 str(zarr_path),
                 component=level_component,
                 overwrite=True,
@@ -2505,9 +2524,25 @@ def _save_display_contrast_metadata(
     root: zarr.hierarchy.Group,
     source_component: str,
     contrast_limits_by_channel: Sequence[Sequence[float]],
+    contrast_source_component: Optional[str] = None,
     percentiles: tuple[float, float] = (1.0, 95.0),
 ) -> None:
-    """Persist per-channel display contrast metadata on the source component."""
+    """Persist per-channel display contrast metadata on the source component.
+
+    Parameters
+    ----------
+    root : zarr.hierarchy.Group
+        Opened root group.
+    source_component : str
+        Source component that stores display contrast metadata.
+    contrast_limits_by_channel : sequence[sequence[float]]
+        Per-channel display limits.
+    contrast_source_component : str, optional
+        Component used to estimate percentiles. Defaults to
+        ``source_component``.
+    percentiles : tuple[float, float], default=(1.0, 95.0)
+        Percentiles used for the computed limits.
+    """
     source_attrs = root[str(source_component)].attrs
     source_attrs[_DISPLAY_CONTRAST_LIMITS_ATTR] = [
         [float(row[0]), float(row[1])] for row in contrast_limits_by_channel
@@ -2516,28 +2551,110 @@ def _save_display_contrast_metadata(
         float(percentiles[0]),
         float(percentiles[1]),
     ]
-    source_attrs[_DISPLAY_CONTRAST_LEVEL_SOURCE_ATTR] = str(source_component)
+    source_attrs[_DISPLAY_CONTRAST_LEVEL_SOURCE_ATTR] = str(
+        contrast_source_component or source_component
+    )
+
+
+def _sample_channel_for_display_contrast(
+    *,
+    channel_data_tpzyx: da.Array,
+    target_voxels: int,
+) -> da.Array:
+    """Sample one channel lazily to bound contrast-estimation compute cost.
+
+    Parameters
+    ----------
+    channel_data_tpzyx : dask.array.Array
+        Channel array in ``(t, p, z, y, x)`` order.
+    target_voxels : int
+        Upper-bound target for sampled voxel count.
+
+    Returns
+    -------
+    dask.array.Array
+        Lazily sliced sample preserving the original chunk graph.
+    """
+    shape_tpzyx = tuple(int(value) for value in tuple(channel_data_tpzyx.shape))
+    if len(shape_tpzyx) != 5:
+        return channel_data_tpzyx
+
+    target = max(1, int(target_voxels))
+    total_voxels = max(1, int(np.prod(shape_tpzyx, dtype=np.int64)))
+    if total_voxels <= target:
+        return channel_data_tpzyx
+
+    # Favor spatial downsampling first to retain time/position diversity.
+    spatial_stride = int(
+        max(
+            1,
+            math.ceil((float(total_voxels) / float(target)) ** (1.0 / 3.0)),
+        )
+    )
+    sampled = channel_data_tpzyx[
+        :,
+        :,
+        ::spatial_stride,
+        ::spatial_stride,
+        ::spatial_stride,
+    ]
+    sampled_voxels = max(1, int(np.prod(sampled.shape, dtype=np.int64)))
+    if sampled_voxels <= target:
+        return sampled
+
+    tp_stride = int(
+        max(1, math.ceil(math.sqrt(float(sampled_voxels) / float(target))))
+    )
+    return sampled[::tp_stride, ::tp_stride, :, :, :]
 
 
 def _compute_display_contrast_limits_by_channel(
     *,
     zarr_path: Union[str, Path],
     source_component: str,
+    sampling_component: Optional[str] = None,
     channel_count: int,
     low_percentile: float = 1.0,
     high_percentile: float = 95.0,
+    sampling_target_voxels: int = _DISPLAY_CONTRAST_SAMPLE_TARGET_VOXELS,
 ) -> tuple[tuple[float, float], ...]:
-    """Compute fixed display percentiles for each channel of one source array."""
-    source = da.from_zarr(str(zarr_path), component=str(source_component))
+    """Compute fixed display percentiles for each channel of one source array.
+
+    Notes
+    -----
+    To avoid expensive global reshapes and percentile shuffles, this computes
+    percentiles on a lazily strided sample from one component (typically the
+    coarsest prepared display-pyramid level).
+    """
+    source_component_text = str(source_component).strip() or "data"
+    sampling_component_text = str(sampling_component or "").strip()
+    contrast_component = sampling_component_text or source_component_text
+    source = da.from_zarr(str(zarr_path), component=contrast_component)
+    source_shape = tuple(int(value) for value in tuple(source.shape))
+    available_channels = int(source_shape[2]) if len(source_shape) >= 3 else 0
     contrast_limits: list[tuple[float, float]] = []
+    target_channels = max(0, int(channel_count))
+    if available_channels <= 0:
+        fallback = _default_contrast_limits_for_dtype(source.dtype)
+        return tuple(fallback for _ in range(target_channels))
+
     for channel_index in range(max(0, int(channel_count))):
-        channel_data = source[:, :, channel_index, :, :, :]
+        clamped_channel_index = int(min(channel_index, available_channels - 1))
+        channel_data = source[:, :, clamped_channel_index, :, :, :]
+        sampled_channel = _sample_channel_for_display_contrast(
+            channel_data_tpzyx=channel_data,
+            target_voxels=sampling_target_voxels,
+        )
         try:
-            percentiles = da.percentile(
-                channel_data.reshape(-1),
-                [float(low_percentile), float(high_percentile)],
-            ).compute()
-            pair = _coerce_contrast_limit_pair(percentiles)
+            sample_np = np.asarray(sampled_channel.compute(), dtype=np.float32)
+            if sample_np.size <= 0:
+                pair = None
+            else:
+                percentiles = np.percentile(
+                    sample_np,
+                    [float(low_percentile), float(high_percentile)],
+                )
+                pair = _coerce_contrast_limit_pair(percentiles)
         except Exception:
             pair = None
         if pair is None:
@@ -3661,6 +3778,7 @@ def _save_display_pyramid_metadata(
     source_component: str,
     source_components: Sequence[str],
     contrast_limits_by_channel: Sequence[Sequence[float]],
+    contrast_source_component: str,
     reused_existing_levels: bool,
     run_id: Optional[str] = None,
 ) -> str:
@@ -3690,6 +3808,7 @@ def _save_display_pyramid_metadata(
         "display_contrast_limits_by_channel": [
             [float(row[0]), float(row[1])] for row in contrast_limits_by_channel
         ],
+        "display_contrast_source_component": str(contrast_source_component),
         "reused_existing_levels": bool(reused_existing_levels),
         "storage_policy": "latest_only",
         "run_id": run_id,
@@ -3795,16 +3914,25 @@ def run_display_pyramid_analysis(
         legacy_component_map
     )
 
-    _emit(70, f"Computing display contrast metadata for {source_component}")
+    contrast_source_component = (
+        str(source_components[-1]) if source_components else source_component
+    )
+    _emit(
+        70,
+        "Computing display contrast metadata for "
+        f"{source_component} (sampling={contrast_source_component})",
+    )
     contrast_limits_by_channel = _compute_display_contrast_limits_by_channel(
         zarr_path=zarr_path,
         source_component=source_component,
+        sampling_component=contrast_source_component,
         channel_count=channel_count,
     )
     _save_display_contrast_metadata(
         root=root,
         source_component=source_component,
         contrast_limits_by_channel=contrast_limits_by_channel,
+        contrast_source_component=contrast_source_component,
     )
     _emit(90, "Writing display pyramid metadata")
     component = _save_display_pyramid_metadata(
@@ -3812,6 +3940,7 @@ def run_display_pyramid_analysis(
         source_component=source_component,
         source_components=source_components,
         contrast_limits_by_channel=contrast_limits_by_channel,
+        contrast_source_component=contrast_source_component,
         reused_existing_levels=reused_existing_levels,
         run_id=run_id,
     )

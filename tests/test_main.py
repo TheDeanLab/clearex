@@ -198,6 +198,66 @@ def test_configure_dask_backend_uses_threads_for_single_worker_io(monkeypatch) -
     assert captured["processes"] is False
 
 
+def test_close_dask_client_prefers_shutdown_for_local_clusters() -> None:
+    calls: list[object] = []
+
+    class _DummyCluster:
+        def close(self) -> None:
+            calls.append("cluster.close")
+
+    class _DummyClient:
+        cluster = _DummyCluster()
+
+        def retire_workers(self, *args, **kwargs) -> None:
+            calls.append(("retire_workers", args, kwargs))
+
+        def shutdown(self) -> None:
+            calls.append("shutdown")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    main_module._close_dask_client(
+        client=_DummyClient(),
+        logger=_test_logger("clearex.test.main.close_client_shutdown"),
+        allow_shutdown=True,
+        retire_workers=True,
+        close_attached_cluster=True,
+    )
+
+    assert any(
+        isinstance(entry, tuple) and str(entry[0]) == "retire_workers"
+        for entry in calls
+    )
+    assert "shutdown" in calls
+    assert "close" not in calls
+    assert "cluster.close" not in calls
+
+
+def test_close_dask_client_falls_back_to_close_and_cluster_close() -> None:
+    calls: list[str] = []
+
+    class _DummyCluster:
+        def close(self) -> None:
+            calls.append("cluster.close")
+
+    class _DummyClient:
+        cluster = _DummyCluster()
+
+        def close(self) -> None:
+            calls.append("close")
+
+    main_module._close_dask_client(
+        client=_DummyClient(),
+        logger=_test_logger("clearex.test.main.close_client_fallback"),
+        allow_shutdown=False,
+        retire_workers=False,
+        close_attached_cluster=True,
+    )
+
+    assert calls == ["close", "cluster.close"]
+
+
 def test_configure_dask_backend_caps_workers_for_gpu_usegment3d_analysis(
     monkeypatch,
 ) -> None:

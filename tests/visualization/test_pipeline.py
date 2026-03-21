@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 
 # Third Party Imports
+import dask.array as da
 import numpy as np
 import pytest
 import zarr
@@ -378,7 +379,13 @@ def test_run_display_pyramid_analysis_materializes_levels_and_contrast_metadata(
     )
     assert source_attrs["display_contrast_percentiles"] == [1.0, 95.0]
     assert len(source_attrs["display_contrast_limits_by_channel"]) == 2
+    assert source_attrs["display_contrast_source_component"] == str(
+        summary.source_components[-1]
+    )
     assert latest_attrs["source_component"] == "results/shear_transform/latest/data"
+    assert latest_attrs["display_contrast_source_component"] == str(
+        summary.source_components[-1]
+    )
     assert latest_attrs["reused_existing_levels"] is False
 
 
@@ -411,6 +418,33 @@ def test_run_display_pyramid_analysis_reuses_existing_levels(
 
     assert summary.source_components == ("data", "data_pyramid/level_1")
     assert summary.reused_existing_levels is True
+
+
+def test_run_display_pyramid_analysis_avoids_forced_rechunk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="results/shear_transform/latest/data",
+        shape=(1, 1, 1, 8, 8, 8),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    def _unexpected_rechunk(self, *args, **kwargs):
+        del self, args, kwargs
+        raise AssertionError("Display pyramid should not force rechunk writes.")
+
+    monkeypatch.setattr(da.Array, "rechunk", _unexpected_rechunk)
+
+    summary = run_display_pyramid_analysis(
+        zarr_path=store_path,
+        parameters={"input_source": "results/shear_transform/latest/data"},
+    )
+    assert len(summary.source_components) > 1
 
 
 def test_run_visualization_analysis_uses_experiment_spacing_when_available(
