@@ -26,6 +26,10 @@ Build docs: `make html -j 15`
 ## Documentation practices
 Be concise, specific, and value dense
 Write so that a new developer to this codebase can understand your writing, don’t assume your audience are experts in the topic/area you are writing about.
+- When runtime behavior changes, update the matching ``docs/source/runtime``
+  pages and the affected top-level/module ``README.md`` / ``CODEX.md`` /
+  ``AGENTS.md`` notes in the same change so CLI flags, store metadata names,
+  and provenance fields stay aligned.
 
 ## Boundaries
 - ✅ **Always do:** Write new files to `docs/`, follow the style examples

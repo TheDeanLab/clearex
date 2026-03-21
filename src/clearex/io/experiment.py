@@ -55,6 +55,11 @@ from dask.delayed import delayed
 
 # Local Imports
 from clearex.io.read import ImageInfo
+from clearex.workflow import (
+    SpatialCalibrationConfig,
+    spatial_calibration_from_dict,
+    spatial_calibration_to_dict,
+)
 
 if TYPE_CHECKING:
     from dask.delayed import Delayed
@@ -77,6 +82,7 @@ IngestionProgressRecord = dict[str, Any]
 
 _INGESTION_PROGRESS_SCHEMA = "clearex.ingestion_progress.v1"
 _INGESTION_PROGRESS_ATTR = "ingestion_progress"
+_SPATIAL_CALIBRATION_ATTR = "spatial_calibration"
 
 
 def _is_zarr_like_path(path: Path) -> bool:
@@ -217,6 +223,55 @@ def _write_ingestion_progress_record(
     serialized = json.loads(json.dumps(record))
     root = zarr.open_group(str(store_path), mode="a")
     root.attrs[_INGESTION_PROGRESS_ATTR] = serialized
+
+
+def load_store_spatial_calibration(
+    zarr_path: Union[str, Path],
+) -> SpatialCalibrationConfig:
+    """Load store-level spatial calibration from root Zarr attrs.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Analysis-store path.
+
+    Returns
+    -------
+    SpatialCalibrationConfig
+        Parsed store calibration. Missing attrs resolve to identity.
+
+    Raises
+    ------
+    ValueError
+        If stored spatial calibration metadata is malformed.
+    """
+    root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r")
+    return spatial_calibration_from_dict(root.attrs.get(_SPATIAL_CALIBRATION_ATTR))
+
+
+def save_store_spatial_calibration(
+    zarr_path: Union[str, Path],
+    calibration: SpatialCalibrationConfig,
+) -> SpatialCalibrationConfig:
+    """Persist store-level spatial calibration into root Zarr attrs.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Analysis-store path.
+    calibration : SpatialCalibrationConfig
+        Calibration payload to persist.
+
+    Returns
+    -------
+    SpatialCalibrationConfig
+        Normalized calibration written to the store.
+    """
+    normalized = spatial_calibration_from_dict(calibration)
+    serialized = json.loads(json.dumps(spatial_calibration_to_dict(normalized)))
+    root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="a")
+    root.attrs[_SPATIAL_CALIBRATION_ATTR] = serialized
+    return normalized
 
 
 def _resolve_expected_pyramid_level_factors(
@@ -4998,6 +5053,9 @@ def initialize_analysis_store(
     root = zarr.open_group(str(output_path), mode="a")
     root.require_group("results")
     root.require_group("provenance")
+    spatial_calibration_payload = spatial_calibration_to_dict(
+        spatial_calibration_from_dict(root.attrs.get(_SPATIAL_CALIBRATION_ATTR))
+    )
     if "data" in root:
         if overwrite:
             del root["data"]
@@ -5028,6 +5086,7 @@ def initialize_analysis_store(
                     "navigate_experiment": experiment.to_metadata_dict(),
                     "storage_policy_analysis_outputs": "latest_only",
                     "storage_policy_provenance": "append_only",
+                    _SPATIAL_CALIBRATION_ATTR: spatial_calibration_payload,
                     "chunk_shape_tpczyx": existing_chunks,
                     "configured_chunks_tpczyx": [
                         int(chunk) for chunk in requested_chunks
@@ -5063,6 +5122,7 @@ def initialize_analysis_store(
             "navigate_experiment": experiment.to_metadata_dict(),
             "storage_policy_analysis_outputs": "latest_only",
             "storage_policy_provenance": "append_only",
+            _SPATIAL_CALIBRATION_ATTR: spatial_calibration_payload,
             "chunk_shape_tpczyx": [int(chunk) for chunk in normalized_chunks],
             "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
             "resolution_pyramid_factors_tpczyx": pyramid_payload,

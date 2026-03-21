@@ -44,22 +44,27 @@ from clearex.workflow import (
     LocalClusterConfig,
     SlurmClusterConfig,
     SlurmRunnerConfig,
+    SpatialCalibrationConfig,
     WorkflowConfig,
     ZarrSaveConfig,
     dask_backend_from_dict,
     dask_backend_to_dict,
+    format_spatial_calibration,
     format_dask_backend_summary,
     format_local_cluster_recommendation_summary,
     format_chunks,
     format_pyramid_levels,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
+    normalize_spatial_calibration,
     parse_chunks,
     parse_pyramid_levels,
+    parse_spatial_calibration,
     normalize_analysis_operation_parameters,
     recommend_local_cluster_config,
     resolve_analysis_input_component,
     resolve_analysis_execution_sequence,
+    spatial_calibration_to_dict,
     validate_analysis_input_references,
     to_tpczyx_chunks,
     to_tpczyx_pyramid,
@@ -104,12 +109,59 @@ class TestFormatChunks:
         assert format_chunks((1, 128, 128)) == "1,128,128"
 
 
+class TestSpatialCalibration:
+    def test_parse_round_trip(self):
+        parsed = parse_spatial_calibration("x=+y,z=-f,y=none")
+
+        assert parsed == SpatialCalibrationConfig(
+            stage_axis_map_zyx=("-f", "none", "+y")
+        )
+        assert format_spatial_calibration(parsed) == "z=-f,y=none,x=+y"
+
+    def test_default_identity(self):
+        cfg = WorkflowConfig()
+
+        assert cfg.spatial_calibration == SpatialCalibrationConfig()
+        assert format_spatial_calibration(cfg.spatial_calibration) == "z=+z,y=+y,x=+x"
+
+    def test_rejects_duplicate_non_none_sources(self):
+        with pytest.raises(ValueError, match="Duplicate source axis 'x'"):
+            parse_spatial_calibration("z=+x,y=-x,x=none")
+
+    def test_supports_none_binding(self):
+        parsed = parse_spatial_calibration("z=none,y=+y,x=-f")
+
+        assert parsed.stage_axis_map_zyx == ("none", "+y", "-f")
+
+    def test_normalizes_mapping_payload(self):
+        parsed = normalize_spatial_calibration(
+            {
+                "schema": "clearex.spatial_calibration.v1",
+                "stage_axis_map_zyx": {"z": "+x", "y": "none", "x": "+y"},
+                "theta_mode": "rotate_zy_about_x",
+            }
+        )
+
+        assert parsed == SpatialCalibrationConfig(
+            stage_axis_map_zyx=("+x", "none", "+y")
+        )
+        assert spatial_calibration_to_dict(parsed) == {
+            "schema": "clearex.spatial_calibration.v1",
+            "stage_axis_map_zyx": {"z": "+x", "y": "none", "x": "+y"},
+            "theta_mode": "rotate_zy_about_x",
+        }
+
+    def test_rejects_partial_top_level_mapping_payload(self):
+        with pytest.raises(ValueError, match="must define z, y, and x bindings"):
+            normalize_spatial_calibration({"z": "+x", "x": "+y"})
+
+
 class TestWorkflowConfig:
     def test_has_analysis_selection(self):
         cfg = WorkflowConfig()
         assert cfg.has_analysis_selection() is False
 
-        cfg.registration = True
+        cfg.display_pyramid = True
         assert cfg.has_analysis_selection() is True
 
     def test_default_zarr_save_config(self):
@@ -140,9 +192,13 @@ class TestWorkflowConfig:
             cfg.analysis_parameters["usegment3d"]["output_reference_space"] == "level0"
         )
         assert cfg.analysis_parameters["usegment3d"]["save_native_labels"] is False
+        assert "display_pyramid" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["display_pyramid"]["execution_order"] == 7
+        assert cfg.analysis_parameters["display_pyramid"]["input_source"] == "data"
         assert cfg.analysis_parameters["visualization"]["show_all_positions"] is False
         assert cfg.analysis_parameters["visualization"]["position_index"] == 0
         assert cfg.analysis_parameters["visualization"]["use_multiscale"] is True
+        assert cfg.analysis_parameters["visualization"]["use_3d_view"] is True
         assert cfg.analysis_parameters["visualization"]["require_gpu_rendering"] is True
         assert cfg.analysis_parameters["visualization"]["capture_keyframes"] is True
         assert cfg.analysis_parameters["visualization"]["keyframe_manifest_path"] == ""
@@ -164,7 +220,7 @@ class TestWorkflowConfig:
             }
         ]
         assert "mip_export" in cfg.analysis_parameters
-        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 8
+        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 9
         assert (
             cfg.analysis_parameters["mip_export"]["position_mode"] == "multi_position"
         )
@@ -375,6 +431,7 @@ class TestWorkflowConfig:
                     "show_all_positions": 1,
                     "position_index": "3",
                     "use_multiscale": 0,
+                    "use_3d_view": 0,
                     "require_gpu_rendering": 0,
                     "overlay_particle_detections": 1,
                     "launch_mode": "subprocess",
@@ -410,6 +467,7 @@ class TestWorkflowConfig:
         assert params["show_all_positions"] is True
         assert params["position_index"] == 3
         assert params["use_multiscale"] is False
+        assert params["use_3d_view"] is False
         assert params["require_gpu_rendering"] is False
         assert params["overlay_particle_detections"] is True
         assert params["launch_mode"] == "subprocess"
@@ -435,7 +493,7 @@ class TestWorkflowConfig:
                 "blending": "translucent",
                 "colormap": "",
                 "rendering": "",
-                "multiscale_policy": "auto_build",
+                "multiscale_policy": "inherit",
             }
         ]
 
@@ -856,14 +914,16 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     assert normalized["flatfield"]["execution_order"] == 1
     assert normalized["shear_transform"]["execution_order"] == 3
     assert normalized["usegment3d"]["execution_order"] == 5
+    assert normalized["display_pyramid"]["execution_order"] == 7
     assert normalized["visualization"]["input_source"] == "data"
     assert normalized["visualization"]["show_all_positions"] is False
     assert normalized["visualization"]["use_multiscale"] is True
+    assert normalized["visualization"]["use_3d_view"] is True
     assert normalized["visualization"]["require_gpu_rendering"] is True
     assert normalized["visualization"]["capture_keyframes"] is True
     assert normalized["visualization"]["keyframe_layer_overrides"] == []
     assert normalized["visualization"]["volume_layers"] == []
-    assert normalized["mip_export"]["execution_order"] == 8
+    assert normalized["mip_export"]["execution_order"] == 9
     assert normalized["mip_export"]["position_mode"] == "multi_position"
     assert normalized["mip_export"]["export_format"] == "ome-tiff"
 
@@ -876,6 +936,7 @@ def test_resolve_analysis_execution_sequence_uses_execution_order():
         particle_detection=True,
         usegment3d=False,
         registration=True,
+        display_pyramid=False,
         visualization=False,
         mip_export=False,
         analysis_parameters={
@@ -903,11 +964,12 @@ def test_resolve_analysis_execution_sequence_includes_mip_export_last_by_default
         particle_detection=False,
         usegment3d=False,
         registration=False,
+        display_pyramid=True,
         visualization=True,
         mip_export=True,
         analysis_parameters=None,
     )
-    assert sequence == ("visualization", "mip_export")
+    assert sequence == ("display_pyramid", "visualization", "mip_export")
 
 
 def test_analysis_operation_order_contains_expected_keys():
@@ -918,6 +980,7 @@ def test_analysis_operation_order_contains_expected_keys():
         "particle_detection",
         "usegment3d",
         "registration",
+        "display_pyramid",
         "visualization",
         "mip_export",
     )
@@ -959,13 +1022,14 @@ def test_validate_analysis_input_references_rejects_later_producer() -> None:
             "visualization": {"execution_order": 1, "input_source": "flatfield"},
             "flatfield": {"execution_order": 2, "input_source": "data"},
         },
-        available_components={"data", ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS["flatfield"]},
+        available_components={
+            "data",
+            ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS["flatfield"],
+        },
     )
 
     assert issues
-    assert all(
-        issue.reason == "producer_scheduled_after_consumer" for issue in issues
-    )
+    assert all(issue.reason == "producer_scheduled_after_consumer" for issue in issues)
 
 
 def test_validate_analysis_input_references_rejects_nonchainable_known_output() -> None:

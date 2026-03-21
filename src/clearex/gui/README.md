@@ -12,10 +12,15 @@ This folder owns the PyQt6 UX in `app.py`.
   - Add/remove experiment entries from the list and persist the list for reuse
   - Auto-load metadata when the current list selection changes
   - Configure Dask backend and Zarr save options
+  - Configure `Spatial Calibration` for the currently selected experiment:
+    - map world `z/y/x` to Navigate stage `X/Y/Z/F` or `none`,
+    - prefill from the target store when available,
+    - otherwise keep a per-experiment draft while setup remains open
   - Persist the last-used Zarr save config across sessions
   - Display image metadata
   - On `Next`, batch-materialize only missing/incomplete canonical stores for
-    every listed experiment, then continue with the currently selected
+    every listed experiment, persist the resolved spatial calibration for
+    every reused/new store, then continue with the currently selected
     experiment
   - `Rebuild Canonical Store` forces the listed stores to be rebuilt with the
     current GUI chunking and pyramid settings
@@ -29,6 +34,8 @@ This folder owns the PyQt6 UX in `app.py`.
       active dataset
   - The selected experiment switches the active store/provenance context shown
     in the dialog
+  - The selected experiment also switches the effective store-backed spatial
+    calibration carried in the workflow used for analysis launch
   - Current analysis-widget values are persisted per dataset on target switch,
     close, and run so reopening a store restores the previous GUI state
   - Left: operation selection, execution order, and `Configure` buttons
@@ -44,6 +51,8 @@ This folder owns the PyQt6 UX in `app.py`.
 - Unselected operations should not be configurable.
 - Per-operation `Input source` options depend on selected upstream operations and execution order.
 - `Visualization` is treated as a terminal/view step; it should not be offered as an upstream image source for later operations.
+- Visualization placement should come from the active target store's persisted
+  `spatial_calibration`, not from one-off GUI-only state.
 - Visualization configuration currently exposes:
   - `position_index` for multiposition datasets
   - multiscale loading toggle

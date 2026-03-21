@@ -8,6 +8,7 @@ The runtime architecture is built around these constraints:
 
 - GUI-first operator workflow, with fully supported headless execution.
 - Canonical analysis data layout in ``(t, p, c, z, y, x)``.
+- Metadata-only spatial calibration for Navigate multiposition placement.
 - Deterministic latest-output paths for large derived arrays.
 - Append-only, FAIR-oriented provenance records.
 - Shared configuration model between GUI and headless paths.
@@ -21,7 +22,8 @@ ClearEx is intentionally split into layers that can evolve independently:
    GUI in ``clearex.gui.app`` and CLI parsing in ``clearex.io.cli``.
 2. Configuration layer:
    typed runtime schema in ``clearex.workflow.WorkflowConfig`` (plus
-   ``DaskBackendConfig`` and ``ZarrSaveConfig``).
+   ``DaskBackendConfig``, ``ZarrSaveConfig``, and
+   ``SpatialCalibrationConfig``).
 3. Orchestration layer:
    workflow entrypoint and execution coordinator in ``clearex.main``.
 4. Data and metadata layer:
@@ -54,6 +56,8 @@ These contracts are stable and expected by multiple modules:
 - Canonical base image shape is always six-dimensional in
   ``(t, p, c, z, y, x)`` order.
 - Multiscale levels are stored under ``data_pyramid/level_<n>``.
+- Root attr ``spatial_calibration`` is the canonical per-store placement
+  mapping for Navigate multiposition stage coordinates.
 - Large analysis outputs are latest-only under ``results/<analysis>/latest``.
 - Provenance run history is append-only under ``provenance/runs``.
 - Provenance includes hash chaining for tamper-evident verification.

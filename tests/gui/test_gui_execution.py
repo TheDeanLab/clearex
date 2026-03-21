@@ -225,7 +225,9 @@ def test_setup_dialog_keeps_experiment_controls_visible_on_short_screens(
     if app is None:
         app = app_module.QApplication([])
 
-    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
 
     dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
     dialog.show()
@@ -253,7 +255,9 @@ def test_analysis_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     if app is None:
         app = app_module.QApplication([])
 
-    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
 
     dialog = app_module.AnalysisSelectionDialog(
         initial=app_module.WorkflowConfig(file="/tmp/test/data_store.fake")
@@ -290,7 +294,9 @@ def test_zarr_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     if app is None:
         app = app_module.QApplication([])
 
-    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
 
     dialog = app_module.ZarrSaveConfigDialog(initial=app_module.ZarrSaveConfig())
     dialog.show()
@@ -314,7 +320,9 @@ def test_dask_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     if app is None:
         app = app_module.QApplication([])
 
-    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
 
     dialog = app_module.DaskBackendConfigDialog(
         initial=app_module.DaskBackendConfig(),
@@ -394,8 +402,10 @@ def test_plan_experiment_store_materialization_partitions_pending_requests(
     monkeypatch.setattr(
         app_module,
         "_has_reusable_canonical_store",
-        lambda store_path: Path(store_path).expanduser().resolve()
-        == requests[2].target_store.resolve(),
+        lambda store_path: (
+            Path(store_path).expanduser().resolve()
+            == requests[2].target_store.resolve()
+        ),
     )
 
     selected_request, pending_requests, ready_requests = (
@@ -530,13 +540,27 @@ def test_reset_analysis_selection_for_next_run_preserves_scope() -> None:
 
     assert reset.file == "/tmp/cell_002/data_store.zarr"
     assert reset.analysis_targets == workflow.analysis_targets
-    assert (
-        reset.analysis_selected_experiment_path
-        == "/tmp/cell_002/experiment.yml"
-    )
+    assert reset.analysis_selected_experiment_path == "/tmp/cell_002/experiment.yml"
     assert reset.analysis_apply_to_all is True
     assert reset.flatfield is False
     assert reset.registration is False
+    assert reset.display_pyramid is False
+
+
+def test_reset_analysis_selection_for_next_run_preserves_spatial_calibration() -> None:
+    workflow = app_module.WorkflowConfig(
+        file="/tmp/cell_001/data_store.zarr",
+        spatial_calibration=app_module.SpatialCalibrationConfig(
+            stage_axis_map_zyx=("+x", "none", "+y")
+        ),
+        spatial_calibration_explicit=True,
+        visualization=True,
+    )
+
+    reset = app_module._reset_analysis_selection_for_next_run(workflow)
+
+    assert reset.spatial_calibration == workflow.spatial_calibration
+    assert reset.spatial_calibration_explicit is True
 
 
 def test_load_experiment_list_file_rejects_invalid_format(tmp_path) -> None:
@@ -614,6 +638,195 @@ def test_apply_experiment_overrides_populates_pixel_size_field() -> None:
     assert updated["pixel_size"] == "z=0.45, y=0.12, x=0.12"
 
 
+def test_workflows_for_selected_analysis_scope_uses_store_spatial_calibration(
+    tmp_path: Path,
+) -> None:
+    first_store = tmp_path / "cell_001" / "data_store.zarr"
+    second_store = tmp_path / "cell_002" / "data_store.zarr"
+    for store in (first_store, second_store):
+        store.parent.mkdir(parents=True, exist_ok=True)
+        root = app_module.zarr.open_group(str(store), mode="w")
+        root.create_dataset(
+            name="data",
+            shape=(1, 1, 1, 2, 2, 2),
+            chunks=(1, 1, 1, 2, 2, 2),
+            dtype="uint16",
+            overwrite=True,
+        )
+    app_module.save_store_spatial_calibration(
+        first_store,
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y")),
+    )
+    app_module.save_store_spatial_calibration(
+        second_store,
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+f", "-y", "+x")),
+    )
+
+    workflow = app_module.WorkflowConfig(
+        file=str(second_store),
+        analysis_targets=(
+            app_module.AnalysisTarget(
+                experiment_path=str(tmp_path / "cell_001" / "experiment.yml"),
+                store_path=str(first_store),
+            ),
+            app_module.AnalysisTarget(
+                experiment_path=str(tmp_path / "cell_002" / "experiment.yml"),
+                store_path=str(second_store),
+            ),
+        ),
+        analysis_selected_experiment_path=str(tmp_path / "cell_002" / "experiment.yml"),
+        analysis_apply_to_all=True,
+        visualization=True,
+    )
+
+    scoped = app_module._workflows_for_selected_analysis_scope(workflow)
+
+    assert [entry.spatial_calibration.stage_axis_map_zyx for entry in scoped] == [
+        ("+x", "none", "+y"),
+        ("+f", "-y", "+x"),
+    ]
+
+
+def test_setup_dialog_resolves_spatial_calibration_drafts_per_experiment() -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    first = Path("/tmp/cell_001/experiment.yml")
+    second = Path("/tmp/cell_002/experiment.yml")
+    dialog._spatial_calibration_drafts[first.resolve()] = (
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y"))
+    )
+    dialog._spatial_calibration_drafts[second.resolve()] = (
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+f", "-y", "+x"))
+    )
+
+    dialog._set_current_spatial_calibration(experiment_path=first)
+    assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
+        "+x",
+        "none",
+        "+y",
+    )
+
+    dialog._set_current_spatial_calibration(experiment_path=second)
+    assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
+        "+f",
+        "-y",
+        "+x",
+    )
+
+    dialog.close()
+
+
+def test_setup_dialog_prefills_spatial_calibration_from_existing_store(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    store_path = tmp_path / "existing_store.zarr"
+    root = app_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    app_module.save_store_spatial_calibration(
+        store_path,
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y")),
+    )
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    dialog._set_current_spatial_calibration(
+        experiment_path=tmp_path / "experiment.yml",
+        target_store=store_path,
+    )
+
+    assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
+        "+x",
+        "none",
+        "+y",
+    )
+    assert "z=+x,y=none,x=+y" in dialog._spatial_calibration_summary.text()
+
+    dialog.close()
+
+
+def test_setup_dialog_persists_spatial_calibration_for_all_requests(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    experiment_a = tmp_path / "cell_001" / "experiment.yml"
+    experiment_b = tmp_path / "cell_002" / "experiment.yml"
+    store_a = tmp_path / "cell_001" / "data_store.zarr"
+    store_b = tmp_path / "cell_002" / "data_store.zarr"
+    for store in (store_a, store_b):
+        store.parent.mkdir(parents=True, exist_ok=True)
+        root = app_module.zarr.open_group(str(store), mode="w")
+        root.create_dataset(
+            name="data",
+            shape=(1, 1, 1, 2, 2, 2),
+            chunks=(1, 1, 1, 2, 2, 2),
+            dtype="uint16",
+            overwrite=True,
+        )
+
+    dialog._spatial_calibration_drafts[experiment_a.resolve()] = (
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y"))
+    )
+    dialog._spatial_calibration_drafts[experiment_b.resolve()] = (
+        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+f", "-y", "+x"))
+    )
+    requests = (
+        app_module.ExperimentStorePreparationRequest(
+            experiment_path=experiment_a.resolve(),
+            experiment=_make_navigate_experiment(experiment_a),
+            source_data_path=tmp_path / "cell_001" / "raw.tif",
+            target_store=store_a.resolve(),
+        ),
+        app_module.ExperimentStorePreparationRequest(
+            experiment_path=experiment_b.resolve(),
+            experiment=_make_navigate_experiment(experiment_b),
+            source_data_path=tmp_path / "cell_002" / "raw.tif",
+            target_store=store_b.resolve(),
+        ),
+    )
+
+    persisted = dialog._persist_spatial_calibration_for_requests(requests)
+
+    assert persisted[store_a.resolve()].stage_axis_map_zyx == ("+x", "none", "+y")
+    assert persisted[store_b.resolve()].stage_axis_map_zyx == ("+f", "-y", "+x")
+    assert app_module.load_store_spatial_calibration(store_a).stage_axis_map_zyx == (
+        "+x",
+        "none",
+        "+y",
+    )
+    assert app_module.load_store_spatial_calibration(store_b).stage_axis_map_zyx == (
+        "+f",
+        "-y",
+        "+x",
+    )
+
+    dialog.close()
+
+
 def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
     monkeypatch,
 ) -> None:
@@ -622,8 +835,10 @@ def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
     monkeypatch.setattr(
         app_module,
         "_show_themed_error_dialog",
-        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
-            {"summary": str(summary), "details": str(details)}
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
         ),
     )
     seen_threads: list[threading.Thread] = []
@@ -635,7 +850,9 @@ def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
         progress_callback(80, "running")
 
     workflow = app_module.WorkflowConfig(
-        dask_backend=app_module.DaskBackendConfig(mode=app_module.DASK_BACKEND_SLURM_CLUSTER)
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        )
     )
 
     ok = app_module.run_workflow_with_progress(
@@ -670,8 +887,10 @@ def test_run_workflow_with_progress_slurm_batches_all_selected_experiments(
     monkeypatch.setattr(
         app_module,
         "_show_themed_error_dialog",
-        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
-            {"summary": str(summary), "details": str(details)}
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
         ),
     )
     executed_files: list[str] = []
@@ -736,8 +955,10 @@ def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
     monkeypatch.setattr(
         app_module,
         "_show_themed_error_dialog",
-        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
-            {"summary": str(summary), "details": str(details)}
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
         ),
     )
     seen_threads: list[threading.Thread] = []
@@ -749,7 +970,9 @@ def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
         raise RuntimeError("boom")
 
     workflow = app_module.WorkflowConfig(
-        dask_backend=app_module.DaskBackendConfig(mode=app_module.DASK_BACKEND_SLURM_CLUSTER)
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        )
     )
 
     ok = app_module.run_workflow_with_progress(
@@ -783,8 +1006,10 @@ def test_run_workflow_with_progress_slurm_cancels_without_error_dialog(
     monkeypatch.setattr(
         app_module,
         "_show_themed_error_dialog",
-        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
-            {"summary": str(summary), "details": str(details)}
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
         ),
     )
 
@@ -884,7 +1109,9 @@ def test_persisted_zarr_save_round_trip(tmp_path) -> None:
     assert loaded == config
 
 
-def test_load_persisted_backend_returns_none_for_empty_or_invalid_json(tmp_path) -> None:
+def test_load_persisted_backend_returns_none_for_empty_or_invalid_json(
+    tmp_path,
+) -> None:
     settings_path = tmp_path / ".clearex" / "dask_backend_settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text("  \n", encoding="utf-8")
@@ -901,20 +1128,20 @@ def test_load_persisted_backend_returns_none_for_empty_or_invalid_json(tmp_path)
     )
 
 
-def test_load_persisted_zarr_save_returns_none_for_empty_or_invalid_json(tmp_path) -> None:
+def test_load_persisted_zarr_save_returns_none_for_empty_or_invalid_json(
+    tmp_path,
+) -> None:
     settings_path = tmp_path / ".clearex" / "zarr_save_settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text("  \n", encoding="utf-8")
 
     assert (
-        app_module._load_last_used_zarr_save_config(settings_path=settings_path)
-        is None
+        app_module._load_last_used_zarr_save_config(settings_path=settings_path) is None
     )
 
     settings_path.write_text("{not-json}", encoding="utf-8")
     assert (
-        app_module._load_last_used_zarr_save_config(settings_path=settings_path)
-        is None
+        app_module._load_last_used_zarr_save_config(settings_path=settings_path) is None
     )
 
 
@@ -1149,7 +1376,9 @@ def test_build_input_source_options_includes_scheduled_upstream_outputs() -> Non
     ) in options
 
 
-def test_build_visualization_volume_layer_component_options_include_existing_outputs() -> None:
+def test_build_visualization_volume_layer_component_options_include_existing_outputs() -> (
+    None
+):
     options = app_module._build_visualization_volume_layer_component_options(
         selected_order=("visualization",),
         operation_key_order=(
@@ -1187,7 +1416,9 @@ def test_build_visualization_volume_layer_component_options_include_existing_out
     ) in options
 
 
-def test_build_visualization_volume_layer_component_options_include_scheduled_outputs() -> None:
+def test_build_visualization_volume_layer_component_options_include_scheduled_outputs() -> (
+    None
+):
     options = app_module._build_visualization_volume_layer_component_options(
         selected_order=("flatfield", "visualization"),
         operation_key_order=(
@@ -1217,7 +1448,9 @@ def test_build_visualization_volume_layer_component_options_include_scheduled_ou
     ) in options
 
 
-def test_build_visualization_volume_layer_component_options_deduplicates_components() -> None:
+def test_build_visualization_volume_layer_component_options_deduplicates_components() -> (
+    None
+):
     options = app_module._build_visualization_volume_layer_component_options(
         selected_order=("flatfield", "visualization"),
         operation_key_order=("flatfield", "deconvolution", "visualization"),
@@ -1285,6 +1518,32 @@ def test_discover_available_operation_output_components(monkeypatch) -> None:
     assert discovered == {"flatfield": "results/flatfield/latest/data"}
 
 
+def test_zarr_component_exists_in_root_uses_membership_semantics() -> None:
+    class _ImplicitGroupRoot:
+        def __contains__(self, key: object) -> bool:
+            return str(key) == "results/flatfield/latest/data"
+
+        def __getitem__(self, key: object) -> object:
+            del key
+            return object()
+
+    root = _ImplicitGroupRoot()
+    assert (
+        app_module._zarr_component_exists_in_root(
+            root,
+            "results/flatfield/latest/data",
+        )
+        is True
+    )
+    assert (
+        app_module._zarr_component_exists_in_root(
+            root,
+            "results/deconvolution/latest/data",
+        )
+        is False
+    )
+
+
 def test_particle_overlay_available_when_particle_detection_runs_first() -> None:
     available = app_module._particle_overlay_available_for_visualization(
         selected_order=["particle_detection", "visualization"],
@@ -1312,7 +1571,9 @@ def test_particle_overlay_available_with_existing_detections() -> None:
     assert from_store is True
 
 
-def test_sync_visualization_volume_layers_from_input_source_updates_primary_layer() -> None:
+def test_sync_visualization_volume_layers_from_input_source_updates_primary_layer() -> (
+    None
+):
     if not hasattr(app_module, "AnalysisSelectionDialog"):
         return
 
@@ -1336,8 +1597,8 @@ def test_sync_visualization_volume_layers_from_input_source_updates_primary_laye
         {"component": "data", "layer_type": "image"}
     ]
     refresh_calls = {"count": 0}
-    dialog._refresh_visualization_volume_layers_summary = lambda: refresh_calls.__setitem__(
-        "count", refresh_calls["count"] + 1
+    dialog._refresh_visualization_volume_layers_summary = lambda: (
+        refresh_calls.__setitem__("count", refresh_calls["count"] + 1)
     )
 
     app_module.AnalysisSelectionDialog._sync_visualization_volume_layers_from_input_source(
@@ -1401,16 +1662,81 @@ def test_collect_visualization_parameters_syncs_combo_with_primary_layer() -> No
     dialog._visualization_show_all_positions_checkbox = _FakeCheckbox(False)
     dialog._visualization_position_spin = _FakeSpin(0)
     dialog._visualization_multiscale_checkbox = _FakeCheckbox(False)
+    dialog._visualization_3d_checkbox = _FakeCheckbox(True)
     dialog._visualization_require_gpu_checkbox = _FakeCheckbox(False)
     dialog._visualization_overlay_points_checkbox = _FakeCheckbox(False)
 
-    params = app_module.AnalysisSelectionDialog._collect_visualization_parameters(dialog)
+    params = app_module.AnalysisSelectionDialog._collect_visualization_parameters(
+        dialog
+    )
 
     assert params["input_source"] == "results/shear_transform/latest/data"
-    assert params["volume_layers"][0]["component"] == "results/shear_transform/latest/data"
+    assert (
+        params["volume_layers"][0]["component"] == "results/shear_transform/latest/data"
+    )
 
 
-def test_validate_selected_analysis_dependencies_rejects_later_scheduled_producer() -> None:
+def test_on_run_propagates_display_pyramid_flag_into_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    class _FakeCheckbox:
+        def __init__(self, checked: bool) -> None:
+            self._checked = bool(checked)
+
+        def isChecked(self) -> bool:
+            return bool(self._checked)
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    base_config = app_module.WorkflowConfig(file="/tmp/data_store.zarr")
+    dialog._base_config = base_config
+    dialog._analysis_targets = ()
+    dialog._analysis_apply_to_all_checkbox = None
+    dialog._dask_backend_config = base_config.dask_backend
+    dialog._refresh_operation_provenance_statuses = lambda: None
+    dialog._current_analysis_target = lambda: None
+    dialog._persist_analysis_gui_state_for_target = lambda _target: None
+    dialog._validate_selected_analysis_dependencies = lambda _params: ()
+    dialog._selected_operations_in_sequence = lambda: ["display_pyramid"]
+    dialog._set_status = lambda _message: None
+
+    selected = {
+        operation_name: _FakeCheckbox(False)
+        for operation_name in dialog._OPERATION_KEYS
+    }
+    selected["display_pyramid"] = _FakeCheckbox(True)
+    dialog._operation_checkboxes = selected
+
+    normalized_defaults = app_module.normalize_analysis_operation_parameters(
+        base_config.analysis_parameters
+    )
+    dialog._collect_operation_parameters = lambda operation_name: dict(
+        normalized_defaults.get(str(operation_name), {})
+    )
+
+    accept_state = {"called": False}
+    dialog.accept = lambda: accept_state.__setitem__("called", True)
+
+    monkeypatch.setattr(
+        app_module,
+        "_save_last_used_dask_backend_config",
+        lambda _config: None,
+    )
+
+    app_module.AnalysisSelectionDialog._on_run(dialog)
+
+    assert accept_state["called"] is True
+    assert dialog.result_config.display_pyramid is True
+    assert dialog.result_config.visualization is False
+
+
+def test_validate_selected_analysis_dependencies_rejects_later_scheduled_producer() -> (
+    None
+):
     if not hasattr(app_module, "AnalysisSelectionDialog"):
         return
 
@@ -1421,12 +1747,14 @@ def test_validate_selected_analysis_dependencies_rejects_later_scheduled_produce
     dialog._selected_operations_in_sequence = lambda: ["visualization", "flatfield"]
     dialog._discover_store_output_components = lambda: {}
 
-    issues = app_module.AnalysisSelectionDialog._validate_selected_analysis_dependencies(
-        dialog,
-        {
-            "visualization": {"input_source": "flatfield"},
-            "flatfield": {"input_source": "data"},
-        },
+    issues = (
+        app_module.AnalysisSelectionDialog._validate_selected_analysis_dependencies(
+            dialog,
+            {
+                "visualization": {"input_source": "flatfield"},
+                "flatfield": {"input_source": "data"},
+            },
+        )
     )
 
     assert issues
@@ -1456,7 +1784,11 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
 
     dialog_cls = app_module.AnalysisSelectionDialog
     assert dialog_cls._OPERATION_LABELS["visualization"] == "Napari"
-    assert ("Visualization", ("visualization", "mip_export")) in dialog_cls._OPERATION_TABS
+    assert dialog_cls._OPERATION_LABELS["display_pyramid"] == "Display Pyramid"
+    assert (
+        "Visualization",
+        ("display_pyramid", "visualization", "mip_export"),
+    ) in dialog_cls._OPERATION_TABS
 
 
 def test_analysis_selection_dialog_themes_rounded_scroll_surfaces() -> None:
@@ -1499,16 +1831,16 @@ def test_visualization_popup_tables_use_uniform_widget_rows() -> None:
         in volume_layers_source
     )
     assert (
-        'header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)'
+        "header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)"
         in volume_layers_source
     )
-    assert 'table.setColumnWidth(0, 140)' in volume_layers_source
+    assert "table.setColumnWidth(0, 140)" in volume_layers_source
     assert 'placeholder_text="Optional name"' in volume_layers_source
     assert 'placeholder_text="All channels"' in volume_layers_source
     assert 'placeholder_text="Auto"' in volume_layers_source
-    assert 'line_edit.setPlaceholderText(str(placeholder_text))' in layer_table_source
-    assert 'table.setColumnWidth(2, 150)' in layer_table_source
-    assert 'QComboBox QLineEdit {' in popup_stylesheet_source
+    assert "line_edit.setPlaceholderText(str(placeholder_text))" in layer_table_source
+    assert "table.setColumnWidth(2, 150)" in layer_table_source
+    assert "QComboBox QLineEdit {" in popup_stylesheet_source
 
 
 def test_analysis_selection_dialog_detect_local_gpu_available(monkeypatch) -> None:

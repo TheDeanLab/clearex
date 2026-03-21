@@ -16,7 +16,11 @@ import zarr
 
 # Local Imports
 import clearex.visualization.pipeline as visualization_pipeline
-from clearex.visualization.pipeline import run_visualization_analysis
+from clearex.visualization.pipeline import (
+    run_display_pyramid_analysis,
+    run_visualization_analysis,
+)
+from clearex.workflow import spatial_calibration_to_dict
 
 
 def _single_image_volume_layers(
@@ -148,6 +152,7 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
             "input_source": "data",
             "position_index": 1,
             "use_multiscale": True,
+            "use_3d_view": False,
             "launch_mode": "in_process",
         },
     )
@@ -161,6 +166,9 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     assert summary.overlay_points_count == 1
     assert summary.launch_mode == "in_process"
     assert summary.viewer_pid is None
+    assert summary.viewer_ndisplay_requested == 2
+    assert summary.viewer_ndisplay_effective == 2
+    assert summary.display_mode_fallback_reason is None
     assert (
         summary.keyframe_manifest_path
         == f"{store_path.resolve()}.visualization_keyframes.json"
@@ -197,6 +205,8 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     assert latest_attrs["selected_positions"] == [1]
     assert latest_attrs["show_all_positions"] is False
     assert latest_attrs["launch_mode"] == "in_process"
+    assert latest_attrs["viewer_ndisplay_requested"] == 2
+    assert latest_attrs["viewer_ndisplay_effective"] == 2
     assert latest_attrs["overlay_points_count"] == 1
     assert latest_attrs["source_components"] == ["data", "data_pyramid/level_1"]
     assert latest_attrs["volume_layers"][0]["component"] == "data"
@@ -253,6 +263,9 @@ def test_run_visualization_analysis_subprocess_launch(
     assert summary.position_index == 0
     assert summary.selected_positions == (0,)
     assert summary.show_all_positions is False
+    assert summary.viewer_ndisplay_requested == 3
+    assert summary.viewer_ndisplay_effective == 3
+    assert summary.display_mode_fallback_reason is None
     assert (
         summary.keyframe_manifest_path
         == f"{store_path.resolve()}.visualization_keyframes.json"
@@ -270,6 +283,8 @@ def test_run_visualization_analysis_subprocess_launch(
     latest_attrs = dict(output_root["results"]["visualization"]["latest"].attrs)
     assert latest_attrs["viewer_pid"] == 43210
     assert latest_attrs["launch_mode"] == "subprocess"
+    assert latest_attrs["viewer_ndisplay_requested"] == 3
+    assert latest_attrs["viewer_ndisplay_effective"] == 3
     assert latest_attrs["capture_keyframes"] is True
     assert latest_attrs["keyframe_count"] == 0
     assert latest_attrs["keyframe_layer_overrides"] == []
@@ -326,8 +341,56 @@ def test_run_visualization_analysis_require_policy_rejects_without_pyramid(
         )
 
 
-def test_run_visualization_analysis_auto_builds_multiscale_layer(
-    tmp_path: Path, monkeypatch
+def test_run_display_pyramid_analysis_materializes_levels_and_contrast_metadata(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="results/shear_transform/latest/data",
+        shape=(1, 1, 2, 8, 8, 8),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    summary = run_display_pyramid_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "results/shear_transform/latest/data",
+        },
+    )
+
+    assert summary.component == "results/display_pyramid/latest"
+    assert summary.source_component == "results/shear_transform/latest/data"
+    assert len(summary.source_components) > 1
+    assert summary.channel_count == 2
+    assert len(summary.contrast_limits_by_channel) == 2
+    assert summary.reused_existing_levels is False
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    source_attrs = dict(output_root["results/shear_transform/latest/data"].attrs)
+    latest_attrs = dict(output_root["results"]["display_pyramid"]["latest"].attrs)
+    assert len(source_attrs["display_pyramid_levels"]) > 1
+    assert all(
+        str(component).startswith("results/display_pyramid/by_component/")
+        or str(component) == "results/shear_transform/latest/data"
+        for component in source_attrs["display_pyramid_levels"]
+    )
+    assert source_attrs["display_contrast_percentiles"] == [1.0, 95.0]
+    assert len(source_attrs["display_contrast_limits_by_channel"]) == 2
+    assert source_attrs["display_contrast_source_component"] == str(
+        summary.source_components[-1]
+    )
+    assert latest_attrs["source_component"] == "results/shear_transform/latest/data"
+    assert latest_attrs["display_contrast_source_component"] == str(
+        summary.source_components[-1]
+    )
+    assert latest_attrs["reused_existing_levels"] is False
+
+
+def test_run_display_pyramid_analysis_reuses_existing_levels(
+    tmp_path: Path,
 ) -> None:
     store_path = tmp_path / "analysis_store.zarr"
     root = zarr.open_group(str(store_path), mode="w")
@@ -338,75 +401,50 @@ def test_run_visualization_analysis_auto_builds_multiscale_layer(
         dtype="uint16",
         overwrite=True,
     )
-
-    captured: dict[str, object] = {}
-
-    def _fake_launch_napari_viewer(
-        *,
-        zarr_path,
-        volume_layers,
-        selected_positions,
-        points_by_position,
-        point_properties_by_position,
-        position_affines_tczyx,
-        axis_labels,
-        scale_tczyx,
-        image_metadata,
-        points_metadata,
-        require_gpu_rendering,
-        capture_keyframes,
-        keyframe_manifest_path,
-        keyframe_layer_overrides,
-    ) -> None:
-        del zarr_path
-        del selected_positions
-        del points_by_position
-        del point_properties_by_position
-        del position_affines_tczyx
-        del axis_labels
-        del scale_tczyx
-        del image_metadata
-        del points_metadata
-        del require_gpu_rendering
-        del capture_keyframes
-        del keyframe_manifest_path
-        del keyframe_layer_overrides
-        captured["volume_layers"] = list(volume_layers)
-
-    monkeypatch.setattr(
-        visualization_pipeline,
-        "_launch_napari_viewer",
-        _fake_launch_napari_viewer,
+    root.create_dataset(
+        name="data_pyramid/level_1",
+        shape=(1, 1, 1, 4, 4, 4),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
     )
+    root.attrs["data_pyramid_levels"] = ["data", "data_pyramid/level_1"]
+    root["data"].attrs["pyramid_levels"] = ["data", "data_pyramid/level_1"]
 
-    summary = run_visualization_analysis(
+    summary = run_display_pyramid_analysis(
         zarr_path=store_path,
-        parameters={
-            "launch_mode": "in_process",
-            "overlay_particle_detections": False,
-            "volume_layers": [
-                {
-                    "component": "data",
-                    "multiscale_policy": "auto_build",
-                }
-            ],
-        },
+        parameters={"input_source": "data"},
     )
 
-    layer = captured["volume_layers"][0]
-    assert len(layer.source_components) > 1
-    assert summary.source_component == "data"
-    assert len(summary.source_components) > 1
-    latest_attrs = dict(
-        zarr.open_group(str(store_path), mode="r")["results"]["visualization"][
-            "latest"
-        ].attrs
+    assert summary.source_components == ("data", "data_pyramid/level_1")
+    assert summary.reused_existing_levels is True
+
+
+def test_run_display_pyramid_analysis_avoids_forced_rechunk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="results/shear_transform/latest/data",
+        shape=(1, 1, 1, 8, 8, 8),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
     )
-    assert latest_attrs["volume_layers"][0]["multiscale_status"] in {
-        "auto_built",
-        "existing",
-    }
-    assert latest_attrs["volume_layers"][0]["component"] == "data"
+
+    def _unexpected_rechunk(self, *args, **kwargs):
+        del self, args, kwargs
+        raise AssertionError("Display pyramid should not force rechunk writes.")
+
+    monkeypatch.setattr(da.Array, "rechunk", _unexpected_rechunk)
+
+    summary = run_display_pyramid_analysis(
+        zarr_path=store_path,
+        parameters={"input_source": "results/shear_transform/latest/data"},
+    )
+    assert len(summary.source_components) > 1
 
 
 def test_run_visualization_analysis_uses_experiment_spacing_when_available(
@@ -693,6 +731,8 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
     image_metadata = dict(captured["image_metadata"])
     assert image_metadata["selected_positions"] == [0, 1]
     assert image_metadata["show_all_positions"] is True
+    assert image_metadata["spatial_calibration_text"] == "z=+z,y=+y,x=+x"
+    assert image_metadata["stage_positions_xyzthetaf"][1]["f"] == 0.0
 
     latest_attrs = dict(
         zarr.open_group(str(store_path), mode="r")["results"]["visualization"][
@@ -702,6 +742,98 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
     assert latest_attrs["position_index"] == 0
     assert latest_attrs["selected_positions"] == [0, 1]
     assert latest_attrs["show_all_positions"] is True
+    assert latest_attrs["spatial_calibration_text"] == "z=+z,y=+y,x=+x"
+
+
+def test_resolve_position_affines_tczyx_supports_focus_axis_and_sign_inversion(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    experiment_path.write_text(
+        json.dumps(
+            {
+                "Saving": {"save_directory": str(tmp_path), "file_type": "TIFF"},
+                "MicroscopeState": {"timepoints": 1, "number_z_steps": 1},
+            }
+        )
+    )
+    (tmp_path / "multi_positions.yml").write_text(
+        json.dumps(
+            [
+                ["X", "Y", "Z", "THETA", "F"],
+                [0, 0, 0, 0, 0],
+                [10, 20, 30, 15, 5],
+            ]
+        )
+    )
+
+    affines, stage_rows, spatial_calibration = (
+        visualization_pipeline._resolve_position_affines_tczyx(
+            root_attrs={
+                "source_experiment": str(experiment_path),
+                "spatial_calibration": {
+                    "schema": "clearex.spatial_calibration.v1",
+                    "stage_axis_map_zyx": {"z": "+f", "y": "-y", "x": "+x"},
+                    "theta_mode": "rotate_zy_about_x",
+                },
+            },
+            selected_positions=(0, 1),
+            scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        )
+    )
+
+    affine = np.asarray(affines[1], dtype=np.float64)
+
+    assert stage_rows[1]["f"] == 5.0
+    assert affine[2, 5] == 5.0
+    assert affine[3, 5] == -20.0
+    assert affine[4, 5] == 10.0
+    assert spatial_calibration.stage_axis_map_zyx == ("+f", "-y", "+x")
+
+
+def test_resolve_position_affines_tczyx_supports_none_and_nontrivial_mapping(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    experiment_path.write_text(
+        json.dumps(
+            {
+                "Saving": {"save_directory": str(tmp_path), "file_type": "TIFF"},
+                "MicroscopeState": {"timepoints": 1, "number_z_steps": 1},
+            }
+        )
+    )
+    (tmp_path / "multi_positions.yml").write_text(
+        json.dumps(
+            [
+                ["X", "Y", "Z", "THETA", "F"],
+                [0, 0, 0, 0, 0],
+                [10, 20, 30, 15, 5],
+            ]
+        )
+    )
+
+    affines, _stage_rows, spatial_calibration = (
+        visualization_pipeline._resolve_position_affines_tczyx(
+            root_attrs={
+                "source_experiment": str(experiment_path),
+                "spatial_calibration": spatial_calibration_to_dict(
+                    visualization_pipeline.SpatialCalibrationConfig(
+                        stage_axis_map_zyx=("+x", "none", "+y")
+                    )
+                ),
+            },
+            selected_positions=(0, 1),
+            scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        )
+    )
+
+    affine = np.asarray(affines[1], dtype=np.float64)
+
+    assert affine[2, 5] == 10.0
+    assert affine[3, 5] == 0.0
+    assert affine[4, 5] == 20.0
+    assert spatial_calibration.stage_axis_map_zyx == ("+x", "none", "+y")
 
 
 def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
@@ -793,7 +925,7 @@ def test_launch_napari_viewer_applies_axis_labels_after_layer_load(
     assert first_image_kwargs["rendering"] == "attenuated_mip"
     assert first_image_kwargs["opacity"] == 0.9
     assert second_image_kwargs["opacity"] == 0.9
-    assert tuple(first_image_kwargs["contrast_limits"]) == (0.0, 1.0)
+    assert tuple(first_image_kwargs["contrast_limits"]) == (0.0, 65535.0)
     first_affine = np.asarray(first_image_kwargs["affine"], dtype=np.float64)
     second_affine = np.asarray(second_image_kwargs["affine"], dtype=np.float64)
     assert np.allclose(first_affine, np.eye(6, dtype=np.float64))
@@ -878,6 +1010,77 @@ def test_launch_napari_viewer_three_channels_use_requested_default_colormaps(
     assert all(float(kwargs["opacity"]) == 0.8 for kwargs in viewer.image_calls)
 
 
+def test_launch_napari_viewer_defaults_multiposition_images_to_translucent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = np.zeros((1, 2, 1, 3, 4, 5), dtype=np.uint16)
+
+    def _fake_from_zarr(_path: str, *, component: str):
+        assert component == "data"
+        return source
+
+    monkeypatch.setattr(visualization_pipeline.da, "from_zarr", _fake_from_zarr)
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.ndim = 2
+            self.axis_labels = ("0", "1")
+
+    class _FakeViewer:
+        def __init__(self, *, ndisplay: int, show: bool) -> None:
+            del ndisplay, show
+            self.dims = _FakeDims()
+            self.image_calls: list[dict[str, object]] = []
+
+        def add_image(self, data, **kwargs):
+            del data
+            self.image_calls.append(dict(kwargs))
+            self.dims.ndim = 5
+            return None
+
+        def add_points(self, *_args, **_kwargs):
+            return None
+
+    class _FakeNapari:
+        def __init__(self) -> None:
+            self.viewer: _FakeViewer | None = None
+
+        def Viewer(self, *, ndisplay: int, show: bool):
+            self.viewer = _FakeViewer(ndisplay=ndisplay, show=show)
+            return self.viewer
+
+        def run(self) -> None:
+            return None
+
+    fake_napari = _FakeNapari()
+    monkeypatch.setitem(sys.modules, "napari", fake_napari)
+
+    visualization_pipeline._launch_napari_viewer(
+        zarr_path=tmp_path / "analysis_store.zarr",
+        volume_layers=_single_image_volume_layers(),
+        selected_positions=(0, 1),
+        points_by_position={},
+        point_properties_by_position={},
+        position_affines_tczyx={
+            0: np.eye(6, dtype=np.float64),
+            1: np.eye(6, dtype=np.float64),
+        },
+        axis_labels=("t", "c", "z", "y", "x"),
+        scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        image_metadata={"viewer_ndisplay_requested": 2, "viewer_ndisplay_effective": 2},
+        points_metadata={},
+        require_gpu_rendering=False,
+        capture_keyframes=False,
+        keyframe_manifest_path=None,
+        keyframe_layer_overrides=[],
+    )
+
+    viewer = fake_napari.viewer
+    assert viewer is not None
+    assert len(viewer.image_calls) == 2
+    assert all(str(kwargs["blending"]) == "translucent" for kwargs in viewer.image_calls)
+
+
 def test_launch_napari_viewer_requests_3d_display_mode(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -946,6 +1149,75 @@ def test_launch_napari_viewer_requests_3d_display_mode(
     assert viewer.initial_ndisplay == 3
     assert len(viewer.image_calls) == 1
     assert viewer.image_calls[0]["rendering"] == "attenuated_mip"
+
+
+def test_launch_napari_viewer_requests_2d_display_mode_when_metadata_disables_3d(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = np.zeros((1, 1, 1, 3, 4, 5), dtype=np.uint16)
+
+    def _fake_from_zarr(_path: str, *, component: str):
+        assert component == "data"
+        return source
+
+    monkeypatch.setattr(visualization_pipeline.da, "from_zarr", _fake_from_zarr)
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.ndim = 2
+            self.axis_labels = ("0", "1")
+
+    class _FakeViewer:
+        def __init__(self, *, ndisplay: int, show: bool) -> None:
+            del show
+            self.initial_ndisplay = int(ndisplay)
+            self.dims = _FakeDims()
+            self.image_calls: list[dict[str, object]] = []
+
+        def add_image(self, data, **kwargs):
+            del data
+            self.image_calls.append(dict(kwargs))
+            self.dims.ndim = 5
+            return None
+
+        def add_points(self, *_args, **_kwargs):
+            return None
+
+    class _FakeNapari:
+        def __init__(self) -> None:
+            self.viewer: _FakeViewer | None = None
+
+        def Viewer(self, *, ndisplay: int, show: bool):
+            self.viewer = _FakeViewer(ndisplay=ndisplay, show=show)
+            return self.viewer
+
+        def run(self) -> None:
+            return None
+
+    fake_napari = _FakeNapari()
+    monkeypatch.setitem(sys.modules, "napari", fake_napari)
+
+    visualization_pipeline._launch_napari_viewer(
+        zarr_path=tmp_path / "analysis_store.zarr",
+        volume_layers=_single_image_volume_layers(),
+        selected_positions=(0,),
+        points_by_position={},
+        point_properties_by_position={},
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        axis_labels=("t", "c", "z", "y", "x"),
+        scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        image_metadata={"viewer_ndisplay": 2},
+        points_metadata={},
+        require_gpu_rendering=False,
+        capture_keyframes=False,
+        keyframe_manifest_path=None,
+        keyframe_layer_overrides=[],
+    )
+
+    viewer = fake_napari.viewer
+    assert viewer is not None
+    assert viewer.initial_ndisplay == 2
+    assert len(viewer.image_calls) == 1
 
 
 def test_launch_napari_viewer_resolves_per_layer_scale_for_downsampled_components(
@@ -1076,47 +1348,144 @@ def test_launch_napari_viewer_resolves_per_layer_scale_for_downsampled_component
     )
 
 
-def test_resolve_display_level_arrays_for_voxel_budget_applies_stride() -> None:
-    base = da.zeros(
-        (1, 1, 500, 2048, 2048),
-        chunks=(1, 1, 64, 256, 256),
-        dtype=np.uint8,
+def test_run_visualization_analysis_large_3d_request_forces_2d_and_persists_reason(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 400, 1000, 1000),
+        chunks=(1, 1, 1, 40, 100, 100),
+        dtype="uint16",
+        overwrite=True,
     )
 
-    arrays, scale, factors, strategy = (
-        visualization_pipeline._resolve_display_level_arrays_for_voxel_budget(
-            level_arrays=(base,),
-            layer_scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
-            max_display_voxels=256_000_000,
-        )
+    captured: dict[str, object] = {}
+
+    def _fake_launch_napari_viewer(**kwargs):
+        captured["volume_layers"] = list(kwargs["volume_layers"])
+        captured["image_metadata"] = dict(kwargs["image_metadata"])
+        return {"keyframe_count": 0, "renderer": {}}
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_launch_napari_viewer",
+        _fake_launch_napari_viewer,
     )
 
-    assert strategy == "stride"
-    assert len(arrays) == 1
-    assert tuple(int(v) for v in arrays[0].shape[-3:]) == (167, 683, 683)
-    assert scale == (1.0, 1.0, 3.0, 3.0, 3.0)
-    assert factors == (3.0, 3.0, 3.0)
-
-
-def test_resolve_display_level_arrays_for_voxel_budget_uses_coarser_level() -> None:
-    level0 = da.zeros((1, 1, 500, 2048, 2048), chunks=(1, 1, 64, 256, 256))
-    level1 = da.zeros((1, 1, 250, 1024, 1024), chunks=(1, 1, 64, 256, 256))
-    level2 = da.zeros((1, 1, 125, 512, 512), chunks=(1, 1, 64, 256, 256))
-
-    arrays, scale, factors, strategy = (
-        visualization_pipeline._resolve_display_level_arrays_for_voxel_budget(
-            level_arrays=(level0, level1, level2),
-            layer_scale_tczyx=(1.0, 1.0, 1.5, 0.5, 0.5),
-            max_display_voxels=300_000_000,
-        )
+    summary = run_visualization_analysis(
+        zarr_path=store_path,
+        parameters={
+            "launch_mode": "in_process",
+            "overlay_particle_detections": False,
+            "use_3d_view": True,
+        },
     )
 
-    assert strategy == "coarse_level"
-    assert len(arrays) == 2
-    assert tuple(int(v) for v in arrays[0].shape[-3:]) == (250, 1024, 1024)
-    assert tuple(int(v) for v in arrays[1].shape[-3:]) == (125, 512, 512)
-    assert scale == (1.0, 1.0, 3.0, 1.0, 1.0)
-    assert factors == (2.0, 2.0, 2.0)
+    assert summary.viewer_ndisplay_requested == 3
+    assert summary.viewer_ndisplay_effective == 2
+    assert summary.display_mode_fallback_reason is not None
+    assert "Falling back to 2D" in str(summary.display_mode_fallback_reason)
+    image_metadata = dict(captured["image_metadata"])
+    assert image_metadata["viewer_ndisplay_requested"] == 3
+    assert image_metadata["viewer_ndisplay_effective"] == 2
+    assert "display_mode_fallback_reason" in image_metadata
+
+    latest_attrs = dict(
+        zarr.open_group(str(store_path), mode="r")["results"]["visualization"][
+            "latest"
+        ].attrs
+    )
+    assert latest_attrs["viewer_ndisplay_requested"] == 3
+    assert latest_attrs["viewer_ndisplay_effective"] == 2
+    assert "display_mode_fallback_reason" in latest_attrs
+
+
+def test_launch_napari_viewer_3d_uses_base_array_only_and_skips_percentiles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = np.zeros((1, 1, 1, 4, 4, 4), dtype=np.uint16)
+    level1 = np.zeros((1, 1, 1, 2, 2, 2), dtype=np.uint16)
+    requested_components: list[str] = []
+
+    def _fake_from_zarr(_path: str, *, component: str):
+        requested_components.append(str(component))
+        if component == "data":
+            return source
+        if component == "data_pyramid/level_1":
+            return level1
+        raise AssertionError(component)
+
+    monkeypatch.setattr(visualization_pipeline.da, "from_zarr", _fake_from_zarr)
+    monkeypatch.setattr(
+        visualization_pipeline.da,
+        "percentile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("viewer launch should not compute percentiles")
+        ),
+    )
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.ndim = 2
+            self.axis_labels = ("0", "1")
+
+    class _FakeViewer:
+        def __init__(self, *, ndisplay: int, show: bool) -> None:
+            del show
+            self.initial_ndisplay = int(ndisplay)
+            self.dims = _FakeDims()
+            self.image_calls: list[dict[str, object]] = []
+
+        def add_image(self, data, **kwargs):
+            del data
+            self.image_calls.append(dict(kwargs))
+            self.dims.ndim = 5
+            return None
+
+        def add_points(self, *_args, **_kwargs):
+            return None
+
+    class _FakeNapari:
+        def __init__(self) -> None:
+            self.viewer: _FakeViewer | None = None
+
+        def Viewer(self, *, ndisplay: int, show: bool):
+            self.viewer = _FakeViewer(ndisplay=ndisplay, show=show)
+            return self.viewer
+
+        def run(self) -> None:
+            return None
+
+    fake_napari = _FakeNapari()
+    monkeypatch.setitem(sys.modules, "napari", fake_napari)
+
+    visualization_pipeline._launch_napari_viewer(
+        zarr_path=tmp_path / "analysis_store.zarr",
+        volume_layers=_single_image_volume_layers(
+            source_components=("data", "data_pyramid/level_1")
+        ),
+        selected_positions=(0,),
+        points_by_position={},
+        point_properties_by_position={},
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        axis_labels=("t", "c", "z", "y", "x"),
+        scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        image_metadata={"viewer_ndisplay_requested": 3, "viewer_ndisplay_effective": 3},
+        points_metadata={},
+        require_gpu_rendering=False,
+        capture_keyframes=False,
+        keyframe_manifest_path=None,
+        keyframe_layer_overrides=[],
+    )
+
+    viewer = fake_napari.viewer
+    assert viewer is not None
+    assert viewer.initial_ndisplay == 3
+    assert requested_components == ["data"]
+    assert len(viewer.image_calls) == 1
+    assert viewer.image_calls[0]["multiscale"] is False
 
 
 def test_launch_napari_viewer_rejects_software_renderer_when_required(

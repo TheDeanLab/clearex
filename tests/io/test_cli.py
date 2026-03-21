@@ -50,6 +50,7 @@ def test_analysis_flags_are_parsed():
             "--particle-detection",
             "--usegment3d",
             "--registration",
+            "--display-pyramid",
             "--visualization",
             "--mip-export",
             "--headless",
@@ -62,6 +63,7 @@ def test_analysis_flags_are_parsed():
     assert args.particle_detection is True
     assert args.usegment3d is True
     assert args.registration is True
+    assert args.display_pyramid is True
     assert args.visualization is True
     assert args.mip_export is True
     assert args.headless is True
@@ -79,3 +81,9 @@ def test_channel_indices_flag_accepts_indices_and_all():
 def test_input_resolution_level_flag_parses_integer():
     args = create_parser().parse_args(["--input-resolution-level", "2"])
     assert args.input_resolution_level == 2
+
+
+def test_stage_axis_map_flag_parses_string():
+    args = create_parser().parse_args(["--stage-axis-map", "z=+x,y=none,x=+y"])
+
+    assert args.stage_axis_map == "z=+x,y=none,x=+y"

@@ -43,7 +43,6 @@ import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 # Third Party Imports
-import dask
 import dask.array as da
 import numpy as np
 import zarr
@@ -51,6 +50,12 @@ import zarr
 # Local Imports
 from clearex.io.experiment import load_navigate_experiment
 from clearex.io.provenance import register_latest_output_reference
+from clearex.workflow import (
+    SpatialCalibrationConfig,
+    format_spatial_calibration,
+    spatial_calibration_from_dict,
+    spatial_calibration_to_dict,
+)
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -64,10 +69,18 @@ _DEFAULT_PYRAMID_FACTORS_TPCZYX = (
     (1, 2, 4, 8),
     (1, 2, 4, 8),
 )
-_VOLUME_LAYER_MULTISCALE_POLICIES = frozenset(
-    {"inherit", "require", "auto_build", "off"}
-)
+_VOLUME_LAYER_MULTISCALE_POLICIES = frozenset({"inherit", "require", "off"})
 _MAX_LAYER_DISPLAY_VOXELS = 256_000_000
+_DISPLAY_PYRAMID_LEVELS_ATTR = "display_pyramid_levels"
+_DISPLAY_PYRAMID_FACTORS_ATTR = "display_pyramid_factors_tpczyx"
+_DISPLAY_PYRAMID_ROOT_MAP_ATTR = "display_pyramid_levels_by_component"
+_LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR = "visualization_pyramid_levels"
+_LEGACY_DISPLAY_PYRAMID_FACTORS_ATTR = "visualization_pyramid_factors_tpczyx"
+_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR = "visualization_pyramid_levels_by_component"
+_DISPLAY_CONTRAST_LIMITS_ATTR = "display_contrast_limits_by_channel"
+_DISPLAY_CONTRAST_PERCENTILES_ATTR = "display_contrast_percentiles"
+_DISPLAY_CONTRAST_LEVEL_SOURCE_ATTR = "display_contrast_source_component"
+_DISPLAY_CONTRAST_SAMPLE_TARGET_VOXELS = 2_000_000
 _SOFTWARE_RENDERER_HINTS = (
     "llvmpipe",
     "softpipe",
@@ -141,6 +154,38 @@ class VisualizationSummary:
     keyframe_manifest_path: Optional[str] = None
     keyframe_count: int = 0
     renderer: Optional[Dict[str, Any]] = None
+    viewer_ndisplay_requested: int = 3
+    viewer_ndisplay_effective: int = 3
+    display_mode_fallback_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DisplayPyramidSummary:
+    """Summary metadata for one display-pyramid preparation run.
+
+    Attributes
+    ----------
+    component : str
+        Latest output metadata group path for the task.
+    source_component : str
+        Source component used to prepare the display pyramid.
+    source_components : tuple[str, ...]
+        Ordered multiscale components registered for later visualization.
+    channel_count : int
+        Number of source channels summarized for display contrast.
+    contrast_limits_by_channel : tuple[tuple[float, float], ...]
+        Stored per-channel contrast limits derived from the fixed display
+        percentiles.
+    reused_existing_levels : bool
+        Whether the task reused existing levels instead of writing new ones.
+    """
+
+    component: str
+    source_component: str
+    source_components: tuple[str, ...]
+    channel_count: int
+    contrast_limits_by_channel: tuple[tuple[float, float], ...]
+    reused_existing_levels: bool
 
 
 @dataclass(frozen=True)
@@ -193,9 +238,9 @@ class ResolvedVolumeLayer:
     name : str
         Optional layer base-name override.
     multiscale_policy : str
-        Layer multiscale policy: ``inherit``, ``require``, ``auto_build``, or ``off``.
+        Layer multiscale policy: ``inherit``, ``require``, or ``off``.
     multiscale_status : str
-        Effective multiscale outcome: ``off``, ``existing``, ``auto_built``, or
+        Effective multiscale outcome: ``off``, ``existing``, or
         ``single_scale``.
     """
 
@@ -855,6 +900,16 @@ def _build_napari_layer_payload(
             source_attrs.get("resolution_pyramid_factors_tpczyx")
             or root_attrs.get("resolution_pyramid_factors_tpczyx")
         ),
+        "display_pyramid_lookup": {
+            "source_attr": _DISPLAY_PYRAMID_LEVELS_ATTR,
+            "root_attr_map": _DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+            "legacy_source_attr": _LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR,
+            "legacy_root_attr_map": _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+        },
+        "display_contrast_metadata_reference": {
+            "limits_attr": _DISPLAY_CONTRAST_LIMITS_ATTR,
+            "percentiles_attr": _DISPLAY_CONTRAST_PERCENTILES_ATTR,
+        },
         "data_pyramid_levels": root_attrs.get("data_pyramid_levels"),
         "data_pyramid_factors_tpczyx": root_attrs.get("data_pyramid_factors_tpczyx"),
         "multiscale_levels": multiscale_levels,
@@ -923,6 +978,7 @@ def _normalize_visualization_parameters(
     normalized["show_all_positions"] = bool(normalized.get("show_all_positions", False))
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
+    normalized["use_3d_view"] = bool(normalized.get("use_3d_view", True))
     normalized["overlay_particle_detections"] = bool(
         normalized.get("overlay_particle_detections", True)
     )
@@ -1219,6 +1275,8 @@ def _normalize_visualization_volume_layers(value: Any) -> list[Dict[str, Any]]:
             str(raw_row.get("multiscale_policy", "inherit")).strip().lower()
             or "inherit"
         )
+        if multiscale_policy == "auto_build":
+            multiscale_policy = "inherit"
         if multiscale_policy not in _VOLUME_LAYER_MULTISCALE_POLICIES:
             multiscale_policy = "inherit"
         blending = str(raw_row.get("blending", "")).strip().lower()
@@ -1688,7 +1746,7 @@ def _resolve_visualization_pyramid_factors_tpczyx(
     root_attrs: Mapping[str, Any],
     source_attrs: Mapping[str, Any],
 ) -> tuple[tuple[int, int, int, int, int, int], ...]:
-    """Resolve absolute level factors used by visualization auto-build.
+    """Resolve absolute level factors used by display-pyramid preparation.
 
     Parameters
     ----------
@@ -1703,6 +1761,8 @@ def _resolve_visualization_pyramid_factors_tpczyx(
         Absolute level factors in canonical order.
     """
     candidates = [
+        source_attrs.get(_DISPLAY_PYRAMID_FACTORS_ATTR),
+        source_attrs.get(_LEGACY_DISPLAY_PYRAMID_FACTORS_ATTR),
         source_attrs.get("visualization_pyramid_factors_tpczyx"),
         source_attrs.get("pyramid_factors_tpczyx"),
         source_attrs.get("resolution_pyramid_factors_tpczyx"),
@@ -1763,6 +1823,45 @@ def _volume_voxel_count_tczyx(shape_tczyx: Sequence[int]) -> int:
     )
 
 
+def _resolve_effective_viewer_ndisplay(
+    *,
+    root: zarr.hierarchy.Group,
+    volume_layers: Sequence[ResolvedVolumeLayer],
+    requested_ndisplay: int,
+    max_display_voxels: int = _MAX_LAYER_DISPLAY_VOXELS,
+) -> tuple[int, Optional[str]]:
+    """Resolve effective napari display mode with strict 3D safety fallback."""
+    requested = 3 if int(requested_ndisplay) >= 3 else 2
+    if requested != 3:
+        return 2, None
+
+    for layer in volume_layers:
+        if str(layer.layer_type) != "image":
+            continue
+        source_component = str(layer.component).strip() or "data"
+        try:
+            source_array = root[source_component]
+        except Exception:
+            continue
+        shape_tpczyx = tuple(int(value) for value in tuple(source_array.shape))
+        if len(shape_tpczyx) != 6:
+            continue
+        voxel_count = max(
+            0,
+            int(shape_tpczyx[3]) * int(shape_tpczyx[4]) * int(shape_tpczyx[5]),
+        )
+        if voxel_count <= int(max_display_voxels):
+            continue
+        reason = (
+            "3D rendering requested, but image layer "
+            f"'{source_component}' has {voxel_count:,} z/y/x voxels, exceeding the "
+            f"ClearEx 3D render limit of {int(max_display_voxels):,}. "
+            "Falling back to 2D without launch-time downsampling."
+        )
+        return 2, reason
+    return 3, None
+
+
 def _resolve_display_level_arrays_for_voxel_budget(
     *,
     level_arrays: Sequence[da.Array],
@@ -1813,7 +1912,9 @@ def _resolve_display_level_arrays_for_voxel_budget(
                 break
         if selected_index > 0:
             resolved_arrays = tuple(resolved_arrays[selected_index:])
-            selected_shape = tuple(int(value) for value in tuple(resolved_arrays[0].shape))
+            selected_shape = tuple(
+                int(value) for value in tuple(resolved_arrays[0].shape)
+            )
             for axis_index, (base_dim, selected_dim) in enumerate(
                 zip(finest_shape[-3:], selected_shape[-3:], strict=False)
             ):
@@ -1877,6 +1978,7 @@ def _resolve_level_chunks_tpczyx(
     *,
     source_chunks: Optional[Sequence[int]],
     level_shape: Sequence[int],
+    level_array: Optional[da.Array] = None,
 ) -> tuple[int, int, int, int, int, int]:
     """Resolve practical chunking for one generated multiscale level.
 
@@ -1886,6 +1988,10 @@ def _resolve_level_chunks_tpczyx(
         Source-array chunk shape.
     level_shape : sequence[int]
         Level array shape.
+    level_array : dask.array.Array, optional
+        Generated level array. When provided, its current chunk geometry is
+        preferred to avoid introducing costly rechunk/shuffle traffic before
+        persistence.
 
     Returns
     -------
@@ -1893,6 +1999,21 @@ def _resolve_level_chunks_tpczyx(
         Chunk shape in canonical order.
     """
     normalized_shape = tuple(max(1, int(size)) for size in level_shape)
+    if level_array is not None:
+        chunksize = getattr(level_array, "chunksize", None)
+        if (
+            isinstance(chunksize, tuple)
+            and len(chunksize) == 6
+            and all(int(size) > 0 for size in chunksize)
+        ):
+            return (
+                int(max(1, min(normalized_shape[0], int(chunksize[0])))),
+                int(max(1, min(normalized_shape[1], int(chunksize[1])))),
+                int(max(1, min(normalized_shape[2], int(chunksize[2])))),
+                int(max(1, min(normalized_shape[3], int(chunksize[3])))),
+                int(max(1, min(normalized_shape[4], int(chunksize[4])))),
+                int(max(1, min(normalized_shape[5], int(chunksize[5])))),
+            )
     if source_chunks is None or len(tuple(source_chunks)) != 6:
         return (
             int(normalized_shape[0]),
@@ -1936,13 +2057,13 @@ def _component_matches_shape_chunks(
 
 
 def _visualization_multiscale_cache_prefix(source_component: str) -> str:
-    """Return deterministic cache prefix used for generated layer pyramids."""
+    """Return deterministic component prefix used for prepared display pyramids."""
     component = str(source_component).strip() or "data"
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", component).strip("_")
     if not safe_name:
         safe_name = "data"
     digest = hashlib.sha1(component.encode("utf-8")).hexdigest()[:10]
-    return f"results/visualization_cache/pyramids/{safe_name}_{digest}"
+    return f"results/display_pyramid/by_component/{safe_name}_{digest}"
 
 
 def _collect_existing_multiscale_components(
@@ -1950,7 +2071,7 @@ def _collect_existing_multiscale_components(
     root: zarr.hierarchy.Group,
     source_component: str,
 ) -> tuple[str, ...]:
-    """Collect existing multiscale component paths for one source component.
+    """Collect existing display-pyramid component paths for one source component.
 
     Parameters
     ----------
@@ -1984,15 +2105,23 @@ def _collect_existing_multiscale_components(
 
     candidates: list[str] = [str(source_component)]
     source_attrs = dict(source_array.attrs)
+    display_levels = source_attrs.get(_DISPLAY_PYRAMID_LEVELS_ATTR)
+    if isinstance(display_levels, (tuple, list)):
+        candidates.extend(str(item) for item in display_levels)
     source_levels = source_attrs.get("pyramid_levels")
     if isinstance(source_levels, (tuple, list)):
         candidates.extend(str(item) for item in source_levels)
-    viz_levels = source_attrs.get("visualization_pyramid_levels")
+    viz_levels = source_attrs.get(_LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR)
     if isinstance(viz_levels, (tuple, list)):
         candidates.extend(str(item) for item in viz_levels)
 
     root_attrs = dict(root.attrs)
-    root_level_map = root_attrs.get("visualization_pyramid_levels_by_component")
+    root_level_map = root_attrs.get(_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
+    if isinstance(root_level_map, Mapping):
+        mapped = root_level_map.get(str(source_component))
+        if isinstance(mapped, (tuple, list)):
+            candidates.extend(str(item) for item in mapped)
+    root_level_map = root_attrs.get(_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
     if isinstance(root_level_map, Mapping):
         mapped = root_level_map.get(str(source_component))
         if isinstance(mapped, (tuple, list)):
@@ -2025,7 +2154,7 @@ def _build_visualization_multiscale_components(
     source_component: str,
     level_factors_tpczyx: tuple[tuple[int, int, int, int, int, int], ...],
 ) -> tuple[str, ...]:
-    """Materialize generated multiscale levels for visualization.
+    """Materialize reusable display-pyramid levels for one source component.
 
     Parameters
     ----------
@@ -2090,6 +2219,7 @@ def _build_visualization_multiscale_components(
         level_chunks = _resolve_level_chunks_tpczyx(
             source_chunks=source_chunks,
             level_shape=level_shape,
+            level_array=downsampled,
         )
 
         if not _component_matches_shape_chunks(
@@ -2112,10 +2242,8 @@ def _build_visualization_multiscale_components(
                 dtype=source_dtype.name,
                 overwrite=True,
             )
-            with dask.config.set({"array.rechunk.method": "tasks"}):
-                rechunked = downsampled.rechunk(level_chunks)
             da.to_zarr(
-                rechunked,
+                downsampled,
                 str(zarr_path),
                 component=level_component,
                 overwrite=True,
@@ -2129,7 +2257,7 @@ def _build_visualization_multiscale_components(
                 "downsample_factors_tpczyx": [int(value) for value in absolute_factors],
                 "chunk_shape_tpczyx": [int(value) for value in level_chunks],
                 "source_component": str(source_level_component),
-                "generated_by": "visualization_multiscale_gate",
+                "generated_by": "display_pyramid",
             }
         )
 
@@ -2138,37 +2266,47 @@ def _build_visualization_multiscale_components(
         prior_component = level_component
         prior_factors = tuple(int(value) for value in absolute_factors)
 
-    root[str(source_component)].attrs["visualization_pyramid_levels"] = [
+    root[str(source_component)].attrs[_DISPLAY_PYRAMID_LEVELS_ATTR] = [
         str(item) for item in level_paths
     ]
-    root[str(source_component)].attrs["visualization_pyramid_factors_tpczyx"] = [
+    root[str(source_component)].attrs[_DISPLAY_PYRAMID_FACTORS_ATTR] = [
+        list(row) for row in factor_payload
+    ]
+    root[str(source_component)].attrs[_LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR] = [
+        str(item) for item in level_paths
+    ]
+    root[str(source_component)].attrs[_LEGACY_DISPLAY_PYRAMID_FACTORS_ATTR] = [
         list(row) for row in factor_payload
     ]
 
-    component_map = root.attrs.get("visualization_pyramid_levels_by_component")
+    component_map = root.attrs.get(_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
     if not isinstance(component_map, dict):
         component_map = {}
     component_map[str(source_component)] = [str(item) for item in level_paths]
-    root.attrs["visualization_pyramid_levels_by_component"] = _sanitize_metadata_value(
+    root.attrs[_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = _sanitize_metadata_value(
         component_map
+    )
+    legacy_component_map = root.attrs.get(_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
+    if not isinstance(legacy_component_map, dict):
+        legacy_component_map = {}
+    legacy_component_map[str(source_component)] = [str(item) for item in level_paths]
+    root.attrs[_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = _sanitize_metadata_value(
+        legacy_component_map
     )
     return tuple(str(item) for item in level_paths)
 
 
 def _resolve_multiscale_components(
     *,
-    zarr_path: Union[str, Path],
     root: zarr.hierarchy.Group,
     source_component: str,
     use_multiscale: bool,
     multiscale_policy: str,
 ) -> tuple[tuple[str, ...], str]:
-    """Resolve source multiscale levels with optional auto-generation.
+    """Resolve prepared source multiscale levels without viewer-time mutation.
 
     Parameters
     ----------
-    zarr_path : str or pathlib.Path
-        Analysis store path.
     root : zarr.hierarchy.Group
         Opened root group.
     source_component : str
@@ -2176,7 +2314,7 @@ def _resolve_multiscale_components(
     use_multiscale : bool
         Global visualization multiscale toggle.
     multiscale_policy : str
-        Layer policy (``inherit``, ``require``, ``auto_build``, ``off``).
+        Layer policy (``inherit``, ``require``, or ``off``).
 
     Returns
     -------
@@ -2187,9 +2325,11 @@ def _resolve_multiscale_components(
     ------
     ValueError
         If source component is invalid, or ``require`` is requested without
-        available/generated multiscale levels.
+        available prepared multiscale levels.
     """
     policy = str(multiscale_policy).strip().lower() or "inherit"
+    if policy == "auto_build":
+        policy = "inherit"
     if policy not in _VOLUME_LAYER_MULTISCALE_POLICIES:
         policy = "inherit"
 
@@ -2213,28 +2353,11 @@ def _resolve_multiscale_components(
             "but no pyramid was found."
         )
 
-    if policy == "auto_build":
-        source_array = root[str(source_component)]
-        level_factors = _resolve_visualization_pyramid_factors_tpczyx(
-            root_attrs=dict(root.attrs),
-            source_attrs=dict(source_array.attrs),
-        )
-        built = _build_visualization_multiscale_components(
-            zarr_path=zarr_path,
-            root=root,
-            source_component=str(source_component),
-            level_factors_tpczyx=level_factors,
-        )
-        if len(built) > 1:
-            return tuple(str(item) for item in built), "auto_built"
-        return (str(source_component),), "single_scale"
-
     return (str(source_component),), "single_scale"
 
 
 def _resolve_volume_layers(
     *,
-    zarr_path: Union[str, Path],
     root: zarr.hierarchy.Group,
     parameters: Mapping[str, Any],
 ) -> list[ResolvedVolumeLayer]:
@@ -2242,8 +2365,6 @@ def _resolve_volume_layers(
 
     Parameters
     ----------
-    zarr_path : str or pathlib.Path
-        Analysis store path.
     root : zarr.hierarchy.Group
         Opened root group.
     parameters : mapping[str, Any]
@@ -2281,7 +2402,6 @@ def _resolve_volume_layers(
         if not component:
             continue
         source_components, multiscale_status = _resolve_multiscale_components(
-            zarr_path=zarr_path,
             root=root,
             source_component=component,
             use_multiscale=use_multiscale,
@@ -2334,6 +2454,213 @@ def _serialize_resolved_volume_layers(
         }
         for layer in volume_layers
     ]
+
+
+def _coerce_contrast_limit_pair(value: Any) -> Optional[tuple[float, float]]:
+    """Parse one contrast-limit pair into finite ascending floats."""
+    if not isinstance(value, (tuple, list)) or len(value) < 2:
+        return None
+    try:
+        low = float(value[0])
+        high = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(low) or not np.isfinite(high):
+        return None
+    if high <= low:
+        high = low + 1.0
+    return (float(low), float(high))
+
+
+def _coerce_contrast_limits_by_channel(
+    value: Any,
+) -> Optional[tuple[tuple[float, float], ...]]:
+    """Parse per-channel contrast-limit metadata."""
+    if not isinstance(value, (tuple, list)):
+        return None
+    parsed: list[tuple[float, float]] = []
+    for row in value:
+        pair = _coerce_contrast_limit_pair(row)
+        if pair is None:
+            return None
+        parsed.append(pair)
+    return tuple(parsed)
+
+
+def _default_contrast_limits_for_dtype(dtype: Any) -> tuple[float, float]:
+    """Return a no-compute contrast fallback for one dtype."""
+    normalized = np.dtype(dtype)
+    if np.issubdtype(normalized, np.bool_):
+        return (0.0, 1.0)
+    if np.issubdtype(normalized, np.integer):
+        info = np.iinfo(normalized)
+        low = float(info.min)
+        high = float(info.max)
+        if high <= low:
+            high = low + 1.0
+        return (low, high)
+    return (0.0, 1.0)
+
+
+def _load_display_contrast_limits_by_channel(
+    *,
+    root: Optional[zarr.hierarchy.Group],
+    source_component: str,
+) -> Optional[tuple[tuple[float, float], ...]]:
+    """Load stored per-channel display contrast metadata when available."""
+    if root is None:
+        return None
+    try:
+        attrs = dict(root[str(source_component)].attrs)
+    except Exception:
+        return None
+    return _coerce_contrast_limits_by_channel(
+        attrs.get(_DISPLAY_CONTRAST_LIMITS_ATTR)
+    )
+
+
+def _save_display_contrast_metadata(
+    *,
+    root: zarr.hierarchy.Group,
+    source_component: str,
+    contrast_limits_by_channel: Sequence[Sequence[float]],
+    contrast_source_component: Optional[str] = None,
+    percentiles: tuple[float, float] = (1.0, 95.0),
+) -> None:
+    """Persist per-channel display contrast metadata on the source component.
+
+    Parameters
+    ----------
+    root : zarr.hierarchy.Group
+        Opened root group.
+    source_component : str
+        Source component that stores display contrast metadata.
+    contrast_limits_by_channel : sequence[sequence[float]]
+        Per-channel display limits.
+    contrast_source_component : str, optional
+        Component used to estimate percentiles. Defaults to
+        ``source_component``.
+    percentiles : tuple[float, float], default=(1.0, 95.0)
+        Percentiles used for the computed limits.
+    """
+    source_attrs = root[str(source_component)].attrs
+    source_attrs[_DISPLAY_CONTRAST_LIMITS_ATTR] = [
+        [float(row[0]), float(row[1])] for row in contrast_limits_by_channel
+    ]
+    source_attrs[_DISPLAY_CONTRAST_PERCENTILES_ATTR] = [
+        float(percentiles[0]),
+        float(percentiles[1]),
+    ]
+    source_attrs[_DISPLAY_CONTRAST_LEVEL_SOURCE_ATTR] = str(
+        contrast_source_component or source_component
+    )
+
+
+def _sample_channel_for_display_contrast(
+    *,
+    channel_data_tpzyx: da.Array,
+    target_voxels: int,
+) -> da.Array:
+    """Sample one channel lazily to bound contrast-estimation compute cost.
+
+    Parameters
+    ----------
+    channel_data_tpzyx : dask.array.Array
+        Channel array in ``(t, p, z, y, x)`` order.
+    target_voxels : int
+        Upper-bound target for sampled voxel count.
+
+    Returns
+    -------
+    dask.array.Array
+        Lazily sliced sample preserving the original chunk graph.
+    """
+    shape_tpzyx = tuple(int(value) for value in tuple(channel_data_tpzyx.shape))
+    if len(shape_tpzyx) != 5:
+        return channel_data_tpzyx
+
+    target = max(1, int(target_voxels))
+    total_voxels = max(1, int(np.prod(shape_tpzyx, dtype=np.int64)))
+    if total_voxels <= target:
+        return channel_data_tpzyx
+
+    # Favor spatial downsampling first to retain time/position diversity.
+    spatial_stride = int(
+        max(
+            1,
+            math.ceil((float(total_voxels) / float(target)) ** (1.0 / 3.0)),
+        )
+    )
+    sampled = channel_data_tpzyx[
+        :,
+        :,
+        ::spatial_stride,
+        ::spatial_stride,
+        ::spatial_stride,
+    ]
+    sampled_voxels = max(1, int(np.prod(sampled.shape, dtype=np.int64)))
+    if sampled_voxels <= target:
+        return sampled
+
+    tp_stride = int(
+        max(1, math.ceil(math.sqrt(float(sampled_voxels) / float(target))))
+    )
+    return sampled[::tp_stride, ::tp_stride, :, :, :]
+
+
+def _compute_display_contrast_limits_by_channel(
+    *,
+    zarr_path: Union[str, Path],
+    source_component: str,
+    sampling_component: Optional[str] = None,
+    channel_count: int,
+    low_percentile: float = 1.0,
+    high_percentile: float = 95.0,
+    sampling_target_voxels: int = _DISPLAY_CONTRAST_SAMPLE_TARGET_VOXELS,
+) -> tuple[tuple[float, float], ...]:
+    """Compute fixed display percentiles for each channel of one source array.
+
+    Notes
+    -----
+    To avoid expensive global reshapes and percentile shuffles, this computes
+    percentiles on a lazily strided sample from one component (typically the
+    coarsest prepared display-pyramid level).
+    """
+    source_component_text = str(source_component).strip() or "data"
+    sampling_component_text = str(sampling_component or "").strip()
+    contrast_component = sampling_component_text or source_component_text
+    source = da.from_zarr(str(zarr_path), component=contrast_component)
+    source_shape = tuple(int(value) for value in tuple(source.shape))
+    available_channels = int(source_shape[2]) if len(source_shape) >= 3 else 0
+    contrast_limits: list[tuple[float, float]] = []
+    target_channels = max(0, int(channel_count))
+    if available_channels <= 0:
+        fallback = _default_contrast_limits_for_dtype(source.dtype)
+        return tuple(fallback for _ in range(target_channels))
+
+    for channel_index in range(max(0, int(channel_count))):
+        clamped_channel_index = int(min(channel_index, available_channels - 1))
+        channel_data = source[:, :, clamped_channel_index, :, :, :]
+        sampled_channel = _sample_channel_for_display_contrast(
+            channel_data_tpzyx=channel_data,
+            target_voxels=sampling_target_voxels,
+        )
+        try:
+            sample_np = np.asarray(sampled_channel.compute(), dtype=np.float32)
+            if sample_np.size <= 0:
+                pair = None
+            else:
+                percentiles = np.percentile(
+                    sample_np,
+                    [float(low_percentile), float(high_percentile)],
+                )
+                pair = _coerce_contrast_limit_pair(percentiles)
+        except Exception:
+            pair = None
+        if pair is None:
+            pair = _default_contrast_limits_for_dtype(source.dtype)
+        contrast_limits.append(pair)
+    return tuple(contrast_limits)
 
 
 def _safe_float(value: Any, *, default: float = 0.0) -> float:
@@ -2390,7 +2717,7 @@ def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
     Returns
     -------
     list[dict[str, float]]
-        Parsed rows with ``x``, ``y``, ``z``, and ``theta`` values.
+        Parsed rows with ``x``, ``y``, ``z``, ``theta``, and ``f`` values.
     """
     if not isinstance(payload, list):
         return []
@@ -2420,9 +2747,28 @@ def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
                 "y": _value("Y", 1),
                 "z": _value("Z", 2),
                 "theta": _value("THETA", 3),
+                "f": _value("F", 4),
             }
         )
     return parsed_rows
+
+
+def _load_spatial_calibration(
+    root_attrs: Mapping[str, Any],
+) -> SpatialCalibrationConfig:
+    """Load store-level spatial calibration from root attrs.
+
+    Parameters
+    ----------
+    root_attrs : mapping[str, Any]
+        Root Zarr attributes.
+
+    Returns
+    -------
+    SpatialCalibrationConfig
+        Parsed store calibration. Missing attrs resolve to identity.
+    """
+    return spatial_calibration_from_dict(root_attrs.get("spatial_calibration"))
 
 
 def _load_multiposition_stage_rows(
@@ -2477,9 +2823,9 @@ def _load_multiposition_stage_rows(
 
 def _build_position_affine_tczyx(
     *,
-    delta_x: float,
-    delta_y: float,
-    delta_z: float,
+    delta_world_x: float,
+    delta_world_y: float,
+    delta_world_z: float,
     delta_theta_deg: float,
     scale_tczyx: Sequence[float],
 ) -> np.ndarray:
@@ -2487,12 +2833,12 @@ def _build_position_affine_tczyx(
 
     Parameters
     ----------
-    delta_x : float
-        Stage X translation delta relative to reference position.
-    delta_y : float
-        Stage Y translation delta relative to reference position.
-    delta_z : float
-        Stage Z translation delta relative to reference position.
+    delta_world_x : float
+        World X translation delta relative to reference position.
+    delta_world_y : float
+        World Y translation delta relative to reference position.
+    delta_world_z : float
+        World Z translation delta relative to reference position.
     delta_theta_deg : float
         Stage rotation delta (degrees) around sample X axis.
     scale_tczyx : sequence of float
@@ -2518,10 +2864,39 @@ def _build_position_affine_tczyx(
 
     # Stage coordinates are reported in microns. Napari affine translation is
     # interpreted in world units, so pass micron offsets directly.
-    affine[2, 5] = float(delta_z)
-    affine[3, 5] = float(delta_y)
-    affine[4, 5] = float(delta_x)
+    affine[2, 5] = float(delta_world_z)
+    affine[3, 5] = float(delta_world_y)
+    affine[4, 5] = float(delta_world_x)
     return affine
+
+
+def _resolve_world_axis_delta(
+    *,
+    row: Mapping[str, float],
+    reference: Mapping[str, float],
+    binding: str,
+) -> float:
+    """Resolve one world-axis translation delta from stage coordinates.
+
+    Parameters
+    ----------
+    row : mapping[str, float]
+        Current multiposition row.
+    reference : mapping[str, float]
+        Reference multiposition row.
+    binding : str
+        Canonical spatial-calibration binding for the world axis.
+
+    Returns
+    -------
+    float
+        Translation delta in stage/world units.
+    """
+    if binding == "none":
+        return 0.0
+    sign = -1.0 if binding.startswith("-") else 1.0
+    source_axis = binding[1:]
+    return sign * float(row[source_axis] - reference[source_axis])
 
 
 def _resolve_position_affines_tczyx(
@@ -2529,7 +2904,7 @@ def _resolve_position_affines_tczyx(
     root_attrs: Mapping[str, Any],
     selected_positions: Sequence[int],
     scale_tczyx: Sequence[float],
-) -> tuple[dict[int, np.ndarray], list[dict[str, float]]]:
+) -> tuple[dict[int, np.ndarray], list[dict[str, float]], SpatialCalibrationConfig]:
     """Resolve per-position affines for napari rendering.
 
     Parameters
@@ -2543,30 +2918,45 @@ def _resolve_position_affines_tczyx(
 
     Returns
     -------
-    tuple[dict[int, numpy.ndarray], list[dict[str, float]]]
-        Mapping of position index to affine matrix and parsed stage rows.
+    tuple[dict[int, numpy.ndarray], list[dict[str, float]], SpatialCalibrationConfig]
+        Mapping of position index to affine matrix, parsed stage rows, and the
+        effective store calibration.
     """
     affines: dict[int, np.ndarray] = {
         int(index): np.eye(6, dtype=np.float64) for index in selected_positions
     }
+    spatial_calibration = _load_spatial_calibration(root_attrs)
     stage_rows = _load_multiposition_stage_rows(root_attrs)
     if not stage_rows:
-        return affines, []
+        return affines, [], spatial_calibration
 
     reference = stage_rows[0]
+    stage_axis_map = spatial_calibration.stage_axis_map_by_world_axis()
     for position_index in selected_positions:
         idx = int(position_index)
         if idx < 0 or idx >= len(stage_rows):
             continue
         row = stage_rows[idx]
         affines[idx] = _build_position_affine_tczyx(
-            delta_x=float(row["x"] - reference["x"]),
-            delta_y=float(row["y"] - reference["y"]),
-            delta_z=float(row["z"] - reference["z"]),
+            delta_world_x=_resolve_world_axis_delta(
+                row=row,
+                reference=reference,
+                binding=stage_axis_map["x"],
+            ),
+            delta_world_y=_resolve_world_axis_delta(
+                row=row,
+                reference=reference,
+                binding=stage_axis_map["y"],
+            ),
+            delta_world_z=_resolve_world_axis_delta(
+                row=row,
+                reference=reference,
+                binding=stage_axis_map["z"],
+            ),
             delta_theta_deg=float(row["theta"] - reference["theta"]),
             scale_tczyx=scale_tczyx,
         )
-    return affines, stage_rows
+    return affines, stage_rows, spatial_calibration
 
 
 def _load_particle_overlay_points(
@@ -2785,88 +3175,6 @@ def _launch_napari_viewer(
             return 1.0
         return float(max(0.55, 1.0 - (0.1 * (channel_count - 1))))
 
-    def _percentile_contrast_limits(
-        data: Any,
-        *,
-        low_percentile: float = 1.0,
-        high_percentile: float = 95.0,
-        target_sample_size: int = 500_000,
-    ) -> tuple[float, float]:
-        """Estimate robust contrast limits from data percentiles.
-
-        Parameters
-        ----------
-        data : Any
-            Image-like array.
-        low_percentile : float, default=1.0
-            Lower percentile.
-        high_percentile : float, default=95.0
-            Upper percentile.
-        target_sample_size : int, default=500_000
-            Approximate number of sampled voxels used for percentile estimation.
-
-        Returns
-        -------
-        tuple[float, float]
-            ``(min, max)`` contrast limits.
-        """
-        if isinstance(data, da.Array):
-            array = data
-        else:
-            array = np.asarray(data)
-
-        shape = tuple(int(value) for value in getattr(array, "shape", tuple()))
-        if not shape or int(np.prod(shape, dtype=np.int64)) <= 0:
-            return 0.0, 1.0
-
-        sampled = array
-        total_size = int(np.prod(shape, dtype=np.int64))
-        if total_size > int(target_sample_size):
-            stride = int(
-                max(
-                    1,
-                    math.ceil(
-                        (total_size / float(target_sample_size)) ** (1.0 / len(shape))
-                    ),
-                )
-            )
-            sampled = sampled[tuple(slice(None, None, stride) for _ in shape)]
-
-        low_value: float
-        high_value: float
-        try:
-            if isinstance(sampled, da.Array):
-                percentiles = da.percentile(
-                    sampled.reshape(-1),
-                    [float(low_percentile), float(high_percentile)],
-                ).compute()
-            else:
-                percentiles = np.percentile(
-                    np.asarray(sampled).reshape(-1),
-                    [float(low_percentile), float(high_percentile)],
-                )
-            low_value = float(percentiles[0])
-            high_value = float(percentiles[1])
-        except Exception:
-            try:
-                if isinstance(sampled, da.Array):
-                    minimum, maximum = da.compute(sampled.min(), sampled.max())
-                else:
-                    minimum = np.min(np.asarray(sampled))
-                    maximum = np.max(np.asarray(sampled))
-                low_value = float(minimum)
-                high_value = float(maximum)
-            except Exception:
-                return 0.0, 1.0
-
-        if not np.isfinite(low_value):
-            low_value = 0.0
-        if not np.isfinite(high_value):
-            high_value = low_value + 1.0
-        if high_value <= low_value:
-            high_value = low_value + 1.0
-        return float(low_value), float(high_value)
-
     scale = tuple(float(value) for value in scale_tczyx)
     scale_root: Optional[zarr.hierarchy.Group] = None
     scale_root_attrs: Dict[str, Any] = {}
@@ -2878,6 +3186,7 @@ def _launch_napari_viewer(
     except Exception:
         scale_root = None
     layer_scale_cache: dict[str, tuple[float, float, float, float, float]] = {}
+    layer_display_contrast_cache: dict[str, tuple[tuple[float, float], ...]] = {}
 
     def _resolve_layer_scale_tczyx(
         component: str,
@@ -2967,11 +3276,66 @@ def _launch_napari_viewer(
 
         if resolved_scale is None:
             resolved_scale = scale
-        normalized = _normalize_scale_tczyx(tuple(float(value) for value in resolved_scale))
+        normalized = _normalize_scale_tczyx(
+            tuple(float(value) for value in resolved_scale)
+        )
         layer_scale_cache[key] = normalized
         return normalized
 
-    viewer = napari.Viewer(ndisplay=3, show=True)
+    def _resolve_layer_contrast_limits_by_channel(
+        component: str,
+        channel_count: int,
+        dtype: Any,
+    ) -> tuple[tuple[float, float], ...]:
+        """Resolve display contrast metadata without viewer-time reductions."""
+        key = str(component).strip() or "data"
+        cached = layer_display_contrast_cache.get(key)
+        if cached is None:
+            cached = _load_display_contrast_limits_by_channel(
+                root=scale_root,
+                source_component=key,
+            ) or tuple()
+            layer_display_contrast_cache[key] = cached
+        if len(cached) >= int(channel_count):
+            return tuple(cached[: int(channel_count)])
+        fallback = _default_contrast_limits_for_dtype(dtype)
+        return tuple(
+            cached[index] if index < len(cached) else fallback
+            for index in range(max(0, int(channel_count)))
+        )
+
+    requested_ndisplay = int(
+        max(
+            2,
+            round(
+                _safe_float(
+                    image_metadata.get(
+                        "viewer_ndisplay_requested",
+                        image_metadata.get("viewer_ndisplay", 3),
+                    ),
+                    default=3.0,
+                )
+            ),
+        )
+    )
+    effective_ndisplay = int(
+        max(
+            2,
+            round(
+                _safe_float(
+                    image_metadata.get(
+                        "viewer_ndisplay_effective",
+                        image_metadata.get("viewer_ndisplay", requested_ndisplay),
+                    ),
+                    default=float(requested_ndisplay),
+                )
+            ),
+        )
+    )
+    viewer = napari.Viewer(
+        ndisplay=(3 if int(effective_ndisplay) >= 3 else 2),
+        show=True,
+    )
     axis_labels_tuple = tuple(str(label) for label in axis_labels)
     axis_labels_applied = False
     renderer_info = _probe_napari_opengl_renderer(viewer)
@@ -3036,38 +3400,26 @@ def _launch_napari_viewer(
         )
         for layer in volume_layers:
             layer_scale = _resolve_layer_scale_tczyx(str(layer.component))
+            rendered_source_components = (
+                tuple(str(item) for item in layer.source_components)
+                if int(effective_ndisplay) < 3
+                else (str(layer.component),)
+            )
             level_arrays = [
                 da.from_zarr(str(zarr_path), component=str(component))[
                     :, position_index, :, :, :, :
                 ]
-                for component in layer.source_components
+                for component in rendered_source_components
             ]
             if not level_arrays:
                 continue
-            display_level_arrays, display_scale, display_factors_zyx, display_strategy = (
-                _resolve_display_level_arrays_for_voxel_budget(
-                    level_arrays=level_arrays,
-                    layer_scale_tczyx=layer_scale,
-                    max_display_voxels=_MAX_LAYER_DISPLAY_VOXELS,
-                )
-            )
+            display_level_arrays = tuple(level_arrays)
+            display_scale = tuple(float(value) for value in layer_scale)
+            display_factors_zyx = (1.0, 1.0, 1.0)
+            display_strategy = "none"
             if not display_level_arrays:
                 continue
-            if display_strategy != "none":
-                base_shape = tuple(int(value) for value in tuple(level_arrays[0].shape))
-                display_shape = tuple(
-                    int(value) for value in tuple(display_level_arrays[0].shape)
-                )
-                print(
-                    "[visualization] Applying display downsampling for layer "
-                    f"'{layer.component}' at position {int(position_index)}: "
-                    f"strategy={display_strategy}, "
-                    f"shape={base_shape[-3:]} -> {display_shape[-3:]}, "
-                    "factors_zyx="
-                    f"({display_factors_zyx[0]:.3g}, "
-                    f"{display_factors_zyx[1]:.3g}, {display_factors_zyx[2]:.3g})."
-                )
-            is_multiscale = len(display_level_arrays) > 1
+            is_multiscale = int(effective_ndisplay) < 3 and len(display_level_arrays) > 1
             channel_count = max(1, int(display_level_arrays[0].shape[1]))
             requested_channels = tuple(
                 int(index)
@@ -3085,11 +3437,21 @@ def _launch_napari_viewer(
                 bool(layer.visible) if layer.visible is not None else True
             )
             base_name = str(layer.name).strip() or str(layer.component)
-            effective_blending = str(layer.blending).strip().lower() or (
-                "translucent" if str(layer.layer_type) == "labels" else "additive"
-            )
+            effective_blending = str(layer.blending).strip().lower()
+            if not effective_blending:
+                if str(layer.layer_type) == "labels":
+                    effective_blending = "translucent"
+                elif multi_position:
+                    effective_blending = "translucent"
+                else:
+                    effective_blending = "additive"
             default_rendering = str(layer.rendering).strip().lower() or "attenuated_mip"
             colormaps = _channel_colormap_cycle(channel_count)
+            contrast_limits_by_channel = _resolve_layer_contrast_limits_by_channel(
+                str(layer.component),
+                channel_count,
+                display_level_arrays[0].dtype,
+            )
             for channel_index in channel_indices:
                 layer_data: Any
                 if is_multiscale:
@@ -3113,13 +3475,18 @@ def _launch_napari_viewer(
                 layer_metadata["channel_index"] = int(channel_index)
                 layer_metadata["source_component"] = str(layer.component)
                 layer_metadata["source_components"] = [
+                    str(item) for item in rendered_source_components
+                ]
+                layer_metadata["available_source_components"] = [
                     str(item) for item in layer.source_components
                 ]
                 layer_metadata["layer_type"] = str(layer.layer_type)
                 layer_metadata["multiscale_policy"] = str(layer.multiscale_policy)
                 layer_metadata["multiscale_status"] = str(layer.multiscale_status)
                 layer_metadata["volume_layers"] = serialized_volume_layers
-                layer_metadata["scale_tczyx"] = [float(value) for value in display_scale]
+                layer_metadata["scale_tczyx"] = [
+                    float(value) for value in display_scale
+                ]
                 layer_metadata["display_downsample_strategy"] = str(display_strategy)
                 layer_metadata["display_downsample_factors_zyx"] = [
                     float(display_factors_zyx[0]),
@@ -3144,9 +3511,7 @@ def _launch_napari_viewer(
                         visible=effective_visibility,
                     )
                 else:
-                    contrast_limits = _percentile_contrast_limits(
-                        layer_data[-1] if is_multiscale else layer_data
-                    )
+                    contrast_limits = contrast_limits_by_channel[int(channel_index)]
                     selected_colormap = str(layer.colormap).strip() or str(
                         colormaps[int(channel_index) % max(1, len(colormaps))]
                     )
@@ -3407,6 +3772,191 @@ def _launch_napari_viewer(
     }
 
 
+def _save_display_pyramid_metadata(
+    *,
+    zarr_path: Union[str, Path],
+    source_component: str,
+    source_components: Sequence[str],
+    contrast_limits_by_channel: Sequence[Sequence[float]],
+    contrast_source_component: str,
+    reused_existing_levels: bool,
+    run_id: Optional[str] = None,
+) -> str:
+    """Persist display-pyramid metadata in ``results/display_pyramid/latest``."""
+    component = "results/display_pyramid/latest"
+    root = zarr.open_group(str(zarr_path), mode="a")
+    results_group = root.require_group("results")
+    display_pyramid_group = results_group.require_group("display_pyramid")
+    if "latest" in display_pyramid_group:
+        del display_pyramid_group["latest"]
+    latest_group = display_pyramid_group.create_group("latest")
+
+    payload: Dict[str, Any] = {
+        "source_component": str(source_component),
+        "source_components": [str(item) for item in source_components],
+        "display_pyramid_lookup": {
+            "source_attr": _DISPLAY_PYRAMID_LEVELS_ATTR,
+            "root_attr_map": _DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+            "legacy_source_attr": _LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR,
+            "legacy_root_attr_map": _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+        },
+        "display_contrast_metadata_reference": {
+            "limits_attr": _DISPLAY_CONTRAST_LIMITS_ATTR,
+            "percentiles_attr": _DISPLAY_CONTRAST_PERCENTILES_ATTR,
+        },
+        "display_contrast_percentiles": [1.0, 95.0],
+        "display_contrast_limits_by_channel": [
+            [float(row[0]), float(row[1])] for row in contrast_limits_by_channel
+        ],
+        "display_contrast_source_component": str(contrast_source_component),
+        "reused_existing_levels": bool(reused_existing_levels),
+        "storage_policy": "latest_only",
+        "run_id": run_id,
+    }
+    latest_group.attrs.update(payload)
+    register_latest_output_reference(
+        zarr_path=zarr_path,
+        analysis_name="display_pyramid",
+        component=component,
+        run_id=run_id,
+        metadata=payload,
+    )
+    return component
+
+
+def run_display_pyramid_analysis(
+    *,
+    zarr_path: Union[str, Path],
+    parameters: Mapping[str, Any],
+    client: Optional[Any] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+    run_id: Optional[str] = None,
+) -> DisplayPyramidSummary:
+    """Prepare reusable display pyramids and stored display contrast metadata."""
+
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
+    del client
+    source_component = str(parameters.get("input_source", "data")).strip() or "data"
+    force_rerun = bool(parameters.get("force_rerun", False))
+    root = zarr.open_group(str(zarr_path), mode="a")
+    try:
+        source_array = root[source_component]
+    except Exception as exc:
+        raise ValueError(
+            f"Display pyramid input component '{source_component}' was not found."
+        ) from exc
+    if len(tuple(source_array.shape)) != 6:
+        raise ValueError(
+            "Display pyramid preparation requires canonical 6D data (t,p,c,z,y,x). "
+            f"Input component '{source_component}' is incompatible."
+        )
+
+    source_attrs = dict(source_array.attrs)
+    root_attrs = dict(root.attrs)
+    channel_count = max(1, int(tuple(source_array.shape)[2]))
+    existing_components = _collect_existing_multiscale_components(
+        root=root,
+        source_component=source_component,
+    )
+    reused_existing_levels = bool(len(existing_components) > 1 and not force_rerun)
+    if reused_existing_levels:
+        _emit(30, f"Reusing existing display pyramid for {source_component}")
+        source_components = tuple(str(item) for item in existing_components)
+    else:
+        _emit(30, f"Preparing display pyramid for {source_component}")
+        level_factors = _resolve_visualization_pyramid_factors_tpczyx(
+            root_attrs=root_attrs,
+            source_attrs=source_attrs,
+        )
+        source_components = _build_visualization_multiscale_components(
+            zarr_path=zarr_path,
+            root=root,
+            source_component=source_component,
+            level_factors_tpczyx=level_factors,
+        )
+
+    level_factors = _resolve_visualization_pyramid_factors_tpczyx(
+        root_attrs=root_attrs,
+        source_attrs=source_attrs,
+    )
+    persisted_factors = [
+        list(row)
+        for row in level_factors[: max(1, len(tuple(source_components)))]
+    ]
+    root[str(source_component)].attrs[_DISPLAY_PYRAMID_LEVELS_ATTR] = [
+        str(item) for item in source_components
+    ]
+    root[str(source_component)].attrs[_DISPLAY_PYRAMID_FACTORS_ATTR] = list(
+        persisted_factors
+    )
+    root[str(source_component)].attrs[_LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR] = [
+        str(item) for item in source_components
+    ]
+    root[str(source_component)].attrs[_LEGACY_DISPLAY_PYRAMID_FACTORS_ATTR] = list(
+        persisted_factors
+    )
+    component_map = root.attrs.get(_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
+    if not isinstance(component_map, dict):
+        component_map = {}
+    component_map[str(source_component)] = [str(item) for item in source_components]
+    root.attrs[_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = _sanitize_metadata_value(component_map)
+    legacy_component_map = root.attrs.get(_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
+    if not isinstance(legacy_component_map, dict):
+        legacy_component_map = {}
+    legacy_component_map[str(source_component)] = [
+        str(item) for item in source_components
+    ]
+    root.attrs[_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = _sanitize_metadata_value(
+        legacy_component_map
+    )
+
+    contrast_source_component = (
+        str(source_components[-1]) if source_components else source_component
+    )
+    _emit(
+        70,
+        "Computing display contrast metadata for "
+        f"{source_component} (sampling={contrast_source_component})",
+    )
+    contrast_limits_by_channel = _compute_display_contrast_limits_by_channel(
+        zarr_path=zarr_path,
+        source_component=source_component,
+        sampling_component=contrast_source_component,
+        channel_count=channel_count,
+    )
+    _save_display_contrast_metadata(
+        root=root,
+        source_component=source_component,
+        contrast_limits_by_channel=contrast_limits_by_channel,
+        contrast_source_component=contrast_source_component,
+    )
+    _emit(90, "Writing display pyramid metadata")
+    component = _save_display_pyramid_metadata(
+        zarr_path=zarr_path,
+        source_component=source_component,
+        source_components=source_components,
+        contrast_limits_by_channel=contrast_limits_by_channel,
+        contrast_source_component=contrast_source_component,
+        reused_existing_levels=reused_existing_levels,
+        run_id=run_id,
+    )
+    _emit(100, "Display pyramid preparation complete")
+    return DisplayPyramidSummary(
+        component=component,
+        source_component=source_component,
+        source_components=tuple(str(item) for item in source_components),
+        channel_count=int(channel_count),
+        contrast_limits_by_channel=tuple(
+            (float(row[0]), float(row[1])) for row in contrast_limits_by_channel
+        ),
+        reused_existing_levels=bool(reused_existing_levels),
+    )
+
+
 def _save_visualization_metadata(
     *,
     zarr_path: Union[str, Path],
@@ -3416,11 +3966,15 @@ def _save_visualization_metadata(
     position_index: int,
     selected_positions: Sequence[int],
     show_all_positions: bool,
+    spatial_calibration: SpatialCalibrationConfig,
     parameters: Mapping[str, Any],
     overlay_points_count: int,
     renderer: Optional[Mapping[str, Any]],
     launch_mode: str,
     viewer_pid: Optional[int],
+    viewer_ndisplay_requested: int,
+    viewer_ndisplay_effective: int,
+    display_mode_fallback_reason: Optional[str],
     keyframe_manifest_path: Optional[str],
     keyframe_count: int,
     run_id: Optional[str] = None,
@@ -3443,6 +3997,8 @@ def _save_visualization_metadata(
         Rendered position indices.
     show_all_positions : bool
         Whether all positions were rendered.
+    spatial_calibration : SpatialCalibrationConfig
+        Effective store-level stage-to-world axis mapping used for placement.
     parameters : mapping[str, Any]
         Effective visualization parameters.
     overlay_points_count : int
@@ -3453,6 +4009,12 @@ def _save_visualization_metadata(
         Effective launch mode.
     viewer_pid : int, optional
         Viewer process ID when launched as subprocess.
+    viewer_ndisplay_requested : int
+        Requested napari display mode (2 or 3).
+    viewer_ndisplay_effective : int
+        Effective napari display mode after ClearEx fallback policy.
+    display_mode_fallback_reason : str, optional
+        Explanation when requested 3D rendering is forced to 2D.
     keyframe_manifest_path : str, optional
         JSON path where interactive keyframe selections were written.
     keyframe_count : int
@@ -3480,9 +4042,23 @@ def _save_visualization_metadata(
         "position_index": int(position_index),
         "selected_positions": [int(value) for value in selected_positions],
         "show_all_positions": bool(show_all_positions),
+        "spatial_calibration": spatial_calibration_to_dict(spatial_calibration),
+        "spatial_calibration_text": format_spatial_calibration(spatial_calibration),
         "overlay_points_count": int(overlay_points_count),
         "renderer": _sanitize_metadata_value(dict(renderer or {})),
         "launch_mode": str(launch_mode),
+        "viewer_ndisplay_requested": int(max(2, int(viewer_ndisplay_requested))),
+        "viewer_ndisplay_effective": int(max(2, int(viewer_ndisplay_effective))),
+        "display_pyramid_lookup": {
+            "source_attr": _DISPLAY_PYRAMID_LEVELS_ATTR,
+            "root_attr_map": _DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+            "legacy_source_attr": _LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR,
+            "legacy_root_attr_map": _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+        },
+        "display_contrast_metadata_reference": {
+            "limits_attr": _DISPLAY_CONTRAST_LIMITS_ATTR,
+            "percentiles_attr": _DISPLAY_CONTRAST_PERCENTILES_ATTR,
+        },
         "parameters": {str(k): v for k, v in dict(parameters).items()},
         "storage_policy": "latest_only",
         "run_id": run_id,
@@ -3494,6 +4070,10 @@ def _save_visualization_metadata(
     }
     if viewer_pid is not None:
         payload["viewer_pid"] = int(viewer_pid)
+    if display_mode_fallback_reason is not None and str(
+        display_mode_fallback_reason
+    ).strip():
+        payload["display_mode_fallback_reason"] = str(display_mode_fallback_reason)
     if keyframe_manifest_path is not None and str(keyframe_manifest_path).strip():
         payload["keyframe_manifest_path"] = str(keyframe_manifest_path)
     latest_group.attrs.update(payload)
@@ -3547,16 +4127,13 @@ def run_visualization_analysis(
     normalized = _normalize_visualization_parameters(parameters)
     root = zarr.open_group(str(zarr_path), mode="a")
     volume_layers = _resolve_volume_layers(
-        zarr_path=zarr_path,
         root=root,
         parameters=normalized,
     )
     if len(volume_layers) <= 0:
         raise ValueError("Visualization requires at least one valid volume layer.")
-    primary_layer = volume_layers[0]
-    source_component = str(primary_layer.component)
-    source_components = tuple(str(item) for item in primary_layer.source_components)
 
+    source_component = str(volume_layers[0].component)
     source_array = root[source_component]
     source_shape = tuple(int(value) for value in source_array.shape)
     position_count = int(source_shape[1])
@@ -3597,16 +4174,57 @@ def run_visualization_analysis(
         )
     )
 
+    viewer_ndisplay_requested = 3 if bool(normalized.get("use_3d_view", True)) else 2
+    viewer_ndisplay_effective, display_mode_fallback_reason = (
+        _resolve_effective_viewer_ndisplay(
+            root=root,
+            volume_layers=volume_layers,
+            requested_ndisplay=viewer_ndisplay_requested,
+        )
+    )
+    if display_mode_fallback_reason is not None:
+        _emit(15, display_mode_fallback_reason)
+
+    launch_volume_layers: list[ResolvedVolumeLayer] = []
+    for layer in volume_layers:
+        rendered_source_components = (
+            tuple(str(item) for item in layer.source_components)
+            if int(viewer_ndisplay_effective) < 3
+            else (str(layer.component),)
+        )
+        launch_volume_layers.append(
+            ResolvedVolumeLayer(
+                component=str(layer.component),
+                source_components=rendered_source_components,
+                layer_type=str(layer.layer_type),
+                channels=tuple(int(value) for value in layer.channels),
+                visible=layer.visible,
+                opacity=layer.opacity,
+                blending=str(layer.blending),
+                colormap=str(layer.colormap),
+                rendering=str(layer.rendering),
+                name=str(layer.name),
+                multiscale_policy=str(layer.multiscale_policy),
+                multiscale_status=str(layer.multiscale_status),
+            )
+        )
+    primary_layer = launch_volume_layers[0]
+    source_components = tuple(str(item) for item in primary_layer.source_components)
+
     napari_payload = _build_napari_layer_payload(
         zarr_path=zarr_path,
         root=root,
-        volume_layers=volume_layers,
+        volume_layers=launch_volume_layers,
         position_index=reference_position_index,
         parameters=normalized,
         overlay_points_count=total_overlay_points,
         point_property_names=point_property_names,
     )
-    position_affines_tczyx, stage_rows = _resolve_position_affines_tczyx(
+    (
+        position_affines_tczyx,
+        stage_rows,
+        spatial_calibration,
+    ) = _resolve_position_affines_tczyx(
         root_attrs=dict(root.attrs),
         selected_positions=selected_positions,
         scale_tczyx=napari_payload.scale_tczyx,
@@ -3620,20 +4238,50 @@ def run_visualization_analysis(
         str(index): np.asarray(matrix, dtype=np.float64).tolist()
         for index, matrix in position_affines_tczyx.items()
     }
-    napari_payload.image_metadata["stage_positions_xyztheta"] = [
+    stage_position_rows = [
         {
             "x": float(row["x"]),
             "y": float(row["y"]),
             "z": float(row["z"]),
             "theta": float(row["theta"]),
+            "f": float(row["f"]),
         }
         for row in stage_rows
     ]
+    napari_payload.image_metadata["stage_positions_xyztheta"] = stage_position_rows
+    napari_payload.image_metadata["stage_positions_xyzthetaf"] = stage_position_rows
+    napari_payload.image_metadata["spatial_calibration"] = spatial_calibration_to_dict(
+        spatial_calibration
+    )
+    napari_payload.image_metadata["spatial_calibration_text"] = (
+        format_spatial_calibration(spatial_calibration)
+    )
     napari_payload.points_metadata["position_index"] = int(reference_position_index)
     napari_payload.points_metadata["selected_positions"] = [
         int(value) for value in selected_positions
     ]
     napari_payload.points_metadata["show_all_positions"] = bool(show_all_positions)
+    napari_payload.image_metadata["viewer_ndisplay_requested"] = int(
+        viewer_ndisplay_requested
+    )
+    napari_payload.image_metadata["viewer_ndisplay_effective"] = int(
+        viewer_ndisplay_effective
+    )
+    napari_payload.image_metadata["viewer_ndisplay"] = int(viewer_ndisplay_effective)
+    napari_payload.points_metadata["viewer_ndisplay_requested"] = int(
+        viewer_ndisplay_requested
+    )
+    napari_payload.points_metadata["viewer_ndisplay_effective"] = int(
+        viewer_ndisplay_effective
+    )
+    napari_payload.points_metadata["viewer_ndisplay"] = int(viewer_ndisplay_effective)
+    if display_mode_fallback_reason is not None:
+        napari_payload.image_metadata["display_mode_fallback_reason"] = str(
+            display_mode_fallback_reason
+        )
+        napari_payload.points_metadata["display_mode_fallback_reason"] = str(
+            display_mode_fallback_reason
+        )
 
     _emit(20, "Preparing napari visualization layers")
     effective_launch_mode = _resolve_effective_launch_mode(
@@ -3665,7 +4313,7 @@ def run_visualization_analysis(
         _emit(65, "Opening napari viewer")
         viewer_capture = _launch_napari_viewer(
             zarr_path=zarr_path,
-            volume_layers=volume_layers,
+            volume_layers=launch_volume_layers,
             selected_positions=selected_positions,
             points_by_position=points_by_position,
             point_properties_by_position=point_properties_by_position,
@@ -3704,15 +4352,19 @@ def run_visualization_analysis(
         zarr_path=zarr_path,
         source_component=source_component,
         source_components=source_components,
-        volume_layers=volume_layers,
+        volume_layers=launch_volume_layers,
         position_index=reference_position_index,
         selected_positions=selected_positions,
         show_all_positions=show_all_positions,
+        spatial_calibration=spatial_calibration,
         parameters=normalized,
         overlay_points_count=total_overlay_points,
         renderer=renderer_info,
         launch_mode=effective_launch_mode,
         viewer_pid=viewer_pid,
+        viewer_ndisplay_requested=viewer_ndisplay_requested,
+        viewer_ndisplay_effective=viewer_ndisplay_effective,
+        display_mode_fallback_reason=display_mode_fallback_reason,
         keyframe_manifest_path=keyframe_manifest_path,
         keyframe_count=keyframe_count,
         run_id=run_id,
@@ -3731,6 +4383,9 @@ def run_visualization_analysis(
         keyframe_manifest_path=keyframe_manifest_path,
         keyframe_count=int(keyframe_count),
         renderer=dict(renderer_info),
+        viewer_ndisplay_requested=int(viewer_ndisplay_requested),
+        viewer_ndisplay_effective=int(viewer_ndisplay_effective),
+        display_mode_fallback_reason=display_mode_fallback_reason,
     )
 
 

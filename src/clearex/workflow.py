@@ -53,6 +53,7 @@ ANALYSIS_OPERATION_ORDER = (
     "particle_detection",
     "usegment3d",
     "registration",
+    "display_pyramid",
     "visualization",
     "mip_export",
 )
@@ -72,6 +73,7 @@ ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
     "particle_detection": "results/particle_detection/latest/detections",
     "usegment3d": "results/usegment3d/latest/data",
     "registration": "results/registration/latest/data",
+    "display_pyramid": "results/display_pyramid/latest",
     "visualization": "results/visualization/latest",
     "mip_export": "results/mip_export/latest",
 }
@@ -79,6 +81,24 @@ _OUTPUT_COMPONENT_TO_OPERATION: Dict[str, str] = {
     str(component): str(operation_name)
     for operation_name, component in ANALYSIS_KNOWN_OUTPUT_COMPONENTS.items()
 }
+SPATIAL_CALIBRATION_SCHEMA = "clearex.spatial_calibration.v1"
+SPATIAL_CALIBRATION_WORLD_AXES = ("z", "y", "x")
+SPATIAL_CALIBRATION_SOURCE_AXES = ("x", "y", "z", "f")
+SPATIAL_CALIBRATION_ALLOWED_BINDINGS = frozenset(
+    {
+        "+x",
+        "-x",
+        "+y",
+        "-y",
+        "+z",
+        "-z",
+        "+f",
+        "-f",
+        "none",
+    }
+)
+SPATIAL_CALIBRATION_DEFAULT_STAGE_AXIS_MAP_ZYX = ("+z", "+y", "+x")
+SPATIAL_CALIBRATION_DEFAULT_THETA_MODE = "rotate_zy_about_x"
 
 
 @dataclass(frozen=True)
@@ -636,8 +656,18 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "overlap_zyx": [8, 32, 32],
         "memory_overhead_factor": 2.5,
     },
-    "visualization": {
+    "display_pyramid": {
         "execution_order": 7,
+        "input_source": "data",
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 1.0,
+    },
+    "visualization": {
+        "execution_order": 8,
         "input_source": "data",
         "chunk_basis": "2d",
         "detect_2d_per_slice": True,
@@ -647,6 +677,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "show_all_positions": False,
         "position_index": 0,
         "use_multiscale": True,
+        "use_3d_view": True,
         "overlay_particle_detections": True,
         "particle_detection_component": "results/particle_detection/latest/detections",
         "launch_mode": "auto",
@@ -657,7 +688,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "volume_layers": [],
     },
     "mip_export": {
-        "execution_order": 8,
+        "execution_order": 9,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -1970,7 +2001,9 @@ def _normalize_visualization_volume_layers(value: Any) -> list[Dict[str, Any]]:
             str(raw_row.get("multiscale_policy", "inherit")).strip().lower()
             or "inherit"
         )
-        if multiscale_policy not in {"inherit", "require", "auto_build", "off"}:
+        if multiscale_policy == "auto_build":
+            multiscale_policy = "inherit"
+        if multiscale_policy not in {"inherit", "require", "off"}:
             multiscale_policy = "inherit"
         blending = str(raw_row.get("blending", "")).strip().lower()
         if blending in {"auto", "default"}:
@@ -2022,6 +2055,7 @@ def _normalize_visualization_parameters(
     normalized["show_all_positions"] = bool(normalized.get("show_all_positions", False))
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
+    normalized["use_3d_view"] = bool(normalized.get("use_3d_view", True))
     normalized["overlay_particle_detections"] = bool(
         normalized.get("overlay_particle_detections", True)
     )
@@ -2204,6 +2238,7 @@ def selected_analysis_operations(
     particle_detection: bool,
     usegment3d: bool,
     registration: bool,
+    display_pyramid: bool,
     visualization: bool,
     mip_export: bool,
 ) -> Tuple[str, ...]:
@@ -2223,6 +2258,8 @@ def selected_analysis_operations(
         Whether usegment3d segmentation is enabled.
     registration : bool
         Whether registration is enabled.
+    display_pyramid : bool
+        Whether display-pyramid preparation is enabled.
     visualization : bool
         Whether visualization is enabled.
     mip_export : bool
@@ -2246,6 +2283,8 @@ def selected_analysis_operations(
         selected.append("usegment3d")
     if registration:
         selected.append("registration")
+    if display_pyramid:
+        selected.append("display_pyramid")
     if visualization:
         selected.append("visualization")
     if mip_export:
@@ -2261,6 +2300,7 @@ def resolve_analysis_execution_sequence(
     particle_detection: bool,
     usegment3d: bool,
     registration: bool,
+    display_pyramid: bool,
     visualization: bool,
     mip_export: bool,
     analysis_parameters: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -2281,6 +2321,8 @@ def resolve_analysis_execution_sequence(
         Whether usegment3d segmentation is enabled.
     registration : bool
         Whether registration is enabled.
+    display_pyramid : bool
+        Whether display-pyramid preparation is enabled.
     visualization : bool
         Whether visualization is enabled.
     mip_export : bool
@@ -2303,6 +2345,7 @@ def resolve_analysis_execution_sequence(
         particle_detection=particle_detection,
         usegment3d=usegment3d,
         registration=registration,
+        display_pyramid=display_pyramid,
         visualization=visualization,
         mip_export=mip_export,
     )
@@ -3955,6 +3998,411 @@ def format_dask_backend_summary(config: DaskBackendConfig) -> str:
     )
 
 
+def _normalize_spatial_calibration_binding(
+    value: Any,
+    *,
+    axis_name: str,
+) -> str:
+    """Normalize one world-axis spatial-calibration binding.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate binding value.
+    axis_name : str
+        World axis receiving the binding for error context.
+
+    Returns
+    -------
+    str
+        Canonical lowercase binding.
+
+    Raises
+    ------
+    ValueError
+        If the binding is empty or unsupported.
+    """
+    text = str(value).strip().lower()
+    if not text:
+        raise ValueError(
+            f"Spatial calibration binding for world axis '{axis_name}' cannot be empty."
+        )
+    if text in SPATIAL_CALIBRATION_SOURCE_AXES:
+        text = f"+{text}"
+    if text not in SPATIAL_CALIBRATION_ALLOWED_BINDINGS:
+        allowed = ", ".join(sorted(SPATIAL_CALIBRATION_ALLOWED_BINDINGS))
+        raise ValueError(
+            f"Spatial calibration binding for world axis '{axis_name}' must be one "
+            f"of: {allowed}."
+        )
+    return text
+
+
+def _normalize_spatial_calibration_stage_axis_map(
+    stage_axis_map_zyx: Any,
+) -> tuple[str, str, str]:
+    """Normalize world ``z/y/x`` axis bindings for spatial calibration.
+
+    Parameters
+    ----------
+    stage_axis_map_zyx : Any
+        Candidate binding payload. Accepts a sequence in ``(z, y, x)`` order or
+        a mapping with ``z``, ``y``, and ``x`` keys.
+
+    Returns
+    -------
+    tuple[str, str, str]
+        Canonical world-axis bindings in ``(z, y, x)`` order.
+
+    Raises
+    ------
+    ValueError
+        If the mapping is malformed or reuses one source axis more than once.
+    """
+    if isinstance(stage_axis_map_zyx, Mapping):
+        missing_axes = [
+            axis_name
+            for axis_name in SPATIAL_CALIBRATION_WORLD_AXES
+            if axis_name not in stage_axis_map_zyx
+        ]
+        if missing_axes:
+            raise ValueError(
+                "Spatial calibration mappings must define z, y, and x bindings."
+            )
+        normalized = (
+            _normalize_spatial_calibration_binding(
+                stage_axis_map_zyx["z"],
+                axis_name="z",
+            ),
+            _normalize_spatial_calibration_binding(
+                stage_axis_map_zyx["y"],
+                axis_name="y",
+            ),
+            _normalize_spatial_calibration_binding(
+                stage_axis_map_zyx["x"],
+                axis_name="x",
+            ),
+        )
+    elif isinstance(stage_axis_map_zyx, Sequence) and not isinstance(
+        stage_axis_map_zyx, (str, bytes)
+    ):
+        values = tuple(stage_axis_map_zyx)
+        if len(values) != len(SPATIAL_CALIBRATION_WORLD_AXES):
+            raise ValueError(
+                "Spatial calibration stage_axis_map_zyx must define three "
+                "entries in (z, y, x) order."
+            )
+        normalized = (
+            _normalize_spatial_calibration_binding(values[0], axis_name="z"),
+            _normalize_spatial_calibration_binding(values[1], axis_name="y"),
+            _normalize_spatial_calibration_binding(values[2], axis_name="x"),
+        )
+    else:
+        raise ValueError(
+            "Spatial calibration stage_axis_map_zyx must be a mapping or "
+            "three-entry sequence."
+        )
+
+    seen_sources: set[str] = set()
+    for axis_name, binding in zip(
+        SPATIAL_CALIBRATION_WORLD_AXES,
+        normalized,
+        strict=False,
+    ):
+        if binding == "none":
+            continue
+        source_axis = binding[1:]
+        if source_axis in seen_sources:
+            raise ValueError(
+                "Spatial calibration cannot map one stage axis to multiple world "
+                f"axes. Duplicate source axis '{source_axis}' detected at world "
+                f"axis '{axis_name}'."
+            )
+        seen_sources.add(source_axis)
+    return normalized
+
+
+@dataclass(frozen=True)
+class SpatialCalibrationConfig:
+    """Store-level stage-to-world axis mapping for multiposition placement.
+
+    Attributes
+    ----------
+    stage_axis_map_zyx : tuple[str, str, str]
+        World-axis bindings in ``(z, y, x)`` order. Allowed values are
+        ``+x``, ``-x``, ``+y``, ``-y``, ``+z``, ``-z``, ``+f``, ``-f``, and
+        ``none``.
+    theta_mode : str
+        Rotation interpretation for Navigate ``THETA`` values.
+    """
+
+    stage_axis_map_zyx: tuple[str, str, str] = (
+        SPATIAL_CALIBRATION_DEFAULT_STAGE_AXIS_MAP_ZYX
+    )
+    theta_mode: str = SPATIAL_CALIBRATION_DEFAULT_THETA_MODE
+
+    def __post_init__(self) -> None:
+        """Normalize and validate spatial-calibration fields.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Values are normalized in-place on the frozen dataclass.
+
+        Raises
+        ------
+        ValueError
+            If bindings or theta mode are invalid.
+        """
+        normalized_bindings = _normalize_spatial_calibration_stage_axis_map(
+            self.stage_axis_map_zyx
+        )
+        theta_mode = (
+            str(self.theta_mode).strip().lower()
+            or SPATIAL_CALIBRATION_DEFAULT_THETA_MODE
+        )
+        if theta_mode != SPATIAL_CALIBRATION_DEFAULT_THETA_MODE:
+            raise ValueError(
+                "Spatial calibration theta_mode must be "
+                f"'{SPATIAL_CALIBRATION_DEFAULT_THETA_MODE}'."
+            )
+        object.__setattr__(self, "stage_axis_map_zyx", normalized_bindings)
+        object.__setattr__(self, "theta_mode", theta_mode)
+
+    def stage_axis_map_by_world_axis(self) -> Dict[str, str]:
+        """Return the world-axis binding mapping.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict[str, str]
+            Mapping of world ``z/y/x`` axes to canonical binding strings.
+        """
+        return {
+            axis_name: binding
+            for axis_name, binding in zip(
+                SPATIAL_CALIBRATION_WORLD_AXES,
+                self.stage_axis_map_zyx,
+                strict=False,
+            )
+        }
+
+
+def parse_spatial_calibration(
+    mapping: Optional[str],
+) -> SpatialCalibrationConfig:
+    """Parse CLI/GUI text into a spatial calibration configuration.
+
+    Parameters
+    ----------
+    mapping : str, optional
+        Canonical text form such as ``"z=+x,y=none,x=+y"``.
+
+    Returns
+    -------
+    SpatialCalibrationConfig
+        Parsed and validated calibration. Empty input resolves to identity.
+
+    Raises
+    ------
+    ValueError
+        If the text is malformed or reuses a non-``none`` stage axis.
+    """
+    if mapping is None:
+        return SpatialCalibrationConfig()
+
+    text = str(mapping).strip()
+    if not text:
+        return SpatialCalibrationConfig()
+
+    assignments: Dict[str, str] = {}
+    for token in text.split(","):
+        item = token.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(
+                "Spatial calibration must use 'world_axis=binding' assignments."
+            )
+        axis_name, binding = item.split("=", 1)
+        key = str(axis_name).strip().lower()
+        if key not in SPATIAL_CALIBRATION_WORLD_AXES:
+            raise ValueError(
+                "Spatial calibration world axes must be z, y, or x."
+            )
+        if key in assignments:
+            raise ValueError(
+                f"Spatial calibration world axis '{key}' is assigned more than once."
+            )
+        assignments[key] = str(binding).strip()
+
+    if set(assignments) != set(SPATIAL_CALIBRATION_WORLD_AXES):
+        raise ValueError(
+            "Spatial calibration must define exactly z, y, and x assignments."
+        )
+    return SpatialCalibrationConfig(
+        stage_axis_map_zyx=(
+            assignments["z"],
+            assignments["y"],
+            assignments["x"],
+        )
+    )
+
+
+def normalize_spatial_calibration(
+    value: Any,
+) -> SpatialCalibrationConfig:
+    """Normalize flexible spatial-calibration payloads.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate calibration payload. Accepts
+        :class:`SpatialCalibrationConfig`, canonical text, or metadata mappings.
+
+    Returns
+    -------
+    SpatialCalibrationConfig
+        Normalized calibration configuration.
+
+    Raises
+    ------
+    ValueError
+        If the payload cannot be interpreted as a valid calibration.
+    """
+    if value is None:
+        return SpatialCalibrationConfig()
+    if isinstance(value, SpatialCalibrationConfig):
+        return value
+    if isinstance(value, str):
+        return parse_spatial_calibration(value)
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "Spatial calibration must be a SpatialCalibrationConfig, string, or mapping."
+        )
+
+    theta_mode = (
+        str(
+            value.get("theta_mode", SPATIAL_CALIBRATION_DEFAULT_THETA_MODE)
+        ).strip()
+        or SPATIAL_CALIBRATION_DEFAULT_THETA_MODE
+    )
+    schema = str(value.get("schema", SPATIAL_CALIBRATION_SCHEMA)).strip()
+    if schema and schema != SPATIAL_CALIBRATION_SCHEMA:
+        raise ValueError(
+            f"Unsupported spatial calibration schema '{schema}'."
+        )
+
+    if "stage_axis_map_zyx" in value:
+        stage_axis_payload = value.get("stage_axis_map_zyx")
+    elif any(axis_name in value for axis_name in SPATIAL_CALIBRATION_WORLD_AXES):
+        missing_axes = [
+            axis_name
+            for axis_name in SPATIAL_CALIBRATION_WORLD_AXES
+            if axis_name not in value
+        ]
+        if missing_axes:
+            raise ValueError(
+                "Spatial calibration mappings must define z, y, and x bindings."
+            )
+        stage_axis_payload = {
+            axis_name: value.get(axis_name)
+            for axis_name in SPATIAL_CALIBRATION_WORLD_AXES
+        }
+    else:
+        raise ValueError(
+            "Spatial calibration mappings must provide stage_axis_map_zyx or z/y/x keys."
+        )
+
+    if isinstance(stage_axis_payload, str):
+        parsed = parse_spatial_calibration(stage_axis_payload)
+        return SpatialCalibrationConfig(
+            stage_axis_map_zyx=parsed.stage_axis_map_zyx,
+            theta_mode=theta_mode,
+        )
+
+    return SpatialCalibrationConfig(
+        stage_axis_map_zyx=_normalize_spatial_calibration_stage_axis_map(
+            stage_axis_payload
+        ),
+        theta_mode=theta_mode,
+    )
+
+
+def spatial_calibration_to_dict(
+    config: SpatialCalibrationConfig,
+) -> Dict[str, Any]:
+    """Serialize spatial calibration for Zarr attrs and provenance.
+
+    Parameters
+    ----------
+    config : SpatialCalibrationConfig
+        Calibration to serialize.
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-compatible payload with schema, bindings, and theta mode.
+    """
+    normalized = normalize_spatial_calibration(config)
+    return {
+        "schema": SPATIAL_CALIBRATION_SCHEMA,
+        "stage_axis_map_zyx": normalized.stage_axis_map_by_world_axis(),
+        "theta_mode": normalized.theta_mode,
+    }
+
+
+def spatial_calibration_from_dict(
+    payload: Any,
+) -> SpatialCalibrationConfig:
+    """Deserialize spatial calibration from metadata payloads.
+
+    Parameters
+    ----------
+    payload : Any
+        Stored calibration payload. Missing values resolve to identity.
+
+    Returns
+    -------
+    SpatialCalibrationConfig
+        Parsed calibration configuration.
+    """
+    return normalize_spatial_calibration(payload)
+
+
+def format_spatial_calibration(
+    config: Any,
+) -> str:
+    """Format a spatial calibration in canonical text form.
+
+    Parameters
+    ----------
+    config : Any
+        Calibration payload accepted by :func:`normalize_spatial_calibration`.
+
+    Returns
+    -------
+    str
+        Canonical text form ``z=...,y=...,x=...``.
+    """
+    normalized = normalize_spatial_calibration(config)
+    return ",".join(
+        f"{axis_name}={binding}"
+        for axis_name, binding in zip(
+            SPATIAL_CALIBRATION_WORLD_AXES,
+            normalized.stage_axis_map_zyx,
+            strict=False,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class AnalysisTarget:
     """Resolved experiment/store pair available to the analysis dialog.
@@ -4061,12 +4509,20 @@ class WorkflowConfig:
         Flag indicating whether usegment3d workflow should run.
     registration : bool
         Flag indicating whether registration workflow should run.
+    display_pyramid : bool
+        Flag indicating whether display-pyramid preparation should run.
     visualization : bool
         Flag indicating whether visualization workflow should run.
     mip_export : bool
         Flag indicating whether MIP-export workflow should run.
     zarr_save : ZarrSaveConfig
         Analysis-store chunking and pyramid configuration for saved Zarr data.
+    spatial_calibration : SpatialCalibrationConfig
+        Store-level Navigate stage-to-world axis mapping used for multiposition
+        placement metadata.
+    spatial_calibration_explicit : bool
+        Whether the current spatial calibration was explicitly supplied by the
+        operator rather than inherited as the identity default.
     analysis_parameters : dict[str, dict[str, Any]]
         Per-analysis runtime parameters keyed by analysis name.
     """
@@ -4084,9 +4540,14 @@ class WorkflowConfig:
     particle_detection: bool = False
     usegment3d: bool = False
     registration: bool = False
+    display_pyramid: bool = False
     visualization: bool = False
     mip_export: bool = False
     zarr_save: ZarrSaveConfig = field(default_factory=ZarrSaveConfig)
+    spatial_calibration: SpatialCalibrationConfig = field(
+        default_factory=SpatialCalibrationConfig
+    )
+    spatial_calibration_explicit: bool = False
     analysis_parameters: Dict[str, Dict[str, Any]] = field(
         default_factory=default_analysis_operation_parameters
     )
@@ -4109,6 +4570,11 @@ class WorkflowConfig:
             If analysis parameter mappings are invalid.
         """
         self.analysis_targets = normalize_analysis_targets(self.analysis_targets)
+        if not isinstance(self.spatial_calibration, SpatialCalibrationConfig):
+            self.spatial_calibration = normalize_spatial_calibration(
+                self.spatial_calibration
+            )
+        self.spatial_calibration_explicit = bool(self.spatial_calibration_explicit)
         selected_experiment_path = (
             str(self.analysis_selected_experiment_path).strip()
             if self.analysis_selected_experiment_path is not None
@@ -4171,6 +4637,7 @@ class WorkflowConfig:
                 self.particle_detection,
                 self.usegment3d,
                 self.registration,
+                self.display_pyramid,
                 self.visualization,
                 self.mip_export,
             )

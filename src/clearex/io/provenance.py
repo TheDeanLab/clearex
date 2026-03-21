@@ -51,10 +51,12 @@ from clearex.io.read import ImageInfo
 from clearex.workflow import (
     WorkflowConfig,
     dask_backend_to_dict,
+    format_spatial_calibration,
     format_dask_backend_summary,
     format_chunks,
     format_zarr_chunks_ptczyx,
     format_zarr_pyramid_ptczyx,
+    spatial_calibration_to_dict,
 )
 
 ArrayLike = Union[np.ndarray, da.Array]
@@ -332,6 +334,8 @@ def _selected_analyses(workflow: WorkflowConfig) -> list[str]:
         selected.append("usegment3d")
     if workflow.registration:
         selected.append("registration")
+    if workflow.display_pyramid:
+        selected.append("display_pyramid")
     if workflow.visualization:
         selected.append("visualization")
     if workflow.mip_export:
@@ -997,9 +1001,19 @@ def persist_run_provenance(
         "particle_detection": workflow.particle_detection,
         "usegment3d": workflow.usegment3d,
         "registration": workflow.registration,
+        "display_pyramid": workflow.display_pyramid,
         "visualization": workflow.visualization,
         "mip_export": workflow.mip_export,
         "selected_analyses": _selected_analyses(workflow),
+        "spatial_calibration": spatial_calibration_to_dict(
+            workflow.spatial_calibration
+        ),
+        "spatial_calibration_text": format_spatial_calibration(
+            workflow.spatial_calibration
+        ),
+        "spatial_calibration_explicit": bool(
+            workflow.spatial_calibration_explicit
+        ),
         "analysis_parameters": _to_jsonable(workflow.analysis_parameters),
         "analysis_output_policy": "latest_only",
     }

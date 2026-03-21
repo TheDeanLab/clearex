@@ -12,6 +12,7 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
 - Input support for TIFF/OME-TIFF, Zarr/N5, HDF5 (`.h5/.hdf5/.hdf`), and NumPy (`.npy/.npz`).
 - Navigate experiment ingestion from `experiment.yml` / `experiment.yaml`.
 - Canonical analysis store layout with axis order `(t, p, c, z, y, x)`.
+- Store-level spatial calibration for Navigate multiposition data, persisted per analysis store and applied to physical placement metadata without rewriting canonical image data.
 - Analysis operations available from the main entrypoint:
   - deconvolution (`results/deconvolution/latest/data`)
   - particle detection (`results/particle_detection/latest`)
@@ -138,22 +139,33 @@ Current CLI usage:
 usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
                [--usegment3d] [--channel-indices CHANNEL_INDICES]
                [--input-resolution-level INPUT_RESOLUTION_LEVEL]
-               [--shear-transform] [-r] [-v] [--mip-export]
-               [-f FILE] [--dask | --no-dask] [--chunks CHUNKS]
-               [--gui | --no-gui] [--headless]
+               [--shear-transform] [-r] [-v] [--mip-export] [-f FILE]
+               [--dask | --no-dask] [--chunks CHUNKS]
+               [--execution-mode {auto,advanced}] [--max-workers MAX_WORKERS]
+               [--memory-per-worker MEMORY_PER_WORKER] [--calibrate]
+               [--stage-axis-map STAGE_AXIS_MAP] [--gui | --no-gui]
+               [--headless]
 ```
 
 ### Options
+- `--flatfield`: Run flatfield-correction workflow.
 - `-f, --file`: Path to input image/store or Navigate `experiment.yml`.
 - `--deconvolution`: Run deconvolution workflow.
 - `--particle-detection`: Run particle detection workflow.
 - `--usegment3d`: Run uSegment3D segmentation workflow.
 - `--channel-indices`: uSegment3D channels to process (`0,1,2` or `all`).
 - `--input-resolution-level`: uSegment3D input pyramid level (`0`, `1`, ...).
+- `--shear-transform`: Run shear-transform workflow.
 - `-r, --registration`: Run registration workflow hook.
 - `-v, --visualization`: Run visualization workflow.
+- `--mip-export`: Export XY/XZ/YZ maximum-intensity projections.
 - `--dask / --no-dask`: Enable/disable Dask-backed reading.
 - `--chunks`: Chunk spec for Dask reads, for example `256` or `1,256,256`.
+- `--execution-mode`: Automatic or advanced Dask execution planning mode.
+- `--max-workers`: Worker cap for automatic execution planning.
+- `--memory-per-worker`: Preferred per-worker memory limit for automatic execution planning.
+- `--calibrate`: Refresh cached execution-planning calibration before running.
+- `--stage-axis-map`: Store-level world `z/y/x` mapping for Navigate multiposition stage coordinates, for example `z=+x,y=none,x=+y`.
 - `--gui / --no-gui`: Enable/disable GUI launch (default is `--gui`).
 - `--headless`: Force non-interactive mode (overrides `--gui`).
 
@@ -171,6 +183,15 @@ Run headless on a Navigate experiment:
 clearex --headless \
   --file /path/to/experiment.yml \
   --deconvolution --usegment3d --particle-detection
+```
+
+Run headless with an explicit stage-to-world axis mapping for Navigate multiposition placement:
+
+```bash
+clearex --headless \
+  --file /path/to/experiment.yml \
+  --visualization \
+  --stage-axis-map z=+x,y=none,x=+y
 ```
 
 Run headless uSegment3D on all channels:
@@ -201,8 +222,12 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
 - If `--file` points to Navigate `experiment.yml`, ClearEx resolves acquisition data and materializes a canonical store first.
 - For non-Zarr/N5 acquisition data, materialization target is `data_store.zarr` beside `experiment.yml`.
 - For Zarr/N5 acquisition data, ClearEx reuses the source store path in place.
+- Canonical stores persist root-attr `spatial_calibration = {schema, stage_axis_map_zyx, theta_mode}`. Missing metadata resolves to the identity mapping `z=+z,y=+y,x=+x`.
+- In the setup window, `Spatial Calibration` is configured per listed experiment. Draft mappings are tracked per experiment while the dialog is open, existing stores prefill the control, and `Next` writes the resolved mapping to every reused or newly prepared store before analysis selection opens.
+- In headless mode, `--stage-axis-map` writes the supplied mapping to materialized experiment stores and existing Zarr/N5 stores before analysis starts. If the flag is omitted, existing store calibration is preserved.
 - Deconvolution, particle detection, uSegment3D, and visualization operations run against canonical Zarr/N5 stores.
 - Visualization supports multi-volume overlays (for example raw `data` + `results/usegment3d/latest/data`) with per-layer image/labels display controls.
+- Multiposition visualization placement now resolves world `z/y/x` translations from the store-level spatial calibration. Bindings support `X`, `Y`, `Z`, and Navigate focus axis `F` with sign inversion or `none`; `THETA` remains a rotation of the `z/y` plane about world `x`.
 - Visualization now probes napari OpenGL renderer info (`vendor`/`renderer`/`version`) and can fail fast when software rendering is detected or GPU rendering cannot be confirmed (`require_gpu_rendering=True`).
 - MIP export writes TIFF outputs as OME-TIFF (`.tif`) with projection-aware physical pixel calibration (`PhysicalSizeX/Y`) derived from source `voxel_size_um_zyx`.
 - uSegment3D runs per `(t, p, selected channel)` volume task and writes labels to `results/usegment3d/latest/data`.
@@ -291,6 +316,8 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
 - Visualization parameters include `require_gpu_rendering` (enabled by default). Disable only when running intentionally without a GPU-backed OpenGL context.
 
 ## Output Layout (Canonical Store)
+- Root metadata:
+  - `spatial_calibration` for store-level world `z/y/x` placement mapping
 - Base image data: `data`
 - Multiscale pyramid levels: `data_pyramid/level_*`
 - Latest analysis outputs:

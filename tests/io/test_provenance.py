@@ -43,7 +43,7 @@ from clearex.io.provenance import (
     verify_provenance_chain,
 )
 from clearex.io.read import ImageInfo
-from clearex.workflow import WorkflowConfig
+from clearex.workflow import SpatialCalibrationConfig, WorkflowConfig
 
 
 def test_is_zarr_store_path():
@@ -62,6 +62,7 @@ def test_persist_run_provenance_hash_chain(tmp_path: Path):
         deconvolution=True,
         usegment3d=True,
         registration=True,
+        display_pyramid=True,
     )
     image_info = ImageInfo(
         path=store_path,
@@ -94,14 +95,46 @@ def test_persist_run_provenance_hash_chain(tmp_path: Path):
     assert record_1["workflow"]["dask_backend"]["mode"] == "local_cluster"
     assert record_1["workflow"]["flatfield"] is True
     assert record_1["workflow"]["usegment3d"] is True
+    assert record_1["workflow"]["display_pyramid"] is True
     assert "flatfield" in record_1["workflow"]["selected_analyses"]
+    assert "display_pyramid" in record_1["workflow"]["selected_analyses"]
     assert "usegment3d" in record_1["workflow"]["selected_analyses"]
+    assert record_1["workflow"]["spatial_calibration_text"] == "z=+z,y=+y,x=+x"
     assert record_1["workflow"]["zarr_chunks_ptczyx"] == "p=1, t=1, c=1, z=256, y=256, x=256"
     assert "z=1,2,4,8" in record_1["workflow"]["zarr_pyramid_ptczyx"]
 
     valid, issues = verify_provenance_chain(store_path)
     assert valid is True
     assert issues == []
+
+
+def test_persist_run_provenance_records_spatial_calibration(tmp_path: Path) -> None:
+    store_path = tmp_path / "spatial_provenance.zarr"
+    zarr.open_group(str(store_path), mode="w")
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        visualization=True,
+        spatial_calibration=SpatialCalibrationConfig(
+            stage_axis_map_zyx=("+x", "none", "+y")
+        ),
+    )
+
+    run_id = persist_run_provenance(
+        zarr_path=store_path,
+        workflow=workflow,
+        image_info=ImageInfo(path=store_path, shape=(2, 2), dtype=np.uint8),
+        repo_root=tmp_path,
+    )
+
+    root = zarr.open_group(str(store_path), mode="r")
+    record = dict(root["provenance"]["runs"][run_id].attrs["record"])
+
+    assert record["workflow"]["spatial_calibration"] == {
+        "schema": "clearex.spatial_calibration.v1",
+        "stage_axis_map_zyx": {"z": "+x", "y": "none", "x": "+y"},
+        "theta_mode": "rotate_zy_about_x",
+    }
+    assert record["workflow"]["spatial_calibration_text"] == "z=+x,y=none,x=+y"
 
 
 def test_verify_provenance_chain_detects_tampering(tmp_path: Path):

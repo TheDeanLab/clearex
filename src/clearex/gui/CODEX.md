@@ -7,8 +7,11 @@ This folder owns the PyQt6 UX in `app.py`.
 - Setup window (`ClearExSetupDialog`):
   - Select file / `experiment.yml`
   - Configure Dask backend and Zarr save options
+  - Configure per-experiment `Spatial Calibration` (world `z/y/x` to Navigate
+    stage `X/Y/Z/F` or `none`)
   - Display image metadata
-  - Materialize canonical store when missing, with progress dialog
+  - Materialize canonical store when missing, persist resolved spatial
+    calibration to all requested stores, and show progress dialog
 - Analysis window (`AnalysisSelectionDialog`):
   - `Analysis Scope` manages the active experiment/store context for single or
     batch analysis
@@ -24,6 +27,9 @@ This folder owns the PyQt6 UX in `app.py`.
   - fall back to the latest completed provenance-backed workflow state,
   - persist current widget state on experiment switch, close, and run,
   - keep `Restore Latest Run Parameters` working for the active dataset.
+- The active analysis workflow must always carry the selected target store's
+  spatial calibration so visualization and future registration use the same
+  placement metadata.
 - When adding a new analysis workflow, new operation widget, or new parameter:
   - add the default and normalization path in `src/clearex/workflow.py`,
   - hydrate the widget from restored `analysis_parameters`,
@@ -42,6 +48,8 @@ This folder owns the PyQt6 UX in `app.py`.
 - Unselected operations should not be configurable.
 - Per-operation `Input source` options depend on selected upstream operations and execution order.
 - `Visualization` is treated as a terminal/view step; it should not be offered as an upstream image source for later operations.
+- Visualization placement must come from persisted store metadata
+  (`spatial_calibration`), not transient GUI-only state.
 - Visualization configuration currently exposes:
   - `position_index` for multiposition datasets
   - multiscale loading toggle
