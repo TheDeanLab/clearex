@@ -225,7 +225,9 @@ def test_setup_dialog_keeps_experiment_controls_visible_on_short_screens(
     if app is None:
         app = app_module.QApplication([])
 
-    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
 
     dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
     dialog.show()
@@ -253,7 +255,9 @@ def test_analysis_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     if app is None:
         app = app_module.QApplication([])
 
-    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
 
     dialog = app_module.AnalysisSelectionDialog(
         initial=app_module.WorkflowConfig(file="/tmp/test/data_store.fake")
@@ -290,7 +294,9 @@ def test_zarr_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     if app is None:
         app = app_module.QApplication([])
 
-    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
 
     dialog = app_module.ZarrSaveConfigDialog(initial=app_module.ZarrSaveConfig())
     dialog.show()
@@ -314,7 +320,9 @@ def test_dask_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     if app is None:
         app = app_module.QApplication([])
 
-    monkeypatch.setattr(app_module, "_primary_screen_available_size", lambda: (800, 800))
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
 
     dialog = app_module.DaskBackendConfigDialog(
         initial=app_module.DaskBackendConfig(),
@@ -394,8 +402,10 @@ def test_plan_experiment_store_materialization_partitions_pending_requests(
     monkeypatch.setattr(
         app_module,
         "_has_reusable_canonical_store",
-        lambda store_path: Path(store_path).expanduser().resolve()
-        == requests[2].target_store.resolve(),
+        lambda store_path: (
+            Path(store_path).expanduser().resolve()
+            == requests[2].target_store.resolve()
+        ),
     )
 
     selected_request, pending_requests, ready_requests = (
@@ -530,10 +540,7 @@ def test_reset_analysis_selection_for_next_run_preserves_scope() -> None:
 
     assert reset.file == "/tmp/cell_002/data_store.zarr"
     assert reset.analysis_targets == workflow.analysis_targets
-    assert (
-        reset.analysis_selected_experiment_path
-        == "/tmp/cell_002/experiment.yml"
-    )
+    assert reset.analysis_selected_experiment_path == "/tmp/cell_002/experiment.yml"
     assert reset.analysis_apply_to_all is True
     assert reset.flatfield is False
     assert reset.registration is False
@@ -805,13 +812,15 @@ def test_setup_dialog_persists_spatial_calibration_for_all_requests(
 
     assert persisted[store_a.resolve()].stage_axis_map_zyx == ("+x", "none", "+y")
     assert persisted[store_b.resolve()].stage_axis_map_zyx == ("+f", "-y", "+x")
-    assert (
-        app_module.load_store_spatial_calibration(store_a).stage_axis_map_zyx
-        == ("+x", "none", "+y")
+    assert app_module.load_store_spatial_calibration(store_a).stage_axis_map_zyx == (
+        "+x",
+        "none",
+        "+y",
     )
-    assert (
-        app_module.load_store_spatial_calibration(store_b).stage_axis_map_zyx
-        == ("+f", "-y", "+x")
+    assert app_module.load_store_spatial_calibration(store_b).stage_axis_map_zyx == (
+        "+f",
+        "-y",
+        "+x",
     )
 
     dialog.close()
@@ -825,8 +834,10 @@ def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
     monkeypatch.setattr(
         app_module,
         "_show_themed_error_dialog",
-        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
-            {"summary": str(summary), "details": str(details)}
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
         ),
     )
     seen_threads: list[threading.Thread] = []
@@ -838,7 +849,9 @@ def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
         progress_callback(80, "running")
 
     workflow = app_module.WorkflowConfig(
-        dask_backend=app_module.DaskBackendConfig(mode=app_module.DASK_BACKEND_SLURM_CLUSTER)
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        )
     )
 
     ok = app_module.run_workflow_with_progress(
@@ -873,8 +886,10 @@ def test_run_workflow_with_progress_slurm_batches_all_selected_experiments(
     monkeypatch.setattr(
         app_module,
         "_show_themed_error_dialog",
-        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
-            {"summary": str(summary), "details": str(details)}
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
         ),
     )
     executed_files: list[str] = []
@@ -939,8 +954,10 @@ def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
     monkeypatch.setattr(
         app_module,
         "_show_themed_error_dialog",
-        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
-            {"summary": str(summary), "details": str(details)}
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
         ),
     )
     seen_threads: list[threading.Thread] = []
@@ -952,7 +969,9 @@ def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
         raise RuntimeError("boom")
 
     workflow = app_module.WorkflowConfig(
-        dask_backend=app_module.DaskBackendConfig(mode=app_module.DASK_BACKEND_SLURM_CLUSTER)
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        )
     )
 
     ok = app_module.run_workflow_with_progress(
@@ -986,8 +1005,10 @@ def test_run_workflow_with_progress_slurm_cancels_without_error_dialog(
     monkeypatch.setattr(
         app_module,
         "_show_themed_error_dialog",
-        lambda _parent, _title, _message, *, summary=None, details=None: themed_error_calls.append(
-            {"summary": str(summary), "details": str(details)}
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
         ),
     )
 
@@ -1087,7 +1108,9 @@ def test_persisted_zarr_save_round_trip(tmp_path) -> None:
     assert loaded == config
 
 
-def test_load_persisted_backend_returns_none_for_empty_or_invalid_json(tmp_path) -> None:
+def test_load_persisted_backend_returns_none_for_empty_or_invalid_json(
+    tmp_path,
+) -> None:
     settings_path = tmp_path / ".clearex" / "dask_backend_settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text("  \n", encoding="utf-8")
@@ -1104,20 +1127,20 @@ def test_load_persisted_backend_returns_none_for_empty_or_invalid_json(tmp_path)
     )
 
 
-def test_load_persisted_zarr_save_returns_none_for_empty_or_invalid_json(tmp_path) -> None:
+def test_load_persisted_zarr_save_returns_none_for_empty_or_invalid_json(
+    tmp_path,
+) -> None:
     settings_path = tmp_path / ".clearex" / "zarr_save_settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text("  \n", encoding="utf-8")
 
     assert (
-        app_module._load_last_used_zarr_save_config(settings_path=settings_path)
-        is None
+        app_module._load_last_used_zarr_save_config(settings_path=settings_path) is None
     )
 
     settings_path.write_text("{not-json}", encoding="utf-8")
     assert (
-        app_module._load_last_used_zarr_save_config(settings_path=settings_path)
-        is None
+        app_module._load_last_used_zarr_save_config(settings_path=settings_path) is None
     )
 
 
@@ -1352,7 +1375,9 @@ def test_build_input_source_options_includes_scheduled_upstream_outputs() -> Non
     ) in options
 
 
-def test_build_visualization_volume_layer_component_options_include_existing_outputs() -> None:
+def test_build_visualization_volume_layer_component_options_include_existing_outputs() -> (
+    None
+):
     options = app_module._build_visualization_volume_layer_component_options(
         selected_order=("visualization",),
         operation_key_order=(
@@ -1390,7 +1415,9 @@ def test_build_visualization_volume_layer_component_options_include_existing_out
     ) in options
 
 
-def test_build_visualization_volume_layer_component_options_include_scheduled_outputs() -> None:
+def test_build_visualization_volume_layer_component_options_include_scheduled_outputs() -> (
+    None
+):
     options = app_module._build_visualization_volume_layer_component_options(
         selected_order=("flatfield", "visualization"),
         operation_key_order=(
@@ -1420,7 +1447,9 @@ def test_build_visualization_volume_layer_component_options_include_scheduled_ou
     ) in options
 
 
-def test_build_visualization_volume_layer_component_options_deduplicates_components() -> None:
+def test_build_visualization_volume_layer_component_options_deduplicates_components() -> (
+    None
+):
     options = app_module._build_visualization_volume_layer_component_options(
         selected_order=("flatfield", "visualization"),
         operation_key_order=("flatfield", "deconvolution", "visualization"),
@@ -1515,7 +1544,9 @@ def test_particle_overlay_available_with_existing_detections() -> None:
     assert from_store is True
 
 
-def test_sync_visualization_volume_layers_from_input_source_updates_primary_layer() -> None:
+def test_sync_visualization_volume_layers_from_input_source_updates_primary_layer() -> (
+    None
+):
     if not hasattr(app_module, "AnalysisSelectionDialog"):
         return
 
@@ -1539,8 +1570,8 @@ def test_sync_visualization_volume_layers_from_input_source_updates_primary_laye
         {"component": "data", "layer_type": "image"}
     ]
     refresh_calls = {"count": 0}
-    dialog._refresh_visualization_volume_layers_summary = lambda: refresh_calls.__setitem__(
-        "count", refresh_calls["count"] + 1
+    dialog._refresh_visualization_volume_layers_summary = lambda: (
+        refresh_calls.__setitem__("count", refresh_calls["count"] + 1)
     )
 
     app_module.AnalysisSelectionDialog._sync_visualization_volume_layers_from_input_source(
@@ -1604,16 +1635,23 @@ def test_collect_visualization_parameters_syncs_combo_with_primary_layer() -> No
     dialog._visualization_show_all_positions_checkbox = _FakeCheckbox(False)
     dialog._visualization_position_spin = _FakeSpin(0)
     dialog._visualization_multiscale_checkbox = _FakeCheckbox(False)
+    dialog._visualization_3d_checkbox = _FakeCheckbox(True)
     dialog._visualization_require_gpu_checkbox = _FakeCheckbox(False)
     dialog._visualization_overlay_points_checkbox = _FakeCheckbox(False)
 
-    params = app_module.AnalysisSelectionDialog._collect_visualization_parameters(dialog)
+    params = app_module.AnalysisSelectionDialog._collect_visualization_parameters(
+        dialog
+    )
 
     assert params["input_source"] == "results/shear_transform/latest/data"
-    assert params["volume_layers"][0]["component"] == "results/shear_transform/latest/data"
+    assert (
+        params["volume_layers"][0]["component"] == "results/shear_transform/latest/data"
+    )
 
 
-def test_validate_selected_analysis_dependencies_rejects_later_scheduled_producer() -> None:
+def test_validate_selected_analysis_dependencies_rejects_later_scheduled_producer() -> (
+    None
+):
     if not hasattr(app_module, "AnalysisSelectionDialog"):
         return
 
@@ -1624,12 +1662,14 @@ def test_validate_selected_analysis_dependencies_rejects_later_scheduled_produce
     dialog._selected_operations_in_sequence = lambda: ["visualization", "flatfield"]
     dialog._discover_store_output_components = lambda: {}
 
-    issues = app_module.AnalysisSelectionDialog._validate_selected_analysis_dependencies(
-        dialog,
-        {
-            "visualization": {"input_source": "flatfield"},
-            "flatfield": {"input_source": "data"},
-        },
+    issues = (
+        app_module.AnalysisSelectionDialog._validate_selected_analysis_dependencies(
+            dialog,
+            {
+                "visualization": {"input_source": "flatfield"},
+                "flatfield": {"input_source": "data"},
+            },
+        )
     )
 
     assert issues
@@ -1659,7 +1699,10 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
 
     dialog_cls = app_module.AnalysisSelectionDialog
     assert dialog_cls._OPERATION_LABELS["visualization"] == "Napari"
-    assert ("Visualization", ("visualization", "mip_export")) in dialog_cls._OPERATION_TABS
+    assert (
+        "Visualization",
+        ("visualization", "mip_export"),
+    ) in dialog_cls._OPERATION_TABS
 
 
 def test_analysis_selection_dialog_themes_rounded_scroll_surfaces() -> None:
@@ -1702,16 +1745,16 @@ def test_visualization_popup_tables_use_uniform_widget_rows() -> None:
         in volume_layers_source
     )
     assert (
-        'header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)'
+        "header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)"
         in volume_layers_source
     )
-    assert 'table.setColumnWidth(0, 140)' in volume_layers_source
+    assert "table.setColumnWidth(0, 140)" in volume_layers_source
     assert 'placeholder_text="Optional name"' in volume_layers_source
     assert 'placeholder_text="All channels"' in volume_layers_source
     assert 'placeholder_text="Auto"' in volume_layers_source
-    assert 'line_edit.setPlaceholderText(str(placeholder_text))' in layer_table_source
-    assert 'table.setColumnWidth(2, 150)' in layer_table_source
-    assert 'QComboBox QLineEdit {' in popup_stylesheet_source
+    assert "line_edit.setPlaceholderText(str(placeholder_text))" in layer_table_source
+    assert "table.setColumnWidth(2, 150)" in layer_table_source
+    assert "QComboBox QLineEdit {" in popup_stylesheet_source
 
 
 def test_analysis_selection_dialog_detect_local_gpu_available(monkeypatch) -> None:

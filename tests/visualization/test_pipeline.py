@@ -1043,6 +1043,75 @@ def test_launch_napari_viewer_requests_3d_display_mode(
     assert viewer.image_calls[0]["rendering"] == "attenuated_mip"
 
 
+def test_launch_napari_viewer_requests_2d_display_mode_when_metadata_disables_3d(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = np.zeros((1, 1, 1, 3, 4, 5), dtype=np.uint16)
+
+    def _fake_from_zarr(_path: str, *, component: str):
+        assert component == "data"
+        return source
+
+    monkeypatch.setattr(visualization_pipeline.da, "from_zarr", _fake_from_zarr)
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.ndim = 2
+            self.axis_labels = ("0", "1")
+
+    class _FakeViewer:
+        def __init__(self, *, ndisplay: int, show: bool) -> None:
+            del show
+            self.initial_ndisplay = int(ndisplay)
+            self.dims = _FakeDims()
+            self.image_calls: list[dict[str, object]] = []
+
+        def add_image(self, data, **kwargs):
+            del data
+            self.image_calls.append(dict(kwargs))
+            self.dims.ndim = 5
+            return None
+
+        def add_points(self, *_args, **_kwargs):
+            return None
+
+    class _FakeNapari:
+        def __init__(self) -> None:
+            self.viewer: _FakeViewer | None = None
+
+        def Viewer(self, *, ndisplay: int, show: bool):
+            self.viewer = _FakeViewer(ndisplay=ndisplay, show=show)
+            return self.viewer
+
+        def run(self) -> None:
+            return None
+
+    fake_napari = _FakeNapari()
+    monkeypatch.setitem(sys.modules, "napari", fake_napari)
+
+    visualization_pipeline._launch_napari_viewer(
+        zarr_path=tmp_path / "analysis_store.zarr",
+        volume_layers=_single_image_volume_layers(),
+        selected_positions=(0,),
+        points_by_position={},
+        point_properties_by_position={},
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        axis_labels=("t", "c", "z", "y", "x"),
+        scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        image_metadata={"viewer_ndisplay": 2},
+        points_metadata={},
+        require_gpu_rendering=False,
+        capture_keyframes=False,
+        keyframe_manifest_path=None,
+        keyframe_layer_overrides=[],
+    )
+
+    viewer = fake_napari.viewer
+    assert viewer is not None
+    assert viewer.initial_ndisplay == 2
+    assert len(viewer.image_calls) == 1
+
+
 def test_launch_napari_viewer_resolves_per_layer_scale_for_downsampled_components(
     tmp_path: Path, monkeypatch
 ) -> None:

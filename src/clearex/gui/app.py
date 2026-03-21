@@ -205,9 +205,7 @@ _GUI_APP_ICON = "icon.png"
 _CLEAREX_SETTINGS_DIR_NAME = ".clearex"
 _CLEAREX_DASK_BACKEND_SETTINGS_FILE = "dask_backend_settings.json"
 _CLEAREX_EXECUTION_POLICY_SETTINGS_FILE = "execution_policy_settings.json"
-_CLEAREX_EXECUTION_CALIBRATION_PROFILES_FILE = (
-    "execution_calibration_profiles.json"
-)
+_CLEAREX_EXECUTION_CALIBRATION_PROFILES_FILE = "execution_calibration_profiles.json"
 _CLEAREX_ZARR_SAVE_SETTINGS_FILE = "zarr_save_settings.json"
 _CLEAREX_EXPERIMENT_LIST_FORMAT = "clearex-experiment-list/v1"
 _CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX = ".clearex-experiment-list.json"
@@ -2186,8 +2184,7 @@ def _format_spatial_calibration_summary(config: SpatialCalibrationConfig) -> str
         Human-readable summary for setup and analysis dialogs.
     """
     binding_labels = {
-        binding: label
-        for label, binding in _spatial_calibration_binding_choices()
+        binding: label for label, binding in _spatial_calibration_binding_choices()
     }
     lines = [
         f"Canonical: {format_spatial_calibration(config)}",
@@ -2198,8 +2195,7 @@ def _format_spatial_calibration_summary(config: SpatialCalibrationConfig) -> str
         strict=False,
     ):
         lines.append(
-            f"World {axis_name.upper()}: "
-            f"{binding_labels.get(binding, binding)}"
+            f"World {axis_name.upper()}: {binding_labels.get(binding, binding)}"
         )
     lines.append("Theta: Rotate Z/Y about world X")
     return "\n".join(lines)
@@ -2414,7 +2410,9 @@ def _show_themed_error_dialog(
         dialog.setDetailedText(str(details))
 
     dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
-    dialog.setStyleSheet(_popup_dialog_stylesheet() + """
+    dialog.setStyleSheet(
+        _popup_dialog_stylesheet()
+        + """
         QMessageBox {
             background-color: #0c1118;
             color: #e6edf3;
@@ -2427,7 +2425,8 @@ def _show_themed_error_dialog(
             color: #e6edf3;
             selection-background-color: #2f81f7;
         }
-        """)
+        """
+    )
     dialog.exec()
 
 
@@ -3061,12 +3060,8 @@ if HAS_PYQT6:
             self._defaults_button = _configure_fixed_height_button(
                 QPushButton("Reset Defaults")
             )
-            self._cancel_button = _configure_fixed_height_button(
-                QPushButton("Cancel")
-            )
-            self._apply_button = _configure_fixed_height_button(
-                QPushButton("Apply")
-            )
+            self._cancel_button = _configure_fixed_height_button(QPushButton("Cancel"))
+            self._apply_button = _configure_fixed_height_button(QPushButton("Apply"))
             self._apply_button.setObjectName("runButton")
             footer.addWidget(self._defaults_button)
             footer.addStretch(1)
@@ -3279,12 +3274,8 @@ if HAS_PYQT6:
             self._defaults_button = _configure_fixed_height_button(
                 QPushButton("Reset Identity")
             )
-            self._cancel_button = _configure_fixed_height_button(
-                QPushButton("Cancel")
-            )
-            self._apply_button = _configure_fixed_height_button(
-                QPushButton("Apply")
-            )
+            self._cancel_button = _configure_fixed_height_button(QPushButton("Cancel"))
+            self._apply_button = _configure_fixed_height_button(QPushButton("Apply"))
             self._apply_button.setObjectName("runButton")
             footer.addWidget(self._defaults_button)
             footer.addStretch(1)
@@ -3483,12 +3474,8 @@ if HAS_PYQT6:
             self._defaults_button = _configure_fixed_height_button(
                 QPushButton("Reset Defaults")
             )
-            self._cancel_button = _configure_fixed_height_button(
-                QPushButton("Cancel")
-            )
-            self._apply_button = _configure_fixed_height_button(
-                QPushButton("Apply")
-            )
+            self._cancel_button = _configure_fixed_height_button(QPushButton("Cancel"))
+            self._apply_button = _configure_fixed_height_button(QPushButton("Apply"))
             self._apply_button.setObjectName("runButton")
             footer.addWidget(self._defaults_button)
             footer.addStretch(1)
@@ -3560,7 +3547,10 @@ if HAS_PYQT6:
             self._local_recommendation_label.setWordWrap(True)
             self._local_recommendation_label.setObjectName("metadataFieldValue")
             self._local_recommendation_label.setMinimumHeight(
-                max(28, int(self._local_recommendation_label.fontMetrics().height()) + 10)
+                max(
+                    28,
+                    int(self._local_recommendation_label.fontMetrics().height()) + 10,
+                )
             )
             form.addRow("", self._local_recommendation_label)
             return page
@@ -4144,12 +4134,8 @@ if HAS_PYQT6:
             self._defaults_button = _configure_fixed_height_button(
                 QPushButton("Reset Defaults")
             )
-            self._cancel_button = _configure_fixed_height_button(
-                QPushButton("Cancel")
-            )
-            self._apply_button = _configure_fixed_height_button(
-                QPushButton("Apply")
-            )
+            self._cancel_button = _configure_fixed_height_button(QPushButton("Cancel"))
+            self._apply_button = _configure_fixed_height_button(QPushButton("Apply"))
             self._apply_button.setObjectName("runButton")
             footer.addWidget(self._defaults_button)
             footer.addStretch(1)
@@ -4199,11 +4185,7 @@ if HAS_PYQT6:
                 memory_per_worker_limit=(
                     self._memory_per_worker_input.text().strip() or "auto"
                 ),
-                calibration_policy=(
-                    "refresh"
-                    if force_refresh
-                    else "use_if_available"
-                ),
+                calibration_policy=("refresh" if force_refresh else "use_if_available"),
             )
 
         def _refresh_summary(self) -> None:
@@ -5305,9 +5287,7 @@ if HAS_PYQT6:
             spatial_button_row = QHBoxLayout()
             apply_row_spacing(spatial_button_row)
             spatial_button_row.addStretch(1)
-            self._spatial_calibration_button = QPushButton(
-                "Edit Spatial Calibration"
-            )
+            self._spatial_calibration_button = QPushButton("Edit Spatial Calibration")
             spatial_button_row.addWidget(self._spatial_calibration_button)
             spatial_layout.addLayout(spatial_button_row)
             root.addWidget(spatial_group)
@@ -5461,7 +5441,9 @@ if HAS_PYQT6:
                     f"Plan: {format_execution_plan_summary(plan)}"
                 )
             except Exception as exc:
-                summary = f"Could not derive execution plan: {type(exc).__name__}: {exc}"
+                summary = (
+                    f"Could not derive execution plan: {type(exc).__name__}: {exc}"
+                )
             self._dask_backend_summary.setText(summary)
             self._dask_backend_summary.setToolTip(summary)
 
@@ -6464,7 +6446,7 @@ if HAS_PYQT6:
                 Experiment list is replaced in-place.
             """
             file_filter = (
-                "ClearEx Experiment List " f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
+                f"ClearEx Experiment List (*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
             )
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
@@ -6526,7 +6508,7 @@ if HAS_PYQT6:
                 default_directory / f"experiments{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
             )
             file_filter = (
-                "ClearEx Experiment List " f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
+                f"ClearEx Experiment List (*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
             )
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
@@ -7744,6 +7726,10 @@ if HAS_PYQT6:
                 "When enabled, napari loads pyramid levels as a multiscale image "
                 "for faster navigation across zoom levels."
             ),
+            "use_3d_view": (
+                "Launch napari in 3D mode (ndisplay=3). Disable to launch in 2D "
+                "mode (ndisplay=2)."
+            ),
             "overlay_particle_detections": (
                 "Overlay particle detections as a napari points layer when "
                 "particle detections already exist in the store or are selected "
@@ -7943,7 +7929,10 @@ if HAS_PYQT6:
             self._analysis_scope_summary_label.setObjectName("statusLabel")
             self._analysis_scope_summary_label.setWordWrap(True)
             self._analysis_scope_summary_label.setMinimumHeight(
-                max(28, int(self._analysis_scope_summary_label.fontMetrics().height()) + 10)
+                max(
+                    28,
+                    int(self._analysis_scope_summary_label.fontMetrics().height()) + 10,
+                )
             )
             layout.addWidget(self._analysis_scope_summary_label)
 
@@ -7955,7 +7944,10 @@ if HAS_PYQT6:
             self._analysis_state_source_label.setObjectName("statusLabel")
             self._analysis_state_source_label.setWordWrap(True)
             self._analysis_state_source_label.setMinimumHeight(
-                max(28, int(self._analysis_state_source_label.fontMetrics().height()) + 10)
+                max(
+                    28,
+                    int(self._analysis_state_source_label.fontMetrics().height()) + 10,
+                )
             )
             restore_row.addWidget(self._analysis_state_source_label, 1)
 
@@ -10217,6 +10209,14 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["use_multiscale"],
             )
 
+            self._visualization_3d_checkbox = QCheckBox("Launch in 3D mode")
+            self._visualization_3d_checkbox.setChecked(True)
+            form.addRow("Display mode", self._visualization_3d_checkbox)
+            self._register_parameter_hint(
+                self._visualization_3d_checkbox,
+                self._PARAMETER_HINTS["use_3d_view"],
+            )
+
             self._visualization_require_gpu_checkbox = QCheckBox(
                 "Require GPU OpenGL renderer"
             )
@@ -10473,9 +10473,12 @@ if HAS_PYQT6:
                 ).strip()
                 or "data"
             )
-            selected_value = str(
-                analysis_operation_for_output_component(component) or component
-            ).strip() or "data"
+            selected_value = (
+                str(
+                    analysis_operation_for_output_component(component) or component
+                ).strip()
+                or "data"
+            )
             combo.blockSignals(True)
             combo_index = combo.findData(selected_value)
             if combo_index < 0:
@@ -12134,8 +12137,12 @@ if HAS_PYQT6:
                 chunks=self._base_config.chunks,
                 flatfield=self._operation_checkboxes["flatfield"].isChecked(),
                 deconvolution=self._operation_checkboxes["deconvolution"].isChecked(),
-                shear_transform=self._operation_checkboxes["shear_transform"].isChecked(),
-                particle_detection=self._operation_checkboxes["particle_detection"].isChecked(),
+                shear_transform=self._operation_checkboxes[
+                    "shear_transform"
+                ].isChecked(),
+                particle_detection=self._operation_checkboxes[
+                    "particle_detection"
+                ].isChecked(),
                 usegment3d=self._operation_checkboxes["usegment3d"].isChecked(),
                 registration=self._operation_checkboxes["registration"].isChecked(),
                 visualization=self._operation_checkboxes["visualization"].isChecked(),
@@ -12271,12 +12278,20 @@ if HAS_PYQT6:
                     dask_backend=backend,
                     chunks=self._base_config.chunks,
                     flatfield=self._operation_checkboxes["flatfield"].isChecked(),
-                    deconvolution=self._operation_checkboxes["deconvolution"].isChecked(),
-                    shear_transform=self._operation_checkboxes["shear_transform"].isChecked(),
-                    particle_detection=self._operation_checkboxes["particle_detection"].isChecked(),
+                    deconvolution=self._operation_checkboxes[
+                        "deconvolution"
+                    ].isChecked(),
+                    shear_transform=self._operation_checkboxes[
+                        "shear_transform"
+                    ].isChecked(),
+                    particle_detection=self._operation_checkboxes[
+                        "particle_detection"
+                    ].isChecked(),
                     usegment3d=self._operation_checkboxes["usegment3d"].isChecked(),
                     registration=self._operation_checkboxes["registration"].isChecked(),
-                    visualization=self._operation_checkboxes["visualization"].isChecked(),
+                    visualization=self._operation_checkboxes[
+                        "visualization"
+                    ].isChecked(),
                     mip_export=self._operation_checkboxes["mip_export"].isChecked(),
                     zarr_save=self._base_config.zarr_save,
                     analysis_parameters=normalize_analysis_operation_parameters(
@@ -13076,6 +13091,7 @@ if HAS_PYQT6:
                 visualization_enabled and not show_all_positions
             )
             self._visualization_multiscale_checkbox.setEnabled(visualization_enabled)
+            self._visualization_3d_checkbox.setEnabled(visualization_enabled)
             gpu_hint = self._PARAMETER_HINTS["require_gpu_rendering"]
             if not bool(self._local_gpu_available):
                 gpu_hint = (
@@ -13922,6 +13938,9 @@ if HAS_PYQT6:
             )
             self._visualization_multiscale_checkbox.setChecked(
                 bool(visualization_params.get("use_multiscale", True))
+            )
+            self._visualization_3d_checkbox.setChecked(
+                bool(visualization_params.get("use_3d_view", True))
             )
             self._visualization_require_gpu_checkbox.setChecked(
                 bool(visualization_params.get("require_gpu_rendering", True))
@@ -14771,6 +14790,7 @@ if HAS_PYQT6:
                 "use_multiscale": bool(
                     self._visualization_multiscale_checkbox.isChecked()
                 ),
+                "use_3d_view": bool(self._visualization_3d_checkbox.isChecked()),
                 "require_gpu_rendering": bool(
                     self._visualization_require_gpu_checkbox.isChecked()
                 ),

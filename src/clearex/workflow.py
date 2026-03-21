@@ -33,7 +33,18 @@ import math
 import os
 import re
 import subprocess
-from typing import Any, Collection, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union, cast
+from typing import (
+    Any,
+    Collection,
+    Dict,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 
 ChunkSpec = Optional[Union[int, Tuple[int, ...]]]
@@ -358,7 +369,9 @@ def _validate_analysis_input_reference(
                 resolved_component=resolved_component,
             )
         if producer_operation in order_map:
-            consumer_index = order_map.get(str(reference.consumer_operation).strip(), -1)
+            consumer_index = order_map.get(
+                str(reference.consumer_operation).strip(), -1
+            )
             producer_index = order_map[producer_operation]
             if producer_index >= consumer_index:
                 return AnalysisInputDependencyIssue(
@@ -669,6 +682,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "show_all_positions": False,
         "position_index": 0,
         "use_multiscale": True,
+        "use_3d_view": True,
         "overlay_particle_detections": True,
         "particle_detection_component": "results/particle_detection/latest/detections",
         "launch_mode": "auto",
@@ -2044,6 +2058,7 @@ def _normalize_visualization_parameters(
     normalized["show_all_positions"] = bool(normalized.get("show_all_positions", False))
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
+    normalized["use_3d_view"] = bool(normalized.get("use_3d_view", True))
     normalized["overlay_particle_detections"] = bool(
         normalized.get("overlay_particle_detections", True)
     )
@@ -3332,7 +3347,9 @@ class AnalysisResourceDescriptor:
                 "AnalysisResourceDescriptor seed_cpu_intensity must be > 0."
             )
         if float(self.io_intensity) < 0:
-            raise ValueError("AnalysisResourceDescriptor io_intensity cannot be negative.")
+            raise ValueError(
+                "AnalysisResourceDescriptor io_intensity cannot be negative."
+            )
         gpu_mode = str(self.gpu_mode).strip().lower()
         if gpu_mode not in {
             EXECUTION_GPU_MODE_NEVER,
@@ -3444,7 +3461,9 @@ class CalibrationProfile:
             "cpu_utilization",
             max(0.05, float(self.cpu_utilization)),
         )
-        object.__setattr__(self, "source", str(self.source).strip() or "geometry_estimate")
+        object.__setattr__(
+            self, "source", str(self.source).strip() or "geometry_estimate"
+        )
         object.__setattr__(
             self,
             "confidence",
@@ -3530,7 +3549,9 @@ class ExecutionPlan:
             self,
             "selected_operations",
             tuple(
-                str(name).strip() for name in self.selected_operations if str(name).strip()
+                str(name).strip()
+                for name in self.selected_operations
+                if str(name).strip()
             ),
         )
         worker_kind = str(self.worker_kind).strip().lower()
@@ -4246,7 +4267,9 @@ def build_execution_calibration_profile(
 ) -> CalibrationProfile:
     """Build a versioned execution profile from dataset geometry and defaults."""
     descriptor_map = (
-        dict(descriptors) if descriptors is not None else default_analysis_resource_descriptors()
+        dict(descriptors)
+        if descriptors is not None
+        else default_analysis_resource_descriptors()
     )
     normalized = normalize_analysis_operation_parameters(analysis_parameters)
     selected_operations = tuple(
@@ -4320,9 +4343,7 @@ def build_execution_calibration_profile(
         "software_version": _clearex_software_version(),
     }
     profile_key = hashlib.sha256(
-        json.dumps(key_material, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(key_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return CalibrationProfile(
         profile_key=profile_key,
@@ -4404,7 +4425,9 @@ def calibration_profile_from_dict(payload: Any) -> Optional[CalibrationProfile]:
             profile_key=str(payload.get("profile_key", "")).strip(),
             operation_names=tuple(payload.get("operation_names", tuple())),
             parameter_signature=str(payload.get("parameter_signature", "")).strip(),
-            chunk_shape_tpczyx=tuple(payload.get("chunk_shape_tpczyx", (1, 1, 1, 256, 256, 256))),
+            chunk_shape_tpczyx=tuple(
+                payload.get("chunk_shape_tpczyx", (1, 1, 1, 256, 256, 256))
+            ),
             dtype_itemsize=payload.get("dtype_itemsize", 2),
             sample_chunk_count=payload.get("sample_chunk_count", 1),
             estimated_peak_memory_bytes=payload.get("estimated_peak_memory_bytes", 1),
@@ -4416,7 +4439,9 @@ def calibration_profile_from_dict(payload: Any) -> Optional[CalibrationProfile]:
                 payload.get("environment_fingerprint", "")
             ).strip(),
             software_version=str(payload.get("software_version", "")).strip(),
-            model_version=str(payload.get("model_version", EXECUTION_PLAN_MODEL_VERSION)).strip()
+            model_version=str(
+                payload.get("model_version", EXECUTION_PLAN_MODEL_VERSION)
+            ).strip()
             or EXECUTION_PLAN_MODEL_VERSION,
         )
     except Exception:
@@ -4976,9 +5001,7 @@ def parse_spatial_calibration(
         axis_name, binding = item.split("=", 1)
         key = str(axis_name).strip().lower()
         if key not in SPATIAL_CALIBRATION_WORLD_AXES:
-            raise ValueError(
-                "Spatial calibration world axes must be z, y, or x."
-            )
+            raise ValueError("Spatial calibration world axes must be z, y, or x.")
         if key in assignments:
             raise ValueError(
                 f"Spatial calibration world axis '{key}' is assigned more than once."
@@ -5031,16 +5054,12 @@ def normalize_spatial_calibration(
         )
 
     theta_mode = (
-        str(
-            value.get("theta_mode", SPATIAL_CALIBRATION_DEFAULT_THETA_MODE)
-        ).strip()
+        str(value.get("theta_mode", SPATIAL_CALIBRATION_DEFAULT_THETA_MODE)).strip()
         or SPATIAL_CALIBRATION_DEFAULT_THETA_MODE
     )
     schema = str(value.get("schema", SPATIAL_CALIBRATION_SCHEMA)).strip()
     if schema and schema != SPATIAL_CALIBRATION_SCHEMA:
-        raise ValueError(
-            f"Unsupported spatial calibration schema '{schema}'."
-        )
+        raise ValueError(f"Unsupported spatial calibration schema '{schema}'.")
 
     if "stage_axis_map_zyx" in value:
         stage_axis_payload = value.get("stage_axis_map_zyx")
@@ -5355,9 +5374,7 @@ class WorkflowConfig:
                 )
                 if selected_target is None:
                     selected_target = self.analysis_targets[0]
-            self.analysis_selected_experiment_path = (
-                selected_target.experiment_path
-            )
+            self.analysis_selected_experiment_path = selected_target.experiment_path
             self.file = selected_target.store_path
         else:
             self.analysis_selected_experiment_path = (
@@ -5398,9 +5415,9 @@ class WorkflowConfig:
             Selected target resolved from ``analysis_targets`` and
             ``analysis_selected_experiment_path``.
         """
-        selected_experiment_path = (
-            str(self.analysis_selected_experiment_path or "").strip()
-        )
+        selected_experiment_path = str(
+            self.analysis_selected_experiment_path or ""
+        ).strip()
         if not selected_experiment_path:
             return None
         for target in self.analysis_targets:
@@ -5684,7 +5701,9 @@ def plan_execution(
                 )
             else:
                 workers = int(backend_config.local_cluster.n_workers or 1)
-                threads_per_worker = int(backend_config.local_cluster.threads_per_worker)
+                threads_per_worker = int(
+                    backend_config.local_cluster.threads_per_worker
+                )
                 memory_per_worker_limit = str(backend_config.local_cluster.memory_limit)
         elif backend_config.mode == DASK_BACKEND_SLURM_CLUSTER:
             workers = int(backend_config.slurm_cluster.workers)
@@ -5730,9 +5749,7 @@ def plan_execution(
         int(workflow.execution_policy.max_workers)
         if workflow.execution_policy.max_workers is not None
         else (
-            int(legacy_local_worker_cap)
-            if legacy_local_worker_cap is not None
-            else 64
+            int(legacy_local_worker_cap) if legacy_local_worker_cap is not None else 64
         )
     )
     reserve_bytes = min(
@@ -5793,7 +5810,10 @@ def plan_execution(
                 workers_by_gpu,
             ),
         )
-        if threads_per_worker > 1 and workers * threads_per_worker > capabilities.cpu_count:
+        if (
+            threads_per_worker > 1
+            and workers * threads_per_worker > capabilities.cpu_count
+        ):
             threads_per_worker = max(1, capabilities.cpu_count // max(1, workers))
         worker_memory_bytes = max(
             worker_memory_bytes,
