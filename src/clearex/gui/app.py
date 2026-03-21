@@ -129,6 +129,7 @@ from clearex.workflow import (
 )
 
 # Third Party Imports
+import numpy as np
 import zarr
 
 try:
@@ -1857,6 +1858,107 @@ def _extract_axis_map(info: ImageInfo) -> Dict[str, int]:
         for axis, size in zip(info.axes, info.shape, strict=False)
         if isinstance(axis, str)
     }
+
+
+def _should_use_n5_experiment_metadata_fallback(
+    *,
+    source_data_path: Path,
+    load_error: Exception,
+) -> bool:
+    """Return whether setup metadata loading should fallback for N5 sources.
+
+    Parameters
+    ----------
+    source_data_path : pathlib.Path
+        Resolved acquisition source path.
+    load_error : Exception
+        Exception raised by the image opener.
+
+    Returns
+    -------
+    bool
+        ``True`` when fallback metadata should be synthesized from
+        ``experiment.yml`` values.
+
+    Notes
+    -----
+    This fallback is intentionally narrow and currently targets legacy N5
+    sources that cannot be opened by the active Zarr runtime. Other source
+    types and error categories continue to raise as before.
+    """
+    if source_data_path.suffix.lower() != ".n5":
+        return False
+    if not isinstance(load_error, ValueError):
+        return False
+    message = str(load_error).lower()
+    return "no suitable reader found" in message
+
+
+def _build_experiment_metadata_fallback_image_info(
+    *,
+    experiment: NavigateExperiment,
+    source_data_path: Path,
+    load_error: Exception,
+) -> ImageInfo:
+    """Build a synthetic :class:`ImageInfo` from Navigate experiment metadata.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    source_data_path : pathlib.Path
+        Resolved acquisition source path.
+    load_error : Exception
+        Exception raised while opening the source path.
+
+    Returns
+    -------
+    ImageInfo
+        Metadata-only fallback image info using canonical ``(t, p, c, z, y, x)``
+        shape from the experiment descriptor.
+
+    Notes
+    -----
+    Fallback dtype defaults to ``uint16`` because raw source dtype is
+    unavailable when reader probing fails.
+    """
+    shape_tpczyx = (
+        max(1, int(experiment.timepoints)),
+        max(1, int(experiment.multiposition_count)),
+        max(1, int(experiment.channel_count)),
+        max(1, int(experiment.number_z_steps)),
+        max(1, int(experiment.y_pixels)),
+        max(1, int(experiment.x_pixels)),
+    )
+
+    metadata: Dict[str, Any] = {
+        "navigate_experiment": {
+            "path": str(experiment.path),
+            "file_type": str(experiment.file_type),
+            "timepoints": int(experiment.timepoints),
+            "positions": int(experiment.multiposition_count),
+            "channels": int(experiment.channel_count),
+            "z_steps": int(experiment.number_z_steps),
+            "y_pixels": int(experiment.y_pixels),
+            "x_pixels": int(experiment.x_pixels),
+        },
+        "source_reader_fallback": {
+            "source_path": str(source_data_path),
+            "reason": f"{type(load_error).__name__}: {load_error}",
+        },
+    }
+    xy_um = _coerce_positive_float(experiment.xy_pixel_size_um)
+    z_um = _coerce_positive_float(experiment.z_step_um)
+    if xy_um is not None and z_um is not None:
+        metadata["voxel_size_um_zyx"] = [float(z_um), float(xy_um), float(xy_um)]
+
+    return ImageInfo(
+        path=source_data_path,
+        shape=shape_tpczyx,
+        dtype=np.dtype("uint16"),
+        axes="TPCZYX",
+        metadata=metadata,
+    )
 
 
 def _metadata_count(
@@ -6937,16 +7039,42 @@ if HAS_PYQT6:
             FileNotFoundError
                 If the selected path does not exist.
             Exception
-                Propagates parse/read failures from experiment or image I/O.
+                Propagates parse/read failures from experiment metadata and
+                non-fallback image I/O errors.
+
+            Notes
+            -----
+            Legacy N5 sources may fail reader probing under environments that
+            do not expose N5 support in the active Zarr runtime. In that case,
+            setup falls back to ``experiment.yml`` dimensions so operators can
+            continue to canonical-store materialization.
             """
             experiment_path, experiment, source_data_path = (
                 self._resolve_experiment_source_context(path=path)
             )
-            _, info = self._opener.open(
-                path=str(source_data_path),
-                prefer_dask=True,
-                chunks=self._chunks,
-            )
+            try:
+                _, info = self._opener.open(
+                    path=str(source_data_path),
+                    prefer_dask=True,
+                    chunks=self._chunks,
+                )
+            except Exception as exc:
+                if not _should_use_n5_experiment_metadata_fallback(
+                    source_data_path=source_data_path,
+                    load_error=exc,
+                ):
+                    raise
+                logging.getLogger(__name__).warning(
+                    "Falling back to experiment metadata for source %s after "
+                    "reader error: %s",
+                    source_data_path,
+                    exc,
+                )
+                info = _build_experiment_metadata_fallback_image_info(
+                    experiment=experiment,
+                    source_data_path=source_data_path,
+                    load_error=exc,
+                )
             return experiment_path, experiment, source_data_path, info
 
         def _resolve_store_preparation_request(

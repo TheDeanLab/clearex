@@ -159,6 +159,84 @@ def test_summarize_image_info_extracts_pixel_size_from_voxel_size_metadata() -> 
     assert summary["pixel_size"] == "z=0.2, y=0.166992, x=0.166992"
 
 
+def test_load_experiment_context_falls_back_for_n5_reader_error(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    source_path = tmp_path / "CH00_000000.n5"
+    source_path.mkdir(parents=True)
+    experiment = _make_navigate_experiment(experiment_path)
+
+    class _FailingOpener:
+        def open(self, **kwargs):
+            del kwargs
+            raise ValueError("No suitable reader found for:", source_path)
+
+    fake_dialog = SimpleNamespace(
+        _chunks=(1, 1, 1, 8, 8, 8),
+        _opener=_FailingOpener(),
+        _resolve_experiment_source_context=lambda *, path: (
+            Path(path).expanduser().resolve(),
+            experiment,
+            source_path.resolve(),
+        ),
+    )
+
+    loaded_path, loaded_experiment, loaded_source_path, info = (
+        app_module.ClearExSetupDialog._load_experiment_context(
+            fake_dialog,
+            path=experiment_path,
+        )
+    )
+
+    assert loaded_path == experiment_path.resolve()
+    assert loaded_experiment is experiment
+    assert loaded_source_path == source_path.resolve()
+    assert info.shape == (
+        experiment.timepoints,
+        experiment.multiposition_count,
+        experiment.channel_count,
+        experiment.number_z_steps,
+        experiment.y_pixels,
+        experiment.x_pixels,
+    )
+    assert info.axes == "TPCZYX"
+    assert int(info.dtype.itemsize) == 2
+    assert info.metadata is not None
+    assert "navigate_experiment" in info.metadata
+    assert "source_reader_fallback" in info.metadata
+
+
+def test_load_experiment_context_raises_for_non_n5_reader_error(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    source_path = tmp_path / "data_store.zarr"
+    source_path.mkdir(parents=True)
+    experiment = _make_navigate_experiment(experiment_path)
+
+    class _FailingOpener:
+        def open(self, **kwargs):
+            del kwargs
+            raise ValueError("No suitable reader found for:", source_path)
+
+    fake_dialog = SimpleNamespace(
+        _chunks=(1, 1, 1, 8, 8, 8),
+        _opener=_FailingOpener(),
+        _resolve_experiment_source_context=lambda *, path: (
+            Path(path).expanduser().resolve(),
+            experiment,
+            source_path.resolve(),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="No suitable reader found"):
+        app_module.ClearExSetupDialog._load_experiment_context(
+            fake_dialog,
+            path=experiment_path,
+        )
+
+
 def test_discover_navigate_experiment_files_recurses_and_sorts(tmp_path) -> None:
     alpha = tmp_path / "alpha" / "experiment.yml"
     beta = tmp_path / "beta" / "nested" / "experiment.yaml"
