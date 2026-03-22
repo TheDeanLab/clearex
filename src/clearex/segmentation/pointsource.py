@@ -30,8 +30,11 @@ import numpy as np
 from skimage.feature import blob_log
 from scipy.ndimage import gaussian_filter
 
-from clearex.detect.particles import remove_close_blobs, \
-    eliminate_insignificant_point_sources
+from clearex.detect.particles import (
+    remove_close_blobs,
+    eliminate_insignificant_point_sources,
+)
+
 # Local Imports
 from clearex.plot.images import mips
 from clearex.preprocess.scale import resize_data

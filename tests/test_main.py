@@ -665,7 +665,9 @@ def test_run_workflow_persists_cancelled_provenance_status(
     )
 
 
-def test_run_workflow_registration_skips_without_crashing(monkeypatch) -> None:
+def test_run_workflow_registration_starts_analysis_dask_startup(
+    monkeypatch,
+) -> None:
     workloads: list[str] = []
 
     def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
@@ -689,7 +691,127 @@ def test_run_workflow_registration_skips_without_crashing(monkeypatch) -> None:
         logger=_test_logger("clearex.test.main.registration"),
     )
 
-    assert workloads == []
+    assert workloads == ["analysis"]
+
+
+def test_run_workflow_chains_registration_output_to_visualization(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_registration_chain.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 2, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _fake_registration(*, zarr_path, parameters, client, progress_callback):
+        del parameters, client, progress_callback
+        fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
+        latest = (
+            fake_root.require_group("results")
+            .require_group("registration")
+            .require_group("latest")
+        )
+        latest.create_dataset(
+            name="data",
+            shape=(1, 1, 1, 2, 2, 3),
+            chunks=(1, 1, 1, 2, 2, 3),
+            dtype="uint16",
+            overwrite=True,
+        )
+        latest.create_dataset(
+            name="affines_tpx44",
+            shape=(1, 2, 4, 4),
+            chunks=(1, 1, 4, 4),
+            dtype="float64",
+            overwrite=True,
+        )
+        return SimpleNamespace(
+            component="results/registration/latest",
+            data_component="results/registration/latest/data",
+            affines_component="results/registration/latest/affines_tpx44",
+            source_component="data",
+            pairwise_source_component="data",
+            requested_source_component="data",
+            requested_input_resolution_level=0,
+            input_resolution_level=0,
+            registration_channel=0,
+            registration_type="rigid",
+            anchor_positions=(0,),
+            edge_count=1,
+            active_edge_count=1,
+            dropped_edge_count=0,
+            output_shape_tpczyx=(1, 1, 1, 2, 2, 3),
+            output_chunks_tpczyx=(1, 1, 1, 2, 2, 3),
+            blend_mode="feather",
+        )
+
+    captured: dict[str, object] = {}
+
+    def _fake_visualization(*, zarr_path, parameters, progress_callback):
+        del zarr_path, progress_callback
+        captured["input_source"] = str(parameters["input_source"])
+        fake_root = main_module.zarr.open_group(str(store_path), mode="a")
+        latest = (
+            fake_root.require_group("results")
+            .require_group("visualization")
+            .require_group("latest")
+        )
+        latest.attrs["source_component"] = str(parameters["input_source"])
+        return SimpleNamespace(
+            component="results/visualization/latest",
+            source_component=str(parameters["input_source"]),
+            source_components=(str(parameters["input_source"]),),
+            position_index=0,
+            overlay_points_count=0,
+            launch_mode="in_process",
+            viewer_pid=None,
+            keyframe_manifest_path="",
+            keyframe_count=0,
+        )
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+    monkeypatch.setattr(main_module, "run_registration_analysis", _fake_registration)
+    monkeypatch.setattr(main_module, "run_visualization_analysis", _fake_visualization)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        registration=True,
+        visualization=True,
+        analysis_parameters={
+            "registration": {
+                "execution_order": 1,
+                "input_source": "data",
+            },
+            "visualization": {
+                "execution_order": 2,
+                "input_source": "registration",
+            },
+        },
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.registration_chain"),
+    )
+
+    assert captured["input_source"] == "results/registration/latest/data"
+    latest_ref = dict(
+        main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
+            "latest_outputs"
+        ]["registration"].attrs
+    )
+    assert latest_ref["component"] == "results/registration/latest"
 
 
 def test_run_workflow_non_experiment_file_skips_io_dask_startup(
@@ -1072,7 +1194,9 @@ def test_run_workflow_experiment_input_persists_explicit_identity_spatial_calibr
 
     monkeypatch.setattr(main_module, "_configure_dask_backend", lambda **kwargs: None)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: True)
-    monkeypatch.setattr(main_module, "load_navigate_experiment", lambda path: experiment)
+    monkeypatch.setattr(
+        main_module, "load_navigate_experiment", lambda path: experiment
+    )
     monkeypatch.setattr(
         main_module, "resolve_experiment_data_path", lambda experiment: source_path
     )
@@ -1149,7 +1273,9 @@ def test_run_workflow_experiment_input_without_override_preserves_store_mapping(
 
     monkeypatch.setattr(main_module, "_configure_dask_backend", lambda **kwargs: None)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: True)
-    monkeypatch.setattr(main_module, "load_navigate_experiment", lambda path: experiment)
+    monkeypatch.setattr(
+        main_module, "load_navigate_experiment", lambda path: experiment
+    )
     monkeypatch.setattr(
         main_module, "resolve_experiment_data_path", lambda experiment: source_path
     )
@@ -1772,7 +1898,9 @@ def test_run_workflow_fails_when_scheduled_output_is_missing(
 
     def _should_not_run(*args, **kwargs):
         del args, kwargs
-        raise AssertionError("deconvolution should not run when upstream output is missing")
+        raise AssertionError(
+            "deconvolution should not run when upstream output is missing"
+        )
 
     monkeypatch.setattr(
         main_module, "_configure_dask_backend", _fake_configure_dask_backend
@@ -1817,8 +1945,7 @@ def test_run_workflow_fails_when_scheduled_output_is_missing(
     assert any(
         str(step.get("name")) == "deconvolution"
         and dict(step.get("parameters", {})).get("status") == "failed"
-        and dict(step.get("parameters", {})).get("reason")
-        == "missing_input_dependency"
+        and dict(step.get("parameters", {})).get("reason") == "missing_input_dependency"
         and dict(step.get("parameters", {})).get("requested_input") == "flatfield"
         and dict(step.get("parameters", {})).get("resolved_input")
         == "results/flatfield/latest/data"

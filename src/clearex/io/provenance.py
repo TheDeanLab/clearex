@@ -238,9 +238,13 @@ def _git_metadata(repo_root: Path) -> Dict[str, Any]:
         Dictionary with commit, branch, dirty state, and remote URL.
     """
     commit = _git_command(repo_root=repo_root, args=["rev-parse", "HEAD"])
-    branch = _git_command(repo_root=repo_root, args=["rev-parse", "--abbrev-ref", "HEAD"])
+    branch = _git_command(
+        repo_root=repo_root, args=["rev-parse", "--abbrev-ref", "HEAD"]
+    )
     status = _git_command(repo_root=repo_root, args=["status", "--porcelain"])
-    remote = _git_command(repo_root=repo_root, args=["config", "--get", "remote.origin.url"])
+    remote = _git_command(
+        repo_root=repo_root, args=["config", "--get", "remote.origin.url"]
+    )
 
     dirty: Optional[bool]
     if status is None:
@@ -274,7 +278,9 @@ def _clearex_version() -> Optional[str]:
         return None
 
 
-def _input_summary(workflow: WorkflowConfig, image_info: Optional[ImageInfo]) -> Dict[str, Any]:
+def _input_summary(
+    workflow: WorkflowConfig, image_info: Optional[ImageInfo]
+) -> Dict[str, Any]:
     """Build input-summary metadata for provenance records.
 
     Parameters
@@ -980,7 +986,9 @@ def persist_run_provenance(
         else _default_steps(workflow)
     )
     output_records = (
-        _to_jsonable(dict(outputs)) if outputs is not None else _default_outputs(workflow)
+        _to_jsonable(dict(outputs))
+        if outputs is not None
+        else _default_outputs(workflow)
     )
 
     workflow_payload = {
@@ -1011,9 +1019,7 @@ def persist_run_provenance(
         "spatial_calibration_text": format_spatial_calibration(
             workflow.spatial_calibration
         ),
-        "spatial_calibration_explicit": bool(
-            workflow.spatial_calibration_explicit
-        ),
+        "spatial_calibration_explicit": bool(workflow.spatial_calibration_explicit),
         "analysis_parameters": _to_jsonable(workflow.analysis_parameters),
         "analysis_output_policy": "latest_only",
     }

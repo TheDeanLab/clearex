@@ -6,4 +6,3 @@
 from .pipeline import ShearTransformSummary, run_shear_transform_analysis
 
 __all__ = ["ShearTransformSummary", "run_shear_transform_analysis"]
-

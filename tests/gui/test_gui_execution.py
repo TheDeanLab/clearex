@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import clearex.gui.app as app_module
 from clearex.io.experiment import NavigateChannel, NavigateExperiment
 import pytest
+import zarr
 
 
 def _make_navigate_experiment(path: Path) -> NavigateExperiment:
@@ -41,6 +42,47 @@ def _make_navigate_experiment(path: Path) -> NavigateExperiment:
         xy_pixel_size_um=0.12,
         z_step_um=0.45,
     )
+
+
+def _create_gui_analysis_store(tmp_path: Path) -> Path:
+    """Create a minimal analysis store for GUI parameter-selection tests."""
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data_shape = (1, 1, 2, 1, 4, 4)
+    data_chunks = (1, 1, 2, 1, 4, 4)
+    root.create_dataset(
+        name="data",
+        shape=data_shape,
+        chunks=data_chunks,
+        dtype="uint16",
+        overwrite=True,
+    )
+    data_pyramid = root.require_group("data_pyramid")
+    data_pyramid.create_dataset(
+        name="level_1",
+        shape=(1, 1, 2, 1, 2, 2),
+        chunks=(1, 1, 2, 1, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.attrs["data_pyramid_levels"] = ["data", "data_pyramid/level_1"]
+    root.attrs["data_pyramid_factors_tpczyx"] = [
+        [1, 1, 1, 1, 1, 1],
+        [1, 1, 1, 2, 2, 2],
+    ]
+    shear_latest = (
+        root.require_group("results")
+        .require_group("shear_transform")
+        .require_group("latest")
+    )
+    shear_latest.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 1, 4, 4),
+        chunks=(1, 1, 1, 1, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+    return store_path
 
 
 def _install_fake_gui_runtime(monkeypatch):
@@ -284,6 +326,192 @@ def test_analysis_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     assert dialog._run_button.geometry().height() >= 36
 
     dialog.close()
+
+
+def test_registration_operation_moves_to_preprocessing_tab() -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    tab_map = dict(app_module.AnalysisSelectionDialog._OPERATION_TABS)
+
+    assert "display_pyramid" in tab_map["Preprocessing"]
+    assert "registration" in tab_map["Preprocessing"]
+    assert "registration" not in tab_map.get("Postprocessing", ())
+
+
+def test_analysis_dialog_persists_registration_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module,
+        "_save_last_used_dask_backend_config",
+        lambda _config: None,
+    )
+
+    store_path = _create_gui_analysis_store(tmp_path)
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(file=str(store_path))
+    )
+    dialog._persist_analysis_gui_state_for_target = lambda _target: None
+    dialog._operation_checkboxes["registration"].setChecked(True)
+    dialog._registration_type_combo.setCurrentIndex(
+        dialog._registration_type_combo.findData("similarity")
+    )
+    dialog._registration_anchor_mode_combo.setCurrentIndex(
+        dialog._registration_anchor_mode_combo.findData("manual")
+    )
+    dialog._registration_anchor_position_spin.setMaximum(3)
+    dialog._registration_anchor_position_spin.setValue(2)
+    dialog._registration_overlap_z_spin.setValue(5)
+    dialog._registration_overlap_y_spin.setValue(12)
+    dialog._registration_overlap_x_spin.setValue(20)
+    dialog._registration_blend_mode_combo.setCurrentIndex(
+        dialog._registration_blend_mode_combo.findData("average")
+    )
+    channel_1_index = dialog._registration_channel_combo.findData(1)
+    assert channel_1_index >= 0
+    dialog._registration_channel_combo.setCurrentIndex(channel_1_index)
+    level_1_index = dialog._registration_resolution_level_combo.findData(1)
+    assert level_1_index >= 0
+    dialog._registration_resolution_level_combo.setCurrentIndex(level_1_index)
+    app_module.AnalysisSelectionDialog._set_registration_parameter_enabled_state(dialog)
+
+    dialog._on_run()
+
+    params = dialog.result_config.analysis_parameters["registration"]
+    assert dialog.result_config.registration is True
+    assert params["registration_type"] == "similarity"
+    assert params["anchor_mode"] == "manual"
+    assert params["anchor_position"] == 2
+    assert params["overlap_zyx"] == [5, 12, 20]
+    assert params["blend_mode"] == "average"
+    assert params["registration_channel"] == 1
+    assert params["input_resolution_level"] == 1
+
+
+def test_registration_resolution_levels_follow_selected_input_source(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    store_path = _create_gui_analysis_store(tmp_path)
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(file=str(store_path))
+    )
+    dialog._persist_analysis_gui_state_for_target = lambda _target: None
+    dialog._operation_checkboxes["registration"].setChecked(True)
+    input_combo = dialog._operation_input_combos["registration"]
+    level_combo = dialog._registration_resolution_level_combo
+
+    data_index = input_combo.findData("data")
+    assert data_index >= 0
+    input_combo.setCurrentIndex(data_index)
+    app.processEvents()
+    assert [int(level_combo.itemData(idx)) for idx in range(level_combo.count())] == [
+        0,
+        1,
+    ]
+
+    level_1_index = level_combo.findData(1)
+    assert level_1_index >= 0
+    level_combo.setCurrentIndex(level_1_index)
+
+    shear_index = input_combo.findData("shear_transform")
+    assert shear_index >= 0
+    input_combo.setCurrentIndex(shear_index)
+    app.processEvents()
+    assert [int(level_combo.itemData(idx)) for idx in range(level_combo.count())] == [0]
+    assert int(level_combo.currentData()) == 0
+    params = dialog._collect_registration_parameters()
+    assert params["input_resolution_level"] == 0
+
+
+def test_registration_channels_follow_selected_input_source(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    store_path = _create_gui_analysis_store(tmp_path)
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(file=str(store_path))
+    )
+    dialog._persist_analysis_gui_state_for_target = lambda _target: None
+    dialog._operation_checkboxes["registration"].setChecked(True)
+    input_combo = dialog._operation_input_combos["registration"]
+    channel_combo = dialog._registration_channel_combo
+
+    data_index = input_combo.findData("data")
+    assert data_index >= 0
+    input_combo.setCurrentIndex(data_index)
+    app.processEvents()
+    assert [
+        int(channel_combo.itemData(idx)) for idx in range(channel_combo.count())
+    ] == [0, 1]
+
+    channel_1_index = channel_combo.findData(1)
+    assert channel_1_index >= 0
+    channel_combo.setCurrentIndex(channel_1_index)
+
+    shear_index = input_combo.findData("shear_transform")
+    assert shear_index >= 0
+    input_combo.setCurrentIndex(shear_index)
+    app.processEvents()
+    assert [
+        int(channel_combo.itemData(idx)) for idx in range(channel_combo.count())
+    ] == [0]
+    assert int(channel_combo.currentData()) == 0
+    params = dialog._collect_registration_parameters()
+    assert params["registration_channel"] == 0
+
+
+def test_registration_anchor_tile_visibility_follows_anchor_mode(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    store_path = _create_gui_analysis_store(tmp_path)
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(file=str(store_path))
+    )
+    dialog._persist_analysis_gui_state_for_target = lambda _target: None
+    dialog._operation_checkboxes["registration"].setChecked(True)
+
+    dialog._registration_anchor_mode_combo.setCurrentIndex(
+        dialog._registration_anchor_mode_combo.findData("central")
+    )
+    app_module.AnalysisSelectionDialog._set_registration_parameter_enabled_state(dialog)
+    assert dialog._registration_anchor_position_label.isHidden() is True
+    assert dialog._registration_anchor_position_spin.isHidden() is True
+
+    dialog._registration_anchor_mode_combo.setCurrentIndex(
+        dialog._registration_anchor_mode_combo.findData("manual")
+    )
+    app_module.AnalysisSelectionDialog._set_registration_parameter_enabled_state(dialog)
+    assert dialog._registration_anchor_position_label.isHidden() is False
+    assert dialog._registration_anchor_position_spin.isHidden() is False
 
 
 def test_zarr_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
@@ -1784,10 +2012,16 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
 
     dialog_cls = app_module.AnalysisSelectionDialog
     assert dialog_cls._OPERATION_LABELS["visualization"] == "Napari"
-    assert dialog_cls._OPERATION_LABELS["display_pyramid"] == "Display Pyramid"
+    assert dialog_cls._OPERATION_LABELS["display_pyramid"] == "Pyramidal Downsampling"
     assert (
-        "Visualization",
-        ("display_pyramid", "visualization", "mip_export"),
+        "Preprocessing",
+        (
+            "flatfield",
+            "deconvolution",
+            "shear_transform",
+            "display_pyramid",
+            "registration",
+        ),
     ) in dialog_cls._OPERATION_TABS
 
 

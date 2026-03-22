@@ -105,4 +105,3 @@ def main_class_based():
 
 if __name__ == "__main__":
     main_class_based()
-

@@ -50,7 +50,7 @@ def make_3d_structured_element(radius: int, shape: str = "sphere") -> np.ndarray
 
     radius = int(radius)
     structured_element = np.zeros((radius, radius, radius))
-    (z_len, y_len, x_len) = structured_element.shape
+    z_len, y_len, x_len = structured_element.shape
 
     if shape == "sphere":
         for i in range(int(z_len)):

@@ -4,7 +4,6 @@ import sys
 
 from setuptools import setup
 
-
 if sys.version_info[:2] != (3, 12):
     detected = ".".join(str(part) for part in sys.version_info[:3])
     raise RuntimeError(

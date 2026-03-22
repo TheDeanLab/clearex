@@ -73,4 +73,3 @@ def main_functional():
 
 if __name__ == "__main__":
     main_functional()
-

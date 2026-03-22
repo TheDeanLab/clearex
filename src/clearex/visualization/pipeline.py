@@ -32,18 +32,20 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
+import logging
 import math
 from pathlib import Path
 import re
 import subprocess
 import sys
 import threading
+import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 # Third Party Imports
 import dask.array as da
+from dask.callbacks import Callback
 import numpy as np
 import zarr
 
@@ -56,7 +58,6 @@ from clearex.workflow import (
     spatial_calibration_from_dict,
     spatial_calibration_to_dict,
 )
-
 
 ProgressCallback = Callable[[int, str], None]
 _AXIS_LABELS_TCZYX = ("t", "c", "z", "y", "x")
@@ -81,6 +82,8 @@ _DISPLAY_CONTRAST_LIMITS_ATTR = "display_contrast_limits_by_channel"
 _DISPLAY_CONTRAST_PERCENTILES_ATTR = "display_contrast_percentiles"
 _DISPLAY_CONTRAST_LEVEL_SOURCE_ATTR = "display_contrast_source_component"
 _DISPLAY_CONTRAST_SAMPLE_TARGET_VOXELS = 2_000_000
+_DISPLAY_PYRAMID_BUILD_PROGRESS_TASK_STEP = 1_024
+_DISPLAY_PYRAMID_BUILD_PROGRESS_MIN_INTERVAL_SECONDS = 1.5
 _SOFTWARE_RENDERER_HINTS = (
     "llvmpipe",
     "softpipe",
@@ -106,6 +109,7 @@ _GPU_VENDOR_HINTS = (
     "tesla",
     "rtx",
 )
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -715,12 +719,16 @@ def _extract_scale_tczyx_from_navigate_raw(
     )
     lateral_from_fov = _first_positive_float(
         (
-            (fov_x / img_x)
-            if fov_x is not None and img_x is not None and img_x > 0
-            else None,
-            (fov_y / img_y)
-            if fov_y is not None and img_y is not None and img_y > 0
-            else None,
+            (
+                (fov_x / img_x)
+                if fov_x is not None and img_x is not None and img_x > 0
+                else None
+            ),
+            (
+                (fov_y / img_y)
+                if fov_y is not None and img_y is not None and img_y > 0
+                else None
+            ),
         )
     )
 
@@ -2056,14 +2064,264 @@ def _component_matches_shape_chunks(
     return array_chunks == tuple(int(v) for v in chunks_tpczyx)
 
 
-def _visualization_multiscale_cache_prefix(source_component: str) -> str:
-    """Return deterministic component prefix used for prepared display pyramids."""
+def _estimate_chunk_region_count_tpczyx(
+    *,
+    shape_tpczyx: Sequence[int],
+    chunks_tpczyx: Sequence[int],
+) -> int:
+    """Estimate chunk-region count for one canonical ``(t,p,c,z,y,x)`` array.
+
+    Parameters
+    ----------
+    shape_tpczyx : sequence[int]
+        Array shape in canonical axis order.
+    chunks_tpczyx : sequence[int]
+        Chunk shape in canonical axis order.
+
+    Returns
+    -------
+    int
+        Estimated chunk-region count. Returns ``0`` for invalid payloads.
+    """
+    if len(tuple(shape_tpczyx)) != 6 or len(tuple(chunks_tpczyx)) != 6:
+        return 0
+    region_counts = [
+        int(max(1, math.ceil(float(max(1, int(size))) / float(max(1, int(chunk))))))
+        for size, chunk in zip(shape_tpczyx, chunks_tpczyx, strict=False)
+    ]
+    return int(math.prod(region_counts))
+
+
+def _write_display_pyramid_level_with_progress(
+    *,
+    level_array: da.Array,
+    zarr_path: Union[str, Path],
+    level_component: str,
+    source_component: str,
+    level_index: int,
+    total_levels: int,
+    absolute_factors_tpczyx: Sequence[int],
+    level_shape_tpczyx: Sequence[int],
+    level_chunks_tpczyx: Sequence[int],
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_start: int = 0,
+    progress_end: int = 100,
+) -> None:
+    """Write one display-pyramid level and emit incremental progress updates.
+
+    Parameters
+    ----------
+    level_array : dask.array.Array
+        Prepared downsampled level data.
+    zarr_path : str or pathlib.Path
+        Analysis-store path.
+    level_component : str
+        Target level component path.
+    source_component : str
+        Source component path used to derive this level.
+    level_index : int
+        One-based level index currently being written.
+    total_levels : int
+        Total number of generated levels.
+    absolute_factors_tpczyx : sequence[int]
+        Absolute level factors in canonical order.
+    level_shape_tpczyx : sequence[int]
+        Target level shape in canonical order.
+    level_chunks_tpczyx : sequence[int]
+        Target level chunks in canonical order.
+    progress_callback : callable, optional
+        Callback receiving ``(percent, message)`` updates.
+    progress_start : int, default=0
+        Start percent for this level write stage.
+    progress_end : int, default=100
+        End percent for this level write stage.
+
+    Returns
+    -------
+    None
+        Writes the level into the configured Zarr/N5 store.
+    """
+
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
+    normalized_shape = tuple(int(max(1, int(v))) for v in level_shape_tpczyx)
+    normalized_chunks = tuple(int(max(1, int(v))) for v in level_chunks_tpczyx)
+    estimated_chunks = _estimate_chunk_region_count_tpczyx(
+        shape_tpczyx=normalized_shape,
+        chunks_tpczyx=normalized_chunks,
+    )
+
+    write_graph = da.to_zarr(
+        level_array,
+        str(zarr_path),
+        component=level_component,
+        overwrite=True,
+        compute=False,
+    )
+    total_tasks = max(1, int(len(getattr(write_graph, "dask", {}))))
+    progress_start_int = int(progress_start)
+    progress_end_int = int(max(progress_start_int, int(progress_end)))
+    progress_span = max(1, progress_end_int - progress_start_int)
+
+    _LOGGER.info(
+        "[display_pyramid] writing level %d/%d component=%s source=%s "
+        "shape=%s chunks=%s estimated_chunks=%d tasks=%d factors_tpczyx=%s",
+        int(level_index),
+        int(total_levels),
+        str(level_component),
+        str(source_component),
+        normalized_shape,
+        normalized_chunks,
+        int(estimated_chunks),
+        int(total_tasks),
+        [int(value) for value in absolute_factors_tpczyx],
+    )
+    _emit(
+        progress_start_int,
+        "Writing pyramid level "
+        f"{int(level_index)}/{int(total_levels)} "
+        f"(estimated_chunks={int(estimated_chunks):,})",
+    )
+
+    if progress_callback is None or total_tasks <= 1:
+        da.compute(write_graph)
+        _emit(
+            progress_end_int,
+            f"Wrote pyramid level {int(level_index)}/{int(total_levels)}",
+        )
+        return
+
+    class _TaskProgressCallback(Callback):
+        """Throttle task-level updates for UI-friendly progress reporting."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._completed = 0
+            self._last_emitted_completed = 0
+            self._last_emitted_time = 0.0
+
+        def _posttask(
+            self,
+            key: object,
+            result: object,
+            dsk: object,
+            state: object,
+            worker_id: object,
+        ) -> None:
+            del key, result, dsk, state, worker_id
+            self._completed += 1
+            now = float(time.monotonic())
+            due_by_count = (
+                int(self._completed) - int(self._last_emitted_completed)
+            ) >= int(_DISPLAY_PYRAMID_BUILD_PROGRESS_TASK_STEP)
+            due_by_time = (float(now) - float(self._last_emitted_time)) >= float(
+                _DISPLAY_PYRAMID_BUILD_PROGRESS_MIN_INTERVAL_SECONDS
+            )
+            is_final = int(self._completed) >= int(total_tasks)
+            if not is_final and not due_by_count and not due_by_time:
+                return
+
+            fraction = max(
+                0.0,
+                min(1.0, float(self._completed) / float(max(1, int(total_tasks)))),
+            )
+            mapped_percent = progress_start_int + int(round(fraction * progress_span))
+            _emit(
+                mapped_percent,
+                "Writing pyramid level "
+                f"{int(level_index)}/{int(total_levels)} "
+                f"(tasks={int(self._completed):,}/{int(total_tasks):,})",
+            )
+            self._last_emitted_completed = int(self._completed)
+            self._last_emitted_time = float(now)
+
+    with _TaskProgressCallback():
+        da.compute(write_graph)
+
+    _emit(
+        progress_end_int,
+        f"Wrote pyramid level {int(level_index)}/{int(total_levels)}",
+    )
+
+
+def _display_pyramid_level_component(
+    *,
+    source_component: str,
+    level: int,
+) -> str:
+    """Return canonical component path for one generated display-pyramid level.
+
+    Parameters
+    ----------
+    source_component : str
+        Base source component path.
+    level : int
+        Pyramid level index (must be >= 1).
+
+    Returns
+    -------
+    str
+        Target component path for this level.
+
+    Raises
+    ------
+    ValueError
+        If ``level`` is less than 1.
+
+    Notes
+    -----
+    Raw data keeps canonical root-level ``data_pyramid`` naming to remain
+    compatible with existing analysis readers. Derived components are written
+    alongside their source at ``<source_component>_pyramid/level_<n>``.
+    """
+    level_index = int(level)
+    if level_index < 1:
+        raise ValueError("display-pyramid level index must be >= 1.")
     component = str(source_component).strip() or "data"
-    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", component).strip("_")
-    if not safe_name:
-        safe_name = "data"
-    digest = hashlib.sha1(component.encode("utf-8")).hexdigest()[:10]
-    return f"results/display_pyramid/by_component/{safe_name}_{digest}"
+    if component == "data":
+        return f"data_pyramid/level_{level_index}"
+    return f"{component}_pyramid/level_{level_index}"
+
+
+def _is_source_pyramid_layout_compatible(
+    *,
+    source_component: str,
+    source_components: Sequence[str],
+) -> bool:
+    """Return whether a discovered multiscale set follows canonical layout.
+
+    Parameters
+    ----------
+    source_component : str
+        Base source component path.
+    source_components : sequence[str]
+        Ordered component paths discovered for multiscale rendering.
+
+    Returns
+    -------
+    bool
+        ``True`` when all levels follow canonical source-adjacent pyramid
+        component naming.
+    """
+    components = [str(item).strip() for item in source_components]
+    if not components:
+        return False
+
+    base_component = str(source_component).strip() or "data"
+    if components[0] != base_component:
+        return False
+
+    for level_index, component in enumerate(components[1:], start=1):
+        expected = _display_pyramid_level_component(
+            source_component=base_component,
+            level=level_index,
+        )
+        if str(component).strip() != expected:
+            return False
+    return True
 
 
 def _collect_existing_multiscale_components(
@@ -2153,6 +2411,9 @@ def _build_visualization_multiscale_components(
     root: zarr.hierarchy.Group,
     source_component: str,
     level_factors_tpczyx: tuple[tuple[int, int, int, int, int, int], ...],
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_start: int = 30,
+    progress_end: int = 68,
 ) -> tuple[str, ...]:
     """Materialize reusable display-pyramid levels for one source component.
 
@@ -2166,6 +2427,13 @@ def _build_visualization_multiscale_components(
         Base component path.
     level_factors_tpczyx : tuple[tuple[int, int, int, int, int, int], ...]
         Absolute level factors including base level.
+    progress_callback : callable, optional
+        Callback receiving ``(percent, message)`` updates while levels are
+        generated.
+    progress_start : int, default=30
+        Start percent for level-generation progress.
+    progress_end : int, default=68
+        End percent for level-generation progress.
 
     Returns
     -------
@@ -2181,11 +2449,26 @@ def _build_visualization_multiscale_components(
     factor_payload: list[list[int]] = [
         [int(value) for value in level_factors_tpczyx[0]]
     ]
-    cache_prefix = _visualization_multiscale_cache_prefix(str(source_component))
-
     prior_component = str(source_component)
     prior_factors = tuple(int(value) for value in level_factors_tpczyx[0])
+    total_generated_levels = max(1, int(len(level_factors_tpczyx) - 1))
+    progress_start_int = int(progress_start)
+    progress_end_int = int(max(progress_start_int, int(progress_end)))
+    progress_span = max(0, int(progress_end_int - progress_start_int))
+
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
     for level_index, absolute_factors in enumerate(level_factors_tpczyx[1:], start=1):
+        level_progress_start = progress_start_int + int(
+            ((int(level_index) - 1) / float(total_generated_levels))
+            * float(progress_span)
+        )
+        level_progress_end = progress_start_int + int(
+            (int(level_index) / float(total_generated_levels)) * float(progress_span)
+        )
         all_relative = all(
             int(current) % int(previous) == 0
             for current, previous in zip(absolute_factors, prior_factors, strict=False)
@@ -2212,7 +2495,10 @@ def _build_visualization_multiscale_components(
                 int(absolute_factors[5]),
             )
 
-        level_component = f"{cache_prefix}/level_{level_index}"
+        level_component = _display_pyramid_level_component(
+            source_component=str(source_component),
+            level=int(level_index),
+        )
         source_level = da.from_zarr(str(zarr_path), component=source_level_component)
         downsampled = _downsample_tpczyx_by_stride(source_level, downsample_factors)
         level_shape = tuple(int(size) for size in tuple(downsampled.shape))
@@ -2242,12 +2528,39 @@ def _build_visualization_multiscale_components(
                 dtype=source_dtype.name,
                 overwrite=True,
             )
-            da.to_zarr(
-                downsampled,
-                str(zarr_path),
-                component=level_component,
-                overwrite=True,
-                compute=True,
+            _write_display_pyramid_level_with_progress(
+                level_array=downsampled,
+                zarr_path=zarr_path,
+                level_component=level_component,
+                source_component=source_level_component,
+                level_index=int(level_index),
+                total_levels=int(total_generated_levels),
+                absolute_factors_tpczyx=absolute_factors,
+                level_shape_tpczyx=level_shape,
+                level_chunks_tpczyx=level_chunks,
+                progress_callback=progress_callback,
+                progress_start=int(level_progress_start),
+                progress_end=int(level_progress_end),
+            )
+        else:
+            estimated_chunks = _estimate_chunk_region_count_tpczyx(
+                shape_tpczyx=level_shape,
+                chunks_tpczyx=level_chunks,
+            )
+            _LOGGER.info(
+                "[display_pyramid] reusing existing level %d/%d component=%s "
+                "shape=%s chunks=%s estimated_chunks=%d factors_tpczyx=%s",
+                int(level_index),
+                int(total_generated_levels),
+                str(level_component),
+                tuple(int(v) for v in level_shape),
+                tuple(int(v) for v in level_chunks),
+                int(estimated_chunks),
+                [int(value) for value in absolute_factors],
+            )
+            _emit(
+                int(level_progress_end),
+                f"Reusing existing pyramid level {int(level_index)}/{int(total_generated_levels)}",
             )
 
         root[level_component].attrs.update(
@@ -2283,9 +2596,7 @@ def _build_visualization_multiscale_components(
     if not isinstance(component_map, dict):
         component_map = {}
     component_map[str(source_component)] = [str(item) for item in level_paths]
-    root.attrs[_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = _sanitize_metadata_value(
-        component_map
-    )
+    root.attrs[_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = _sanitize_metadata_value(component_map)
     legacy_component_map = root.attrs.get(_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
     if not isinstance(legacy_component_map, dict):
         legacy_component_map = {}
@@ -2514,9 +2825,7 @@ def _load_display_contrast_limits_by_channel(
         attrs = dict(root[str(source_component)].attrs)
     except Exception:
         return None
-    return _coerce_contrast_limits_by_channel(
-        attrs.get(_DISPLAY_CONTRAST_LIMITS_ATTR)
-    )
+    return _coerce_contrast_limits_by_channel(attrs.get(_DISPLAY_CONTRAST_LIMITS_ATTR))
 
 
 def _save_display_contrast_metadata(
@@ -2602,9 +2911,7 @@ def _sample_channel_for_display_contrast(
     if sampled_voxels <= target:
         return sampled
 
-    tp_stride = int(
-        max(1, math.ceil(math.sqrt(float(sampled_voxels) / float(target))))
-    )
+    tp_stride = int(max(1, math.ceil(math.sqrt(float(sampled_voxels) / float(target)))))
     return sampled[::tp_stride, ::tp_stride, :, :, :]
 
 
@@ -3291,10 +3598,13 @@ def _launch_napari_viewer(
         key = str(component).strip() or "data"
         cached = layer_display_contrast_cache.get(key)
         if cached is None:
-            cached = _load_display_contrast_limits_by_channel(
-                root=scale_root,
-                source_component=key,
-            ) or tuple()
+            cached = (
+                _load_display_contrast_limits_by_channel(
+                    root=scale_root,
+                    source_component=key,
+                )
+                or tuple()
+            )
             layer_display_contrast_cache[key] = cached
         if len(cached) >= int(channel_count):
             return tuple(cached[: int(channel_count)])
@@ -3419,7 +3729,9 @@ def _launch_napari_viewer(
             display_strategy = "none"
             if not display_level_arrays:
                 continue
-            is_multiscale = int(effective_ndisplay) < 3 and len(display_level_arrays) > 1
+            is_multiscale = (
+                int(effective_ndisplay) < 3 and len(display_level_arrays) > 1
+            )
             channel_count = max(1, int(display_level_arrays[0].shape[1]))
             requested_channels = tuple(
                 int(index)
@@ -3764,9 +4076,9 @@ def _launch_napari_viewer(
     napari.run()
     _persist_keyframes()
     return {
-        "keyframe_manifest_path": str(manifest_path)
-        if manifest_path is not None
-        else None,
+        "keyframe_manifest_path": (
+            str(manifest_path) if manifest_path is not None else None
+        ),
         "keyframe_count": int(len(keyframes)),
         "renderer": dict(renderer_info),
     }
@@ -3862,11 +4174,26 @@ def run_display_pyramid_analysis(
         root=root,
         source_component=source_component,
     )
-    reused_existing_levels = bool(len(existing_components) > 1 and not force_rerun)
+    has_multiscale_levels = bool(len(existing_components) > 1)
+    layout_compatible = _is_source_pyramid_layout_compatible(
+        source_component=source_component,
+        source_components=existing_components,
+    )
+    reused_existing_levels = bool(
+        has_multiscale_levels and not force_rerun and layout_compatible
+    )
+    should_rebuild_for_layout = bool(
+        has_multiscale_levels and not force_rerun and not layout_compatible
+    )
     if reused_existing_levels:
         _emit(30, f"Reusing existing display pyramid for {source_component}")
         source_components = tuple(str(item) for item in existing_components)
     else:
+        if should_rebuild_for_layout:
+            _emit(
+                15,
+                "Existing display pyramid uses legacy layout; rebuilding source-adjacent levels.",
+            )
         _emit(30, f"Preparing display pyramid for {source_component}")
         level_factors = _resolve_visualization_pyramid_factors_tpczyx(
             root_attrs=root_attrs,
@@ -3877,6 +4204,9 @@ def run_display_pyramid_analysis(
             root=root,
             source_component=source_component,
             level_factors_tpczyx=level_factors,
+            progress_callback=_emit,
+            progress_start=32,
+            progress_end=68,
         )
 
     level_factors = _resolve_visualization_pyramid_factors_tpczyx(
@@ -3884,8 +4214,7 @@ def run_display_pyramid_analysis(
         source_attrs=source_attrs,
     )
     persisted_factors = [
-        list(row)
-        for row in level_factors[: max(1, len(tuple(source_components)))]
+        list(row) for row in level_factors[: max(1, len(tuple(source_components)))]
     ]
     root[str(source_component)].attrs[_DISPLAY_PYRAMID_LEVELS_ATTR] = [
         str(item) for item in source_components
@@ -4070,9 +4399,10 @@ def _save_visualization_metadata(
     }
     if viewer_pid is not None:
         payload["viewer_pid"] = int(viewer_pid)
-    if display_mode_fallback_reason is not None and str(
-        display_mode_fallback_reason
-    ).strip():
+    if (
+        display_mode_fallback_reason is not None
+        and str(display_mode_fallback_reason).strip()
+    ):
         payload["display_mode_fallback_reason"] = str(display_mode_fallback_reason)
     if keyframe_manifest_path is not None and str(keyframe_manifest_path).strip():
         payload["keyframe_manifest_path"] = str(keyframe_manifest_path)

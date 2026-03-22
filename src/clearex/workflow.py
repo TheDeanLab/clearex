@@ -29,8 +29,17 @@ from dataclasses import dataclass, field
 import math
 import os
 import subprocess
-from typing import Any, Collection, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union
-
+from typing import (
+    Any,
+    Collection,
+    Dict,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 ChunkSpec = Optional[Union[int, Tuple[int, ...]]]
 ZarrAxisSpec = Tuple[int, int, int, int, int, int]
@@ -50,10 +59,10 @@ ANALYSIS_OPERATION_ORDER = (
     "flatfield",
     "deconvolution",
     "shear_transform",
+    "display_pyramid",
+    "registration",
     "particle_detection",
     "usegment3d",
-    "registration",
-    "display_pyramid",
     "visualization",
     "mip_export",
 )
@@ -64,6 +73,7 @@ ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS: Dict[str, str] = {
     "deconvolution": "results/deconvolution/latest/data",
     "shear_transform": "results/shear_transform/latest/data",
     "usegment3d": "results/usegment3d/latest/data",
+    "registration": "results/registration/latest/data",
 }
 ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
     "data": "data",
@@ -356,7 +366,9 @@ def _validate_analysis_input_reference(
                 resolved_component=resolved_component,
             )
         if producer_operation in order_map:
-            consumer_index = order_map.get(str(reference.consumer_operation).strip(), -1)
+            consumer_index = order_map.get(
+                str(reference.consumer_operation).strip(), -1
+            )
             producer_index = order_map[producer_operation]
             if producer_index >= consumer_index:
                 return AnalysisInputDependencyIssue(
@@ -568,7 +580,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "roi_padding_zyx": [2, 2, 2],
     },
     "particle_detection": {
-        "execution_order": 4,
+        "execution_order": 6,
         "input_source": "data",
         "force_rerun": False,
         "channel_index": 0,
@@ -589,7 +601,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "min_distance_sigma": 10.0,
     },
     "usegment3d": {
-        "execution_order": 5,
+        "execution_order": 7,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -647,7 +659,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "output_dtype": "uint32",
     },
     "registration": {
-        "execution_order": 6,
+        "execution_order": 5,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -655,9 +667,15 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "use_map_overlap": True,
         "overlap_zyx": [8, 32, 32],
         "memory_overhead_factor": 2.5,
+        "registration_channel": 0,
+        "registration_type": "rigid",
+        "input_resolution_level": 0,
+        "anchor_mode": "central",
+        "anchor_position": None,
+        "blend_mode": "feather",
     },
     "display_pyramid": {
-        "execution_order": 7,
+        "execution_order": 4,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -1604,9 +1622,11 @@ def _normalize_usegment3d_parameters(
             shape_zyx = normalized["aggregation_tile_shape_zyx"]
             overlap_values = [max(0, int(v)) for v in tile_overlap_zyx]
             ratio_candidates = [
-                (float(overlap_values[idx]) / float(shape_zyx[idx]))
-                if int(shape_zyx[idx]) > 0
-                else 0.0
+                (
+                    (float(overlap_values[idx]) / float(shape_zyx[idx]))
+                    if int(shape_zyx[idx]) > 0
+                    else 0.0
+                )
                 for idx in range(3)
             ]
             tile_overlap_ratio = max(ratio_candidates) if ratio_candidates else 0.0
@@ -1700,6 +1720,70 @@ def _normalize_usegment3d_parameters(
     if output_dtype not in {"uint16", "uint32", "int32"}:
         raise ValueError("usegment3d output_dtype must be uint16, uint32, or int32.")
     normalized["output_dtype"] = output_dtype
+    return normalized
+
+
+def _normalize_registration_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize registration runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate registration parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized registration parameter mapping.
+
+    Raises
+    ------
+    ValueError
+        If required values are invalid.
+    """
+    normalized = _normalize_common_operation_parameters("registration", params)
+    normalized["detect_2d_per_slice"] = False
+    normalized["use_map_overlap"] = bool(normalized.get("use_map_overlap", True))
+    normalized["registration_channel"] = max(
+        0, int(normalized.get("registration_channel", 0))
+    )
+
+    registration_type = (
+        str(normalized.get("registration_type", "rigid")).strip().lower() or "rigid"
+    )
+    if registration_type not in {"translation", "rigid", "similarity"}:
+        raise ValueError(
+            "registration registration_type must be one of translation, rigid, or similarity."
+        )
+    normalized["registration_type"] = registration_type
+
+    input_resolution_level = int(normalized.get("input_resolution_level", 0))
+    if input_resolution_level < 0:
+        raise ValueError("registration input_resolution_level must be >= 0.")
+    normalized["input_resolution_level"] = input_resolution_level
+
+    anchor_mode = (
+        str(normalized.get("anchor_mode", "central")).strip().lower() or "central"
+    )
+    if anchor_mode not in {"central", "manual"}:
+        raise ValueError("registration anchor_mode must be 'central' or 'manual'.")
+    normalized["anchor_mode"] = anchor_mode
+
+    anchor_position = normalized.get("anchor_position")
+    if anchor_position in {None, ""}:
+        normalized["anchor_position"] = None
+    else:
+        parsed_anchor = int(anchor_position)
+        if parsed_anchor < 0:
+            raise ValueError("registration anchor_position must be >= 0.")
+        normalized["anchor_position"] = parsed_anchor
+
+    blend_mode = str(normalized.get("blend_mode", "feather")).strip().lower()
+    if blend_mode not in {"average", "feather"}:
+        raise ValueError("registration blend_mode must be 'average' or 'feather'.")
+    normalized["blend_mode"] = blend_mode
     return normalized
 
 
@@ -2214,6 +2298,10 @@ def normalize_analysis_operation_parameters(
             merged[operation_name] = _normalize_usegment3d_parameters(
                 merged[operation_name]
             )
+        elif operation_name == "registration":
+            merged[operation_name] = _normalize_registration_parameters(
+                merged[operation_name]
+            )
         elif operation_name == "visualization":
             merged[operation_name] = _normalize_visualization_parameters(
                 merged[operation_name]
@@ -2277,14 +2365,14 @@ def selected_analysis_operations(
         selected.append("deconvolution")
     if shear_transform:
         selected.append("shear_transform")
+    if display_pyramid:
+        selected.append("display_pyramid")
+    if registration:
+        selected.append("registration")
     if particle_detection:
         selected.append("particle_detection")
     if usegment3d:
         selected.append("usegment3d")
-    if registration:
-        selected.append("registration")
-    if display_pyramid:
-        selected.append("display_pyramid")
     if visualization:
         selected.append("visualization")
     if mip_export:
@@ -4234,9 +4322,7 @@ def parse_spatial_calibration(
         axis_name, binding = item.split("=", 1)
         key = str(axis_name).strip().lower()
         if key not in SPATIAL_CALIBRATION_WORLD_AXES:
-            raise ValueError(
-                "Spatial calibration world axes must be z, y, or x."
-            )
+            raise ValueError("Spatial calibration world axes must be z, y, or x.")
         if key in assignments:
             raise ValueError(
                 f"Spatial calibration world axis '{key}' is assigned more than once."
@@ -4289,16 +4375,12 @@ def normalize_spatial_calibration(
         )
 
     theta_mode = (
-        str(
-            value.get("theta_mode", SPATIAL_CALIBRATION_DEFAULT_THETA_MODE)
-        ).strip()
+        str(value.get("theta_mode", SPATIAL_CALIBRATION_DEFAULT_THETA_MODE)).strip()
         or SPATIAL_CALIBRATION_DEFAULT_THETA_MODE
     )
     schema = str(value.get("schema", SPATIAL_CALIBRATION_SCHEMA)).strip()
     if schema and schema != SPATIAL_CALIBRATION_SCHEMA:
-        raise ValueError(
-            f"Unsupported spatial calibration schema '{schema}'."
-        )
+        raise ValueError(f"Unsupported spatial calibration schema '{schema}'.")
 
     if "stage_axis_map_zyx" in value:
         stage_axis_payload = value.get("stage_axis_map_zyx")
@@ -4608,9 +4690,7 @@ class WorkflowConfig:
                 )
                 if selected_target is None:
                     selected_target = self.analysis_targets[0]
-            self.analysis_selected_experiment_path = (
-                selected_target.experiment_path
-            )
+            self.analysis_selected_experiment_path = selected_target.experiment_path
             self.file = selected_target.store_path
         else:
             self.analysis_selected_experiment_path = (
@@ -4652,9 +4732,9 @@ class WorkflowConfig:
             Selected target resolved from ``analysis_targets`` and
             ``analysis_selected_experiment_path``.
         """
-        selected_experiment_path = (
-            str(self.analysis_selected_experiment_path or "").strip()
-        )
+        selected_experiment_path = str(
+            self.analysis_selected_experiment_path or ""
+        ).strip()
         if not selected_experiment_path:
             return None
         for target in self.analysis_targets:

@@ -36,7 +36,16 @@ from importlib.metadata import PackageNotFoundError, version
 from itertools import product
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+    cast,
+)
 
 import dask
 import dask.array as da
@@ -388,15 +397,14 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("flatfield smoothness_flatfield must be greater than zero.")
     normalized["working_size"] = max(1, int(normalized.get("working_size", 128)))
     normalized["is_timelapse"] = bool(normalized.get("is_timelapse", False))
-    fit_mode = str(normalized.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    fit_mode = (
+        str(normalized.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    )
     if fit_mode not in {"tiled", "full_volume"}:
         raise ValueError("flatfield fit_mode must be 'tiled' or 'full_volume'.")
     normalized["fit_mode"] = fit_mode
     fit_tile_shape = normalized.get("fit_tile_shape_yx", [256, 256])
-    if (
-        not isinstance(fit_tile_shape, (tuple, list))
-        or len(fit_tile_shape) != 2
-    ):
+    if not isinstance(fit_tile_shape, (tuple, list)) or len(fit_tile_shape) != 2:
         raise ValueError(
             "flatfield fit_tile_shape_yx must define tile sizes in (y, x) order."
         )
@@ -681,8 +689,7 @@ def _axis_chunk_bounds(size: int, chunk_size: int) -> list[tuple[int, int]]:
         Ordered ``(start, stop)`` bounds covering the full axis.
     """
     return [
-        (start, min(start + chunk_size, size))
-        for start in range(0, size, chunk_size)
+        (start, min(start + chunk_size, size)) for start in range(0, size, chunk_size)
     ]
 
 
@@ -816,7 +823,9 @@ def _fit_basic_profile(
     )
 
 
-def _region_to_slices(region: RegionBounds) -> tuple[slice, slice, slice, slice, slice, slice]:
+def _region_to_slices(
+    region: RegionBounds,
+) -> tuple[slice, slice, slice, slice, slice, slice]:
     """Convert integer region bounds into six-axis Python slices.
 
     Parameters
@@ -1266,6 +1275,7 @@ def _materialize_output_pyramid(
     ValueError
         If base output component shape/chunks are not canonical.
     """
+
     def _emit(percent: int, message: str) -> None:
         if progress_callback is None:
             return
@@ -1385,9 +1395,7 @@ def _materialize_output_pyramid(
             {
                 "axes": ["t", "p", "c", "z", "y", "x"],
                 "pyramid_level": int(level_index),
-                "downsample_factors_tpczyx": [
-                    int(value) for value in absolute_factors
-                ],
+                "downsample_factors_tpczyx": [int(value) for value in absolute_factors],
                 "chunk_shape_tpczyx": [int(value) for value in level_chunks],
                 "source_component": str(level_source_component),
             }
@@ -1460,7 +1468,13 @@ def _checkpoint_dataset_specs(
     specs: dict[str, tuple[tuple[int, ...], Any]] = {
         "fit_profile_done_pc": ((p_count, c_count), np.bool_),
         "transform_done_tpcyx": (
-            (t_count, p_count, c_count, int(transform_grid_yx[0]), int(transform_grid_yx[1])),
+            (
+                t_count,
+                p_count,
+                c_count,
+                int(transform_grid_yx[0]),
+                int(transform_grid_yx[1]),
+            ),
             np.bool_,
         ),
     }
@@ -1471,16 +1485,28 @@ def _checkpoint_dataset_specs(
                     (p_count, c_count, int(fit_grid_yx[0]), int(fit_grid_yx[1])),
                     np.bool_,
                 ),
-                "fit_baseline_sum_pctz": ((p_count, c_count, t_count, z_count), np.float32),
+                "fit_baseline_sum_pctz": (
+                    (p_count, c_count, t_count, z_count),
+                    np.float32,
+                ),
                 "fit_baseline_count_pc": ((p_count, c_count), np.uint32),
             }
         )
         if bool(blend_tiles_effective):
             specs.update(
                 {
-                    "fit_flatfield_sum_pcyx": ((p_count, c_count, y_count, x_count), np.float32),
-                    "fit_darkfield_sum_pcyx": ((p_count, c_count, y_count, x_count), np.float32),
-                    "fit_weight_sum_pcyx": ((p_count, c_count, y_count, x_count), np.float32),
+                    "fit_flatfield_sum_pcyx": (
+                        (p_count, c_count, y_count, x_count),
+                        np.float32,
+                    ),
+                    "fit_darkfield_sum_pcyx": (
+                        (p_count, c_count, y_count, x_count),
+                        np.float32,
+                    ),
+                    "fit_weight_sum_pcyx": (
+                        (p_count, c_count, y_count, x_count),
+                        np.float32,
+                    ),
                 }
             )
     return specs
@@ -1534,9 +1560,13 @@ def _checkpoint_is_compatible(
         int(shape_tpczyx[4]),
         int(shape_tpczyx[5]),
     )
-    if not _has_dataset(latest_group, name="data", shape=shape_tpczyx, dtype=np.float32):
+    if not _has_dataset(
+        latest_group, name="data", shape=shape_tpczyx, dtype=np.float32
+    ):
         return False
-    if tuple(int(v) for v in latest_group["data"].chunks) != tuple(int(v) for v in chunks_tpczyx):
+    if tuple(int(v) for v in latest_group["data"].chunks) != tuple(
+        int(v) for v in chunks_tpczyx
+    ):
         return False
     if not _has_dataset(
         latest_group,
@@ -1567,7 +1597,9 @@ def _checkpoint_is_compatible(
     checkpoint_attrs = dict(checkpoint_group.attrs)
     if str(checkpoint_attrs.get("schema_version", "")) != RESUME_SCHEMA_VERSION:
         return False
-    if str(checkpoint_attrs.get("parameter_fingerprint", "")) != str(parameter_fingerprint):
+    if str(checkpoint_attrs.get("parameter_fingerprint", "")) != str(
+        parameter_fingerprint
+    ):
         return False
     if str(checkpoint_attrs.get("source_component", "")) != str(source_component):
         return False
@@ -1966,7 +1998,9 @@ def _prepare_output_arrays(
             f"Input component '{source_component}' is incompatible."
         )
 
-    fit_mode = str(parameters.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    fit_mode = (
+        str(parameters.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    )
     fit_tile_shape_yx = cast(
         tuple[int, int],
         parameters.get("fit_tile_shape_yx", (256, 256)),
@@ -1983,7 +2017,9 @@ def _prepare_output_arrays(
         parameters.get("blend_tiles", False) and parameters.get("use_map_overlap", True)
     )
     parameter_payload = _resume_parameter_payload(parameters)
-    parameter_json, parameter_fingerprint = _resume_parameter_fingerprint(parameter_payload)
+    parameter_json, parameter_fingerprint = _resume_parameter_fingerprint(
+        parameter_payload
+    )
 
     component = "results/flatfield/latest"
     data_component = "results/flatfield/latest/data"
@@ -2115,7 +2151,9 @@ def _fit_profile(
     ValueError
         If the fitted baseline length cannot be reshaped back to ``(t, z)``.
     """
-    fit_mode = str(parameters.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    fit_mode = (
+        str(parameters.get("fit_mode", "tiled")).strip().lower().replace("-", "_")
+    )
     if fit_mode == "full_volume":
         return _fit_profile_full_volume(
             zarr_path=zarr_path,
@@ -2297,7 +2335,9 @@ def _fit_profile_tiled(
                 dtype=np.float32,
             )
             _, _, y_read_count, x_read_count = volume_tzyx.shape
-            fit_images = volume_tzyx.reshape(t_count * z_count, y_read_count, x_read_count)
+            fit_images = volume_tzyx.reshape(
+                t_count * z_count, y_read_count, x_read_count
+            )
             flatfield_tile, darkfield_tile, baseline = _fit_basic_profile(
                 fit_images=fit_images,
                 basic_class=basic_class,
@@ -2322,11 +2362,15 @@ def _fit_profile_tiled(
                 flatfield_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
-                ] += flatfield_tile.astype(np.float64) * blend_weights_64
+                ] += (
+                    flatfield_tile.astype(np.float64) * blend_weights_64
+                )
                 darkfield_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
-                ] += darkfield_tile.astype(np.float64) * blend_weights_64
+                ] += (
+                    darkfield_tile.astype(np.float64) * blend_weights_64
+                )
                 weight_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
@@ -2892,10 +2936,12 @@ def _transform_region(
         )
         corrected = corrected - baseline[:, None, None, :, None, None]
 
-    corrected_core = corrected[_crop_slices_for_core(
-        read_region=read_region,
-        core_region=core_region,
-    )].astype(np.float32, copy=False)
+    corrected_core = corrected[
+        _crop_slices_for_core(
+            read_region=read_region,
+            core_region=core_region,
+        )
+    ].astype(np.float32, copy=False)
 
     write_root = zarr.open_group(str(zarr_path), mode="a")
     write_root[output_data_component][_region_to_slices(core_region)] = corrected_core
@@ -3044,7 +3090,9 @@ def run_flatfield_analysis(
         if client is None:
             for completed, task_input in enumerate(task_inputs, start=1):
                 try:
-                    result = dask.compute(build_task(task_input), scheduler="processes")[0]
+                    result = dask.compute(
+                        build_task(task_input), scheduler="processes"
+                    )[0]
                 except Exception as exc:  # pragma: no cover - mirrored distributed path
                     if handle_task_error is None or not bool(
                         handle_task_error(task_input, exc)
@@ -3063,14 +3111,18 @@ def run_flatfield_analysis(
 
         delayed_tasks = [build_task(task_input) for task_input in task_inputs]
         futures = cast(list[Any], client.compute(delayed_tasks))
-        future_to_input = {future: task_inputs[index] for index, future in enumerate(futures)}
+        future_to_input = {
+            future: task_inputs[index] for index, future in enumerate(futures)
+        }
         completed = 0
         for future in as_completed(futures):
             task_input = future_to_input[future]
             try:
                 result = future.result()
             except Exception as exc:
-                if handle_task_error is None or not bool(handle_task_error(task_input, exc)):
+                if handle_task_error is None or not bool(
+                    handle_task_error(task_input, exc)
+                ):
                     raise
             else:
                 consume_result(task_input, result)
@@ -3119,18 +3171,24 @@ def run_flatfield_analysis(
     profile_count = int(len(profile_pairs))
     _emit(
         6,
-        "Resuming existing flatfield checkpoint"
-        if layout.resumed
-        else "Initialized fresh flatfield checkpoint",
+        (
+            "Resuming existing flatfield checkpoint"
+            if layout.resumed
+            else "Initialized fresh flatfield checkpoint"
+        ),
     )
 
-    checkpoint_group = zarr.open_group(str(zarr_path), mode="a")[layout.checkpoint_component]
+    checkpoint_group = zarr.open_group(str(zarr_path), mode="a")[
+        layout.checkpoint_component
+    ]
     raw_fallback_records = checkpoint_group.attrs.get("fit_fallback_records", [])
     fit_fallback_records: list[dict[str, Any]] = []
     if isinstance(raw_fallback_records, list):
         for record in raw_fallback_records:
             if isinstance(record, Mapping):
-                fit_fallback_records.append(cast(dict[str, Any], _to_jsonable(dict(record))))
+                fit_fallback_records.append(
+                    cast(dict[str, Any], _to_jsonable(dict(record)))
+                )
     checkpoint_group.attrs.update(
         {
             "run_status": "running",
@@ -3187,7 +3245,9 @@ def run_flatfield_analysis(
                         profile=profile_result,
                     )
                     position_index, channel_index = profile_key
-                    fit_profile_done_array[position_index, channel_index] = np.bool_(True)
+                    fit_profile_done_array[position_index, channel_index] = np.bool_(
+                        True
+                    )
 
                 _execute_tasks(
                     task_inputs=pending_profile_pairs,
@@ -3230,7 +3290,9 @@ def run_flatfield_analysis(
                 if "position_index" in record and "channel_index" in record
             }
             tiles_per_profile = (
-                int(len(tile_specs) // max(1, profile_count)) if profile_count > 0 else 0
+                int(len(tile_specs) // max(1, profile_count))
+                if profile_count > 0
+                else 0
             )
             tile_done_array = checkpoint_group["fit_tile_done_pcyx"]
             tile_done_mask = np.asarray(tile_done_array, dtype=bool)
@@ -3326,7 +3388,9 @@ def run_flatfield_analysis(
                         "channel_index": int(profile_key[1]),
                         "fallback_mode": str(fallback_mode),
                         "trigger_error": str(trigger_error),
-                        "retry_error": None if retry_error is None else str(retry_error),
+                        "retry_error": (
+                            None if retry_error is None else str(retry_error)
+                        ),
                         "recorded_utc": _utc_now_iso(),
                     }
                     fit_fallback_records.append(record)
@@ -3423,8 +3487,12 @@ def run_flatfield_analysis(
                     profile_key = (position_index, channel_index)
                     if profile_key in fallback_profile_keys:
                         return
-                    y_start, y_stop = int(tile_result.y_bounds[0]), int(tile_result.y_bounds[1])
-                    x_start, x_stop = int(tile_result.x_bounds[0]), int(tile_result.x_bounds[1])
+                    y_start, y_stop = int(tile_result.y_bounds[0]), int(
+                        tile_result.y_bounds[1]
+                    )
+                    x_start, x_stop = int(tile_result.x_bounds[0]), int(
+                        tile_result.x_bounds[1]
+                    )
                     profile_selection = (
                         slice(position_index, position_index + 1),
                         slice(channel_index, channel_index + 1),
@@ -3442,14 +3510,18 @@ def run_flatfield_analysis(
                         baseline_sum_array[profile_selection],
                         dtype=np.float32,
                     )
-                    baseline_sum += np.asarray(tile_result.baseline_tz, dtype=np.float32)[
+                    baseline_sum += np.asarray(
+                        tile_result.baseline_tz, dtype=np.float32
+                    )[
                         None,
                         None,
                         :,
                         :,
                     ]
                     baseline_sum_array[profile_selection] = baseline_sum
-                    baseline_count = int(baseline_count_array[position_index, channel_index])
+                    baseline_count = int(
+                        baseline_count_array[position_index, channel_index]
+                    )
                     baseline_count_array[position_index, channel_index] = np.uint32(
                         baseline_count + 1
                     )

@@ -34,7 +34,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import islice, product
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Optional, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    Optional,
+    Sequence,
+    Union,
+)
 import json
 import math
 import os
@@ -350,7 +359,10 @@ def _expected_pyramid_components(
     None
         This helper does not raise custom exceptions.
     """
-    return ["data", *[f"data_pyramid/level_{idx}" for idx in range(1, len(level_factors))]]
+    return [
+        "data",
+        *[f"data_pyramid/level_{idx}" for idx in range(1, len(level_factors))],
+    ]
 
 
 def _has_expected_pyramid_structure(
@@ -589,7 +601,9 @@ def has_complete_canonical_data_store(
     if not _has_expected_pyramid_structure(root=root, level_factors=level_factors):
         return False
     required_components = (
-        _expected_pyramid_components(level_factors) if level_factors is not None else ["data"]
+        _expected_pyramid_components(level_factors)
+        if level_factors is not None
+        else ["data"]
     )
 
     record = _read_ingestion_progress_record(root)
@@ -979,6 +993,7 @@ def _parse_navigate_bdv_setup_index_map(
     None
         Parsing is best-effort and falls back to ``None``.
     """
+
     def _candidate_bdv_xml_paths(path: Path) -> list[Path]:
         """Return candidate BDV XML sidecar paths for one source path.
 
@@ -1790,8 +1805,7 @@ def _axis_chunk_bounds(size: int, chunk_size: int) -> list[tuple[int, int]]:
         Ordered ``(start, stop)`` bounds covering the full axis.
     """
     return [
-        (start, min(start + chunk_size, size))
-        for start in range(0, size, chunk_size)
+        (start, min(start + chunk_size, size)) for start in range(0, size, chunk_size)
     ]
 
 
@@ -1876,7 +1890,9 @@ def _estimate_write_batch_region_count(
     int
         Recommended number of chunk regions per submission batch.
     """
-    chunk_bytes = max(1, math.prod(int(value) for value in chunks_tpczyx) * int(dtype_itemsize))
+    chunk_bytes = max(
+        1, math.prod(int(value) for value in chunks_tpczyx) * int(dtype_itemsize)
+    )
     target_batch_bytes = 512 << 20
     return max(1, min(64, target_batch_bytes // chunk_bytes))
 
@@ -1987,14 +2003,15 @@ def _should_use_source_aligned_plane_writes(
     """
     min_chunks, max_chunks = _dask_chunk_min_max_tpczyx(array)
     source_is_single_plane_z = min_chunks[3] == 1 and max_chunks[3] == 1
-    source_is_full_lateral = (
-        min_chunks[4] >= int(shape_tpczyx[4]) and min_chunks[5] >= int(shape_tpczyx[5])
+    source_is_full_lateral = min_chunks[4] >= int(shape_tpczyx[4]) and min_chunks[
+        5
+    ] >= int(shape_tpczyx[5])
+    target_splits_lateral = int(target_chunks_tpczyx[4]) < int(shape_tpczyx[4]) or int(
+        target_chunks_tpczyx[5]
+    ) < int(shape_tpczyx[5])
+    return bool(
+        source_is_single_plane_z and source_is_full_lateral and target_splits_lateral
     )
-    target_splits_lateral = (
-        int(target_chunks_tpczyx[4]) < int(shape_tpczyx[4])
-        or int(target_chunks_tpczyx[5]) < int(shape_tpczyx[5])
-    )
-    return bool(source_is_single_plane_z and source_is_full_lateral and target_splits_lateral)
 
 
 def _detect_runtime_memory_bytes() -> int:
@@ -2290,7 +2307,11 @@ def _estimate_source_aligned_submission_batch_count(
     cpu_count = max(1, int(os.cpu_count() or 1))
     effective_worker_count = max(
         1,
-        int(worker_count) if worker_count is not None and int(worker_count) > 0 else cpu_count,
+        (
+            int(worker_count)
+            if worker_count is not None and int(worker_count) > 0
+            else cpu_count
+        ),
     )
 
     per_worker_memory_limit = (
@@ -2448,8 +2469,8 @@ def _write_dask_array_in_batches(
     completed_regions = int(start_region)
     region_iter = islice(
         _iter_tpczyx_chunk_regions(
-        shape_tpczyx=shape_tpczyx,
-        chunks_tpczyx=chunks_tpczyx,
+            shape_tpczyx=shape_tpczyx,
+            chunks_tpczyx=chunks_tpczyx,
         ),
         int(start_region),
         None,
@@ -2569,7 +2590,9 @@ def _write_dask_array_source_aligned_plane_batches(
     detected_worker_count = worker_count
     detected_worker_memory_limit_bytes = worker_memory_limit_bytes
     if detected_worker_count is None or detected_worker_memory_limit_bytes is None:
-        auto_worker_count, auto_worker_memory_limit = _detect_client_worker_resources(client)
+        auto_worker_count, auto_worker_memory_limit = _detect_client_worker_resources(
+            client
+        )
         if detected_worker_count is None:
             detected_worker_count = auto_worker_count
         if detected_worker_memory_limit_bytes is None:
@@ -2666,9 +2689,9 @@ def _component_matches_shape_and_chunks(
         actual_chunks = tuple(int(size) for size in target.chunks)
     except Exception:
         return False
-    return actual_shape == tuple(int(v) for v in shape_tpczyx) and actual_chunks == tuple(
-        int(v) for v in chunks_tpczyx
-    )
+    return actual_shape == tuple(
+        int(v) for v in shape_tpczyx
+    ) and actual_chunks == tuple(int(v) for v in chunks_tpczyx)
 
 
 def _create_ingestion_progress_record(
@@ -2795,9 +2818,7 @@ def _ingestion_progress_record_matches(
         return False
     record_source_component = record.get("source_component")
     normalized_record_source_component = (
-        ""
-        if record_source_component is None
-        else str(record_source_component).strip()
+        "" if record_source_component is None else str(record_source_component).strip()
     )
     normalized_source_component = (
         "" if source_component is None else str(source_component).strip()
@@ -2809,7 +2830,9 @@ def _ingestion_progress_record_matches(
     if str(record.get("write_mode", "")).strip() != str(write_mode):
         return False
     try:
-        record_shape = tuple(int(value) for value in record.get("canonical_shape_tpczyx", []))
+        record_shape = tuple(
+            int(value) for value in record.get("canonical_shape_tpczyx", [])
+        )
         record_chunks = tuple(int(value) for value in record.get("chunks_tpczyx", []))
         record_factors = tuple(
             tuple(int(value) for value in level)
@@ -3486,7 +3509,9 @@ def materialize_experiment_data_store(
         if (not force_rebuild) and has_complete_canonical_data_store(store_path):
             _emit_progress(100, "Canonical data store is already complete")
             data_root = zarr.open_group(str(store_path), mode="r")
-            data_chunks = tuple(int(value) for value in (data_root["data"].chunks or normalized_chunks))
+            data_chunks = tuple(
+                int(value) for value in (data_root["data"].chunks or normalized_chunks)
+            )
             return MaterializedDataStore(
                 source_path=source_resolved,
                 store_path=store_path,
@@ -3582,7 +3607,8 @@ def materialize_experiment_data_store(
 
         write_mode = (
             "source_aligned_plane_batches"
-            if use_source_aligned_plane_writes and source_aligned_z_batch_depth is not None
+            if use_source_aligned_plane_writes
+            and source_aligned_z_batch_depth is not None
             else "chunk_region_batches"
         )
         if write_mode == "source_aligned_plane_batches":
@@ -3606,8 +3632,7 @@ def materialize_experiment_data_store(
         base_start_region = 0
         if (
             not force_rebuild
-            and
-            checkpoint_resume_supported
+            and checkpoint_resume_supported
             and existing_progress_record is not None
             and _ingestion_progress_record_matches(
                 record=existing_progress_record,
@@ -3786,7 +3811,9 @@ def materialize_experiment_data_store(
                             completed = int(payload.get("completed_regions", 0))
                         except Exception:
                             continue
-                        start_regions_by_component[str(component)] = max(0, int(completed))
+                        start_regions_by_component[str(component)] = max(
+                            0, int(completed)
+                        )
 
             _materialize_data_pyramid(
                 store_path=store_path,
@@ -5201,9 +5228,7 @@ def create_dask_client(
             )
 
         worker_count = (
-            max(1, int(n_workers))
-            if n_workers is not None
-            else len(assigned_gpu_ids)
+            max(1, int(n_workers)) if n_workers is not None else len(assigned_gpu_ids)
         )
         worker_gpu_ids = [
             str(assigned_gpu_ids[idx % len(assigned_gpu_ids)])
@@ -5309,9 +5334,9 @@ def _library_path_env_vars_for_platform(
         Ordered environment variable names used for runtime library lookup.
     """
     effective_os_name = str(os.name if os_name is None else os_name).strip().lower()
-    effective_platform = str(
-        sys.platform if platform is None else platform
-    ).strip().lower()
+    effective_platform = (
+        str(sys.platform if platform is None else platform).strip().lower()
+    )
     if effective_os_name == "nt":
         return ("PATH",)
     if effective_platform == "darwin":

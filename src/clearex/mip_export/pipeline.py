@@ -259,9 +259,7 @@ def _normalize_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     normalized["resample_z_to_lateral"] = _coerce_bool(
         normalized.get("resample_z_to_lateral", True)
     )
-    normalized["output_directory"] = str(
-        normalized.get("output_directory", "")
-    ).strip()
+    normalized["output_directory"] = str(normalized.get("output_directory", "")).strip()
     return normalized
 
 
@@ -480,7 +478,9 @@ def _resample_axis_linear_to_uint16(
         dst_flat[:, :] = _to_uint16(repeated)
         return
 
-    sample_positions = np.linspace(0.0, float(src_len - 1), num=dst_len, dtype=np.float64)
+    sample_positions = np.linspace(
+        0.0, float(src_len - 1), num=dst_len, dtype=np.float64
+    )
     lower = np.floor(sample_positions).astype(np.int64)
     upper = np.minimum(lower + 1, src_len - 1)
     weight_upper = (sample_positions - lower).astype(np.float32)
@@ -576,9 +576,7 @@ def _resample_tiff_projection_z_axis_if_needed(
             metadata=_ome_metadata_for_projection_output(
                 output_shape=tuple(int(v) for v in output_shape),
                 axes=tuple(str(axis) for axis in axes),
-                voxel_size_um_zyx=tuple(
-                    float(v) for v in effective_voxel_size_um_zyx
-                ),
+                voxel_size_um_zyx=tuple(float(v) for v in effective_voxel_size_um_zyx),
                 image_name=str(output_path.stem),
             ),
         )
@@ -1131,9 +1129,7 @@ def _choose_preserved_tile_shape(
     )
     budget = max(1, int(max_read_bytes))
     while read_bytes > budget:
-        largest_axis = int(
-            np.argmax(np.asarray(tile_lengths, dtype=np.int64))
-        )
+        largest_axis = int(np.argmax(np.asarray(tile_lengths, dtype=np.int64)))
         if tile_lengths[largest_axis] <= 1:
             break
         tile_lengths[largest_axis] = max(1, tile_lengths[largest_axis] // 2)
@@ -1181,7 +1177,9 @@ def _iter_tile_slices(
     ]
 
 
-def _tile_slices_to_bounds(tile_slices: tuple[slice, ...]) -> tuple[tuple[int, int], ...]:
+def _tile_slices_to_bounds(
+    tile_slices: tuple[slice, ...],
+) -> tuple[tuple[int, int], ...]:
     """Convert tile slices into serializable integer bounds.
 
     Parameters
@@ -1912,7 +1910,9 @@ def _run_export_task(
             )
             stored_dtype = str(np.dtype(np.uint16))
         else:
-            stored_dtype = str(np.dtype(getattr(output_target, "dtype", source_array.dtype)))
+            stored_dtype = str(
+                np.dtype(getattr(output_target, "dtype", source_array.dtype))
+            )
             effective_voxel_size_um_zyx = tuple(float(v) for v in voxel_size_um_zyx)
 
         if _is_tiff_export_format(export_format):
@@ -2075,7 +2075,9 @@ def run_mip_export_analysis(
                         metadata=_ome_metadata_for_projection_output(
                             output_shape=tuple(int(v) for v in planned.output_shape),
                             axes=tuple(str(axis) for axis in planned.axes),
-                            voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+                            voxel_size_um_zyx=tuple(
+                                float(v) for v in voxel_size_um_zyx
+                            ),
                             image_name=str(planned.output_path.stem),
                         ),
                     )
@@ -2105,7 +2107,9 @@ def run_mip_export_analysis(
                             {"axes": [str(axis) for axis in planned.axes]}
                         )
                         stored_dtypes[int(planned.task_index)] = str(
-                            np.dtype(getattr(output_target, "dtype", source_array.dtype))
+                            np.dtype(
+                                getattr(output_target, "dtype", source_array.dtype)
+                            )
                         )
                     finally:
                         _close_zarr_store(output_root)

@@ -373,7 +373,7 @@ def test_run_display_pyramid_analysis_materializes_levels_and_contrast_metadata(
     latest_attrs = dict(output_root["results"]["display_pyramid"]["latest"].attrs)
     assert len(source_attrs["display_pyramid_levels"]) > 1
     assert all(
-        str(component).startswith("results/display_pyramid/by_component/")
+        str(component).startswith("results/shear_transform/latest/data_pyramid/")
         or str(component) == "results/shear_transform/latest/data"
         for component in source_attrs["display_pyramid_levels"]
     )
@@ -445,6 +445,120 @@ def test_run_display_pyramid_analysis_avoids_forced_rechunk(
         parameters={"input_source": "results/shear_transform/latest/data"},
     )
     assert len(summary.source_components) > 1
+
+
+def test_run_display_pyramid_analysis_emits_level_write_progress(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="results/shear_transform/latest/data",
+        shape=(1, 1, 1, 16, 16, 16),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    events: list[tuple[int, str]] = []
+    run_display_pyramid_analysis(
+        zarr_path=store_path,
+        parameters={"input_source": "results/shear_transform/latest/data"},
+        progress_callback=lambda percent, message: events.append(
+            (int(percent), str(message))
+        ),
+    )
+
+    level_messages = [
+        str(message) for _, message in events if "pyramid level" in message
+    ]
+    assert any("Writing pyramid level 1/" in message for message in level_messages)
+    assert any("Wrote pyramid level 1/" in message for message in level_messages)
+    assert any(
+        30 < int(percent) < 70
+        for percent, message in events
+        if "pyramid level" in str(message)
+    )
+
+
+def test_run_display_pyramid_analysis_logs_level_chunk_estimates(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="results/shear_transform/latest/data",
+        shape=(1, 1, 1, 16, 16, 16),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    with caplog.at_level("INFO", logger="clearex.visualization.pipeline"):
+        run_display_pyramid_analysis(
+            zarr_path=store_path,
+            parameters={"input_source": "results/shear_transform/latest/data"},
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("writing level 1/" in message for message in messages)
+    assert any("estimated_chunks=" in message for message in messages)
+
+
+def test_run_display_pyramid_analysis_rebuilds_legacy_component_layout(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="results/shear_transform/latest/data",
+        shape=(1, 1, 1, 8, 8, 8),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+    legacy_level_component = (
+        "results/display_pyramid/by_component/legacy_shear_cache/level_1"
+    )
+    root.create_dataset(
+        name=legacy_level_component,
+        shape=(1, 1, 1, 4, 4, 4),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root["results/shear_transform/latest/data"].attrs["display_pyramid_levels"] = [
+        "results/shear_transform/latest/data",
+        legacy_level_component,
+    ]
+    root.attrs["display_pyramid_levels_by_component"] = {
+        "results/shear_transform/latest/data": [
+            "results/shear_transform/latest/data",
+            legacy_level_component,
+        ]
+    }
+
+    summary = run_display_pyramid_analysis(
+        zarr_path=store_path,
+        parameters={"input_source": "results/shear_transform/latest/data"},
+    )
+
+    assert summary.reused_existing_levels is False
+    assert len(summary.source_components) > 1
+    assert summary.source_components[0] == "results/shear_transform/latest/data"
+    assert summary.source_components[1].startswith(
+        "results/shear_transform/latest/data_pyramid/level_"
+    )
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    assert (
+        "results/shear_transform/latest/data_pyramid/level_1" in output_root
+    ), "Expected source-adjacent level_1 pyramid after migration."
+    source_attrs = dict(output_root["results/shear_transform/latest/data"].attrs)
+    assert source_attrs["display_pyramid_levels"][1].startswith(
+        "results/shear_transform/latest/data_pyramid/level_"
+    )
 
 
 def test_run_visualization_analysis_uses_experiment_spacing_when_available(
@@ -1078,7 +1192,9 @@ def test_launch_napari_viewer_defaults_multiposition_images_to_translucent(
     viewer = fake_napari.viewer
     assert viewer is not None
     assert len(viewer.image_calls) == 2
-    assert all(str(kwargs["blending"]) == "translucent" for kwargs in viewer.image_calls)
+    assert all(
+        str(kwargs["blending"]) == "translucent" for kwargs in viewer.image_calls
+    )
 
 
 def test_launch_napari_viewer_requests_3d_display_mode(

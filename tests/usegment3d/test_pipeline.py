@@ -254,9 +254,7 @@ def test_remap_usegment3d_runtime_stdout_line(
     raw_line: str,
     expected: str,
 ) -> None:
-    assert (
-        usegment_pipeline._remap_usegment3d_runtime_stdout_line(raw_line) == expected
-    )
+    assert usegment_pipeline._remap_usegment3d_runtime_stdout_line(raw_line) == expected
 
 
 class _PreprocessPrintRuntimeModule(_FakeRuntimeModule):
