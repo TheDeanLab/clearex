@@ -398,5 +398,131 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
     assert latest.attrs["pairwise_source_component"] == "data_pyramid/level_1"
     assert latest.attrs["input_resolution_level"] == 1
     assert latest.attrs["blend_mode"] == "feather"
+    assert "blend_weights_zyx" in latest
+    assert latest["blend_weights_zyx"].shape == (4, 4, 6)
+    assert latest.attrs["max_pairwise_voxels"] == int(
+        registration_pipeline._DEFAULT_MAX_PAIRWISE_VOXELS
+    )
+    assert latest.attrs["ants_iterations"] == list(
+        registration_pipeline._ANTS_AFF_ITERATIONS
+    )
+    assert latest.attrs["ants_sampling_rate"] == pytest.approx(
+        registration_pipeline._ANTS_RANDOM_SAMPLING_RATE
+    )
+    assert latest.attrs["use_phase_correlation"] is False
+    assert latest.attrs["use_fft_initial_alignment"] is True
     assert progress_updates
     assert progress_updates[-1][0] == 100
+    # Verify we get granular progress (not just start and end).
+    progress_percents = [p for p, _ in progress_updates]
+    assert len(progress_percents) >= 5
+
+
+def test_source_subvolume_for_overlap_returns_tighter_slices() -> None:
+    """_source_subvolume_for_overlap should return slices narrower than the full tile."""
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, 3] = np.asarray([0.0, 0.0, 0.0], dtype=np.float64)
+    source_shape_zyx = (20, 100, 40)
+    reference_origin_xyz = np.asarray([5.0, 10.0, 2.0], dtype=np.float64)
+    reference_shape_zyx = (4, 8, 6)
+    voxel_size = (1.0, 1.0, 1.0)
+
+    slices, adjusted = registration_pipeline._source_subvolume_for_overlap(
+        transform,
+        reference_origin_xyz=reference_origin_xyz,
+        reference_shape_zyx=reference_shape_zyx,
+        source_shape_zyx=source_shape_zyx,
+        voxel_size_um_zyx=voxel_size,
+        padding=2,
+    )
+
+    for axis_slice, full_size in zip(slices, source_shape_zyx):
+        assert axis_slice.start >= 0
+        assert axis_slice.stop <= full_size
+        assert (axis_slice.stop - axis_slice.start) <= full_size
+
+    # The sub-volume must still be usable for resampling: verify that
+    # resampling the sub-volume with the adjusted transform produces the same
+    # result as resampling the full tile with the original transform.
+    rng = np.random.default_rng(42)
+    full_volume = rng.random(source_shape_zyx).astype(np.float32)
+    sub_volume = full_volume[slices[0], slices[1], slices[2]]
+
+    full_result = registration_pipeline._resample_source_to_world_grid(
+        full_volume,
+        transform,
+        reference_origin_xyz=reference_origin_xyz,
+        reference_shape_zyx=reference_shape_zyx,
+        voxel_size_um_zyx=voxel_size,
+        order=1,
+        cval=0.0,
+    )
+    sub_result = registration_pipeline._resample_source_to_world_grid(
+        sub_volume,
+        adjusted,
+        reference_origin_xyz=reference_origin_xyz,
+        reference_shape_zyx=reference_shape_zyx,
+        voxel_size_um_zyx=voxel_size,
+        order=1,
+        cval=0.0,
+    )
+    np.testing.assert_allclose(sub_result, full_result, atol=1e-5)
+
+
+def test_downsample_crop_for_registration_reduces_volume() -> None:
+    """_downsample_crop_for_registration should reduce volume beyond the budget."""
+    rng = np.random.default_rng(7)
+    volume = rng.random((20, 100, 40)).astype(np.float32)
+    voxel_size = (1.0, 1.0, 1.0)
+
+    # Volume is 80 000 voxels; set budget to 10 000.
+    down, eff_voxel = registration_pipeline._downsample_crop_for_registration(
+        volume,
+        max_voxels=10_000,
+        voxel_size_um_zyx=voxel_size,
+    )
+
+    assert down.size < volume.size
+    assert all(float(e) > float(o) for e, o in zip(eff_voxel, voxel_size))
+
+
+def test_downsample_crop_for_registration_noop_when_small() -> None:
+    """_downsample_crop_for_registration should be a noop for small volumes."""
+    rng = np.random.default_rng(8)
+    volume = rng.random((4, 4, 4)).astype(np.float32)
+    voxel_size = (1.0, 1.0, 1.0)
+
+    down, eff_voxel = registration_pipeline._downsample_crop_for_registration(
+        volume,
+        max_voxels=500_000,
+        voxel_size_um_zyx=voxel_size,
+    )
+
+    assert down is volume
+    assert eff_voxel == pytest.approx(voxel_size)
+
+
+def test_phase_correlation_translation_recovers_known_shift() -> None:
+    """_phase_correlation_translation should recover a known translation."""
+    pytest.importorskip("skimage")
+    rng = np.random.default_rng(99)
+    fixed = rng.random((16, 32, 32)).astype(np.float32) * 100.0
+    # Shift by 3 voxels in Z, 5 in Y, -2 in X.
+    from scipy.ndimage import shift as ndimage_shift
+
+    moving = ndimage_shift(fixed, (3.0, 5.0, -2.0), order=1, mode="constant")
+    voxel_size = (2.0, 1.0, 0.5)
+
+    correction = registration_pipeline._phase_correlation_translation(
+        fixed,
+        moving,
+        voxel_size_um_zyx=voxel_size,
+    )
+
+    # phase_cross_correlation returns the shift to align moving → fixed.
+    # moving was shifted by (3, 5, -2) ZYX from fixed, so the correction
+    # shift is (-3, -5, 2) ZYX voxels → (2*0.5, -5*1.0, -3*2.0) XYZ µm.
+    expected_xyz = np.asarray([1.0, -5.0, -6.0], dtype=np.float64)
+    np.testing.assert_allclose(correction[:3, 3], expected_xyz, atol=1.0)
+    np.testing.assert_allclose(correction[:3, :3], np.eye(3), atol=1e-10)
+

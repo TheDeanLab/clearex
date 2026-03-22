@@ -7197,11 +7197,16 @@ if HAS_PYQT6:
             "overlap_zyx": [8, 32, 32],
             "memory_overhead_factor": 2.5,
             "registration_channel": 0,
-            "registration_type": "rigid",
+            "registration_type": "translation",
             "input_resolution_level": 0,
             "anchor_mode": "central",
             "anchor_position": None,
             "blend_mode": "feather",
+            "max_pairwise_voxels": 500000,
+            "ants_iterations": [200, 100, 50, 25],
+            "ants_sampling_rate": 0.20,
+            "use_phase_correlation": False,
+            "use_fft_initial_alignment": True,
         }
         _PARAMETER_HINTS: Dict[str, str] = {
             "input_source": (
@@ -7442,6 +7447,21 @@ if HAS_PYQT6:
             "registration_blend_mode": (
                 "Overlap fusion mode for the final stitched volume. Feather "
                 "weights edges to reduce seams; average uses uniform weights."
+            ),
+            "registration_max_pairwise_voxels": (
+                "Maximum voxel budget for pairwise overlap crops. Crops "
+                "exceeding this budget are isotropically downsampled before "
+                "ANTs estimation. Set to 0 to disable sub-sampling."
+            ),
+            "registration_use_phase_correlation": (
+                "When enabled with translation-only registration, use FFT "
+                "phase correlation instead of ANTs for faster pairwise "
+                "estimation. Falls back to ANTs on failure."
+            ),
+            "registration_use_fft_initial_alignment": (
+                "Use FFT phase correlation to pre-align the moving crop "
+                "before ANTs optimization. This provides a better starting "
+                "point and reduces the iterations ANTs needs to converge."
             ),
             "usegment3d_output_reference_space": (
                 "Choose whether final labels are stored at level 0 (original "
@@ -10021,6 +10041,41 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["registration_blend_mode"],
             )
             form.addRow(fusion_section)
+
+            perf_section, perf_form = self._build_parameter_section_card(
+                "Performance"
+            )
+            self._registration_max_pairwise_voxels_spin = QSpinBox()
+            self._registration_max_pairwise_voxels_spin.setRange(0, 100_000_000)
+            self._registration_max_pairwise_voxels_spin.setSingleStep(50_000)
+            perf_form.addRow(
+                "max pairwise voxels",
+                self._registration_max_pairwise_voxels_spin,
+            )
+            self._register_parameter_hint(
+                self._registration_max_pairwise_voxels_spin,
+                self._PARAMETER_HINTS["registration_max_pairwise_voxels"],
+            )
+
+            self._registration_use_phase_correlation_check = QCheckBox(
+                "phase correlation (translation only)"
+            )
+            perf_form.addRow(self._registration_use_phase_correlation_check)
+            self._register_parameter_hint(
+                self._registration_use_phase_correlation_check,
+                self._PARAMETER_HINTS["registration_use_phase_correlation"],
+            )
+
+            self._registration_use_fft_initial_alignment_check = QCheckBox(
+                "FFT initial alignment"
+            )
+            self._registration_use_fft_initial_alignment_check.setChecked(True)
+            perf_form.addRow(self._registration_use_fft_initial_alignment_check)
+            self._register_parameter_hint(
+                self._registration_use_fft_initial_alignment_check,
+                self._PARAMETER_HINTS["registration_use_fft_initial_alignment"],
+            )
+            form.addRow(perf_section)
 
         def _rebuild_usegment3d_channel_checkboxes(
             self,
@@ -13086,6 +13141,9 @@ if HAS_PYQT6:
                 self._registration_overlap_y_spin,
                 self._registration_overlap_x_spin,
                 self._registration_blend_mode_combo,
+                self._registration_max_pairwise_voxels_spin,
+                self._registration_use_phase_correlation_check,
+                self._registration_use_fft_initial_alignment_check,
             )
             for widget in widgets:
                 widget.setEnabled(registration_enabled)
@@ -14011,17 +14069,17 @@ if HAS_PYQT6:
                 )
             )
             registration_type = (
-                str(registration_params.get("registration_type", "rigid"))
+                str(registration_params.get("registration_type", "translation"))
                 .strip()
                 .lower()
-                or "rigid"
+                or "translation"
             )
             registration_type_index = self._registration_type_combo.findData(
                 registration_type
             )
             if registration_type_index < 0:
                 registration_type_index = self._registration_type_combo.findData(
-                    "rigid"
+                    "translation"
                 )
             if registration_type_index < 0:
                 registration_type_index = 0
@@ -14097,6 +14155,16 @@ if HAS_PYQT6:
                 registration_blend_index = 0
             self._registration_blend_mode_combo.setCurrentIndex(
                 registration_blend_index
+            )
+
+            self._registration_max_pairwise_voxels_spin.setValue(
+                max(0, int(registration_params.get("max_pairwise_voxels", 500_000)))
+            )
+            self._registration_use_phase_correlation_check.setChecked(
+                bool(registration_params.get("use_phase_correlation", False))
+            )
+            self._registration_use_fft_initial_alignment_check.setChecked(
+                bool(registration_params.get("use_fft_initial_alignment", True))
             )
 
             self._visualization_show_all_positions_checkbox.setChecked(
@@ -14986,6 +15054,23 @@ if HAS_PYQT6:
                     self._registration_blend_mode_combo.currentData() or "feather"
                 ).strip()
                 or "feather",
+                "max_pairwise_voxels": int(
+                    self._registration_max_pairwise_voxels_spin.value()
+                ),
+                "ants_iterations": list(
+                    self._registration_defaults.get(
+                        "ants_iterations", [200, 100, 50, 25]
+                    )
+                ),
+                "ants_sampling_rate": float(
+                    self._registration_defaults.get("ants_sampling_rate", 0.20)
+                ),
+                "use_phase_correlation": bool(
+                    self._registration_use_phase_correlation_check.isChecked()
+                ),
+                "use_fft_initial_alignment": bool(
+                    self._registration_use_fft_initial_alignment_check.isChecked()
+                ),
             }
 
         def _collect_visualization_parameters(self) -> Dict[str, Any]:

@@ -2297,7 +2297,7 @@ def _run_workflow(
                                     summary,
                                     "registration_type",
                                     registration_parameters.get(
-                                        "registration_type", "rigid"
+                                        "registration_type", "translation"
                                     ),
                                 )
                             ),
@@ -2380,7 +2380,7 @@ def _run_workflow(
                                             summary,
                                             "registration_type",
                                             registration_parameters.get(
-                                                "registration_type", "rigid"
+                                                "registration_type", "translation"
                                             ),
                                         )
                                     ),

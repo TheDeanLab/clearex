@@ -8,6 +8,7 @@ The registration module provides tools for aligning images using combined linear
 - `linear.py` - Linear/affine registration functions
 - `nonlinear.py` - Nonlinear/deformable registration functions  
 - `common.py` - Shared utilities (transform I/O, cropping, etc.)
+- `pipeline.py` - Chunked tile-registration workflow for canonical 6D analysis stores (Dask + Zarr)
 
 ## Quick Start
 
@@ -422,6 +423,47 @@ The registration module follows a layered design:
 2. **Convenience function** (`register_round`): Simple functional interface
 3. **Mid-level functions** (`linear.py`, `nonlinear.py`): Individual registration steps
 4. **Utility functions** (`common.py`): Shared helpers
+5. **Tile-registration pipeline** (`pipeline.py`): Dask + Zarr distributed tile registration
 
 This design allows users to choose the appropriate level of abstraction for their needs.
+
+## Performance Tuning (pipeline.py)
+
+The chunked tile-registration pipeline (`pipeline.py`) supports several
+parameters for tuning pairwise estimation and fusion throughput.  All
+parameters are passed through the `parameters` dict to
+`run_registration_analysis`.
+
+### Dask/Zarr Design Principles
+
+- **No large arrays through Dask pipes.** Workers receive `zarr_path` (string)
+  and component paths, then open the store locally and read only the minimal
+  sub-volume needed for each task.
+- **Cropped source reads.** Both pairwise registration and fusion use
+  `_source_subvolume_for_overlap` to compute the minimal source Zarr slice
+  that covers each output region, dramatically reducing I/O for large tiles.
+- **Cached blend weights.** The blend weight volume is pre-computed once and
+  stored as `results/registration/latest/blend_weights_zyx` in the analysis
+  store.  Fusion workers lazily load it instead of recomputing per tile per
+  chunk.
+
+### Configurable Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `registration_type` | `"translation"` | Pairwise ANTsPy transform family: `translation` (fastest), `rigid`, or `similarity`. Translation is the default for maximum throughput; combined with FFT initial alignment this converges in very few iterations. |
+| `use_fft_initial_alignment` | `True` | Run FFT phase correlation to pre-align the moving crop before ANTs. Gives ANTs a much better starting point so it converges faster with fewer iterations. |
+| `max_pairwise_voxels` | `500_000` | Maximum voxel budget for pairwise overlap crops. Crops exceeding this budget are isotropically downsampled before ANTs estimation. Set to `0` to disable. |
+| `ants_iterations` | `(200, 100, 50, 25)` | ANTsPy multi-resolution iteration schedule. Smaller values are faster; the legacy schedule `(2000, 1000, 500, 250)` is available as `_ANTS_AFF_ITERATIONS_LEGACY`. |
+| `ants_sampling_rate` | `0.20` | ANTsPy random voxel sampling rate. Reducing this saves per-iteration cost with minimal accuracy impact for tile registration. |
+| `use_phase_correlation` | `False` | When `True` and `registration_type` is `"translation"`, skip ANTs entirely and use FFT phase correlation only. Falls back to ANTs on failure. |
+
+### GPU Acceleration (future)
+
+The core resampling function `_resample_source_to_world_grid` uses
+`scipy.ndimage.affine_transform`, which is single-threaded CPU code.  A
+drop-in GPU replacement via `cupyx.scipy.ndimage.affine_transform` is marked
+as a TODO for future integration.  This would benefit both pairwise
+registration and fusion.  The deconvolution subsystem already supports
+GPU-pinned `LocalCluster` workers; registration would reuse the same backend.
 

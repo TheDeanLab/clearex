@@ -668,11 +668,16 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "overlap_zyx": [8, 32, 32],
         "memory_overhead_factor": 2.5,
         "registration_channel": 0,
-        "registration_type": "rigid",
+        "registration_type": "translation",
         "input_resolution_level": 0,
         "anchor_mode": "central",
         "anchor_position": None,
         "blend_mode": "feather",
+        "max_pairwise_voxels": 500000,
+        "ants_iterations": [200, 100, 50, 25],
+        "ants_sampling_rate": 0.20,
+        "use_phase_correlation": False,
+        "use_fft_initial_alignment": True,
     },
     "display_pyramid": {
         "execution_order": 4,
@@ -1751,7 +1756,8 @@ def _normalize_registration_parameters(
     )
 
     registration_type = (
-        str(normalized.get("registration_type", "rigid")).strip().lower() or "rigid"
+        str(normalized.get("registration_type", "translation")).strip().lower()
+        or "translation"
     )
     if registration_type not in {"translation", "rigid", "similarity"}:
         raise ValueError(
@@ -1784,6 +1790,33 @@ def _normalize_registration_parameters(
     if blend_mode not in {"average", "feather"}:
         raise ValueError("registration blend_mode must be 'average' or 'feather'.")
     normalized["blend_mode"] = blend_mode
+
+    # Performance-tuning parameters — passed through with validated defaults.
+    max_pairwise_voxels = int(normalized.get("max_pairwise_voxels", 500_000))
+    if max_pairwise_voxels < 0:
+        raise ValueError("registration max_pairwise_voxels must be >= 0.")
+    normalized["max_pairwise_voxels"] = max_pairwise_voxels
+
+    raw_iterations = normalized.get("ants_iterations", [200, 100, 50, 25])
+    if isinstance(raw_iterations, (list, tuple)):
+        ants_iterations = [max(1, int(v)) for v in raw_iterations]
+    else:
+        ants_iterations = [200, 100, 50, 25]
+    normalized["ants_iterations"] = ants_iterations
+
+    ants_sampling_rate = float(normalized.get("ants_sampling_rate", 0.20))
+    if ants_sampling_rate <= 0.0 or ants_sampling_rate > 1.0:
+        raise ValueError(
+            "registration ants_sampling_rate must be in the range (0, 1]."
+        )
+    normalized["ants_sampling_rate"] = ants_sampling_rate
+
+    normalized["use_phase_correlation"] = bool(
+        normalized.get("use_phase_correlation", False)
+    )
+    normalized["use_fft_initial_alignment"] = bool(
+        normalized.get("use_fft_initial_alignment", True)
+    )
     return normalized
 
 

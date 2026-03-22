@@ -24,6 +24,11 @@ try:
 except ImportError:  # pragma: no cover - exercised via runtime fallback tests
     ants = None
 
+try:
+    from skimage.registration import phase_cross_correlation as _phase_cross_correlation
+except ImportError:  # pragma: no cover - optional fast-path dependency
+    _phase_cross_correlation = None  # type: ignore[assignment]
+
 from clearex.io.experiment import load_navigate_experiment
 from clearex.io.provenance import register_latest_output_reference
 from clearex.workflow import SpatialCalibrationConfig, spatial_calibration_from_dict
@@ -33,12 +38,15 @@ if TYPE_CHECKING:
 
 
 ProgressCallback = Callable[[int, str], None]
-_ANTS_AFF_ITERATIONS = (2000, 1000, 500, 250)
+_ANTS_AFF_ITERATIONS_LEGACY = (2000, 1000, 500, 250)
+_ANTS_AFF_ITERATIONS = (200, 100, 50, 25)
 _ANTS_AFF_SHRINK_FACTORS = (8, 4, 2, 1)
 _ANTS_AFF_SMOOTHING_SIGMAS = (3, 2, 1, 0)
-_ANTS_RANDOM_SAMPLING_RATE = 0.25
+_ANTS_RANDOM_SAMPLING_RATE = 0.20
 _ABSOLUTE_RESIDUAL_THRESHOLD_PX = 3.5
 _RELATIVE_RESIDUAL_THRESHOLD = 2.5
+_DEFAULT_MAX_PAIRWISE_VOXELS = 500_000
+_PHASE_CORRELATION_UPSAMPLE_FACTOR = 10
 _WEIGHT_EPS = np.float32(1e-6)
 _PERMUTE_ZYX_TO_XYZ = np.asarray(
     [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64
@@ -627,6 +635,12 @@ def _resample_source_to_world_grid(
         reference_origin_xyz=reference_origin_xyz,
         voxel_size_um_zyx=voxel_size_um_zyx,
     )
+    # TODO: GPU acceleration — when a CuPy-backed Dask array backend is active,
+    # replace with ``cupyx.scipy.ndimage.affine_transform`` for 10-50× speedup
+    # on large volumes.  Requires the same ``matrix``, ``offset``, and
+    # ``output_shape`` arguments.  See also the deconvolution subsystem which
+    # already supports GPU-pinned LocalCluster workers via
+    # ``create_dask_client(..., gpu_enabled=True)``.
     return ndimage.affine_transform(
         np.asarray(source_zyx),
         matrix=matrix,
@@ -637,6 +651,137 @@ def _resample_source_to_world_grid(
         cval=float(cval),
         prefilter=bool(order > 1),
     ).astype(np.float32, copy=False)
+
+
+def _source_subvolume_for_overlap(
+    local_to_world_xyz: np.ndarray,
+    *,
+    reference_origin_xyz: np.ndarray,
+    reference_shape_zyx: tuple[int, int, int],
+    source_shape_zyx: tuple[int, int, int],
+    voxel_size_um_zyx: Sequence[float],
+    padding: int = 2,
+) -> tuple[tuple[slice, slice, slice], np.ndarray]:
+    """Compute the minimal source sub-volume that covers a world-grid crop.
+
+    Returns the ZYX slices into the source array and an adjusted
+    ``local_to_world_xyz`` that accounts for the sub-volume origin shift.
+
+    Parameters
+    ----------
+    local_to_world_xyz : numpy.ndarray
+        4×4 homogeneous transform from source local space to world space.
+    reference_origin_xyz : numpy.ndarray
+        World-space origin of the output crop.
+    reference_shape_zyx : tuple[int, int, int]
+        Output crop shape in ``(z, y, x)`` order.
+    source_shape_zyx : tuple[int, int, int]
+        Full source tile shape in ``(z, y, x)`` order.
+    voxel_size_um_zyx : sequence of float
+        Voxel size in ``(z, y, x)`` order.
+    padding : int, optional
+        Extra voxel padding per side for interpolation safety (default 2).
+
+    Returns
+    -------
+    tuple[tuple[slice, slice, slice], numpy.ndarray]
+        ``(slices_zyx, adjusted_local_to_world_xyz)`` — Zarr-compatible index
+        slices and a translation-adjusted copy of the input transform.
+    """
+    matrix, offset = _world_to_input_affine_zyx(
+        local_to_world_xyz,
+        reference_origin_xyz=reference_origin_xyz,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+    )
+    # Build the eight corners of the output crop in output-index space.
+    rz, ry, rx = (int(reference_shape_zyx[0]), int(reference_shape_zyx[1]),
+                  int(reference_shape_zyx[2]))
+    output_corners = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [rz, 0.0, 0.0],
+            [0.0, ry, 0.0],
+            [0.0, 0.0, rx],
+            [rz, ry, 0.0],
+            [rz, 0.0, rx],
+            [0.0, ry, rx],
+            [rz, ry, rx],
+        ],
+        dtype=np.float64,
+    )
+    # Map each corner into source-index space: src_idx = matrix @ out_idx + offset
+    source_indices = (matrix @ output_corners.T).T + offset[np.newaxis, :]
+    src_min = np.floor(np.min(source_indices, axis=0)).astype(int) - int(padding)
+    src_max = np.ceil(np.max(source_indices, axis=0)).astype(int) + int(padding)
+
+    sz, sy, sx = (int(source_shape_zyx[0]), int(source_shape_zyx[1]),
+                  int(source_shape_zyx[2]))
+    z0, y0, x0 = (max(0, int(src_min[0])), max(0, int(src_min[1])),
+                  max(0, int(src_min[2])))
+    z1, y1, x1 = (min(sz, int(src_max[0])), min(sy, int(src_max[1])),
+                  min(sx, int(src_max[2])))
+
+    if z1 <= z0 or y1 <= y0 or x1 <= x0:
+        return (
+            (slice(0, sz), slice(0, sy), slice(0, sx)),
+            local_to_world_xyz.copy(),
+        )
+
+    slices_zyx = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
+    # Shift the transform origin to account for the sub-volume offset.
+    voxel_xyz = np.asarray(
+        [float(voxel_size_um_zyx[2]), float(voxel_size_um_zyx[1]),
+         float(voxel_size_um_zyx[0])],
+        dtype=np.float64,
+    )
+    offset_xyz = np.asarray([float(x0), float(y0), float(z0)],
+                            dtype=np.float64) * voxel_xyz
+    adjusted = local_to_world_xyz.copy()
+    adjusted[:3, 3] = adjusted[:3, 3] + (adjusted[:3, :3] @ offset_xyz)
+    return slices_zyx, adjusted
+
+
+def _downsample_crop_for_registration(
+    volume_zyx: np.ndarray,
+    *,
+    max_voxels: int,
+    voxel_size_um_zyx: Sequence[float],
+) -> tuple[np.ndarray, tuple[float, float, float]]:
+    """Optionally downsample a crop volume to keep it within a voxel budget.
+
+    Parameters
+    ----------
+    volume_zyx : numpy.ndarray
+        3D volume in ``(z, y, x)`` order.
+    max_voxels : int
+        Maximum total voxels allowed.  If the volume is smaller, it is
+        returned unchanged.
+    voxel_size_um_zyx : sequence of float
+        Original voxel size in ``(z, y, x)`` order.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, tuple[float, float, float]]
+        ``(downsampled_volume, effective_voxel_size_um_zyx)``
+    """
+    total = int(np.prod(volume_zyx.shape))
+    if total <= max(1, int(max_voxels)):
+        return volume_zyx, tuple(float(v) for v in voxel_size_um_zyx)  # type: ignore[return-value]
+    factor = max(2, int(math.ceil((total / max(1, int(max_voxels))) ** (1.0 / 3.0))))
+    zoom_factors = tuple(1.0 / float(factor) for _ in range(3))
+    downsampled = ndimage.zoom(
+        volume_zyx.astype(np.float32, copy=False),
+        zoom_factors,
+        order=1,
+        mode="constant",
+        cval=0.0,
+    ).astype(np.float32, copy=False)
+    effective_voxel = (
+        float(voxel_size_um_zyx[0]) * float(factor),
+        float(voxel_size_um_zyx[1]) * float(factor),
+        float(voxel_size_um_zyx[2]) * float(factor),
+    )
+    return downsampled, effective_voxel
 
 
 def _crop_from_overlap_bbox(
@@ -731,6 +876,58 @@ def _registration_type_to_ants(value: str) -> str:
     return mapping[str(value).strip().lower()]
 
 
+def _phase_correlation_translation(
+    fixed_crop_zyx: np.ndarray,
+    moving_crop_zyx: np.ndarray,
+    *,
+    voxel_size_um_zyx: Sequence[float],
+) -> np.ndarray:
+    """Estimate a translation-only correction via FFT phase correlation.
+
+    Parameters
+    ----------
+    fixed_crop_zyx : numpy.ndarray
+        Fixed reference crop in ``(z, y, x)`` order.
+    moving_crop_zyx : numpy.ndarray
+        Moving crop in ``(z, y, x)`` order (same shape as *fixed_crop_zyx*).
+    voxel_size_um_zyx : sequence of float
+        Voxel size in ``(z, y, x)`` order.
+
+    Returns
+    -------
+    numpy.ndarray
+        4×4 homogeneous translation correction matrix in XYZ µm.
+
+    Raises
+    ------
+    RuntimeError
+        If ``scikit-image`` is not installed.
+    """
+    if _phase_cross_correlation is None:
+        raise RuntimeError(
+            "phase correlation requires scikit-image "
+            "(skimage.registration.phase_cross_correlation)."
+        )
+    shift_zyx, _error, _phasediff = _phase_cross_correlation(
+        fixed_crop_zyx.astype(np.float32, copy=False),
+        moving_crop_zyx.astype(np.float32, copy=False),
+        upsample_factor=int(_PHASE_CORRELATION_UPSAMPLE_FACTOR),
+    )
+    shift_zyx = np.asarray(shift_zyx, dtype=np.float64)
+    # Convert voxel shift to physical XYZ translation.
+    shift_xyz_um = np.asarray(
+        [
+            float(shift_zyx[2]) * float(voxel_size_um_zyx[2]),
+            float(shift_zyx[1]) * float(voxel_size_um_zyx[1]),
+            float(shift_zyx[0]) * float(voxel_size_um_zyx[0]),
+        ],
+        dtype=np.float64,
+    )
+    correction = np.eye(4, dtype=np.float64)
+    correction[:3, 3] = shift_xyz_um
+    return correction
+
+
 def _register_pairwise_overlap(
     *,
     zarr_path: str,
@@ -743,30 +940,94 @@ def _register_pairwise_overlap(
     voxel_size_um_zyx: Sequence[float],
     overlap_zyx: Sequence[int],
     registration_type: str,
+    max_pairwise_voxels: int = _DEFAULT_MAX_PAIRWISE_VOXELS,
+    ants_iterations: Sequence[int] = _ANTS_AFF_ITERATIONS,
+    ants_sampling_rate: float = _ANTS_RANDOM_SAMPLING_RATE,
+    use_phase_correlation: bool = False,
+    use_fft_initial_alignment: bool = True,
 ) -> dict[str, Any]:
-    """Register one nominal overlap crop and return a correction transform."""
+    """Register one nominal overlap crop and return a correction transform.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Path to canonical analysis-store.
+    source_component : str
+        Source data component path within the store.
+    t_index : int
+        Time index.
+    registration_channel : int
+        Channel used for pairwise estimation.
+    edge : _EdgeSpec
+        Overlap edge specification.
+    nominal_fixed_transform_xyz : numpy.ndarray
+        4×4 nominal world transform for the fixed tile.
+    nominal_moving_transform_xyz : numpy.ndarray
+        4×4 nominal world transform for the moving tile.
+    voxel_size_um_zyx : sequence of float
+        Voxel size in ``(z, y, x)`` order for the registration level.
+    overlap_zyx : sequence of int
+        Overlap padding in ``(z, y, x)`` voxels.
+    registration_type : str
+        Registration family (``translation``, ``rigid``, or ``similarity``).
+    max_pairwise_voxels : int, optional
+        Maximum voxel budget for overlap crops before sub-sampling.
+    ants_iterations : sequence of int, optional
+        ANTsPy affine iteration schedule per multi-resolution level.
+    ants_sampling_rate : float, optional
+        ANTsPy random sampling rate.
+    use_phase_correlation : bool, optional
+        When ``True`` and ``registration_type`` is ``translation``, use
+        FFT-based phase correlation instead of ANTsPy for faster estimation.
+    use_fft_initial_alignment : bool, optional
+        When ``True``, run FFT phase correlation first to pre-align the
+        moving crop before ANTs, reducing iteration requirements.  The
+        ANTs result is then composed with the FFT correction.
+    """
     root = zarr.open_group(str(zarr_path), mode="r")
     source = root[source_component]
-    fixed_source = np.asarray(
-        source[
-            int(t_index), int(edge.fixed_position), int(registration_channel), :, :, :
-        ],
-        dtype=np.float32,
-    )
-    moving_source = np.asarray(
-        source[
-            int(t_index), int(edge.moving_position), int(registration_channel), :, :, :
-        ],
-        dtype=np.float32,
-    )
+    source_shape_zyx = tuple(int(v) for v in source.shape[3:])
+
     crop_origin_xyz, crop_shape_zyx = _crop_from_overlap_bbox(
         edge.overlap_bbox_xyz,
         voxel_size_um_zyx=voxel_size_um_zyx,
         overlap_zyx=overlap_zyx,
     )
+
+    # Compute minimal source sub-volumes covering the overlap crop.
+    fixed_slices, fixed_adj_transform = _source_subvolume_for_overlap(
+        nominal_fixed_transform_xyz,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=crop_shape_zyx,
+        source_shape_zyx=source_shape_zyx,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+    )
+    moving_slices, moving_adj_transform = _source_subvolume_for_overlap(
+        nominal_moving_transform_xyz,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=crop_shape_zyx,
+        source_shape_zyx=source_shape_zyx,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+    )
+
+    fixed_source = np.asarray(
+        source[
+            int(t_index), int(edge.fixed_position), int(registration_channel),
+            fixed_slices[0], fixed_slices[1], fixed_slices[2],
+        ],
+        dtype=np.float32,
+    )
+    moving_source = np.asarray(
+        source[
+            int(t_index), int(edge.moving_position), int(registration_channel),
+            moving_slices[0], moving_slices[1], moving_slices[2],
+        ],
+        dtype=np.float32,
+    )
+
     fixed_crop = _resample_source_to_world_grid(
         fixed_source,
-        nominal_fixed_transform_xyz,
+        fixed_adj_transform,
         reference_origin_xyz=crop_origin_xyz,
         reference_shape_zyx=crop_shape_zyx,
         voxel_size_um_zyx=voxel_size_um_zyx,
@@ -775,13 +1036,14 @@ def _register_pairwise_overlap(
     )
     moving_crop = _resample_source_to_world_grid(
         moving_source,
-        nominal_moving_transform_xyz,
+        moving_adj_transform,
         reference_origin_xyz=crop_origin_xyz,
         reference_shape_zyx=crop_shape_zyx,
         voxel_size_um_zyx=voxel_size_um_zyx,
         order=1,
         cval=0.0,
     )
+
     fixed_mask = np.asarray(fixed_crop > 0, dtype=np.float32)
     moving_mask = np.asarray(moving_crop > 0, dtype=np.float32)
     overlap_pixels = int(np.count_nonzero((fixed_mask > 0) & (moving_mask > 0)))
@@ -800,18 +1062,90 @@ def _register_pairwise_overlap(
             "nominal_overlap_pixels": int(overlap_pixels),
         }
 
+    # Phase-correlation fast path — skip ANTs entirely for translation-only.
+    if (
+        bool(use_phase_correlation)
+        and registration_type == "translation"
+        and _phase_cross_correlation is not None
+    ):
+        try:
+            correction_matrix_xyz = _phase_correlation_translation(
+                fixed_crop,
+                moving_crop,
+                voxel_size_um_zyx=voxel_size_um_zyx,
+            )
+            return {
+                "fixed_position": int(edge.fixed_position),
+                "moving_position": int(edge.moving_position),
+                "success": True,
+                "reason": "phase_correlation",
+                "correction_matrix_xyz": correction_matrix_xyz.tolist(),
+                "overlap_voxels": int(edge.overlap_voxels),
+                "nominal_overlap_pixels": int(overlap_pixels),
+            }
+        except Exception:
+            pass  # Fall through to ANTs path.
+
+    # Sub-sample large crops to stay within the voxel budget.
+    reg_voxel_size: Sequence[float] = voxel_size_um_zyx
+    reg_fixed = fixed_crop
+    reg_moving = moving_crop
+    reg_fixed_mask = fixed_mask
+    reg_moving_mask = moving_mask
+    if int(max_pairwise_voxels) > 0:
+        reg_fixed, reg_voxel_size = _downsample_crop_for_registration(
+            fixed_crop,
+            max_voxels=int(max_pairwise_voxels),
+            voxel_size_um_zyx=voxel_size_um_zyx,
+        )
+        reg_moving, reg_voxel_size = _downsample_crop_for_registration(
+            moving_crop,
+            max_voxels=int(max_pairwise_voxels),
+            voxel_size_um_zyx=voxel_size_um_zyx,
+        )
+        reg_fixed_mask = np.asarray(reg_fixed > 0, dtype=np.float32)
+        reg_moving_mask = np.asarray(reg_moving > 0, dtype=np.float32)
+
+    # FFT initial alignment — pre-align moving crop before ANTs so ANTs
+    # starts near the solution and converges with fewer iterations.
+    fft_correction_xyz = np.eye(4, dtype=np.float64)
+    if bool(use_fft_initial_alignment) and _phase_cross_correlation is not None:
+        try:
+            shift_zyx, _err, _pd = _phase_cross_correlation(
+                reg_fixed.astype(np.float32, copy=False),
+                reg_moving.astype(np.float32, copy=False),
+                upsample_factor=int(_PHASE_CORRELATION_UPSAMPLE_FACTOR),
+            )
+            shift_zyx = np.asarray(shift_zyx, dtype=np.float64)
+            # Pre-align the moving crop using the detected shift.
+            reg_moving = ndimage.shift(
+                reg_moving, shift_zyx, order=1, mode="constant", cval=0.0,
+            ).astype(np.float32, copy=False)
+            reg_moving_mask = np.asarray(reg_moving > 0, dtype=np.float32)
+            # Build the FFT correction in physical XYZ coordinates.
+            fft_correction_xyz[:3, 3] = np.asarray(
+                [
+                    float(shift_zyx[2]) * float(reg_voxel_size[2]),
+                    float(shift_zyx[1]) * float(reg_voxel_size[1]),
+                    float(shift_zyx[0]) * float(reg_voxel_size[0]),
+                ],
+                dtype=np.float64,
+            )
+        except Exception:
+            fft_correction_xyz = np.eye(4, dtype=np.float64)
+
     try:
         fixed_image = _ants_image_from_zyx(
-            fixed_crop, voxel_size_um_zyx=voxel_size_um_zyx
+            reg_fixed, voxel_size_um_zyx=reg_voxel_size
         )
         moving_image = _ants_image_from_zyx(
-            moving_crop, voxel_size_um_zyx=voxel_size_um_zyx
+            reg_moving, voxel_size_um_zyx=reg_voxel_size
         )
         fixed_mask_image = _ants_image_from_zyx(
-            fixed_mask, voxel_size_um_zyx=voxel_size_um_zyx
+            reg_fixed_mask, voxel_size_um_zyx=reg_voxel_size
         )
         moving_mask_image = _ants_image_from_zyx(
-            moving_mask, voxel_size_um_zyx=voxel_size_um_zyx
+            reg_moving_mask, voxel_size_um_zyx=reg_voxel_size
         )
         registration = ants.registration(
             fixed=fixed_image,
@@ -822,21 +1156,23 @@ def _register_pairwise_overlap(
             initial_transform="Identity",
             aff_metric="mattes",
             aff_sampling=32,
-            aff_random_sampling_rate=float(_ANTS_RANDOM_SAMPLING_RATE),
-            aff_iterations=_ANTS_AFF_ITERATIONS,
+            aff_random_sampling_rate=float(ants_sampling_rate),
+            aff_iterations=tuple(int(v) for v in ants_iterations),
             aff_shrink_factors=_ANTS_AFF_SHRINK_FACTORS,
             aff_smoothing_sigmas=_ANTS_AFF_SMOOTHING_SIGMAS,
             mask_all_stages=True,
             verbose=False,
         )
         transform = ants.read_transform(registration["fwdtransforms"][0])
-        correction_matrix_xyz = _ants_transform_to_matrix_xyz(transform)
+        ants_correction_xyz = _ants_transform_to_matrix_xyz(transform)
+        # Compose: total = ANTs residual on top of FFT pre-alignment.
+        correction_matrix_xyz = ants_correction_xyz @ fft_correction_xyz
         success = True
         reason = ""
     except Exception as exc:
-        correction_matrix_xyz = np.eye(4, dtype=np.float64)
-        success = False
-        reason = str(exc)
+        correction_matrix_xyz = fft_correction_xyz.copy()
+        success = bool(not np.allclose(fft_correction_xyz, np.eye(4)))
+        reason = str(exc) if not success else "fft_only_fallback"
 
     return {
         "fixed_position": int(edge.fixed_position),
@@ -1269,6 +1605,7 @@ def _process_and_write_registration_chunk(
     output_component: str,
     affines_component: str,
     transformed_bboxes_component: str,
+    blend_weights_component: str,
     t_index: int,
     c_index: int,
     z_bounds: tuple[int, int],
@@ -1276,13 +1613,45 @@ def _process_and_write_registration_chunk(
     x_bounds: tuple[int, int],
     output_origin_xyz: Sequence[float],
     voxel_size_um_zyx: Sequence[float],
-    blend_mode: str,
-    overlap_zyx: Sequence[int],
     output_dtype: str,
 ) -> int:
-    """Render one fused output chunk into the registration result store."""
+    """Render one fused output chunk into the registration result store.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Canonical analysis-store path.
+    source_component : str
+        Full-resolution source data component.
+    output_component : str
+        Output fused data component.
+    affines_component : str
+        Per-tile affine dataset component.
+    transformed_bboxes_component : str
+        Per-tile transformed bounding box dataset component.
+    blend_weights_component : str
+        Pre-computed blend weight volume component (lazily loaded per worker).
+    t_index : int
+        Time index.
+    c_index : int
+        Channel index.
+    z_bounds, y_bounds, x_bounds : tuple[int, int]
+        Inclusive start and exclusive end for each spatial axis.
+    output_origin_xyz : sequence of float
+        Output mosaic origin in XYZ µm.
+    voxel_size_um_zyx : sequence of float
+        Voxel size in ``(z, y, x)`` order.
+    output_dtype : str
+        Desired output dtype string.
+
+    Returns
+    -------
+    int
+        Always ``1`` on success.
+    """
     root = zarr.open_group(str(zarr_path), mode="r")
     source = root[source_component]
+    source_shape_zyx = tuple(int(v) for v in source.shape[3:])
     z0, z1 = (int(z_bounds[0]), int(z_bounds[1]))
     y0, y1 = (int(y_bounds[0]), int(y_bounds[1]))
     x0, x1 = (int(x_bounds[0]), int(x_bounds[1]))
@@ -1316,6 +1685,9 @@ def _process_and_write_registration_chunk(
         dtype=np.float64,
     )
 
+    # Load the pre-computed blend weight volume once per worker call.
+    weight_volume = np.asarray(root[blend_weights_component][:], dtype=np.float32)
+
     chunk_sum = np.zeros(chunk_shape_zyx, dtype=np.float32)
     chunk_weight = np.zeros(chunk_shape_zyx, dtype=np.float32)
     position_count = int(source.shape[1])
@@ -1331,28 +1703,42 @@ def _process_and_write_registration_chunk(
             chunk_bbox_xyz[:, 1] <= bbox_min
         ):
             continue
-        source_volume = np.asarray(
-            source[int(t_index), int(position_index), int(c_index), :, :, :],
-            dtype=np.float32,
-        )
         transform_xyz = np.asarray(
             affines[int(t_index), int(position_index)], dtype=np.float64
         )
+
+        # Compute the minimal source sub-volume needed for this output chunk.
+        src_slices, adj_transform = _source_subvolume_for_overlap(
+            transform_xyz,
+            reference_origin_xyz=chunk_origin_xyz,
+            reference_shape_zyx=chunk_shape_zyx,
+            source_shape_zyx=source_shape_zyx,
+            voxel_size_um_zyx=voxel_size_um_zyx,
+        )
+        source_volume = np.asarray(
+            source[
+                int(t_index), int(position_index), int(c_index),
+                src_slices[0], src_slices[1], src_slices[2],
+            ],
+            dtype=np.float32,
+        )
         warped_volume = _resample_source_to_world_grid(
             source_volume,
-            transform_xyz,
+            adj_transform,
             reference_origin_xyz=chunk_origin_xyz,
             reference_shape_zyx=chunk_shape_zyx,
             voxel_size_um_zyx=voxel_size_um_zyx,
             order=1,
             cval=0.0,
         )
-        weight_volume = _blend_weight_volume(
-            source_volume.shape, blend_mode=blend_mode, overlap_zyx=overlap_zyx
-        )
+
+        # Crop blend weights to match the source sub-volume.
+        weight_sub = weight_volume[
+            src_slices[0], src_slices[1], src_slices[2]
+        ]
         warped_weight = _resample_source_to_world_grid(
-            weight_volume,
-            transform_xyz,
+            weight_sub,
+            adj_transform,
             reference_origin_xyz=chunk_origin_xyz,
             reference_shape_zyx=chunk_shape_zyx,
             voxel_size_um_zyx=voxel_size_um_zyx,
@@ -1385,8 +1771,18 @@ def _prepare_output_group(
     output_chunks_tpczyx: tuple[int, int, int, int, int, int],
     voxel_size_um_zyx: Sequence[float],
     output_origin_xyz: Sequence[float],
-) -> tuple[str, str, str]:
-    """Create latest registration output datasets."""
+    source_tile_shape_zyx: tuple[int, int, int],
+    blend_mode: str,
+    overlap_zyx: Sequence[int],
+) -> tuple[str, str, str, str]:
+    """Create latest registration output datasets.
+
+    Returns
+    -------
+    tuple[str, str, str, str]
+        ``(component, data_component, affines_component,
+        blend_weights_component)``
+    """
     root = zarr.open_group(str(zarr_path), mode="a")
     results_group = root.require_group("results")
     registration_group = results_group.require_group("registration")
@@ -1426,10 +1822,26 @@ def _prepare_output_group(
         dtype=np.float64,
         overwrite=True,
     )
+
+    # Pre-compute and cache the blend weight volume so fusion workers can load
+    # it lazily from the store instead of recomputing per tile per chunk.
+    weight_volume = _blend_weight_volume(
+        source_tile_shape_zyx,
+        blend_mode=str(blend_mode),
+        overlap_zyx=overlap_zyx,
+    )
+    latest.create_dataset(
+        name="blend_weights_zyx",
+        data=weight_volume,
+        dtype=np.float32,
+        overwrite=True,
+    )
+
     return (
         "results/registration/latest",
         "results/registration/latest/data",
         "results/registration/latest/affines_tpx44",
+        "results/registration/latest/blend_weights_zyx",
     )
 
 
@@ -1476,6 +1888,7 @@ def run_registration_analysis(
     ValueError
         If source components or required stage metadata are missing.
     """
+    _emit(progress_callback, 1, "Loading store metadata and stage coordinates")
     root = zarr.open_group(str(zarr_path), mode="r")
     requested_source_component = (
         str(parameters.get("input_source", "data")).strip() or "data"
@@ -1545,6 +1958,7 @@ def run_registration_analysis(
         float(full_voxel_size_um_zyx[2]) * float(level_factor_zyx[2]),
     )
 
+    _emit(progress_callback, 3, "Building nominal stage transforms")
     nominal_transforms_xyz = _build_nominal_transforms_xyz(
         stage_rows,
         spatial_calibration,
@@ -1585,6 +1999,24 @@ def run_registration_analysis(
     )
     successful_edge_count = 0
 
+    # Resolve configurable pairwise estimation parameters.
+    effective_ants_iterations = tuple(
+        int(v)
+        for v in parameters.get("ants_iterations", _ANTS_AFF_ITERATIONS)
+    )
+    effective_ants_sampling_rate = float(
+        parameters.get("ants_sampling_rate", _ANTS_RANDOM_SAMPLING_RATE)
+    )
+    effective_max_pairwise_voxels = int(
+        parameters.get("max_pairwise_voxels", _DEFAULT_MAX_PAIRWISE_VOXELS)
+    )
+    effective_use_phase_correlation = bool(
+        parameters.get("use_phase_correlation", False)
+    )
+    effective_use_fft_initial_alignment = bool(
+        parameters.get("use_fft_initial_alignment", True)
+    )
+
     for t_index in range(int(source_shape_tpczyx[0])):
         anchor_positions.append(int(anchor_position))
         if edge_count == 0:
@@ -1606,14 +2038,33 @@ def run_registration_analysis(
                 overlap_zyx=[
                     int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])
                 ],
-                registration_type=str(parameters.get("registration_type", "rigid"))
+                registration_type=str(parameters.get("registration_type", "translation"))
                 .strip()
                 .lower(),
+                max_pairwise_voxels=effective_max_pairwise_voxels,
+                ants_iterations=effective_ants_iterations,
+                ants_sampling_rate=effective_ants_sampling_rate,
+                use_phase_correlation=effective_use_phase_correlation,
+                use_fft_initial_alignment=effective_use_fft_initial_alignment,
             )
             for edge in edge_specs
         ]
         if client is None:
-            pairwise_results = list(dask.compute(*delayed_edges, scheduler="processes"))
+            pairwise_results = []
+            total = max(1, len(delayed_edges))
+            batch_size = max(1, min(total, 4))
+            for batch_start in range(0, total, batch_size):
+                batch = delayed_edges[batch_start : batch_start + batch_size]
+                batch_results = list(
+                    dask.compute(*batch, scheduler="processes")
+                )
+                pairwise_results.extend(batch_results)
+                completed = len(pairwise_results)
+                _emit(
+                    progress_callback,
+                    5 + int((completed / total) * 35),
+                    f"Pairwise registration {completed}/{total} for t={t_index}",
+                )
         else:
             from dask.distributed import as_completed
 
@@ -1633,12 +2084,17 @@ def run_registration_analysis(
             1 for result in pairwise_results if bool(result.get("success", False))
         )
 
+        _emit(
+            progress_callback,
+            41,
+            f"Solving global optimization for t={t_index}",
+        )
         solved, active_mask, residuals = _solve_with_pruning(
             positions=positions,
             edges=edge_specs,
             edge_results=pairwise_results,
             anchor_position=anchor_position,
-            registration_type=str(parameters.get("registration_type", "rigid"))
+            registration_type=str(parameters.get("registration_type", "translation"))
             .strip()
             .lower(),
             voxel_size_um_zyx=pairwise_voxel_size_um_zyx,
@@ -1658,6 +2114,7 @@ def run_registration_analysis(
                 residuals[int(edge_index)]
             )
 
+    _emit(progress_callback, 43, "Computing output layout and bounding boxes")
     effective_transforms_tpx44 = np.zeros(
         (int(source_shape_tpczyx[0]), int(source_shape_tpczyx[1]), 4, 4),
         dtype=np.float64,
@@ -1725,14 +2182,25 @@ def run_registration_analysis(
         max(1, min(int(source_chunks[4]), int(output_shape_tpczyx[4]))),
         max(1, min(int(source_chunks[5]), int(output_shape_tpczyx[5]))),
     )
-    component, data_component, affines_component = _prepare_output_group(
-        zarr_path=zarr_path,
-        source_component=source_component,
-        parameters=parameters,
-        output_shape_tpczyx=output_shape_tpczyx,
-        output_chunks_tpczyx=output_chunks_tpczyx,
-        voxel_size_um_zyx=full_voxel_size_um_zyx,
-        output_origin_xyz=output_min_xyz,
+    blend_mode = str(parameters.get("blend_mode", "feather")).strip().lower()
+    overlap_zyx = [
+        int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])
+    ]
+    component, data_component, affines_component, blend_weights_component = (
+        _prepare_output_group(
+            zarr_path=zarr_path,
+            source_component=source_component,
+            parameters=parameters,
+            output_shape_tpczyx=output_shape_tpczyx,
+            output_chunks_tpczyx=output_chunks_tpczyx,
+            voxel_size_um_zyx=full_voxel_size_um_zyx,
+            output_origin_xyz=output_min_xyz,
+            source_tile_shape_zyx=tuple(
+                int(v) for v in source_shape_tpczyx[3:]
+            ),  # type: ignore[arg-type]
+            blend_mode=blend_mode,
+            overlap_zyx=overlap_zyx,
+        )
     )
     write_root = zarr.open_group(str(zarr_path), mode="a")
     latest_group = write_root["results/registration/latest"]
@@ -1799,6 +2267,7 @@ def run_registration_analysis(
             output_component=data_component,
             affines_component=affines_component,
             transformed_bboxes_component="results/registration/latest/transformed_bboxes_tpx6",
+            blend_weights_component=blend_weights_component,
             t_index=t_index,
             c_index=c_index,
             z_bounds=z_chunk,
@@ -1806,20 +2275,26 @@ def run_registration_analysis(
             x_bounds=x_chunk,
             output_origin_xyz=output_min_xyz,
             voxel_size_um_zyx=full_voxel_size_um_zyx,
-            blend_mode=str(parameters.get("blend_mode", "feather")).strip().lower(),
-            overlap_zyx=[
-                int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])
-            ],
             output_dtype=str(full_source.dtype),
         )
         for t_index, c_index, z_chunk, y_chunk, x_chunk in fusion_tasks
     ]
     if client is None:
-        delayed_tasks = [
-            delayed(_process_and_write_registration_chunk)(**kwargs)
-            for kwargs in task_kwargs
-        ]
-        dask.compute(*delayed_tasks, scheduler="processes")
+        total = max(1, len(task_kwargs))
+        batch_size = max(1, min(total, 4))
+        completed = 0
+        for batch_start in range(0, total, batch_size):
+            batch = [
+                delayed(_process_and_write_registration_chunk)(**kwargs)
+                for kwargs in task_kwargs[batch_start : batch_start + batch_size]
+            ]
+            dask.compute(*batch, scheduler="processes")
+            completed += len(batch)
+            _emit(
+                progress_callback,
+                45 + int((completed / total) * 50),
+                f"Fusion chunk {completed}/{total}",
+            )
     else:
         from dask.distributed import as_completed
 
@@ -1857,6 +2332,7 @@ def run_registration_analysis(
                 f"Fusion chunk {completed}/{total}",
             )
 
+    _emit(progress_callback, 96, "Writing registration metadata and provenance")
     active_edge_count = int(np.count_nonzero(edge_status_te))
     dropped_edge_count = max(0, int(successful_edge_count) - int(active_edge_count))
     latest_group.attrs.update(
@@ -1867,12 +2343,17 @@ def run_registration_analysis(
             "requested_input_resolution_level": int(requested_resolution_level),
             "input_resolution_level": int(effective_level),
             "registration_channel": int(registration_channel),
-            "registration_type": str(parameters.get("registration_type", "rigid")),
+            "registration_type": str(parameters.get("registration_type", "translation")),
             "anchor_positions": [int(value) for value in anchor_positions],
             "edge_count": int(edge_count),
             "active_edge_count": int(active_edge_count),
             "dropped_edge_count": int(dropped_edge_count),
-            "blend_mode": str(parameters.get("blend_mode", "feather")),
+            "blend_mode": blend_mode,
+            "max_pairwise_voxels": int(effective_max_pairwise_voxels),
+            "ants_iterations": [int(v) for v in effective_ants_iterations],
+            "ants_sampling_rate": float(effective_ants_sampling_rate),
+            "use_phase_correlation": bool(effective_use_phase_correlation),
+            "use_fft_initial_alignment": bool(effective_use_fft_initial_alignment),
         }
     )
 
@@ -1889,12 +2370,17 @@ def run_registration_analysis(
             "requested_input_resolution_level": int(requested_resolution_level),
             "input_resolution_level": int(effective_level),
             "registration_channel": int(registration_channel),
-            "registration_type": str(parameters.get("registration_type", "rigid")),
+            "registration_type": str(parameters.get("registration_type", "translation")),
             "anchor_positions": [int(value) for value in anchor_positions],
             "edge_count": int(edge_count),
             "active_edge_count": int(active_edge_count),
             "dropped_edge_count": int(dropped_edge_count),
-            "blend_mode": str(parameters.get("blend_mode", "feather")),
+            "blend_mode": blend_mode,
+            "max_pairwise_voxels": int(effective_max_pairwise_voxels),
+            "ants_iterations": [int(v) for v in effective_ants_iterations],
+            "ants_sampling_rate": float(effective_ants_sampling_rate),
+            "use_phase_correlation": bool(effective_use_phase_correlation),
+            "use_fft_initial_alignment": bool(effective_use_fft_initial_alignment),
             "output_shape_tpczyx": [int(value) for value in output_shape_tpczyx],
             "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
             "voxel_size_um_zyx": [float(value) for value in full_voxel_size_um_zyx],
@@ -1912,7 +2398,7 @@ def run_registration_analysis(
         input_resolution_level=int(effective_level),
         requested_input_resolution_level=int(requested_resolution_level),
         registration_channel=int(registration_channel),
-        registration_type=str(parameters.get("registration_type", "rigid"))
+        registration_type=str(parameters.get("registration_type", "translation"))
         .strip()
         .lower(),
         anchor_positions=tuple(int(value) for value in anchor_positions),

@@ -182,7 +182,7 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["registration"]["execution_order"] == 5
         assert cfg.analysis_parameters["registration"]["input_source"] == "data"
         assert cfg.analysis_parameters["registration"]["registration_channel"] == 0
-        assert cfg.analysis_parameters["registration"]["registration_type"] == "rigid"
+        assert cfg.analysis_parameters["registration"]["registration_type"] == "translation"
         assert cfg.analysis_parameters["registration"]["input_resolution_level"] == 0
         assert cfg.analysis_parameters["registration"]["anchor_mode"] == "central"
         assert cfg.analysis_parameters["registration"]["anchor_position"] is None

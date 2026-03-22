@@ -133,6 +133,40 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Detailed operational guidance for this area now lives in
   `src/clearex/visualization/README.md`.
 
+## Recent Runtime Updates (2026-03-22)
+
+- Registration pipeline (`pipeline.py`) performance optimizations:
+  - Default `registration_type` changed from `rigid` to `translation` for
+    maximum throughput; rigid/similarity remain available.
+  - FFT phase-correlation initial alignment (`use_fft_initial_alignment=True`
+    by default) pre-aligns the moving crop before ANTs, so ANTs starts near
+    the solution and converges with fewer iterations.  The ANTs result is
+    composed with the FFT correction automatically.
+  - Pairwise and fusion source reads now use `_source_subvolume_for_overlap` to
+    load only the minimal Zarr slice covering each overlap or output chunk,
+    instead of reading full tile volumes.
+  - Large overlap crops are optionally downsampled to a configurable voxel
+    budget (`max_pairwise_voxels`, default 500 000) before ANTs estimation.
+  - ANTs iteration counts reduced from `(2000, 1000, 500, 250)` to
+    `(200, 100, 50, 25)` by default; legacy values available as
+    `_ANTS_AFF_ITERATIONS_LEGACY`.  ANTs parameters are now configurable via
+    `ants_iterations` and `ants_sampling_rate` in the parameters dict.
+  - Optional FFT-only fast path for translation-only registration
+    (`use_phase_correlation=True`), using
+    `skimage.registration.phase_cross_correlation`.
+  - Blend weight volume is pre-computed once and cached as a Zarr dataset
+    (`results/registration/latest/blend_weights_zyx`) so fusion workers lazily
+    load it instead of recomputing per tile per chunk.
+  - GPU TODO: `_resample_source_to_world_grid` annotated for future
+    `cupyx.scipy.ndimage.affine_transform` integration.
+  - Progress emission throughout `run_registration_analysis`: metadata loading,
+    transform building, edge preparation, per-edge pairwise progress (batched
+    for non-distributed scheduler), solving, layout computation, per-chunk
+    fusion progress (batched for non-distributed scheduler), and metadata
+    writing — progress bar no longer appears stalled.
+  - All new parameters recorded in provenance metadata and group attrs.
+- Detailed operational guidance in `src/clearex/registration/README.md`.
+
 ## Sequencing and Inputs
 
 - Operation order is driven by `analysis_parameters[<op>]["execution_order"]`.
