@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import json
+import logging
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence, Union
@@ -32,6 +33,8 @@ except ImportError:  # pragma: no cover - optional fast-path dependency
 from clearex.io.experiment import load_navigate_experiment
 from clearex.io.provenance import register_latest_output_reference
 from clearex.workflow import SpatialCalibrationConfig, spatial_calibration_from_dict
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from dask.distributed import Client
@@ -1560,25 +1563,103 @@ def _blend_weight_volume(
     blend_mode: str,
     overlap_zyx: Sequence[int],
 ) -> np.ndarray:
-    """Build a separable edge-feathered weight volume."""
+    """Build a separable edge-feathered weight volume.
+
+    .. warning::
+
+       This materializes the full 3D volume.  For large tiles use
+       :func:`_blend_weight_profiles` and reconstruct sub-volumes
+       on-the-fly from the 1D profiles.
+    """
     shape = tuple(int(value) for value in shape_zyx)
     if str(blend_mode).strip().lower() == "average":
         return np.ones(shape, dtype=np.float32)
 
-    profiles: list[np.ndarray] = []
-    for axis_size, ramp_width in zip(shape, overlap_zyx, strict=False):
-        profile = np.ones(int(axis_size), dtype=np.float32)
-        width = max(0, min(int(ramp_width), max(0, int(axis_size // 2))))
-        if width > 0:
-            ramp = 0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, width, dtype=np.float32))
-            profile[:width] = ramp
-            profile[-width:] = np.minimum(profile[-width:], ramp[::-1])
-        profiles.append(profile)
+    profiles = _blend_weight_profiles(
+        shape_zyx, blend_mode=blend_mode, overlap_zyx=overlap_zyx
+    )
     return (
         profiles[0][:, np.newaxis, np.newaxis]
         * profiles[1][np.newaxis, :, np.newaxis]
         * profiles[2][np.newaxis, np.newaxis, :]
     ).astype(np.float32)
+
+
+def _blend_weight_profiles(
+    shape_zyx: Sequence[int],
+    *,
+    blend_mode: str,
+    overlap_zyx: Sequence[int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the three separable 1D blend-weight profiles for ``(z, y, x)``.
+
+    The full 3D weight volume is the outer product of the three profiles.
+    This function avoids materializing it, making it safe for arbitrarily
+    large tiles.
+
+    Parameters
+    ----------
+    shape_zyx : sequence of int
+        Source tile shape in ``(z, y, x)`` order.
+    blend_mode : str
+        ``"feather"`` or ``"average"``.
+    overlap_zyx : sequence of int
+        Ramp width per axis in ``(z, y, x)`` order.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+        ``(profile_z, profile_y, profile_x)`` — each a 1D float32 array.
+    """
+    shape = tuple(int(value) for value in shape_zyx)
+    profiles: list[np.ndarray] = []
+    for axis_size, ramp_width in zip(shape, overlap_zyx, strict=False):
+        if str(blend_mode).strip().lower() == "average":
+            profiles.append(np.ones(int(axis_size), dtype=np.float32))
+            continue
+        profile = np.ones(int(axis_size), dtype=np.float32)
+        width = max(0, min(int(ramp_width), max(0, int(axis_size // 2))))
+        if width > 0:
+            ramp = 0.5 - 0.5 * np.cos(
+                np.linspace(0.0, np.pi, width, dtype=np.float32)
+            )
+            profile[:width] = ramp
+            profile[-width:] = np.minimum(profile[-width:], ramp[::-1])
+        profiles.append(profile)
+    return (profiles[0], profiles[1], profiles[2])
+
+
+def _blend_weight_subvolume_from_profiles(
+    profile_z: np.ndarray,
+    profile_y: np.ndarray,
+    profile_x: np.ndarray,
+    slices_zyx: tuple[slice, slice, slice],
+) -> np.ndarray:
+    """Reconstruct a sub-volume of the blend weight from 1D profiles.
+
+    Only the sub-volume defined by *slices_zyx* is materialized, keeping
+    memory proportional to the sub-volume rather than the full tile.
+
+    Parameters
+    ----------
+    profile_z, profile_y, profile_x : numpy.ndarray
+        1D blend-weight profiles for each axis.
+    slices_zyx : tuple[slice, slice, slice]
+        Sub-volume slices into the full tile.
+
+    Returns
+    -------
+    numpy.ndarray
+        3D float32 weight sub-volume.
+    """
+    pz = profile_z[slices_zyx[0]]
+    py = profile_y[slices_zyx[1]]
+    px = profile_x[slices_zyx[2]]
+    return (
+        pz[:, np.newaxis, np.newaxis]
+        * py[np.newaxis, :, np.newaxis]
+        * px[np.newaxis, np.newaxis, :]
+    ).astype(np.float32, copy=False)
 
 
 def _cast_to_dtype(data: np.ndarray, dtype: np.dtype[Any]) -> np.ndarray:
@@ -1596,6 +1677,36 @@ def _axis_chunk_bounds(size: int, chunk_size: int) -> list[tuple[int, int]]:
         (start, min(start + chunk_size, int(size)))
         for start in range(0, int(size), int(chunk_size))
     ]
+
+
+def _estimate_fusion_chunk_bytes(
+    chunk_shape_zyx: Sequence[int],
+    source_shape_zyx: Sequence[int],
+    n_positions: int,
+) -> int:
+    """Estimate peak memory for a single fusion-worker invocation.
+
+    The worker simultaneously holds:
+
+    * Two float32 accumulation buffers (``chunk_sum``, ``chunk_weight``)
+      sized to the output chunk.
+    * Per overlapping position (worst-case *n_positions*): a source sub-volume
+      read, a resampled volume, a weight sub-volume, and a resampled weight,
+      each up to source-tile-sized but more typically chunk-sized.  Only one
+      position is live at a time, so we estimate for one.
+
+    Returns
+    -------
+    int
+        Estimated bytes.
+    """
+    chunk_voxels = int(np.prod(list(chunk_shape_zyx)))
+    # Worst-case sub-volume is full tile (clipped by _source_subvolume_for_overlap
+    # but for estimation purposes we use the full tile).
+    source_voxels = int(np.prod(list(source_shape_zyx)))
+    # Two accumulators + 4 transient arrays per position (only 1 position live).
+    bytes_per_float32 = 4
+    return (2 * chunk_voxels + 4 * source_voxels) * bytes_per_float32
 
 
 def _process_and_write_registration_chunk(
@@ -1685,8 +1796,12 @@ def _process_and_write_registration_chunk(
         dtype=np.float64,
     )
 
-    # Load the pre-computed blend weight volume once per worker call.
-    weight_volume = np.asarray(root[blend_weights_component][:], dtype=np.float32)
+    # Load the pre-computed 1D blend-weight profiles (tiny — sum of axis
+    # lengths × 4 bytes) and reconstruct sub-volumes on-the-fly per tile.
+    blend_group = root[blend_weights_component]
+    profile_z = np.asarray(blend_group["profile_z"][:], dtype=np.float32)
+    profile_y = np.asarray(blend_group["profile_y"][:], dtype=np.float32)
+    profile_x = np.asarray(blend_group["profile_x"][:], dtype=np.float32)
 
     chunk_sum = np.zeros(chunk_shape_zyx, dtype=np.float32)
     chunk_weight = np.zeros(chunk_shape_zyx, dtype=np.float32)
@@ -1732,10 +1847,11 @@ def _process_and_write_registration_chunk(
             cval=0.0,
         )
 
-        # Crop blend weights to match the source sub-volume.
-        weight_sub = weight_volume[
-            src_slices[0], src_slices[1], src_slices[2]
-        ]
+        # Reconstruct blend weights for only the needed source sub-volume
+        # from the 1D profiles — avoids materializing the full 3D weight volume.
+        weight_sub = _blend_weight_subvolume_from_profiles(
+            profile_z, profile_y, profile_x, src_slices,
+        )
         warped_weight = _resample_source_to_world_grid(
             weight_sub,
             adj_transform,
@@ -1823,25 +1939,29 @@ def _prepare_output_group(
         overwrite=True,
     )
 
-    # Pre-compute and cache the blend weight volume so fusion workers can load
-    # it lazily from the store instead of recomputing per tile per chunk.
-    weight_volume = _blend_weight_volume(
+    # Store the separable 1D blend-weight profiles so fusion workers can
+    # reconstruct only the sub-volume they need on-the-fly.  The three
+    # profiles are tiny (sum of axis lengths × 4 bytes) regardless of tile
+    # size, avoiding the catastrophic allocation that a full 3D outer-product
+    # volume would require for large tiles.
+    prof_z, prof_y, prof_x = _blend_weight_profiles(
         source_tile_shape_zyx,
         blend_mode=str(blend_mode),
         overlap_zyx=overlap_zyx,
     )
-    latest.create_dataset(
-        name="blend_weights_zyx",
-        data=weight_volume,
-        dtype=np.float32,
-        overwrite=True,
-    )
+    blend_group = latest.create_group("blend_weights", overwrite=True)
+    blend_group.create_dataset(name="profile_z", data=prof_z, dtype=np.float32,
+                               overwrite=True)
+    blend_group.create_dataset(name="profile_y", data=prof_y, dtype=np.float32,
+                               overwrite=True)
+    blend_group.create_dataset(name="profile_x", data=prof_x, dtype=np.float32,
+                               overwrite=True)
 
     return (
         "results/registration/latest",
         "results/registration/latest/data",
         "results/registration/latest/affines_tpx44",
-        "results/registration/latest/blend_weights_zyx",
+        "results/registration/latest/blend_weights",
     )
 
 
@@ -2186,6 +2306,31 @@ def run_registration_analysis(
     overlap_zyx = [
         int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])
     ]
+
+    # --- Memory guard ---------------------------------------------------------
+    source_tile_shape_zyx = tuple(int(v) for v in source_shape_tpczyx[3:])
+    chunk_shape_zyx = output_chunks_tpczyx[3:]
+    est_bytes = _estimate_fusion_chunk_bytes(
+        chunk_shape_zyx,
+        source_tile_shape_zyx,
+        n_positions=int(source_shape_tpczyx[1]),
+    )
+    est_gib = est_bytes / (1024 ** 3)
+    logger.info(
+        "Fusion memory estimate: %.1f GiB per worker (chunk %s, tile %s)",
+        est_gib,
+        chunk_shape_zyx,
+        source_tile_shape_zyx,
+    )
+    if est_gib > 64:
+        logger.warning(
+            "Estimated per-worker memory (%.1f GiB) exceeds 64 GiB. "
+            "Consider reducing output chunk sizes or downsampling tiles "
+            "before registration to avoid out-of-memory failures.",
+            est_gib,
+        )
+    # --------------------------------------------------------------------------
+
     component, data_component, affines_component, blend_weights_component = (
         _prepare_output_group(
             zarr_path=zarr_path,
@@ -2195,9 +2340,7 @@ def run_registration_analysis(
             output_chunks_tpczyx=output_chunks_tpczyx,
             voxel_size_um_zyx=full_voxel_size_um_zyx,
             output_origin_xyz=output_min_xyz,
-            source_tile_shape_zyx=tuple(
-                int(v) for v in source_shape_tpczyx[3:]
-            ),  # type: ignore[arg-type]
+            source_tile_shape_zyx=source_tile_shape_zyx,  # type: ignore[arg-type]
             blend_mode=blend_mode,
             overlap_zyx=overlap_zyx,
         )

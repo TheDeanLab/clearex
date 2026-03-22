@@ -398,8 +398,10 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
     assert latest.attrs["pairwise_source_component"] == "data_pyramid/level_1"
     assert latest.attrs["input_resolution_level"] == 1
     assert latest.attrs["blend_mode"] == "feather"
-    assert "blend_weights_zyx" in latest
-    assert latest["blend_weights_zyx"].shape == (4, 4, 6)
+    assert "blend_weights" in latest
+    assert latest["blend_weights"]["profile_z"].shape == (4,)
+    assert latest["blend_weights"]["profile_y"].shape == (4,)
+    assert latest["blend_weights"]["profile_x"].shape == (6,)
     assert latest.attrs["max_pairwise_voxels"] == int(
         registration_pipeline._DEFAULT_MAX_PAIRWISE_VOXELS
     )
@@ -525,4 +527,65 @@ def test_phase_correlation_translation_recovers_known_shift() -> None:
     expected_xyz = np.asarray([1.0, -5.0, -6.0], dtype=np.float64)
     np.testing.assert_allclose(correction[:3, 3], expected_xyz, atol=1.0)
     np.testing.assert_allclose(correction[:3, :3], np.eye(3), atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Separable blend-weight profile tests
+# ---------------------------------------------------------------------------
+
+
+class TestBlendWeightProfiles:
+    """Verify that the separable 1D profiles reproduce the full 3D volume."""
+
+    def test_profiles_reconstruct_full_volume(self):
+        shape = (8, 12, 10)
+        overlap = (4, 6, 5)
+        full_vol = registration_pipeline._blend_weight_volume(
+            shape, blend_mode="feather", overlap_zyx=overlap,
+        )
+        pz, py, px = registration_pipeline._blend_weight_profiles(
+            shape, blend_mode="feather", overlap_zyx=overlap,
+        )
+        reconstructed = (
+            pz[:, np.newaxis, np.newaxis]
+            * py[np.newaxis, :, np.newaxis]
+            * px[np.newaxis, np.newaxis, :]
+        )
+        np.testing.assert_allclose(reconstructed, full_vol, atol=1e-7)
+
+    def test_subvolume_matches_full_slice(self):
+        shape = (8, 12, 10)
+        overlap = (4, 6, 5)
+        full_vol = registration_pipeline._blend_weight_volume(
+            shape, blend_mode="feather", overlap_zyx=overlap,
+        )
+        pz, py, px = registration_pipeline._blend_weight_profiles(
+            shape, blend_mode="feather", overlap_zyx=overlap,
+        )
+        slices = (slice(2, 6), slice(3, 9), slice(1, 7))
+        sub = registration_pipeline._blend_weight_subvolume_from_profiles(
+            pz, py, px, slices,
+        )
+        np.testing.assert_allclose(sub, full_vol[slices], atol=1e-7)
+
+    def test_average_mode_profiles(self):
+        shape = (4, 6, 8)
+        pz, py, px = registration_pipeline._blend_weight_profiles(
+            shape, blend_mode="average", overlap_zyx=(2, 3, 4),
+        )
+        np.testing.assert_array_equal(pz, np.ones(4, dtype=np.float32))
+        np.testing.assert_array_equal(py, np.ones(6, dtype=np.float32))
+        np.testing.assert_array_equal(px, np.ones(8, dtype=np.float32))
+
+    def test_memory_estimate_positive(self):
+        est = registration_pipeline._estimate_fusion_chunk_bytes(
+            chunk_shape_zyx=(64, 64, 64),
+            source_shape_zyx=(576, 30730, 5112),
+            n_positions=4,
+        )
+        assert est > 0
+        # Should be dominated by source tile size (~337 GiB)
+        # but with only 4× source voxels it's much more reasonable
+        assert est < 2_000_000_000_000  # < 2 TiB sanity check
+
 
