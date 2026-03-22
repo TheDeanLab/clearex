@@ -66,6 +66,8 @@ This folder contains ingestion, CLI, logging, and provenance logic.
 - For GPU-heavy analysis, `create_dask_client(..., gpu_enabled=True)` now starts a GPU-pinned local `SpecCluster` with one worker process per assigned CUDA device (`gpu_device_ids` optional).
 - GPU-pinned workers advertise `resources={"GPU": 1}` so callers can place GPU-bound tasks explicitly on GPU workers.
 - uSegment3D can submit channel-level tasks (`channel_indices`) so multiple selected channels can execute concurrently across available GPU workers.
+- Headless CLI supports `--channel-indices` for uSegment3D, including `--channel-indices all` to process the full channel axis.
+- Headless CLI supports `--input-resolution-level` for uSegment3D pyramid-level selection.
 - Callers can still override `dashboard_address` explicitly when fixed dashboard ports are required.
 
 ## Provenance Rules

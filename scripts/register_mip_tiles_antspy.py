@@ -37,7 +37,39 @@ MIP_TILE_PATTERN = re.compile(
 
 @dataclass(frozen=True)
 class TileRecord:
-    """One discovered MIP tile record."""
+    """Metadata describing one discovered MIP tile.
+
+    Parameters
+    ----------
+    projection : str
+        Two-letter projection identifier parsed from the TIFF filename.
+    position : int
+        Position index parsed from the TIFF filename.
+    time_index : int
+        Time index parsed from the TIFF filename.
+    channel : int
+        Channel index parsed from the TIFF filename.
+    path : Path
+        Absolute path to the tile on disk.
+
+    Attributes
+    ----------
+    projection : str
+        Projection identifier used to group tiles by MIP plane.
+    position : int
+        Position index used to order tiles across the stitched canvas.
+    time_index : int
+        Time index used to batch tiles into one mosaic per timepoint.
+    channel : int
+        Channel index used to select the registration source and output order.
+    path : Path
+        Fully resolved TIFF path for the tile.
+
+    Notes
+    -----
+    Instances are immutable so they can be reused safely during grouping and
+    logging.
+    """
 
     projection: str
     position: int
@@ -48,7 +80,30 @@ class TileRecord:
 
 @dataclass(frozen=True)
 class CanvasLayout:
-    """Global canvas layout used for registration and stitching."""
+    """Global canvas geometry used for registration and stitching.
+
+    Parameters
+    ----------
+    shape_yx : tuple[int, int]
+        Full canvas height and width in ``(y, x)`` order.
+    origin_y : int
+        Top padding in pixels before the first tile begins.
+    origin_x : int
+        Left padding in pixels before the first tile begins.
+    step_x : int
+        Horizontal spacing in pixels between nominal tile anchors.
+
+    Attributes
+    ----------
+    shape_yx : tuple[int, int]
+        Canvas shape used for all registration, warping, and blending arrays.
+    origin_y : int
+        Baseline ``y`` anchor applied to every tile.
+    origin_x : int
+        ``x`` anchor for the first tile in the mosaic.
+    step_x : int
+        Horizontal offset between adjacent tile anchors.
+    """
 
     shape_yx: tuple[int, int]
     origin_y: int
@@ -57,7 +112,26 @@ class CanvasLayout:
 
 
 def _parse_schedule(raw: str, *, field_name: str) -> tuple[int, ...]:
-    """Parse an integer schedule from ``a x b x c`` or ``a,b,c`` text."""
+    """Parse an integer schedule from CLI text.
+
+    Parameters
+    ----------
+    raw : str
+        Input text containing integers separated by ``"x"`` or commas.
+    field_name : str
+        CLI flag name used to construct validation errors.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Parsed non-negative integer schedule in input order.
+
+    Raises
+    ------
+    ValueError
+        If the input does not contain at least one integer or if any parsed
+        value is negative.
+    """
     parts = [part.strip() for part in re.split(r"[x,]", str(raw)) if part.strip()]
     if not parts:
         raise ValueError(f"{field_name} must contain at least one integer value.")
@@ -68,7 +142,25 @@ def _parse_schedule(raw: str, *, field_name: str) -> tuple[int, ...]:
 
 
 def _discover_tiles(input_dir: Path) -> list[TileRecord]:
-    """Discover MIP tile TIFFs in ``input_dir``."""
+    """Discover ClearEx MIP TIFF tiles in one directory.
+
+    Parameters
+    ----------
+    input_dir : Path
+        Directory to scan for files named like
+        ``mip_<projection>_p####_t####_c####.tif``.
+
+    Returns
+    -------
+    list[TileRecord]
+        Sorted tile records for every filename matching
+        :data:`MIP_TILE_PATTERN`.
+
+    Raises
+    ------
+    OSError
+        If the directory cannot be listed.
+    """
     records: list[TileRecord] = []
     for path in sorted(input_dir.iterdir()):
         if not path.is_file():
@@ -91,7 +183,24 @@ def _discover_tiles(input_dir: Path) -> list[TileRecord]:
 def _group_tiles(
     records: Iterable[TileRecord],
 ) -> dict[str, dict[int, dict[int, dict[int, Path]]]]:
-    """Group tiles as ``projection -> time -> channel -> position -> path``."""
+    """Group discovered tiles by projection, time, channel, and position.
+
+    Parameters
+    ----------
+    records : Iterable[TileRecord]
+        Tile metadata records to group.
+
+    Returns
+    -------
+    dict[str, dict[int, dict[int, dict[int, Path]]]]
+        Nested mapping with structure
+        ``projection -> time -> channel -> position -> path``.
+
+    Notes
+    -----
+    If duplicate records resolve to the same nested key, the later record
+    overwrites the earlier entry.
+    """
     grouped: dict[str, dict[int, dict[int, dict[int, Path]]]] = {}
     for record in records:
         grouped.setdefault(record.projection, {}).setdefault(
@@ -101,7 +210,25 @@ def _group_tiles(
 
 
 def _load_2d_tiff(path: Path) -> np.ndarray:
-    """Load a 2D TIFF tile as ``float32``."""
+    """Load one TIFF tile as a 2D ``float32`` array.
+
+    Parameters
+    ----------
+    path : Path
+        TIFF path to read.
+
+    Returns
+    -------
+    np.ndarray
+        Tile image converted to ``float32`` with shape ``(y, x)``.
+
+    Raises
+    ------
+    OSError
+        If the TIFF cannot be opened or read from disk.
+    ValueError
+        If the TIFF does not contain a 2D image plane.
+    """
     data = np.asarray(tifffile.imread(str(path)))
     if data.ndim != 2:
         raise ValueError(
@@ -117,7 +244,26 @@ def _build_canvas_layout(
     overlap_fraction: float,
     margin_fraction: float,
 ) -> CanvasLayout:
-    """Create the registration/stitching canvas geometry."""
+    """Create the global registration and blending canvas geometry.
+
+    Parameters
+    ----------
+    tile_shape_yx : tuple[int, int]
+        Tile height and width in pixels.
+    tile_count : int
+        Number of positions that will be laid out on the canvas.
+    overlap_fraction : float
+        Expected left-right overlap fraction between neighboring tiles.
+    margin_fraction : float
+        Extra padding fraction to add around the tile chain so rigid
+        registration has room to search.
+
+    Returns
+    -------
+    CanvasLayout
+        Canvas geometry with padded origin offsets and nominal horizontal step
+        size.
+    """
     tile_h, tile_w = int(tile_shape_yx[0]), int(tile_shape_yx[1])
     step_x = int(round(float(tile_w) * (1.0 - float(overlap_fraction))))
     step_x = max(1, step_x)
@@ -136,7 +282,20 @@ def _build_canvas_layout(
 
 
 def _tile_anchor(layout: CanvasLayout, tile_index: int) -> tuple[int, int]:
-    """Return top-left canvas anchor for one tile index."""
+    """Return the top-left canvas anchor for one nominal tile slot.
+
+    Parameters
+    ----------
+    layout : CanvasLayout
+        Canvas geometry describing the shared mosaic frame.
+    tile_index : int
+        Zero-based tile index in the left-to-right position ordering.
+
+    Returns
+    -------
+    tuple[int, int]
+        Anchor coordinates as ``(y, x)`` in canvas pixels.
+    """
     y = int(layout.origin_y)
     x = int(layout.origin_x + int(tile_index) * int(layout.step_x))
     return y, x
@@ -148,7 +307,22 @@ def _tile_bbox(
     tile_index: int,
     tile_shape_yx: tuple[int, int],
 ) -> tuple[int, int, int, int]:
-    """Return tile bounding box as ``(y0, y1, x0, x1)`` in canvas coordinates."""
+    """Return a tile bounding box in canvas coordinates.
+
+    Parameters
+    ----------
+    layout : CanvasLayout
+        Canvas geometry describing the shared mosaic frame.
+    tile_index : int
+        Zero-based tile index in the left-to-right position ordering.
+    tile_shape_yx : tuple[int, int]
+        Tile height and width in pixels.
+
+    Returns
+    -------
+    tuple[int, int, int, int]
+        Bounding box as ``(y0, y1, x0, x1)`` in canvas coordinates.
+    """
     y0, x0 = _tile_anchor(layout, tile_index)
     h, w = int(tile_shape_yx[0]), int(tile_shape_yx[1])
     return y0, y0 + h, x0, x0 + w
@@ -160,7 +334,29 @@ def _place_tile_on_canvas(
     layout: CanvasLayout,
     tile_index: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Place one tile onto a zero canvas and return image + footprint mask."""
+    """Place one tile on an otherwise empty canvas.
+
+    Parameters
+    ----------
+    tile_yx : np.ndarray
+        Tile image to place on the canvas.
+    layout : CanvasLayout
+        Canvas geometry describing the shared mosaic frame.
+    tile_index : int
+        Zero-based tile index in the left-to-right position ordering.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Two ``float32`` arrays containing the placed image canvas and a binary
+        footprint mask for the tile.
+
+    Raises
+    ------
+    ValueError
+        If the tile cannot be broadcast into the canvas footprint because the
+        tile shape exceeds the available canvas bounds.
+    """
     canvas = np.zeros(layout.shape_yx, dtype=np.float32)
     mask = np.zeros(layout.shape_yx, dtype=np.float32)
     y0, x0 = _tile_anchor(layout, tile_index)
@@ -178,7 +374,30 @@ def _overlap_only_masks(
     fixed_tile_index: int,
     moving_tile_index: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build fixed/moving masks constrained to their nominal overlap strip."""
+    """Build masks restricted to the nominal overlap strip between two tiles.
+
+    Parameters
+    ----------
+    layout : CanvasLayout
+        Canvas geometry describing the shared mosaic frame.
+    tile_shape_yx : tuple[int, int]
+        Tile height and width in pixels.
+    fixed_tile_index : int
+        Index of the fixed tile on the canvas.
+    moving_tile_index : int
+        Index of the moving tile on the canvas.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Pair of ``float32`` masks for the fixed and moving images. Both masks
+        are nonzero only inside the nominal overlap strip.
+
+    Raises
+    ------
+    ValueError
+        If the two nominal tile boxes do not overlap on the canvas.
+    """
     fy0, fy1, fx0, fx1 = _tile_bbox(
         layout=layout,
         tile_index=fixed_tile_index,
@@ -215,7 +434,28 @@ def _overlap_slices(
     moving_tile_index: int,
     pad_pixels: int = 0,
 ) -> tuple[slice, slice] | None:
-    """Return canvas slices that tightly cover nominal overlap, optionally padded."""
+    """Return padded slices covering the nominal overlap between two tiles.
+
+    Parameters
+    ----------
+    layout : CanvasLayout
+        Canvas geometry describing the shared mosaic frame.
+    tile_shape_yx : tuple[int, int]
+        Tile height and width in pixels.
+    fixed_tile_index : int
+        Index of the fixed tile on the canvas.
+    moving_tile_index : int
+        Index of the moving tile on the canvas.
+    pad_pixels : int, default=0
+        Extra pixels to extend on each side of the overlap region, clipped to
+        canvas bounds.
+
+    Returns
+    -------
+    tuple[slice, slice] or None
+        ``(ys, xs)`` slices tightly covering the padded overlap region, or
+        ``None`` when no nominal overlap exists.
+    """
     fy0, fy1, fx0, fx1 = _tile_bbox(
         layout=layout,
         tile_index=fixed_tile_index,
@@ -249,7 +489,27 @@ def _blend_profile_x(
     overlap_fraction: float,
     min_edge_weight: float,
 ) -> np.ndarray:
-    """Build a 1D feather profile across X for one tile position."""
+    """Build a 1D feathering profile across the tile width.
+
+    Parameters
+    ----------
+    width : int
+        Tile width in pixels.
+    tile_index : int
+        Zero-based tile index in the left-to-right position ordering.
+    tile_count : int
+        Total number of tiles in the row.
+    overlap_fraction : float
+        Expected left-right overlap fraction between neighboring tiles.
+    min_edge_weight : float
+        Minimum blend weight allowed at overlapped tile edges.
+
+    Returns
+    -------
+    np.ndarray
+        ``float32`` weight profile of length ``width`` suitable for feathered
+        blending across ``x``.
+    """
     width_int = int(width)
     profile = np.ones(width_int, dtype=np.float32)
     if tile_count <= 1 or overlap_fraction <= 0.0 or width_int <= 1:
@@ -274,7 +534,30 @@ def _place_profile_on_canvas(
     tile_shape_yx: tuple[int, int],
     profile_x: np.ndarray,
 ) -> np.ndarray:
-    """Place an X-profile into the tile footprint on a full canvas."""
+    """Place a horizontal blend profile into one tile footprint on the canvas.
+
+    Parameters
+    ----------
+    layout : CanvasLayout
+        Canvas geometry describing the shared mosaic frame.
+    tile_index : int
+        Zero-based tile index in the left-to-right position ordering.
+    tile_shape_yx : tuple[int, int]
+        Tile height and width in pixels.
+    profile_x : np.ndarray
+        One-dimensional blend profile with one weight per tile column.
+
+    Returns
+    -------
+    np.ndarray
+        Full-size ``float32`` canvas containing the profile repeated over the
+        tile footprint and zeros elsewhere.
+
+    Raises
+    ------
+    ValueError
+        If ``profile_x`` cannot be broadcast to the tile width.
+    """
     canvas = np.zeros(layout.shape_yx, dtype=np.float32)
     y0, x0 = _tile_anchor(layout, int(tile_index))
     h, w = int(tile_shape_yx[0]), int(tile_shape_yx[1])
@@ -292,7 +575,31 @@ def _estimate_intensity_correction(
     sample_size: int,
     rng: np.random.Generator,
 ) -> tuple[float, float, int]:
-    """Estimate gain/offset to match moving intensities to fixed intensities."""
+    """Estimate intensity harmonization parameters for one overlap region.
+
+    Parameters
+    ----------
+    fixed_values : np.ndarray
+        Reference pixel intensities sampled from the anchor tile.
+    moving_values : np.ndarray
+        Pixel intensities from the moving tile after warping into canvas space.
+    overlap_mask : np.ndarray
+        Boolean-like mask selecting overlap pixels to consider for the fit.
+    mode : str
+        Normalization mode. Supported values are ``"none"``, ``"gain"``, and
+        ``"gain-offset"``.
+    sample_size : int
+        Maximum number of valid overlap pixels to sample for robust statistics.
+        Use ``0`` or a negative value to disable subsampling.
+    rng : np.random.Generator
+        Random generator used for reproducible subsampling.
+
+    Returns
+    -------
+    tuple[float, float, int]
+        Estimated ``(gain, offset, sample_count)`` used to map moving
+        intensities toward fixed intensities.
+    """
     mode_value = str(mode).strip().lower()
     if mode_value == "none":
         return 1.0, 0.0, 0
@@ -337,7 +644,20 @@ def _estimate_intensity_correction(
 
 
 def _safe_blend(sum_image: np.ndarray, weight_image: np.ndarray) -> np.ndarray:
-    """Compute weighted average image with zero-safe division."""
+    """Compute a weighted average image with zero-safe division.
+
+    Parameters
+    ----------
+    sum_image : np.ndarray
+        Accumulated weighted pixel intensities.
+    weight_image : np.ndarray
+        Accumulated blend weights.
+
+    Returns
+    -------
+    np.ndarray
+        ``float32`` blended image with zeros where the weight image is zero.
+    """
     blended = np.zeros_like(sum_image, dtype=np.float32)
     np.divide(
         sum_image,
@@ -349,7 +669,19 @@ def _safe_blend(sum_image: np.ndarray, weight_image: np.ndarray) -> np.ndarray:
 
 
 def _compute_crop_slices(weight_image: np.ndarray) -> tuple[slice, slice]:
-    """Compute tight crop around nonzero coverage."""
+    """Compute the tight crop covering all nonzero weights.
+
+    Parameters
+    ----------
+    weight_image : np.ndarray
+        Weight canvas whose positive entries mark valid stitched coverage.
+
+    Returns
+    -------
+    tuple[slice, slice]
+        ``(ys, xs)`` slices spanning the smallest bounding box around positive
+        weights. If no weights are present, the full image extent is returned.
+    """
     ys, xs = np.nonzero(weight_image > 0)
     if ys.size == 0 or xs.size == 0:
         return slice(0, int(weight_image.shape[0])), slice(
@@ -361,7 +693,26 @@ def _compute_crop_slices(weight_image: np.ndarray) -> tuple[slice, slice]:
 
 
 def _cast_to_dtype(data: np.ndarray, dtype: np.dtype[Any]) -> np.ndarray:
-    """Cast blended float data to an output dtype with clipping for integers."""
+    """Cast blended floating-point data to the requested output dtype.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Floating-point blended image data.
+    dtype : np.dtype[Any]
+        Output dtype to use for the saved mosaic.
+
+    Returns
+    -------
+    np.ndarray
+        Image data converted to ``dtype``. Integer outputs are rounded and
+        clipped to the valid dtype range before casting.
+
+    Raises
+    ------
+    TypeError
+        If ``dtype`` cannot be interpreted as a valid NumPy dtype.
+    """
     out_dtype = np.dtype(dtype)
     if np.issubdtype(out_dtype, np.integer):
         info = np.iinfo(out_dtype)
@@ -382,7 +733,48 @@ def _register_positions(
     anchor_position: int | None,
     verbose: bool,
 ) -> tuple[list[int], CanvasLayout, tuple[slice, slice], dict[int, Any]]:
-    """Estimate rigid transforms from one channel against a fixed anchor."""
+    """Estimate rigid transforms for all positions from one registration channel.
+
+    Parameters
+    ----------
+    reg_channel_paths : Mapping[int, Path]
+        Mapping from position index to TIFF path for the registration channel.
+    overlap_fraction : float
+        Expected left-right overlap fraction between neighboring tiles.
+    margin_fraction : float
+        Canvas padding fraction used to give rigid registration search room.
+    aff_iterations : tuple[int, ...]
+        ANTs affine iteration schedule for each pyramid level.
+    aff_shrink_factors : tuple[int, ...]
+        ANTs shrink-factor schedule for each pyramid level.
+    aff_smoothing_sigmas : tuple[int, ...]
+        ANTs smoothing-sigma schedule for each pyramid level.
+    aff_random_sampling_rate : float
+        Random metric sampling fraction passed to ANTs.
+    anchor_position : int or None
+        Position to hold fixed. If ``None``, the median discovered position is
+        used.
+    verbose : bool
+        Whether to enable verbose ANTs logging.
+
+    Returns
+    -------
+    tuple[list[int], CanvasLayout, tuple[slice, slice], dict[int, Any]]
+        Tuple containing the sorted position list, canvas layout, crop slices
+        spanning the registered coverage, and a transform mapping keyed by
+        position. The anchor position stores ``None`` instead of a transform.
+
+    Raises
+    ------
+    ValueError
+        If no registration tiles are provided, the requested anchor position is
+        missing, or a moving tile has no nominal overlap with the anchor tile.
+    OSError
+        If any registration-channel TIFF cannot be read.
+    Exception
+        Propagated from ANTsPy if transform estimation or transform loading
+        fails.
+    """
     positions = sorted(int(position) for position in reg_channel_paths)
     if not positions:
         raise ValueError("No registration-channel tiles were provided.")
@@ -494,7 +886,54 @@ def _stitch_channels(
     blend_mode: str,
     feather_min_edge_weight: float,
 ) -> tuple[np.ndarray, list[int]]:
-    """Apply position transforms to all channels and blend to a mosaic stack."""
+    """Apply per-position transforms to all channels and blend a mosaic stack.
+
+    Parameters
+    ----------
+    channel_paths : Mapping[int, Mapping[int, Path]]
+        Mapping ``channel -> position -> TIFF path`` for the current projection
+        and timepoint.
+    positions : Sequence[int]
+        Ordered position indices to stitch from left to right.
+    layout : CanvasLayout
+        Shared canvas geometry returned by :func:`_register_positions`.
+    transforms_by_position : Mapping[int, Any]
+        Mapping from position index to ANTs transform. The anchor position must
+        map to ``None``.
+    crop_slices : tuple[slice, slice]
+        Final crop to apply after blending.
+    output_dtype : np.dtype[Any]
+        Output dtype for the stitched channel mosaics.
+    overlap_fraction : float
+        Expected left-right overlap fraction between neighboring tiles.
+    intensity_normalization : str
+        Overlap-based normalization mode: ``"none"``, ``"gain"``, or
+        ``"gain-offset"``.
+    norm_sample_size : int
+        Maximum number of overlap pixels to sample when fitting intensity
+        corrections.
+    blend_mode : str
+        Tile blending mode. Supported values are ``"average"`` and
+        ``"feather"``.
+    feather_min_edge_weight : float
+        Minimum feather weight to preserve at overlapped tile edges.
+
+    Returns
+    -------
+    tuple[np.ndarray, list[int]]
+        Stitched multi-channel stack with shape ``(c, y, x)`` and the sorted
+        channel indices written into that stack.
+
+    Raises
+    ------
+    ValueError
+        If there is not exactly one anchor transform, if a channel is missing
+        the anchor tile, or if any requested channel/position tile is missing.
+    OSError
+        If any TIFF tile cannot be read.
+    Exception
+        Propagated from ANTsPy while applying transforms.
+    """
     channels = sorted(int(channel) for channel in channel_paths)
     channel_mosaics: list[np.ndarray] = []
     reference_img = ants.from_numpy(np.zeros(layout.shape_yx, dtype=np.float32))
@@ -683,7 +1122,67 @@ def _process_projection_time(
     output_suffix: str,
     verbose: bool,
 ) -> Path:
-    """Run registration+stitching for one projection/timepoint."""
+    """Run registration and stitching for one projection/timepoint pair.
+
+    Parameters
+    ----------
+    input_dir : Path
+        Directory containing the per-position MIP TIFF tiles.
+    projection : str
+        Projection identifier being processed, such as ``"xy"``.
+    time_index : int
+        Time index being processed.
+    by_channel : Mapping[int, Mapping[int, Path]]
+        Mapping ``channel -> position -> TIFF path`` for the selected
+        projection/timepoint.
+    registration_channel : int
+        Channel index used to estimate rigid transforms.
+    overlap_fraction : float
+        Expected left-right overlap fraction between neighboring tiles.
+    margin_fraction : float
+        Canvas padding fraction used to give rigid registration search room.
+    aff_iterations : tuple[int, ...]
+        ANTs affine iteration schedule for each pyramid level.
+    aff_shrink_factors : tuple[int, ...]
+        ANTs shrink-factor schedule for each pyramid level.
+    aff_smoothing_sigmas : tuple[int, ...]
+        ANTs smoothing-sigma schedule for each pyramid level.
+    aff_random_sampling_rate : float
+        Random metric sampling fraction passed to ANTs.
+    anchor_position : int or None
+        Position to hold fixed. If ``None``, the median discovered position is
+        used.
+    intensity_normalization : str
+        Overlap-based normalization mode: ``"none"``, ``"gain"``, or
+        ``"gain-offset"``.
+    norm_sample_size : int
+        Maximum number of overlap pixels to sample when fitting intensity
+        corrections.
+    blend_mode : str
+        Tile blending mode. Supported values are ``"average"`` and
+        ``"feather"``.
+    feather_min_edge_weight : float
+        Minimum feather weight to preserve at overlapped tile edges.
+    output_suffix : str
+        Filename suffix to append to the stitched output TIFF.
+    verbose : bool
+        Whether to enable verbose ANTs logging.
+
+    Returns
+    -------
+    Path
+        Absolute path to the written stitched TIFF mosaic.
+
+    Raises
+    ------
+    ValueError
+        If the requested registration channel is missing or if downstream
+        registration/stitching validation fails.
+    OSError
+        If sample tiles cannot be read or the output TIFF cannot be written.
+    Exception
+        Propagated from ANTsPy during registration or transform application.
+    """
     if registration_channel not in by_channel:
         raise ValueError(
             f"Projection '{projection}', time t{time_index:04d}: "
@@ -739,7 +1238,14 @@ def _process_projection_time(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build CLI parser."""
+    """Build the command-line parser for the stitching script.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Parser configured with all registration, blending, and output options
+        supported by this script.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Register per-position ClearEx MIP TIFF tiles with rigid ANTsPy "
@@ -857,7 +1363,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> list[Path]:
-    """Execute stitching workflow from parsed CLI args."""
+    """Execute the stitching workflow from parsed command-line arguments.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments produced by :func:`_build_parser`.
+
+    Returns
+    -------
+    list[Path]
+        Absolute paths to every stitched TIFF mosaic written during the run.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the input directory does not exist or no matching MIP TIFF tiles are
+        discovered.
+    ValueError
+        If CLI numeric ranges are invalid, the ANTs schedules have mismatched
+        lengths, or the requested projection/timepoint is unavailable.
+    OSError
+        If any source TIFF cannot be read or an output TIFF cannot be written.
+    Exception
+        Propagated from ANTsPy during transform estimation or application.
+    """
     input_dir = Path(args.input_dir).expanduser().resolve()
     if not input_dir.is_dir():
         raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
@@ -957,7 +1487,29 @@ def run(args: argparse.Namespace) -> list[Path]:
 
 
 def main() -> None:
-    """CLI entrypoint."""
+    """Run the script as a command-line program.
+
+    Returns
+    -------
+    None
+        This function is executed for its side effects: argument parsing,
+        logging setup, workflow execution, and output-path printing.
+
+    Raises
+    ------
+    SystemExit
+        Raised by :mod:`argparse` for CLI usage errors or help/version exits.
+    FileNotFoundError
+        If the input directory does not exist or no matching MIP TIFF tiles are
+        discovered.
+    ValueError
+        If validated CLI parameters or requested projection/timepoint values are
+        invalid.
+    OSError
+        If source TIFFs cannot be read or stitched outputs cannot be written.
+    Exception
+        Propagated from ANTsPy during transform estimation or application.
+    """
     parser = _build_parser()
     args = parser.parse_args()
     logging.basicConfig(

@@ -9,13 +9,16 @@ This directory contains the runtime orchestration surface for ClearEx.
 
 ## Agent Notes Convention
 
-- This file is the top-level agent reference for `src/clearex`.
+- This file is the authoritative package-level guide for `src/clearex`.
+- The repository root `AGENTS.md` covers repo-wide conventions only and should
+  not duplicate package runtime strategy.
 - For subdirectories under `src/clearex`, treat `README.md` as the canonical
-  agent-reference file for that folder.
-- If both `README.md` and `CODEX.md` exist in a subdirectory, prefer
-  `README.md`.
-- `CODEX.md` files may remain temporarily for compatibility but should be kept
-  aligned with their corresponding `README.md` files.
+  subsystem-level reference file for that folder.
+- If guidance conflicts, the more specific file wins:
+  `src/clearex/<subsystem>/README.md` over this file, and this file over the
+  repository-root `AGENTS.md`.
+- Keep package-level rules here and move subsystem-only detail into the
+  corresponding `README.md`.
 
 ## Runtime Invariants
 
