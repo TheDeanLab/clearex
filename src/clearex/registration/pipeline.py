@@ -35,6 +35,7 @@ from clearex.io.ome_store import (
     analysis_auxiliary_root,
     analysis_cache_data_component,
     analysis_cache_root,
+    load_store_metadata,
     public_analysis_root,
 )
 from clearex.io.provenance import register_latest_output_reference
@@ -181,6 +182,20 @@ def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
 
     parsed: list[dict[str, float]] = []
     for row in rows:
+        if isinstance(row, Mapping):
+            parsed.append(
+                {
+                    "x": _safe_float(row.get("x", row.get("X")), default=0.0),
+                    "y": _safe_float(row.get("y", row.get("Y")), default=0.0),
+                    "z": _safe_float(row.get("z", row.get("Z")), default=0.0),
+                    "theta": _safe_float(
+                        row.get("theta", row.get("THETA")), default=0.0
+                    ),
+                    "f": _safe_float(row.get("f", row.get("F")), default=0.0),
+                }
+            )
+            continue
+
         if not isinstance(row, (list, tuple)):
             continue
 
@@ -204,6 +219,16 @@ def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
 
 def _load_stage_rows(root_attrs: Mapping[str, Any]) -> list[dict[str, float]]:
     """Load multiposition stage rows from experiment metadata."""
+    parsed = _parse_multiposition_stage_rows(root_attrs.get("stage_rows"))
+    if parsed:
+        return parsed
+
+    navigate_payload = root_attrs.get("navigate_experiment")
+    if isinstance(navigate_payload, Mapping):
+        parsed = _parse_multiposition_stage_rows(navigate_payload.get("MultiPositions"))
+        if parsed:
+            return parsed
+
     source_experiment = root_attrs.get("source_experiment")
     if not isinstance(source_experiment, str):
         return []
@@ -2070,10 +2095,18 @@ def run_registration_analysis(
         )
 
     root_attrs = dict(root.attrs)
+    try:
+        store_metadata = load_store_metadata(root)
+    except Exception:
+        store_metadata = {}
+    merged_metadata = dict(root_attrs)
+    if isinstance(store_metadata, Mapping):
+        merged_metadata.update(dict(store_metadata))
+
     spatial_calibration = spatial_calibration_from_dict(
-        root_attrs.get("spatial_calibration")
+        merged_metadata.get("spatial_calibration")
     )
-    stage_rows = _load_stage_rows(root_attrs)
+    stage_rows = _load_stage_rows(merged_metadata)
     if len(positions) > 1 and len(stage_rows) < len(positions):
         raise ValueError(
             "registration requires multiposition stage metadata when more than one position is present."

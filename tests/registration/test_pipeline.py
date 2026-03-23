@@ -135,6 +135,31 @@ def test_build_edge_specs_only_keeps_overlapping_neighbors() -> None:
     ]
 
 
+def test_parse_multiposition_stage_rows_accepts_mapping_rows() -> None:
+    parsed = registration_pipeline._parse_multiposition_stage_rows(
+        [
+            {"x": 1.5, "y": -2.0, "z": 3.0, "theta": 4.0, "f": 5.0},
+            {"X": 2.5, "Y": -1.0, "Z": 1.0, "THETA": 8.0, "F": 9.0},
+        ]
+    )
+
+    assert len(parsed) == 2
+    assert parsed[0] == {
+        "x": pytest.approx(1.5),
+        "y": pytest.approx(-2.0),
+        "z": pytest.approx(3.0),
+        "theta": pytest.approx(4.0),
+        "f": pytest.approx(5.0),
+    }
+    assert parsed[1] == {
+        "x": pytest.approx(2.5),
+        "y": pytest.approx(-1.0),
+        "z": pytest.approx(1.0),
+        "theta": pytest.approx(8.0),
+        "f": pytest.approx(9.0),
+    }
+
+
 def test_resolve_source_components_for_level_uses_requested_pyramid(
     tmp_path: Path,
 ) -> None:
@@ -420,6 +445,61 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
     assert len(progress_percents) >= 5
 
 
+def test_run_registration_analysis_uses_namespaced_stage_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_path = tmp_path / "registration_namespaced_metadata_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = root.create_dataset(
+        name="data",
+        shape=(1, 2, 1, 3, 3, 4),
+        chunks=(1, 1, 1, 3, 3, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+    data[:] = np.uint16(1)
+
+    metadata_group = root.require_group("clearex/metadata")
+    metadata_group.attrs.update(
+        {
+            "schema": "clearex.store_metadata.v1",
+            "spatial_calibration": {
+                "schema": SPATIAL_CALIBRATION_SCHEMA,
+                "stage_axis_map_zyx": {"z": "+z", "y": "+y", "x": "+x"},
+                "theta_mode": "rotate_zy_about_x",
+            },
+            "stage_rows": [
+                {"x": 0.0, "y": 0.0, "z": 0.0, "theta": 0.0, "f": 0.0},
+                {"x": 4.0, "y": 0.0, "z": 0.0, "theta": 0.0, "f": 0.0},
+            ],
+        }
+    )
+
+    def _raise_after_stage_metadata(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("sentinel-after-stage-metadata")
+
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_build_nominal_transforms_xyz",
+        _raise_after_stage_metadata,
+    )
+
+    with pytest.raises(RuntimeError, match="sentinel-after-stage-metadata"):
+        registration_pipeline.run_registration_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "data",
+                "registration_channel": 0,
+                "registration_type": "rigid",
+                "input_resolution_level": 0,
+                "anchor_mode": "central",
+                "blend_mode": "feather",
+            },
+            client=None,
+        )
+
+
 def test_source_subvolume_for_overlap_returns_tighter_slices() -> None:
     """_source_subvolume_for_overlap should return slices narrower than the full tile."""
     transform = np.eye(4, dtype=np.float64)
@@ -587,5 +667,3 @@ class TestBlendWeightProfiles:
         # Should be dominated by source tile size (~337 GiB)
         # but with only 4× source voxels it's much more reasonable
         assert est < 2_000_000_000_000  # < 2 TiB sanity check
-
-
