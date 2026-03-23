@@ -22,13 +22,29 @@ This directory contains the runtime orchestration surface for ClearEx.
 
 ## Runtime Invariants
 
-- Canonical analysis image layout is `(t, p, c, z, y, x)`.
-- Canonical source array component is `data`.
-- Analysis outputs use `results/<analysis>/latest/...` (latest-only replacement).
+- Canonical persisted stores are OME-Zarr v3 `*.ome.zarr` objects.
+- Canonical analysis image layout remains `(t, p, c, z, y, x)` for ClearEx
+  internal execution arrays.
+- Public source data is exposed as a single-well OME-Zarr HCS collection at the
+  store root (`A/1/<field>/<level>` with `TCZYX` arrays).
+- Public image-producing analysis outputs are exposed as OME-Zarr HCS
+  collections under `results/<analysis>/latest`.
+- ClearEx internal execution arrays live under
+  `clearex/runtime_cache/source/...` and
+  `clearex/runtime_cache/results/<analysis>/latest/...`.
+- ClearEx-owned metadata and non-image artifacts live under namespaced paths:
+  `clearex/metadata`, `clearex/provenance`, `clearex/gui_state`, and
+  `clearex/results/<analysis>/latest`.
+- Workflow input aliases such as `data`, `flatfield`, `deconvolution`,
+  `shear_transform`, `usegment3d`, and `registration` are logical names that
+  resolve to runtime-cache components. New runtime code must not hard-code old
+  public array paths.
 - Provenance records are append-only and include workflow + runtime parameters.
-- Root store attr `spatial_calibration` is the canonical store-level
-  stage-to-world axis mapping for Navigate multiposition placement; missing
-  attrs mean identity mapping.
+- Store-level spatial calibration is persisted in `clearex/metadata` and
+  missing values resolve to the identity mapping.
+- Legacy root `data`, root `data_pyramid`, and
+  `results/<analysis>/latest/data` layouts are migration-only and must not be
+  reintroduced as canonical outputs.
 
 ## Dask Workload Policy
 
@@ -74,7 +90,8 @@ This directory contains the runtime orchestration surface for ClearEx.
   - GUI runtime controls now expose channel checkboxes and emit `channel_indices`,
   - headless CLI supports `--channel-indices` with `all` for full-channel runs,
   - headless CLI supports `--input-resolution-level` for pyramid-level selection,
-  - latest output is persisted to `results/usegment3d/latest/data`,
+  - image output is written to the runtime cache and published as the public
+    OME collection `results/usegment3d/latest`,
   - provenance references include GPU/tiling configuration, resolution/output-space metadata, and selected views.
 - Runtime uses optional dependency loading (`u-Segment3D`) and supports
   `require_gpu` fail-fast behavior when CUDA is unavailable.
@@ -88,8 +105,8 @@ This directory contains the runtime orchestration surface for ClearEx.
   - per-layer multiscale policies are now `inherit`, `require`, and `off`,
   - legacy saved `auto_build` values are normalized to `inherit`,
   - reusable display pyramids are prepared explicitly via the
-    `display_pyramid` analysis task under
-    `results/display_pyramid/by_component/...`.
+    `display_pyramid` analysis task and summarized under
+    `clearex/results/display_pyramid/latest`.
 
 ## Recent Runtime Updates (2026-03-20)
 
@@ -97,8 +114,7 @@ This directory contains the runtime orchestration surface for ClearEx.
   - `WorkflowConfig` now carries `SpatialCalibrationConfig`,
   - canonical text form is `z=...,y=...,x=...`,
   - allowed bindings are `+/-x`, `+/-y`, `+/-z`, `+/-f`, and `none`,
-  - the root store attr `spatial_calibration` persists schema, mapping, and
-    `theta_mode`,
+  - `clearex/metadata` persists schema, mapping, and `theta_mode`,
   - missing attrs resolve to identity instead of requiring backfilled config.
 - Setup flow now exposes a lightweight `Spatial Calibration` control per
   experiment:
@@ -106,7 +122,7 @@ This directory contains the runtime orchestration surface for ClearEx.
   - existing stores prefill the current mapping,
   - `Next` writes the resolved mapping to every reused or newly prepared store.
 - Headless workflows now accept `--stage-axis-map` for Navigate
-  `experiment.yml` inputs and existing Zarr/N5 stores.
+  `experiment.yml` inputs and existing canonical OME-Zarr stores.
 - Visualization position affines now derive world `z/y/x` translations from
   the stored calibration:
   - Navigate `F` is available as a placement source,
@@ -132,6 +148,21 @@ This directory contains the runtime orchestration surface for ClearEx.
   user leaves blending blank/auto.
 - Detailed operational guidance for this area now lives in
   `src/clearex/visualization/README.md`.
+
+## Recent Runtime Updates (2026-03-23)
+
+- ClearEx adopted OME-Zarr v3 as the canonical store contract:
+  - materialization now targets `data_store.ome.zarr`,
+  - public source data is published as a root OME HCS collection,
+  - public image-analysis outputs are published as OME HCS collections under
+    `results/<analysis>/latest`,
+  - internal execution arrays moved under `clearex/runtime_cache/...`,
+  - store metadata, provenance, GUI state, and non-image artifacts moved under
+    `clearex/...`.
+- The runtime now refuses legacy canonical ClearEx stores as direct canonical
+  inputs and requires migration via `clearex --migrate-store`.
+- Reader selection now prefers validated/public OME metadata instead of
+  “largest array wins” heuristics.
 
 ## Recent Runtime Updates (2026-03-22)
 
@@ -172,12 +203,23 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Operation order is driven by `analysis_parameters[<op>]["execution_order"]`.
 - Per-step input source comes from `analysis_parameters[<op>]["input_source"]`.
 - `workflow.resolve_analysis_execution_sequence(...)` is the canonical order resolver.
+- Input-source UI and workflow defaults should present logical aliases rather
+  than raw internal component paths whenever possible.
 
 ## Implementation Rules
 
 - Keep parsing/normalization centralized in `workflow.py`; avoid duplicating logic in GUI/runtime.
 - Keep function signatures type hinted.
 - Use numpydoc docstrings for new/changed functions.
+- New image-producing analyses must:
+  - write executable arrays into `clearex/runtime_cache/results/<analysis>/latest`,
+  - publish a public OME image collection under `results/<analysis>/latest`,
+  - keep auxiliary arrays / metadata under `clearex/results/<analysis>/latest`.
+- New metadata/table-only analyses must write to `clearex/results/...` and
+  must not allocate fake public image collections.
+- Readers, GUI discovery, and visualization helpers must prefer public OME
+  metadata and OME coordinate transforms. Do not reintroduce root-array
+  heuristics as the canonical path.
 
 ## Ongoing GUI And Docs Hygiene
 

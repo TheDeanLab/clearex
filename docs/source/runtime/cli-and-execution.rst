@@ -16,15 +16,15 @@ Current primary arguments are:
 - ``--input-resolution-level``
 - ``--shear-transform``
 - ``--registration``
+- ``--display-pyramid``
 - ``--visualization``
 - ``--mip-export``
 - ``--file``
+- ``--migrate-store``
+- ``--migrate-output``
+- ``--migrate-overwrite``
 - ``--dask`` / ``--no-dask``
 - ``--chunks``
-- ``--execution-mode``
-- ``--max-workers``
-- ``--memory-per-worker``
-- ``--calibrate``
 - ``--stage-axis-map``
 - ``--gui`` / ``--no-gui``
 - ``--headless``
@@ -56,18 +56,16 @@ The first GUI window is an experiment-list driven setup flow:
 - The current ordered list can be saved back to a reusable
   ``.clearex-experiment-list.json`` file.
 - ``Spatial Calibration`` edits store-level world ``z/y/x`` placement mapping
-  for the currently selected experiment without rewriting canonical image data.
+  for the currently selected experiment without rewriting image data.
 - Spatial-calibration drafts are tracked per experiment while setup is open.
-- Existing stores prefill the spatial-calibration control when metadata is
-  already present.
-- Pressing ``Next`` batch-prepares canonical stores for every listed
-  experiment that is missing a complete store, persists the resolved spatial
-  calibration to every reused or newly prepared store, then opens analysis
-  selection for the currently selected experiment.
-- The setup dialog persists the last-used Zarr save configuration across
-  sessions.
-- ``Rebuild Canonical Store`` forces the listed stores to be rebuilt with the
-  current chunk and pyramid settings instead of reusing complete stores.
+- Existing canonical stores prefill the spatial-calibration control when
+  metadata is already present.
+- Pressing ``Next`` batch-prepares canonical ``data_store.ome.zarr`` stores for
+  every listed experiment that is missing a complete store, persists the
+  resolved spatial calibration to every reused or newly prepared store, then
+  opens analysis selection for the currently selected experiment.
+- ``Rebuild Canonical Store`` forces the listed stores to be rebuilt as
+  canonical OME-Zarr outputs with the current chunk and pyramid settings.
 
 .. figure:: ../../screenshots/setup_dialog_experiment_list.png
    :alt: ClearEx setup dialog showing the themed experiment list pane and metadata panel
@@ -92,7 +90,8 @@ In the GUI analysis window:
   saved GUI state is preferred, and ``Restore Latest Run Parameters`` falls
   back to the latest completed provenance-backed run for the active store.
 
-Examples:
+Examples
+--------
 
 .. code-block:: bash
 
@@ -108,9 +107,9 @@ Examples:
 
 .. code-block:: bash
 
-   # Headless visualization only
+   # Headless visualization against an existing canonical OME-Zarr store
    clearex --headless \
-     --file /path/to/data_store.zarr \
+     --file /path/to/data_store.ome.zarr \
      --visualization
 
 .. code-block:: bash
@@ -120,6 +119,11 @@ Examples:
      --file /path/to/experiment.yml \
      --visualization \
      --stage-axis-map z=+x,y=none,x=+y
+
+.. code-block:: bash
+
+   # Migrate one legacy ClearEx store
+   clearex --migrate-store /path/to/legacy_store.zarr
 
 Spatial Calibration
 -------------------
@@ -140,10 +144,9 @@ GUI and headless flows share the same normalized parser and storage policy:
 - GUI setup writes the resolved mappings to the listed experiment stores on
   ``Next``.
 - ``--stage-axis-map`` writes an explicit override to Navigate-materialized
-  stores and existing Zarr/N5 stores before analysis starts.
+  stores and existing canonical OME-Zarr stores before analysis starts.
 - If no explicit override is supplied, existing store calibration is preserved.
-- The mapping changes placement metadata only; canonical ``data`` remains
-  unchanged.
+- The mapping changes placement metadata only; image payloads remain unchanged.
 
 Interchangeable Routine Composition
 -----------------------------------
@@ -152,7 +155,7 @@ In orchestration, routines are composed from normalized
 ``analysis_parameters`` rather than hard-coded fixed order:
 
 - ``execution_order`` decides sequence among selected routines.
-- ``input_source`` decides which component each routine reads.
+- ``input_source`` decides which logical upstream component each routine reads.
 - ``force_rerun`` can override provenance-based skip behavior.
 
 This allows operators to rerun one stage, swap stage order, or run partial
@@ -163,13 +166,19 @@ Input Source Resolution
 
 Runtime source aliases currently include:
 
-- ``data`` -> ``data``
-- ``flatfield`` -> ``results/flatfield/latest/data``
-- ``deconvolution`` -> ``results/deconvolution/latest/data``
-- ``registration`` -> ``results/registration/latest/data``
+- ``data`` -> ``clearex/runtime_cache/source/data``
+- ``flatfield`` -> ``clearex/runtime_cache/results/flatfield/latest/data``
+- ``deconvolution`` -> ``clearex/runtime_cache/results/deconvolution/latest/data``
+- ``shear_transform`` -> ``clearex/runtime_cache/results/shear_transform/latest/data``
+- ``usegment3d`` -> ``clearex/runtime_cache/results/usegment3d/latest/data``
+- ``registration`` -> ``clearex/runtime_cache/results/registration/latest/data``
+
+Public OME image collections at the root and under ``results/<analysis>/latest``
+exist for interoperability and visualization. Analysis kernels should not write
+into those public arrays directly.
 
 When a requested source component does not exist, runtime raises an input
-dependency error instead of silently falling back to ``data``.
+dependency error instead of silently falling back.
 
 Progress and Run Lifecycle
 --------------------------
@@ -177,9 +186,9 @@ Progress and Run Lifecycle
 Execution progresses through these coarse stages:
 
 1. Resolve workflow and inputs.
-2. Materialize canonical store when needed.
+2. Materialize canonical OME-Zarr store when needed.
 3. Execute selected analyses in resolved order.
-4. Persist latest outputs and append provenance run record.
+4. Publish latest outputs and append provenance run record.
 
 GUI execution uses explicit progress callbacks and per-run logging in the
 resolved workflow log directory.

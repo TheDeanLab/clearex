@@ -48,6 +48,21 @@ workflow behavior for ClearEx lives in `src/clearex/AGENTS.md`.
 - Avoid duplicating subsystem strategy in this root file; link or defer to the
   more specific package/subsystem docs instead.
 
+## Canonical Store Policy
+
+- Treat OME-Zarr v3 (``*.ome.zarr``) as the only canonical ClearEx store
+  format in new code, tests, examples, and docs.
+- Treat legacy ClearEx root-``data`` / root-``data_pyramid`` layouts in
+  ``.zarr`` / ``.n5`` as migration-only inputs. Do not describe them as the
+  preferred runtime contract and do not introduce new fixtures or examples that
+  rely on them as canonical.
+- Public microscopy-facing image data must use the OME-Zarr HCS contract.
+  ClearEx-owned execution caches, provenance, GUI state, and non-image
+  artifacts belong under the namespaced ``clearex/`` tree.
+- Storage-contract changes must update the repository ``README.md``,
+  ``src/clearex/AGENTS.md``, and the affected ``docs/source/runtime/*.rst`` /
+  subsystem ``README.md`` files in the same change set.
+
 ## Validation
 
 - Run linting and tests that match the files and behavior you changed.

@@ -11,15 +11,35 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
 - Headless CLI for scripted runs.
 - Input support for TIFF/OME-TIFF, Zarr/N5, HDF5 (`.h5/.hdf5/.hdf`), and NumPy (`.npy/.npz`).
 - Navigate experiment ingestion from `experiment.yml` / `experiment.yaml`.
-- Canonical analysis store layout with axis order `(t, p, c, z, y, x)`.
-- Store-level spatial calibration for Navigate multiposition data, persisted per analysis store and applied to physical placement metadata without rewriting canonical image data.
+- Canonical persisted store format is OME-Zarr v3 (`*.ome.zarr`).
+- Public microscopy-facing image data is published as OME-Zarr HCS collections, while ClearEx execution caches and non-image artifacts live under namespaced `clearex/...` groups.
+- Internal analysis image layout remains `(t, p, c, z, y, x)` for runtime-cache arrays and analysis kernels.
+- Store-level spatial calibration for Navigate multiposition data is persisted in `clearex/metadata` and applied to physical placement metadata without rewriting image data.
 - Analysis operations available from the main entrypoint:
-  - deconvolution (`results/deconvolution/latest/data`)
-  - particle detection (`results/particle_detection/latest`)
-  - uSegment3D segmentation (`results/usegment3d/latest/data`)
-  - visualization metadata (`results/visualization/latest`) with napari launch
-  - registration workflow hook (currently initialized from CLI/GUI, but latest-output persistence is not yet wired like other analyses)
-- FAIR-style provenance records persisted in Zarr/N5 (`provenance/runs`) with append-only run history and hash chaining.
+  - flatfield (`results/flatfield/latest`)
+  - deconvolution (`results/deconvolution/latest`)
+  - shear transform (`results/shear_transform/latest`)
+  - registration (`results/registration/latest`)
+  - uSegment3D segmentation (`results/usegment3d/latest`)
+  - particle detection (`clearex/results/particle_detection/latest`)
+  - display-pyramid metadata (`clearex/results/display_pyramid/latest`)
+  - visualization metadata (`clearex/results/visualization/latest`) with napari launch
+  - MIP export metadata (`clearex/results/mip_export/latest`)
+- FAIR-style provenance records are persisted in `clearex/provenance/runs` with append-only run history and hash chaining.
+
+## Canonical Store Contract
+- `data_store.ome.zarr` is the canonical materialized store beside `experiment.yml`.
+- The public source image collection is a synthetic single-well HCS layout at the store root: `A/1/<field>/<level>`.
+- Public image-producing analysis outputs are sibling HCS collections under `results/<analysis>/latest`.
+- ClearEx internal execution data lives under:
+  - `clearex/runtime_cache/source/...`
+  - `clearex/runtime_cache/results/<analysis>/latest/...`
+- ClearEx-owned metadata, provenance, GUI state, and non-image artifacts live under:
+  - `clearex/metadata`
+  - `clearex/provenance`
+  - `clearex/gui_state`
+  - `clearex/results/<analysis>/latest`
+- Legacy root `data`, root `data_pyramid`, and `results/<analysis>/latest/data` layouts are migration-only and are no longer the canonical public contract.
 
 ## Installation
 
@@ -139,10 +159,10 @@ Current CLI usage:
 usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
                [--usegment3d] [--channel-indices CHANNEL_INDICES]
                [--input-resolution-level INPUT_RESOLUTION_LEVEL]
-               [--shear-transform] [-r] [-v] [--mip-export] [-f FILE]
+               [--shear-transform] [-r] [--display-pyramid] [-v]
+               [--mip-export] [-f FILE] [--migrate-store MIGRATE_STORE]
+               [--migrate-output MIGRATE_OUTPUT] [--migrate-overwrite]
                [--dask | --no-dask] [--chunks CHUNKS]
-               [--execution-mode {auto,advanced}] [--max-workers MAX_WORKERS]
-               [--memory-per-worker MEMORY_PER_WORKER] [--calibrate]
                [--stage-axis-map STAGE_AXIS_MAP] [--gui | --no-gui]
                [--headless]
 ```
@@ -157,14 +177,14 @@ usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
 - `--input-resolution-level`: uSegment3D input pyramid level (`0`, `1`, ...).
 - `--shear-transform`: Run shear-transform workflow.
 - `-r, --registration`: Run registration workflow hook.
+- `--display-pyramid`: Prepare reusable display pyramids for visualization.
 - `-v, --visualization`: Run visualization workflow.
 - `--mip-export`: Export XY/XZ/YZ maximum-intensity projections.
+- `--migrate-store`: Convert one legacy ClearEx `.zarr` / `.n5` store into canonical OME-Zarr v3.
+- `--migrate-output`: Optional destination path for `--migrate-store`.
+- `--migrate-overwrite`: Overwrite the migration destination.
 - `--dask / --no-dask`: Enable/disable Dask-backed reading.
 - `--chunks`: Chunk spec for Dask reads, for example `256` or `1,256,256`.
-- `--execution-mode`: Automatic or advanced Dask execution planning mode.
-- `--max-workers`: Worker cap for automatic execution planning.
-- `--memory-per-worker`: Preferred per-worker memory limit for automatic execution planning.
-- `--calibrate`: Refresh cached execution-planning calibration before running.
 - `--stage-axis-map`: Store-level world `z/y/x` mapping for Navigate multiposition stage coordinates, for example `z=+x,y=none,x=+y`.
 - `--gui / --no-gui`: Enable/disable GUI launch (default is `--gui`).
 - `--headless`: Force non-interactive mode (overrides `--gui`).
@@ -204,38 +224,45 @@ clearex --headless \
   --input-resolution-level 1
 ```
 
-Run headless particle detection on an existing canonical Zarr store:
+Run headless particle detection on an existing canonical OME-Zarr store:
 
 ```bash
 clearex --headless \
-  --file /path/to/data_store.zarr \
+  --file /path/to/data_store.ome.zarr \
   --particle-detection
 ```
 
 Disable Dask lazy loading:
 
 ```bash
-clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detection
+clearex --headless --no-dask --file /path/to/data_store.ome.zarr --particle-detection
+```
+
+Migrate one legacy ClearEx store into canonical OME-Zarr v3:
+
+```bash
+clearex --migrate-store /path/to/legacy_store.zarr
 ```
 
 ## Runtime Behavior Notes
 - If `--file` points to Navigate `experiment.yml`, ClearEx resolves acquisition data and materializes a canonical store first.
-- For non-Zarr/N5 acquisition data, materialization target is `data_store.zarr` beside `experiment.yml`.
-- For Zarr/N5 acquisition data, ClearEx reuses the source store path in place.
-- Canonical stores persist root-attr `spatial_calibration = {schema, stage_axis_map_zyx, theta_mode}`. Missing metadata resolves to the identity mapping `z=+z,y=+y,x=+x`.
+- Existing canonical OME-Zarr stores are reused in place.
+- Non-canonical acquisition inputs, including TIFF/OME-TIFF, HDF5, NumPy, generic Zarr/N5, and Navigate source layouts, materialize to `data_store.ome.zarr` beside `experiment.yml`.
+- Legacy ClearEx `.zarr` / `.n5` stores are not treated as canonical runtime inputs. Migrate them first with `clearex --migrate-store`.
+- Canonical stores persist `spatial_calibration = {schema, stage_axis_map_zyx, theta_mode}` inside `clearex/metadata`. Missing metadata resolves to the identity mapping `z=+z,y=+y,x=+x`.
 - In the setup window, `Spatial Calibration` is configured per listed experiment. Draft mappings are tracked per experiment while the dialog is open, existing stores prefill the control, and `Next` writes the resolved mapping to every reused or newly prepared store before analysis selection opens.
-- In headless mode, `--stage-axis-map` writes the supplied mapping to materialized experiment stores and existing Zarr/N5 stores before analysis starts. If the flag is omitted, existing store calibration is preserved.
-- Deconvolution, particle detection, uSegment3D, and visualization operations run against canonical Zarr/N5 stores.
-- Visualization supports multi-volume overlays (for example raw `data` + `results/usegment3d/latest/data`) with per-layer image/labels display controls.
+- In headless mode, `--stage-axis-map` writes the supplied mapping to materialized experiment stores and existing canonical OME-Zarr stores before analysis starts. If the flag is omitted, existing store calibration is preserved.
+- Deconvolution, particle detection, uSegment3D, and visualization operations run against canonical OME-Zarr stores.
+- Visualization supports multi-volume overlays using logical sources and/or public OME image collections (for example source data plus `results/usegment3d/latest`) with per-layer image/labels display controls.
 - Multiposition visualization placement now resolves world `z/y/x` translations from the store-level spatial calibration. Bindings support `X`, `Y`, `Z`, and Navigate focus axis `F` with sign inversion or `none`; `THETA` remains a rotation of the `z/y` plane about world `x`.
 - Visualization now probes napari OpenGL renderer info (`vendor`/`renderer`/`version`) and can fail fast when software rendering is detected or GPU rendering cannot be confirmed (`require_gpu_rendering=True`).
 - MIP export writes TIFF outputs as OME-TIFF (`.tif`) with projection-aware physical pixel calibration (`PhysicalSizeX/Y`) derived from source `voxel_size_um_zyx`.
-- uSegment3D runs per `(t, p, selected channel)` volume task and writes labels to `results/usegment3d/latest/data`.
+- uSegment3D runs per `(t, p, selected channel)` volume task and publishes the latest result as `results/usegment3d/latest`.
   - GUI channel checkboxes now support selecting multiple channels in one run (`channel_indices`).
   - With GPU-aware `LocalCluster`, separate channel tasks can execute concurrently across GPUs.
-  - `input_resolution_level` lets segmentation run on a selected pyramid level (for example `data_pyramid/level_1`).
+  - `input_resolution_level` lets segmentation run on a selected prepared pyramid level.
   - `output_reference_space=level0` upsamples labels back to original resolution.
-  - `save_native_labels=True` (when upsampling) also writes native-resolution labels to `results/usegment3d/latest/data_native`.
+  - `save_native_labels=True` (when upsampling) also stores native-resolution labels as ClearEx-owned auxiliary artifacts.
 - GPU awareness:
   - `gpu=True` requests GPU use for Cellpose/uSegment3D internals.
   - `require_gpu=True` fails fast if CUDA is unavailable.
@@ -270,7 +297,7 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
   - save the current ordered experiment list for later reuse.
 - Selecting an experiment in the setup list loads metadata automatically;
   double-clicking reloads that entry explicitly.
-- Pressing `Next` batch-prepares canonical `data_store.zarr` outputs for every
+- Pressing `Next` batch-prepares canonical `data_store.ome.zarr` outputs for every
   listed experiment that does not already have a complete store, then opens
   analysis selection for the currently selected experiment.
 - The setup dialog persists the last-used Zarr save config across sessions.
@@ -316,16 +343,25 @@ clearex --headless --no-dask --file /path/to/data_store.zarr --particle-detectio
 - Visualization parameters include `require_gpu_rendering` (enabled by default). Disable only when running intentionally without a GPU-backed OpenGL context.
 
 ## Output Layout (Canonical Store)
-- Root metadata:
-  - `spatial_calibration` for store-level world `z/y/x` placement mapping
-- Base image data: `data`
-- Multiscale pyramid levels: `data_pyramid/level_*`
-- Latest analysis outputs:
-  - `results/deconvolution/latest`
-  - `results/particle_detection/latest`
-  - `results/usegment3d/latest`
-    - optional native-level labels: `results/usegment3d/latest/data_native`
-  - `results/visualization/latest`
-- Provenance:
-  - run records: `provenance/runs/<run_id>`
-  - latest output pointers: `provenance/latest_outputs/<analysis>`
+- Public OME source image collection:
+  - root `A/1/<field>/<level>` (`TCZYX`)
+- Public OME image analysis collections:
+  - `results/flatfield/latest/A/1/<field>/<level>`
+  - `results/deconvolution/latest/A/1/<field>/<level>`
+  - `results/shear_transform/latest/A/1/<field>/<level>`
+  - `results/registration/latest/A/1/<field>/<level>`
+  - `results/usegment3d/latest/A/1/<field>/<level>`
+- ClearEx metadata and runtime namespaces:
+  - `clearex/metadata`
+  - `clearex/provenance/runs/<run_id>`
+  - `clearex/provenance/latest_outputs/<analysis>`
+  - `clearex/gui_state`
+  - `clearex/runtime_cache/source/data`
+  - `clearex/runtime_cache/source/data_pyramid/level_*`
+  - `clearex/runtime_cache/results/<analysis>/latest/data`
+  - `clearex/runtime_cache/results/<analysis>/latest/data_pyramid/level_*`
+  - `clearex/results/<analysis>/latest`
+- Migration-only legacy layouts:
+  - root `data`
+  - root `data_pyramid`
+  - `results/<analysis>/latest/data`

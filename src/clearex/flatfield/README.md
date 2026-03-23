@@ -1,7 +1,7 @@
 # Flatfield Agent Notes
 
 This folder owns BaSiCPy-driven flatfield correction for canonical ClearEx
-stores.
+OME-Zarr stores.
 
 ## Key File
 
@@ -14,7 +14,8 @@ stores.
 ## Input Contract
 
 - Source must be canonical 6D `(t, p, c, z, y, x)`.
-- `input_source` defaults to `data`.
+- `input_source` defaults to the logical alias `data`, which resolves to the
+  runtime-cache source component.
 - Core params:
   - `fit_mode`: `tiled` or `full_volume`.
   - `fit_tile_shape_yx`: tile size for tiled fitting.
@@ -25,14 +26,21 @@ stores.
 
 ## Output Contract
 
-- Latest output root: `results/flatfield/latest`
-- Datasets:
-  - `data` (corrected output, float32)
-  - `flatfield_pcyx` (float32)
-  - `darkfield_pcyx` (float32)
-  - `baseline_pctz` (float32)
+- Public latest image root: `results/flatfield/latest`
+- Internal image data:
+  - `clearex/runtime_cache/results/flatfield/latest/data` (corrected output,
+    float32)
+  - `clearex/runtime_cache/results/flatfield/latest/data_pyramid/level_*`
+- ClearEx-owned auxiliary artifacts:
+  - `clearex/results/flatfield/latest/flatfield_pcyx`
+  - `clearex/results/flatfield/latest/darkfield_pcyx`
+  - `clearex/results/flatfield/latest/baseline_pctz`
+  - `clearex/results/flatfield/latest/checkpoint`
 - Storage policy is latest-only for large arrays.
 - `run_id` is backfilled later by main workflow/provenance path.
+- The public OME collection is published from the runtime-cache data after the
+  flatfield write completes. New code must not treat the public collection as
+  the executable write target.
 
 ## Correction Formula
 
@@ -64,7 +72,7 @@ stores.
 
 ## Resume / Checkpoint Contract
 
-- Checkpoint group: `results/flatfield/latest/checkpoint`
+- Checkpoint group: `clearex/results/flatfield/latest/checkpoint`
 - Schema guard: `clearex.flatfield.resume.v1`
 - Resume is allowed only when all are compatible:
   - source component, shape, chunks
@@ -79,13 +87,13 @@ stores.
 ## Pyramid Materialization
 
 - Builds multiscale corrected output under
-  `results/flatfield/latest/data_pyramid/level_*`.
-- Factors are resolved from source/root attrs when available; otherwise base
-  level only.
+  `clearex/runtime_cache/results/flatfield/latest/data_pyramid/level_*`.
+- Factors are resolved from source-component attrs / store metadata when
+  available; otherwise base level only.
 - Uses Dask array slicing/rechunk/to_zarr.
-- Writes pyramid metadata to both:
-  - `results/flatfield/latest/data` attrs
-  - `results/flatfield/latest` attrs (`data_pyramid_*`).
+- Writes pyramid metadata to the runtime-cache image attrs and the
+  `clearex/results/flatfield/latest` attrs. The public OME collection is a
+  published view, not the metadata source of truth.
 
 ## Provenance / Latest Output Reference
 
@@ -101,7 +109,7 @@ stores.
   issues appear, consider bounded in-flight scheduling.
 - Keep transform writes non-overlapping and preserve checkpoint update semantics.
 - Preserve chunk-probe resume guards; they protect against malformed checkpoint
-  chunks in N5/Zarr stores.
+  chunks in migrated/legacy stores.
 
 ## Validation
 

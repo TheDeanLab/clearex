@@ -1,7 +1,7 @@
 # MIP Export Agent Notes
 
 This folder owns maximum-intensity projection (MIP) export from canonical
-ClearEx stores.
+ClearEx OME-Zarr stores.
 
 ## Key Files
 
@@ -14,7 +14,8 @@ ClearEx stores.
 ## Input Contract
 
 - Source data must be canonical 6D `(t, p, c, z, y, x)`.
-- `input_source` selects component path (default: `data`).
+- `input_source` selects a logical source alias or explicit internal image
+  component (default: `data`).
 - `position_mode`:
   - `per_position`: one file per `(projection, p, t, c)`.
   - `multi_position`: one file per `(projection, t, c)` with leading `p` axis.
@@ -64,11 +65,13 @@ ClearEx stores.
 
 ## Output + Provenance Contract
 
-- Latest analysis metadata path: `results/mip_export/latest`.
+- Latest analysis metadata path: `clearex/results/mip_export/latest`.
 - Large projection files are stored outside the analysis store in a `latest`
   output directory (configured or auto-generated).
 - `register_latest_output_reference(...)` must be called with analysis key
-  `mip_export` and component `results/mip_export/latest`.
+  `mip_export` and component `clearex/results/mip_export/latest`.
+- MIP export is metadata-only inside the OME-Zarr store; it does not publish a
+  public OME image collection under `results/mip_export/latest`.
 
 ## Failure Patterns
 
