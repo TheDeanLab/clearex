@@ -215,7 +215,6 @@ _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
         "particle_detection",
         "usegment3d",
         "registration",
-        "mip_export",
     }
 )
 _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {

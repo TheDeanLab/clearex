@@ -2774,6 +2774,31 @@ def _estimate_source_aligned_submission_batch_count(
     )
 
 
+def _source_aligned_writes_require_serial_submission(
+    *,
+    z_batch_depth: int,
+    target_chunks_tpczyx: CanonicalShapeTpczyx,
+) -> bool:
+    """Return whether source-aligned writes must serialize region submissions.
+
+    Parameters
+    ----------
+    z_batch_depth : int
+        Source-aligned z-planes per write region.
+    target_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Target chunk shape in canonical ``(t, p, c, z, y, x)`` order.
+
+    Returns
+    -------
+    bool
+        ``True`` when source-aligned z regions do not land on target z-chunk
+        boundaries and concurrent submissions could clobber partially-written
+        chunks.
+    """
+    target_chunk_z = max(1, int(target_chunks_tpczyx[3]))
+    return int(max(1, int(z_batch_depth))) % int(target_chunk_z) != 0
+
+
 def _write_numpy_region(
     block: np.ndarray,
     *,
@@ -2931,6 +2956,7 @@ def _write_dask_array_source_aligned_plane_batches(
     shape_tpczyx: CanonicalShapeTpczyx,
     z_batch_depth: int,
     dtype_itemsize: int,
+    target_chunks_tpczyx: Optional[CanonicalShapeTpczyx] = None,
     client: Optional["Client"] = None,
     progress_callback: Optional[ProgressCallback] = None,
     progress_start: int = 0,
@@ -2955,6 +2981,9 @@ def _write_dask_array_source_aligned_plane_batches(
         Full output shape.
     z_batch_depth : int
         Number of z-planes per source-aligned write region.
+    target_chunks_tpczyx : tuple[int, int, int, int, int, int], optional
+        Target canonical chunk shape. When provided, submission concurrency is
+        constrained to avoid concurrent partial writes into the same z chunk.
     dtype_itemsize : int
         Bytes per array element.
     client : dask.distributed.Client, optional
@@ -3022,6 +3051,18 @@ def _write_dask_array_source_aligned_plane_batches(
         worker_count=detected_worker_count,
         worker_memory_limit_bytes=detected_worker_memory_limit_bytes,
     )
+    if (
+        target_chunks_tpczyx is not None
+        and _source_aligned_writes_require_serial_submission(
+            z_batch_depth=z_batch_depth,
+            target_chunks_tpczyx=target_chunks_tpczyx,
+        )
+    ):
+        # Concurrent source-aligned writes can race when z-regions split target
+        # z chunks (read-modify-write overlap). Serialize submissions in this
+        # case to preserve correctness.
+        regions_per_submission = 1
+
     remaining_regions = int(total_regions - start_region)
     total_batches = max(1, math.ceil(remaining_regions / regions_per_submission))
     completed_regions = int(start_region)
@@ -3998,6 +4039,7 @@ def materialize_experiment_data_store(
                     component=component,
                     shape_tpczyx=canonical_shape,
                     z_batch_depth=source_aligned_z_batch_depth,
+                    target_chunks_tpczyx=normalized_chunks,
                     dtype_itemsize=int(source_dtype.itemsize),
                     client=write_client,
                     progress_callback=progress_callback,

@@ -1732,3 +1732,72 @@ def test_estimate_source_plane_batch_depth_respects_worker_memory_limit():
 
     assert depth < 256
     assert depth <= 64
+
+
+def test_source_aligned_writes_require_serial_submission_when_chunk_misaligned() -> (
+    None
+):
+    assert (
+        experiment_module._source_aligned_writes_require_serial_submission(
+            z_batch_depth=128,
+            target_chunks_tpczyx=(1, 1, 1, 256, 256, 256),
+        )
+        is True
+    )
+    assert (
+        experiment_module._source_aligned_writes_require_serial_submission(
+            z_batch_depth=256,
+            target_chunks_tpczyx=(1, 1, 1, 256, 256, 256),
+        )
+        is False
+    )
+
+
+def test_write_source_aligned_batches_serializes_when_chunk_misaligned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "source_aligned_serialized.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        SOURCE_CACHE_COMPONENT,
+        shape=(1, 1, 1, 6, 4, 4),
+        chunks=(1, 1, 1, 4, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    source_data = np.arange(1 * 1 * 1 * 6 * 4 * 4, dtype=np.uint16).reshape(
+        (1, 1, 1, 6, 4, 4)
+    )
+    source = da.from_array(source_data, chunks=(1, 1, 1, 1, 4, 4))
+    compute_batch_sizes: list[int] = []
+    original_compute = experiment_module._compute_dask_graph
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_estimate_source_aligned_submission_batch_count",
+        lambda **kwargs: 8,
+    )
+
+    def _capture_compute(graph, *, client=None):
+        compute_batch_sizes.append(len(list(graph)))
+        return original_compute(graph, client=client)
+
+    monkeypatch.setattr(experiment_module, "_compute_dask_graph", _capture_compute)
+
+    experiment_module._write_dask_array_source_aligned_plane_batches(
+        array=source,
+        store_path=store_path,
+        component=SOURCE_CACHE_COMPONENT,
+        shape_tpczyx=(1, 1, 1, 6, 4, 4),
+        z_batch_depth=2,
+        dtype_itemsize=int(np.dtype(source_data.dtype).itemsize),
+        target_chunks_tpczyx=(1, 1, 1, 4, 2, 2),
+    )
+
+    reloaded = np.asarray(
+        zarr.open_group(str(store_path), mode="r")[SOURCE_CACHE_COMPONENT]
+    )
+    assert np.array_equal(reloaded, source_data)
+    assert compute_batch_sizes == [1, 1, 1]
