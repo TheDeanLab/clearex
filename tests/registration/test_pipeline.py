@@ -399,8 +399,8 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
     )
 
     root = zarr.open_group(str(store_path), mode="r")
-    latest = root["results/registration/latest"]
-    data = latest["data"]
+    latest = root["clearex/results/registration/latest"]
+    data = root["clearex/runtime_cache/results/registration/latest/data"]
     affines = latest["affines_tpx44"]
 
     assert summary.source_component == "data"

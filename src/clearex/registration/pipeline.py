@@ -1954,7 +1954,7 @@ def _prepare_output_group(
     if auxiliary_root in root:
         del root[auxiliary_root]
     latest = root.require_group(cache_root)
-    latest.create_dataset(
+    latest.create_array(
         name="data",
         shape=output_shape_tpczyx,
         chunks=output_chunks_tpczyx,
@@ -1983,7 +1983,7 @@ def _prepare_output_group(
             "data_component": analysis_cache_data_component("registration"),
         }
     )
-    auxiliary_group.create_dataset(
+    auxiliary_group.create_array(
         name="affines_tpx44",
         shape=(output_shape_tpczyx[0], int(root[source_component].shape[1]), 4, 4),
         dtype=np.float64,
@@ -2001,12 +2001,21 @@ def _prepare_output_group(
         overlap_zyx=overlap_zyx,
     )
     blend_group = auxiliary_group.create_group("blend_weights", overwrite=True)
-    blend_group.create_dataset(name="profile_z", data=prof_z, dtype=np.float32,
-                               overwrite=True)
-    blend_group.create_dataset(name="profile_y", data=prof_y, dtype=np.float32,
-                               overwrite=True)
-    blend_group.create_dataset(name="profile_x", data=prof_x, dtype=np.float32,
-                               overwrite=True)
+    blend_group.create_array(
+        name="profile_z",
+        data=np.asarray(prof_z, dtype=np.float32),
+        overwrite=True,
+    )
+    blend_group.create_array(
+        name="profile_y",
+        data=np.asarray(prof_y, dtype=np.float32),
+        overwrite=True,
+    )
+    blend_group.create_array(
+        name="profile_x",
+        data=np.asarray(prof_x, dtype=np.float32),
+        overwrite=True,
+    )
 
     return (
         public_analysis_root("registration"),
@@ -2410,7 +2419,7 @@ def run_registration_analysis(
     )
     write_root = zarr.open_group(str(zarr_path), mode="a")
     latest_group = write_root[analysis_auxiliary_root("registration")]
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="edges_pe2",
         data=(
             np.asarray(
@@ -2425,22 +2434,22 @@ def run_registration_analysis(
         ),
         overwrite=True,
     )
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="pairwise_affines_tex44",
         data=correction_affines_tex44,
         overwrite=True,
     )
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="edge_status_te",
         data=edge_status_te,
         overwrite=True,
     )
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="edge_residual_te",
         data=edge_residual_te,
         overwrite=True,
     )
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="transformed_bboxes_tpx6",
         data=transformed_bboxes_tpx6,
         overwrite=True,
