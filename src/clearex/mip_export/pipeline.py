@@ -470,6 +470,7 @@ def _resample_axis_linear_to_uint16(
     dst_moved = np.moveaxis(dst, axis_index, 0)
     src_flat = src_moved.reshape(src_len, -1)
     dst_flat = dst_moved.reshape(dst_len, -1)
+    dst_requires_copy_back = not np.shares_memory(dst_flat, dst_moved)
 
     if dst_flat.size == 0:
         return
@@ -477,6 +478,8 @@ def _resample_axis_linear_to_uint16(
     if src_len <= 1:
         repeated = np.repeat(src_flat[:1, :], repeats=dst_len, axis=0)
         dst_flat[:, :] = _to_uint16(repeated)
+        if dst_requires_copy_back:
+            dst_moved[...] = dst_flat.reshape(dst_moved.shape)
         return
 
     sample_positions = np.linspace(
@@ -503,6 +506,9 @@ def _resample_axis_linear_to_uint16(
             lower_block * weight_lower[:, None] + upper_block * weight_upper[:, None]
         )
         dst_flat[:, start:stop] = _to_uint16(interpolated)
+
+    if dst_requires_copy_back:
+        dst_moved[...] = dst_flat.reshape(dst_moved.shape)
 
 
 def _resample_tiff_projection_z_axis_if_needed(
