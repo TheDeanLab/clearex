@@ -65,6 +65,11 @@ Run in headless mode against an experiment file:
 This materializes ``data_store.ome.zarr`` beside ``experiment.yml`` when a
 canonical store does not already exist.
 
+For Navigate BDV ``.n5`` acquisitions, point ClearEx at ``experiment.yml``
+rather than the raw ``.n5`` directory. ClearEx uses the companion BDV XML plus
+TensorStore-backed reads of ``setup*/timepoint*/s0`` to materialize the
+canonical OME-Zarr store.
+
 Run in headless mode with an explicit Navigate stage-to-world mapping:
 
 .. code-block:: bash

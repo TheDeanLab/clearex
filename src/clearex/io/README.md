@@ -16,7 +16,11 @@ This folder contains ingestion, CLI, logging, and provenance logic.
 - For non-canonical sources: create `data_store.ome.zarr` beside
   `experiment.yml`.
 - Reuse an input store in place only when it is already a canonical OME-Zarr
-  store. Generic Zarr/N5 inputs are source formats, not canonical outputs.
+  store. Generic Zarr inputs and legacy `.n5` inputs are source formats, not
+  canonical outputs.
+- Legacy `.n5` is source-only. First-class `.n5` support currently means
+  Navigate BDV acquisition input routed through `experiment.yml`, not bare
+  direct `.n5` runtime input.
 - Canonical public source data is a single-well OME HCS collection at the store
   root.
 - Canonical internal source array is
@@ -46,9 +50,16 @@ This folder contains ingestion, CLI, logging, and provenance logic.
 - For Navigate BDV `H5`/`N5` outputs, materialization must parse companion
   `*.xml` `ViewSetup` entries and map `setup -> (tile=position, channel)` so
   canonical channel/position axes are preserved.
+- For Navigate BDV `.n5`, readers must use TensorStore-backed access to
+  `setup*/timepoint*/s0` datasets so ingestion stays compatible with
+  `zarr>=3` and remains Dask-parallel. Do not use `zarr.open_group(...)` or
+  `da.from_zarr(...)` on raw `.n5` paths.
 - Navigate BDV storage layout uses setup-major indexing
   `setup = channel * positions + position`; loader fallback should respect this
   rule when XML metadata is unavailable.
+- Legacy ClearEx groups such as `data`, `data_pyramid`, `results`, and
+  `provenance` inside source `.n5` trees are stale source-side artifacts and
+  must be ignored for source discovery/materialization.
 - XY pixel-size inference should use active microscope camera profile (from
   `MicroscopeState.microscope_name`) and prefer:
   1. `fov_x / img_x_pixels` or `fov_y / img_y_pixels`,

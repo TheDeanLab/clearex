@@ -56,6 +56,15 @@ workflow behavior for ClearEx lives in `src/clearex/AGENTS.md`.
   ``.zarr`` / ``.n5`` as migration-only inputs. Do not describe them as the
   preferred runtime contract and do not introduce new fixtures or examples that
   rely on them as canonical.
+- Treat legacy ``.n5`` as source-only unless the path is a Navigate BDV
+  acquisition reached through ``experiment.yml``.
+- For Navigate BDV ``.n5`` sources, documentation and examples must describe
+  TensorStore-backed reads of ``setup*/timepoint*/s0`` plus companion XML
+  ``ViewSetup`` metadata. Do not describe raw ``zarr.open_group(...)`` /
+  ``da.from_zarr(...)`` reads on ``.n5`` paths as the supported contract.
+- Do not document bare direct ``--file /path/to/source.n5`` usage as a
+  supported runtime workflow in phase 1. The supported path is
+  ``experiment.yml`` materialization into canonical ``*.ome.zarr``.
 - Public microscopy-facing image data must use the OME-Zarr HCS contract.
   ClearEx-owned execution caches, provenance, GUI state, and non-image
   artifacts belong under the namespaced ``clearex/`` tree.

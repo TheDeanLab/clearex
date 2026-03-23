@@ -11,6 +11,9 @@ This folder owns the PyQt6 UX in `app.py`.
     - drag and drop of experiments, folders, or `.clearex-experiment-list.json` files
   - Add/remove experiment entries from the list and persist the list for reuse
   - Auto-load metadata when the current list selection changes
+    - for Navigate BDV ``file_type: N5``, source metadata must come from the
+      Navigate experiment context plus TensorStore-backed BDV source summary,
+      not from sending the raw ``.n5`` path through the generic Zarr reader
   - Configure Dask backend and OME-Zarr save options
   - Configure `Spatial Calibration` for the currently selected experiment:
     - map world `z/y/x` to Navigate stage `X/Y/Z/F` or `none`,
@@ -81,6 +84,9 @@ This folder owns the PyQt6 UX in `app.py`.
 
 - Treat `.ome.zarr` as the only canonical store suffix in labels, tooltips,
   examples, and validation messages.
+- Treat source `.n5` as Navigate acquisition input only. GUI messaging should
+  point users to `experiment.yml` materialization, not direct raw `.n5`
+  runtime opening.
 - Present logical analysis inputs (`data`, `flatfield`, `deconvolution`,
   `shear_transform`, `usegment3d`, `registration`) instead of raw internal
   component paths wherever possible.

@@ -12,7 +12,7 @@ You are a computer vision expert in fluorescence microscopy and technical writer
 
 ## Project knowledge
 - **Tech Stack:** Python 3.12, antsypyx, dask, h5py, matplotlib, napari, numpy,
-  ome-zarr-models, ome-zarr, bioio-ome-zarr, opencv-python, pandas,
+  ome-zarr-models, ome-zarr, bioio-ome-zarr, tensorstore, opencv-python, pandas,
   scikit-image, scipy, seaborn, zarr v3
 - **File Structure:**
   - `src/` – Application source code (you READ from here)
@@ -40,6 +40,11 @@ Write so that a new developer to this codebase can understand your writing, don�
   ``results/<analysis>/latest/data`` layouts as the preferred public contract.
   If legacy layouts are mentioned, label them explicitly as migration-only and
   point readers to ``clearex --migrate-store``.
+- Document legacy ``.n5`` as source-only except for Navigate BDV acquisition
+  input routed through ``experiment.yml``.
+- When documenting Navigate BDV ``.n5`` ingestion, describe TensorStore-backed
+  reads of ``setup*/timepoint*/s0`` plus companion XML metadata; do not teach
+  raw Zarr API reads on ``.n5`` as the supported path.
 
 ## Boundaries
 - ✅ **Always do:** Write new files to `docs/`, follow the style examples

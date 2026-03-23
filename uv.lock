@@ -616,6 +616,7 @@ dependencies = [
     { name = "scikit-image" },
     { name = "scipy" },
     { name = "seaborn" },
+    { name = "tensorstore" },
     { name = "tifffile" },
     { name = "zarr" },
 ]
@@ -703,6 +704,7 @@ requires-dist = [
     { name = "sphinx-issues", marker = "extra == 'docs'" },
     { name = "sphinx-rtd-theme", marker = "extra == 'docs'" },
     { name = "sphinx-toolbox", marker = "extra == 'docs'" },
+    { name = "tensorstore" },
     { name = "tifffile", specifier = "==2025.1.10" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.1a32" },
     { name = "u-segment3d", marker = "extra == 'usegment3d'", specifier = ">=0.1.4,<0.2" },
@@ -2097,6 +2099,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9d/55/d01f0c4b45ade6536c51170b9043db8b2ec6ddf4a35c7ea3f5f559ac935b/mistune-3.2.0.tar.gz", hash = "sha256:708487c8a8cdd99c9d90eb3ed4c3ed961246ff78ac82f03418f5183ab70e398a", size = 95467, upload-time = "2025-12-23T11:36:34.994Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9b/f7/4a5e785ec9fbd65146a27b6b70b6cdc161a66f2024e4b04ac06a67f5578b/mistune-3.2.0-py3-none-any.whl", hash = "sha256:febdc629a3c78616b94393c6580551e0e34cc289987ec6c35ed3f4be42d0eee1", size = 53598, upload-time = "2025-12-23T11:36:33.211Z" },
+]
+
+[[package]]
+name = "ml-dtypes"
+version = "0.5.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/4a/c27b42ed9b1c7d13d9ba8b6905dece787d6259152f2309338aed29b2447b/ml_dtypes-0.5.4.tar.gz", hash = "sha256:8ab06a50fb9bf9666dd0fe5dfb4676fa2b0ac0f31ecff72a6c3af8e22c063453", size = 692314, upload-time = "2025-11-17T22:32:31.031Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/b8/3c70881695e056f8a32f8b941126cf78775d9a4d7feba8abcb52cb7b04f2/ml_dtypes-0.5.4-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:a174837a64f5b16cab6f368171a1a03a27936b31699d167684073ff1c4237dac", size = 676927, upload-time = "2025-11-17T22:31:48.182Z" },
+    { url = "https://files.pythonhosted.org/packages/54/0f/428ef6881782e5ebb7eca459689448c0394fa0a80bea3aa9262cba5445ea/ml_dtypes-0.5.4-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a7f7c643e8b1320fd958bf098aa7ecf70623a42ec5154e3be3be673f4c34d900", size = 5028464, upload-time = "2025-11-17T22:31:50.135Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/cb/28ce52eb94390dda42599c98ea0204d74799e4d8047a0eb559b6fd648056/ml_dtypes-0.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9ad459e99793fa6e13bd5b7e6792c8f9190b4e5a1b45c63aba14a4d0a7f1d5ff", size = 5009002, upload-time = "2025-11-17T22:31:52.001Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/f0/0cfadd537c5470378b1b32bd859cf2824972174b51b873c9d95cfd7475a5/ml_dtypes-0.5.4-cp312-cp312-win_amd64.whl", hash = "sha256:c1a953995cccb9e25a4ae19e34316671e4e2edaebe4cf538229b1fc7109087b7", size = 212222, upload-time = "2025-11-17T22:31:53.742Z" },
+    { url = "https://files.pythonhosted.org/packages/16/2e/9acc86985bfad8f2c2d30291b27cd2bb4c74cea08695bd540906ed744249/ml_dtypes-0.5.4-cp312-cp312-win_arm64.whl", hash = "sha256:9bad06436568442575beb2d03389aa7456c690a5b05892c471215bfd8cf39460", size = 160793, upload-time = "2025-11-17T22:31:55.358Z" },
 ]
 
 [[package]]
@@ -4199,6 +4217,23 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f4/8a/14c15ae154895cc131174f858c707790d416c444fc69f93918adfd8c4c0b/tblib-3.2.2.tar.gz", hash = "sha256:e9a652692d91bf4f743d4a15bc174c0b76afc750fe8c7b6d195cc1c1d6d2ccec", size = 35046, upload-time = "2025-11-12T12:21:16.572Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/02/be/5d2d47b1fb58943194fb59dcf222f7c4e35122ec0ffe8c36e18b5d728f0b/tblib-3.2.2-py3-none-any.whl", hash = "sha256:26bdccf339bcce6a88b2b5432c988b266ebbe63a4e593f6b578b1d2e723d2b76", size = 12893, upload-time = "2025-11-12T12:21:14.407Z" },
+]
+
+[[package]]
+name = "tensorstore"
+version = "0.1.82"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ml-dtypes" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cd/9b/43aedb544937f214dd7c665a7edf1b8b74f2f55d53ebd351c0ce69acf81a/tensorstore-0.1.82.tar.gz", hash = "sha256:ccfceffb7611fc61330f6da24b8b0abd9251d480ac8a5bac5a1729f9ed0c3a9f", size = 7160364, upload-time = "2026-03-13T00:22:16.888Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0d/c3/5ab0b99487b2596bdc0ebd3a569e50415949a63bad90b18e6476de91a7bb/tensorstore-0.1.82-cp312-cp312-macosx_10_14_x86_64.whl", hash = "sha256:f0ac091bd47ea6f051fe11230ad2642c254b46a8fabdd5184b0600556b5529ed", size = 16570668, upload-time = "2026-03-13T00:21:36.386Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/95/92b00a4b2e6192528a9c5bac9f53007acf4aa5d54943b9e114bedb72b2da/tensorstore-0.1.82-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:8cae7d0c9b2fa0653f90b147daaf9ed04664cab7d297b9772efcfa088da26cab", size = 14904517, upload-time = "2026-03-13T00:21:38.464Z" },
+    { url = "https://files.pythonhosted.org/packages/46/7e/c9c8ad65ee4015787e32d31bcf8278fcb27109e809f8334a64285bd73028/tensorstore-0.1.82-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:34c491ea3c6c1904d4618bfe40020bd83aaeb19d52a266ea0f6919eb3fdc64c4", size = 19344428, upload-time = "2026-03-13T00:21:40.575Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/8a/590bb60a190d414abd2f83dd5b5148722d0c5d310a73e21b7a60ab98cf00/tensorstore-0.1.82-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d4182300d8ffa172e961e79c6bd89e38ce6bc5cd3abf1a7dacb22c2396ce40b7", size = 20964954, upload-time = "2026-03-13T00:21:42.515Z" },
+    { url = "https://files.pythonhosted.org/packages/43/1c/34e6e97426e1718106e9cb74d3045992bdea3ee368f9ea4ea25b809bdba8/tensorstore-0.1.82-cp312-cp312-win_amd64.whl", hash = "sha256:6369809d01edf66cd487cde5c94f57138167c09561f3d906020fd53c72687f92", size = 13393361, upload-time = "2026-03-13T00:21:44.443Z" },
 ]
 
 [[package]]

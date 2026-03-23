@@ -58,9 +58,18 @@ import dask
 import dask.array as da
 import h5py
 import numpy as np
+import numpy.typing as npt
 import tifffile
 import zarr
 from dask.delayed import delayed
+
+try:
+    import tensorstore as ts
+
+    HAS_TENSORSTORE = True
+except Exception:  # pragma: no cover - optional dependency import guard
+    ts = None
+    HAS_TENSORSTORE = False
 
 # Local Imports
 from clearex.io.ome_store import (
@@ -110,6 +119,41 @@ _INGESTION_PROGRESS_ATTR = "ingestion_progress"
 _SPATIAL_CALIBRATION_ATTR = "spatial_calibration"
 
 
+@dataclass(frozen=True)
+class _TensorStoreN5ArrayAdapter:
+    """Expose one TensorStore N5 dataset through Dask's array protocol.
+
+    Parameters
+    ----------
+    source_path : str
+        N5 root path on disk.
+    component : str
+        Dataset component path within the N5 root.
+    shape : tuple[int, ...]
+        Dataset shape in source axis order.
+    dtype : numpy.dtype
+        NumPy dtype of the dataset.
+    """
+
+    source_path: str
+    component: str
+    shape: tuple[int, ...]
+    dtype: npt.DTypeLike
+
+    @property
+    def ndim(self) -> int:
+        """Return dataset dimensionality."""
+        return len(self.shape)
+
+    def __getitem__(self, item: Any) -> np.ndarray[Any, Any]:
+        """Read one N5 selection as a NumPy array."""
+        dataset = _open_tensorstore_n5_dataset(
+            Path(self.source_path),
+            component=self.component,
+        )
+        return np.asarray(dataset[item].read().result(), dtype=np.dtype(self.dtype))
+
+
 def _is_zarr_like_path(path: Path) -> bool:
     """Return whether a path is a Zarr or N5 directory store.
 
@@ -124,6 +168,87 @@ def _is_zarr_like_path(path: Path) -> bool:
         ``True`` when ``path`` is a directory with ``.zarr`` or ``.n5`` suffix.
     """
     return path.is_dir() and path.suffix.lower() in {".zarr", ".n5"}
+
+
+def _require_tensorstore_for_n5() -> None:
+    """Raise a clear error when TensorStore-backed N5 support is unavailable."""
+    if HAS_TENSORSTORE:
+        return
+    raise ImportError(
+        "TensorStore is required for Navigate BDV N5 ingestion with zarr>=3. "
+        "Install the 'tensorstore' dependency to read .n5 sources."
+    )
+
+
+def _tensorstore_n5_spec(*, source_path: Path, component: str) -> dict[str, Any]:
+    """Build a TensorStore N5 spec for one dataset component."""
+    return {
+        "driver": "n5",
+        "kvstore": {"driver": "file", "path": str(source_path)},
+        "path": str(component).strip("/"),
+    }
+
+
+def _open_tensorstore_n5_dataset(source_path: Path, *, component: str) -> Any:
+    """Open one N5 dataset with TensorStore."""
+    _require_tensorstore_for_n5()
+    return ts.open(_tensorstore_n5_spec(source_path=source_path, component=component)).result()
+
+
+def _load_n5_attributes(source_path: Path, *, component: str) -> dict[str, Any]:
+    """Load ``attributes.json`` for one N5 dataset component."""
+    attributes_path = source_path / component / "attributes.json"
+    try:
+        payload = json.loads(attributes_path.read_text())
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _normalize_n5_chunks(
+    *,
+    shape: tuple[int, ...],
+    attributes: dict[str, Any],
+) -> tuple[int, ...]:
+    """Resolve Dask chunk sizes for one N5 dataset."""
+    raw_chunks = attributes.get("blockSize")
+    if not isinstance(raw_chunks, (list, tuple)) or len(raw_chunks) != len(shape):
+        return tuple(int(size) for size in shape)
+    normalized: list[int] = []
+    for dim_size, chunk_size in zip(shape, raw_chunks, strict=False):
+        try:
+            parsed = int(chunk_size)
+        except (TypeError, ValueError):
+            parsed = int(dim_size)
+        normalized.append(max(1, min(int(dim_size), parsed)))
+    return tuple(normalized)
+
+
+def _open_tensorstore_n5_as_dask(
+    source_path: Path,
+    *,
+    component: str,
+) -> tuple[da.Array, dict[str, Any]]:
+    """Open one N5 dataset as a lazy Dask array via TensorStore."""
+    dataset = _open_tensorstore_n5_dataset(source_path, component=component)
+    shape = tuple(int(size) for size in dataset.shape)
+    dtype = np.dtype(dataset.dtype.numpy_dtype)
+    attributes = _load_n5_attributes(source_path, component=component)
+    chunks = _normalize_n5_chunks(shape=shape, attributes=attributes)
+    adapter = _TensorStoreN5ArrayAdapter(
+        source_path=str(source_path),
+        component=component,
+        shape=shape,
+        dtype=dtype,
+    )
+    array = da.from_array(
+        adapter,
+        chunks=chunks,
+        asarray=False,
+        fancy=False,
+        meta=np.empty((0,) * len(shape), dtype=dtype),
+    )
+    return array, attributes
 
 
 def has_canonical_data_component(zarr_path: Union[str, Path]) -> bool:
@@ -918,6 +1043,12 @@ def _open_source_as_dask(
     suffix = source_path.suffix.lower()
     meta: dict[str, Any] = {"source_path": str(source_path)}
 
+    if suffix == ".n5" and _is_zarr_like_path(source_path):
+        raise ValueError(
+            "Standalone N5 ingestion is not supported. Use Navigate "
+            "experiment.yml-driven BDV N5 materialization instead."
+        )
+
     if _is_zarr_like_path(source_path):
         array, component, axes = _collect_largest_zarr_array(source_path)
         source_array = (
@@ -984,6 +1115,91 @@ def _open_source_as_dask(
     raise ValueError(f"Unsupported source format for ingestion: {source_path}")
 
 
+def _candidate_bdv_xml_paths(path: Path) -> list[Path]:
+    """Return candidate BDV XML sidecar paths for one source path."""
+    candidates: list[Path] = []
+    candidates.append(path.with_suffix(".xml"))
+    candidates.append(path.parent / f"{path.name}.xml")
+
+    lower_name = path.name.lower()
+    for token in (".ome.zarr", ".zarr", ".n5", ".hdf5", ".hdf", ".h5"):
+        if not lower_name.endswith(token):
+            continue
+        stem = path.name[: -len(token)]
+        if stem:
+            candidates.append(path.parent / f"{stem}.xml")
+        break
+
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(candidate)
+    return ordered
+
+
+def _bdv_loader_format_matches_source_suffix(*, suffix: str, image_format: str) -> bool:
+    """Return whether a BDV XML loader format matches the source suffix."""
+    normalized = str(image_format).strip().lower()
+    if suffix in {".h5", ".hdf5", ".hdf"}:
+        return normalized in {"bdv.hdf5", "bdv.h5", "bdv.hdf"}
+    if suffix == ".n5":
+        return normalized == "bdv.n5" or normalized.startswith("bdv.n5.")
+    if suffix == ".zarr":
+        if normalized in {
+            "bdv.zarr",
+            "bdv.ome.zarr",
+            "bdv.ngff",
+            "bdv.omezarr",
+            "bdv.omengff",
+            "ome.zarr",
+            "ome-zarr",
+            "ome.ngff",
+            "ome-ngff",
+            "ngff",
+            "zarr",
+        }:
+            return True
+        return (
+            normalized.startswith("bdv.zarr.")
+            or normalized.startswith("bdv.ome.zarr.")
+            or normalized.startswith("bdv.ngff.")
+            or normalized.startswith("ome.zarr.")
+            or normalized.startswith("ome.ngff.")
+        )
+    return False
+
+
+def _load_navigate_bdv_xml_root(source_path: Path) -> Optional[ET.Element]:
+    """Load the companion BDV XML root when present and compatible."""
+    suffix = source_path.suffix.lower()
+    if suffix not in {".h5", ".hdf5", ".hdf", ".n5", ".zarr"}:
+        return None
+
+    for xml_path in _candidate_bdv_xml_paths(source_path):
+        if not xml_path.exists():
+            continue
+        try:
+            root = ET.fromstring(xml_path.read_text())
+        except Exception:
+            continue
+
+        image_loader = root.find("SequenceDescription/ImageLoader")
+        if image_loader is None:
+            continue
+        image_format = str(image_loader.attrib.get("format", ""))
+        if not _bdv_loader_format_matches_source_suffix(
+            suffix=suffix,
+            image_format=image_format,
+        ):
+            continue
+        return root
+    return None
+
+
 def _parse_navigate_bdv_setup_index_map(
     source_path: Path,
 ) -> Optional[dict[int, tuple[int, int]]]:
@@ -1007,140 +1223,168 @@ def _parse_navigate_bdv_setup_index_map(
         Parsing is best-effort and falls back to ``None``.
     """
 
-    def _candidate_bdv_xml_paths(path: Path) -> list[Path]:
-        """Return candidate BDV XML sidecar paths for one source path.
-
-        Parameters
-        ----------
-        path : pathlib.Path
-            Source BDV container path.
-
-        Returns
-        -------
-        list[pathlib.Path]
-            Ordered XML candidate paths, deduplicated while preserving order.
-        """
-        candidates: list[Path] = []
-        candidates.append(path.with_suffix(".xml"))
-        candidates.append(path.parent / f"{path.name}.xml")
-
-        lower_name = path.name.lower()
-        for token in (".ome.zarr", ".zarr", ".n5", ".hdf5", ".hdf", ".h5"):
-            if not lower_name.endswith(token):
-                continue
-            stem = path.name[: -len(token)]
-            if stem:
-                candidates.append(path.parent / f"{stem}.xml")
-            break
-
-        ordered: list[Path] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            ordered.append(candidate)
-        return ordered
-
-    def _loader_format_matches_source_suffix(*, suffix: str, image_format: str) -> bool:
-        """Return whether a BDV XML loader format matches the source suffix.
-
-        Parameters
-        ----------
-        suffix : str
-            Source path suffix.
-        image_format : str
-            XML ``ImageLoader`` format value.
-
-        Returns
-        -------
-        bool
-            ``True`` when ``image_format`` is compatible with ``suffix``.
-        """
-        normalized = str(image_format).strip().lower()
-        if suffix in {".h5", ".hdf5", ".hdf"}:
-            return normalized in {"bdv.hdf5", "bdv.h5", "bdv.hdf"}
-        if suffix == ".n5":
-            return normalized == "bdv.n5" or normalized.startswith("bdv.n5.")
-        if suffix == ".zarr":
-            if normalized in {
-                "bdv.zarr",
-                "bdv.ome.zarr",
-                "bdv.ngff",
-                "bdv.omezarr",
-                "bdv.omengff",
-                "ome.zarr",
-                "ome-zarr",
-                "ome.ngff",
-                "ome-ngff",
-                "ngff",
-                "zarr",
-            }:
-                return True
-            return (
-                normalized.startswith("bdv.zarr.")
-                or normalized.startswith("bdv.ome.zarr.")
-                or normalized.startswith("bdv.ngff.")
-                or normalized.startswith("ome.zarr.")
-                or normalized.startswith("ome.ngff.")
-            )
-        return False
-
-    suffix = source_path.suffix.lower()
-    if suffix not in {".h5", ".hdf5", ".hdf", ".n5", ".zarr"}:
+    root = _load_navigate_bdv_xml_root(source_path)
+    if root is None:
         return None
 
-    xml_candidates = _candidate_bdv_xml_paths(source_path)
-    for xml_path in xml_candidates:
-        if not xml_path.exists():
+    raw_entries: list[tuple[int, int, int]] = []
+    for view_setup in root.findall("SequenceDescription/ViewSetups/ViewSetup"):
+        setup_text = view_setup.findtext("id")
+        channel_text = view_setup.findtext("attributes/channel")
+        tile_text = view_setup.findtext("attributes/tile")
+        if setup_text is None or channel_text is None or tile_text is None:
             continue
         try:
-            root = ET.fromstring(xml_path.read_text())
-        except Exception:
+            setup_index = int(setup_text)
+            channel_index = int(channel_text)
+            tile_index = int(tile_text)
+        except ValueError:
             continue
+        raw_entries.append((setup_index, channel_index, tile_index))
 
-        image_loader = root.find("SequenceDescription/ImageLoader")
-        if image_loader is None:
+    if not raw_entries:
+        return None
+
+    channel_values = sorted({entry[1] for entry in raw_entries})
+    tile_values = sorted({entry[2] for entry in raw_entries})
+    channel_lookup = {value: idx for idx, value in enumerate(channel_values)}
+    tile_lookup = {value: idx for idx, value in enumerate(tile_values)}
+
+    return {
+        int(setup_index): (
+            int(tile_lookup[tile_index]),
+            int(channel_lookup[channel_index]),
+        )
+        for setup_index, channel_index, tile_index in raw_entries
+    }
+
+
+@dataclass(frozen=True)
+class _NavigateBdvN5Entry:
+    """Describe one BDV N5 dataset component."""
+
+    time_index: int
+    setup_index: int
+    component: str
+    source_shape: tuple[int, ...]
+    source_chunks: tuple[int, ...]
+
+
+def _iter_navigate_bdv_n5_entries(source_path: Path) -> list[_NavigateBdvN5Entry]:
+    """Enumerate BDV-style N5 datasets from the filesystem layout."""
+    entries: list[_NavigateBdvN5Entry] = []
+    for attributes_path in sorted(source_path.rglob("attributes.json")):
+        component_path = attributes_path.parent
+        try:
+            relative_component = component_path.relative_to(source_path)
+        except ValueError:
             continue
-        image_format = str(image_loader.attrib.get("format", ""))
-        if not _loader_format_matches_source_suffix(
-            suffix=suffix,
-            image_format=image_format,
-        ):
+        component = relative_component.as_posix()
+        match = re.match(r"^setup(\d+)/timepoint(\d+)/s(\d+)$", component)
+        if match is None or int(match.group(3)) != 0:
             continue
-
-        raw_entries: list[tuple[int, int, int]] = []
-        for view_setup in root.findall("SequenceDescription/ViewSetups/ViewSetup"):
-            setup_text = view_setup.findtext("id")
-            channel_text = view_setup.findtext("attributes/channel")
-            tile_text = view_setup.findtext("attributes/tile")
-            if setup_text is None or channel_text is None or tile_text is None:
-                continue
-            try:
-                setup_index = int(setup_text)
-                channel_index = int(channel_text)
-                tile_index = int(tile_text)
-            except ValueError:
-                continue
-            raw_entries.append((setup_index, channel_index, tile_index))
-
-        if not raw_entries:
+        attributes = _load_n5_attributes(source_path, component=component)
+        dimensions = attributes.get("dimensions")
+        if not isinstance(dimensions, (list, tuple)) or not dimensions:
             continue
-
-        channel_values = sorted({entry[1] for entry in raw_entries})
-        tile_values = sorted({entry[2] for entry in raw_entries})
-        channel_lookup = {value: idx for idx, value in enumerate(channel_values)}
-        tile_lookup = {value: idx for idx, value in enumerate(tile_values)}
-
-        return {
-            int(setup_index): (
-                int(tile_lookup[tile_index]),
-                int(channel_lookup[channel_index]),
+        shape = tuple(int(size) for size in dimensions)
+        chunks = _normalize_n5_chunks(shape=shape, attributes=attributes)
+        entries.append(
+            _NavigateBdvN5Entry(
+                time_index=int(match.group(2)),
+                setup_index=int(match.group(1)),
+                component=component,
+                source_shape=shape,
+                source_chunks=chunks,
             )
-            for setup_index, channel_index, tile_index in raw_entries
-        }
-    return None
+        )
+    return entries
+
+
+def summarize_navigate_bdv_n5_image_info(
+    *,
+    experiment: "NavigateExperiment",
+    source_path: Path,
+) -> Optional[ImageInfo]:
+    """Summarize a Navigate BDV N5 collection as canonical ``ImageInfo``."""
+    if source_path.suffix.lower() != ".n5" or not _is_zarr_like_path(source_path):
+        return None
+
+    entries = _iter_navigate_bdv_n5_entries(source_path)
+    if len(entries) <= 1:
+        return None
+
+    setup_map = _parse_navigate_bdv_setup_index_map(source_path)
+    inferred_positions = max(1, int(experiment.multiposition_count))
+    time_indices: set[int] = set()
+    position_indices: set[int] = set()
+    channel_indices: set[int] = set()
+    base_shape: Optional[tuple[int, ...]] = None
+
+    for entry in entries:
+        if setup_map is not None and entry.setup_index not in setup_map:
+            continue
+        if setup_map is not None:
+            position_index, channel_index = setup_map[entry.setup_index]
+        else:
+            channel_index = int(entry.setup_index // inferred_positions)
+            position_index = int(entry.setup_index % inferred_positions)
+        time_indices.add(int(entry.time_index))
+        position_indices.add(int(position_index))
+        channel_indices.add(int(channel_index))
+        if base_shape is None:
+            base_shape = entry.source_shape
+        elif entry.source_shape != base_shape:
+            raise ValueError(
+                "Navigate BDV N5 collection has inconsistent source shapes: "
+                f"expected {base_shape}, got {entry.source_shape} at "
+                f"timepoint={entry.time_index}, setup={entry.setup_index}."
+            )
+
+    if not time_indices or not position_indices or not channel_indices or base_shape is None:
+        return None
+
+    sample_entry = min(
+        entries,
+        key=lambda item: (item.time_index, item.setup_index, item.component),
+    )
+    sample_dataset = _open_tensorstore_n5_dataset(
+        source_path,
+        component=sample_entry.component,
+    )
+    dtype = np.dtype(sample_dataset.dtype.numpy_dtype)
+    x_size, y_size, z_size = (int(size) for size in base_shape)
+    metadata: dict[str, Any] = {
+        "source_component": sample_entry.component,
+        "source_layout": "navigate_bdv_n5",
+        "positions": len(position_indices),
+        "channels": len(channel_indices),
+    }
+    if (
+        experiment.z_step_um is not None
+        and experiment.xy_pixel_size_um is not None
+        and experiment.z_step_um > 0
+        and experiment.xy_pixel_size_um > 0
+    ):
+        metadata["voxel_size_um_zyx"] = [
+            float(experiment.z_step_um),
+            float(experiment.xy_pixel_size_um),
+            float(experiment.xy_pixel_size_um),
+        ]
+    return ImageInfo(
+        path=source_path,
+        shape=(
+            len(time_indices),
+            len(position_indices),
+            len(channel_indices),
+            z_size,
+            y_size,
+            x_size,
+        ),
+        dtype=dtype,
+        axes="TPCZYX",
+        metadata=metadata,
+    )
 
 
 def _open_navigate_bdv_collection_as_dask(
@@ -1253,6 +1497,52 @@ def _open_navigate_bdv_collection_as_dask(
                 if source_shape != base_shape:
                     raise ValueError(
                         "Navigate BDV H5 collection has inconsistent source shapes: "
+                        f"expected {base_shape}, got {source_shape} at "
+                        f"t={time_index}, setup={setup_index}."
+                    )
+            arrays_by_index[key] = source_array
+    elif is_n5:
+        entries = [
+            (entry.time_index, entry.setup_index, entry.component, ("x", "y", "z"))
+            for entry in _iter_navigate_bdv_n5_entries(source_path)
+        ]
+        if len(entries) <= 1:
+            return None
+
+        for time_index, setup_index, component, source_axes in sorted(
+            entries, key=lambda item: (item[0], item[1], item[2])
+        ):
+            if setup_map is not None and setup_index not in setup_map:
+                continue
+            if setup_map is not None:
+                position_index, channel_index = setup_map[setup_index]
+            else:
+                channel_index = int(setup_index // inferred_positions)
+                position_index = int(setup_index % inferred_positions)
+
+            key = (int(time_index), int(position_index), int(channel_index))
+            if key in arrays_by_index:
+                continue
+
+            source_array, _ = _open_tensorstore_n5_as_dask(
+                source_path,
+                component=component,
+            )
+            normalized_axes = tuple(source_axes)
+            source_shape = tuple(int(size) for size in source_array.shape)
+            if base_axes is None:
+                base_axes = normalized_axes
+                base_shape = source_shape
+            else:
+                if normalized_axes != base_axes:
+                    raise ValueError(
+                        "Navigate BDV N5 collection has inconsistent source axes: "
+                        f"expected {base_axes}, got {normalized_axes} at "
+                        f"t={time_index}, setup={setup_index}."
+                    )
+                if source_shape != base_shape:
+                    raise ValueError(
+                        "Navigate BDV N5 collection has inconsistent source shapes: "
                         f"expected {base_shape}, got {source_shape} at "
                         f"t={time_index}, setup={setup_index}."
                     )
@@ -1376,6 +1666,68 @@ def _open_navigate_bdv_collection_as_dask(
         ),
     }
     return source_array, source_axes, metadata
+
+
+def load_navigate_experiment_source_image_info(
+    *,
+    experiment: "NavigateExperiment",
+    source_path: Path,
+    opener: Any = None,
+    prefer_dask: bool = True,
+    chunks: Optional[Union[int, tuple[int, ...]]] = None,
+) -> ImageInfo:
+    """Load source metadata for one Navigate experiment input path.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    source_path : pathlib.Path
+        Resolved acquisition source path.
+    opener : object, optional
+        Existing ``ImageOpener``-compatible instance for non-N5 sources.
+    prefer_dask : bool, default=True
+        Forwarded to ``ImageOpener.open`` when non-N5 metadata is read.
+    chunks : int or tuple[int, ...], optional
+        Forwarded to ``ImageOpener.open`` when non-N5 metadata is read.
+
+    Returns
+    -------
+    ImageInfo
+        Metadata summary for the resolved acquisition source.
+
+    Raises
+    ------
+    ValueError
+        If Navigate ``file_type: N5`` does not resolve to a BDV-style N5
+        source layout.
+    """
+    resolved_source = Path(source_path).expanduser().resolve()
+    if (
+        _normalize_file_type(experiment.file_type) == "N5"
+        and resolved_source.suffix.lower() == ".n5"
+    ):
+        info = summarize_navigate_bdv_n5_image_info(
+            experiment=experiment,
+            source_path=resolved_source,
+        )
+        if info is None:
+            raise ValueError(
+                "Navigate file_type=N5 currently requires a BDV-style N5 source "
+                "with companion XML metadata."
+            )
+        return info
+
+    if opener is None:
+        from clearex.io.read import ImageOpener
+
+        opener = ImageOpener()
+    _, info = opener.open(
+        path=str(resolved_source),
+        prefer_dask=prefer_dask,
+        chunks=chunks,
+    )
+    return info
 
 
 def _parse_navigate_tiff_indices(path: Path) -> tuple[int, int, int]:

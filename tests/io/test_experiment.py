@@ -25,6 +25,7 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 # Standard Library Imports
+from contextlib import ExitStack
 from pathlib import Path
 import json
 
@@ -46,6 +47,7 @@ from clearex.io.experiment import (
     initialize_analysis_store,
     is_navigate_experiment_file,
     load_navigate_experiment,
+    load_navigate_experiment_source_image_info,
     load_store_spatial_calibration,
     materialize_experiment_data_store,
     resolve_data_store_path,
@@ -53,6 +55,7 @@ from clearex.io.experiment import (
     save_store_spatial_calibration,
     write_zyx_block,
 )
+from clearex.io.ome_store import SOURCE_CACHE_COMPONENT
 from clearex.io.read import ImageInfo
 from clearex.workflow import SpatialCalibrationConfig
 
@@ -148,6 +151,55 @@ def _write_bdv_xml(
 </SpimData>
 """
     path.write_text(xml)
+
+
+def _tensorstore_module():
+    """Import TensorStore for real N5 fixture creation."""
+    return pytest.importorskip("tensorstore")
+
+
+def _write_real_n5_dataset(
+    root_path: Path,
+    *,
+    component: str,
+    data_xyz: np.ndarray,
+    block_size_xyz: tuple[int, int, int],
+) -> None:
+    """Create one real N5 dataset using TensorStore."""
+    ts = _tensorstore_module()
+    spec = {
+        "driver": "n5",
+        "kvstore": {"driver": "file", "path": str(root_path)},
+        "path": component,
+        "metadata": {
+            "blockSize": [int(v) for v in block_size_xyz],
+            "compression": {
+                "type": "blosc",
+                "cname": "lz4",
+                "clevel": 5,
+                "shuffle": 1,
+                "blocksize": 0,
+            },
+            "dataType": np.dtype(data_xyz.dtype).name,
+            "dimensions": [int(v) for v in data_xyz.shape],
+        },
+        "create": True,
+        "delete_existing": True,
+    }
+    dataset = ts.open(spec).result()
+    dataset[...] = data_xyz
+
+
+def _write_legacy_n5_group(
+    root_path: Path,
+    *,
+    component: str,
+    schema: str = "clearex.analysis_store.v1",
+) -> None:
+    """Write a stale legacy ClearEx group marker into an N5 tree."""
+    group_path = root_path / component
+    group_path.mkdir(parents=True, exist_ok=True)
+    (group_path / "attributes.json").write_text(json.dumps({"schema": schema}))
 
 
 def test_normalize_gpu_device_ids_deduplicates_and_strips() -> None:
@@ -1137,43 +1189,29 @@ def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
     experiment = load_navigate_experiment(experiment_path)
 
     source_path = tmp_path / "CH00_000000.n5"
-    source_root = zarr.open_group(str(source_path), mode="w")
     expected_blocks = {
         (0, 0): np.full((2, 3, 4), fill_value=11, dtype=np.uint16),
         (1, 0): np.full((2, 3, 4), fill_value=21, dtype=np.uint16),
         (0, 1): np.full((2, 3, 4), fill_value=31, dtype=np.uint16),
         (1, 1): np.full((2, 3, 4), fill_value=41, dtype=np.uint16),
     }
-    source_root.create_dataset(
-        "setup0/timepoint0/s0",
-        data=expected_blocks[(0, 0)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup1/timepoint0/s0",
-        data=expected_blocks[(1, 0)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup2/timepoint0/s0",
-        data=expected_blocks[(0, 1)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup3/timepoint0/s0",
-        data=expected_blocks[(1, 1)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup99/timepoint0/s0",
-        data=np.zeros((2, 3, 4), dtype=np.uint16),
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
+    for setup_index, block in {
+        0: expected_blocks[(0, 0)],
+        1: expected_blocks[(1, 0)],
+        2: expected_blocks[(0, 1)],
+        3: expected_blocks[(1, 1)],
+        99: np.zeros((2, 3, 4), dtype=np.uint16),
+    }.items():
+        _write_real_n5_dataset(
+            source_path,
+            component=f"setup{setup_index}/timepoint0/s0",
+            data_xyz=np.transpose(block, (2, 1, 0)),
+            block_size_xyz=(4, 3, 1),
+        )
+    _write_legacy_n5_group(source_path, component="data")
+    _write_legacy_n5_group(source_path, component="data_pyramid")
+    _write_legacy_n5_group(source_path, component="results")
+    _write_legacy_n5_group(source_path, component="provenance")
 
     _write_bdv_xml(
         tmp_path / "CH00_000000.xml",
@@ -1195,15 +1233,94 @@ def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
     )
 
     root = zarr.open_group(str(materialized.store_path), mode="r")
-    assert tuple(root["data"].shape) == (1, 2, 2, 2, 3, 4)
-    assert root.attrs["source_data_path"] == str(source_path.resolve())
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 2, 2, 2, 3, 4)
+    assert root["clearex/metadata"].attrs["source_data_path"] == str(source_path.resolve())
+    assert materialized.source_image_info.shape == (1, 2, 2, 4, 3, 2)
+    assert materialized.source_image_info.axes == "TPCXYZ"
+    assert root["A/1/0/0"].shape == (1, 2, 2, 3, 4)
 
     for position_index in range(2):
         for channel_index in range(2):
-            loaded = np.array(root["data"][0, position_index, channel_index, :, :, :])
+            loaded = np.array(
+                root[SOURCE_CACHE_COMPONENT][
+                    0, position_index, channel_index, :, :, :
+                ]
+            )
             assert np.array_equal(
                 loaded, expected_blocks[(position_index, channel_index)]
             )
+
+
+def test_load_navigate_experiment_source_image_info_summarizes_bdv_n5(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="N5",
+        is_multiposition=True,
+    )
+    _write_multipositions_sidecar(tmp_path / "multi_positions.yml", count=2)
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.n5"
+    for setup_index, fill_value in enumerate((11, 21, 31, 41)):
+        canonical_block = np.full((2, 3, 4), fill_value=fill_value, dtype=np.uint16)
+        _write_real_n5_dataset(
+            source_path,
+            component=f"setup{setup_index}/timepoint0/s0",
+            data_xyz=np.transpose(canonical_block, (2, 1, 0)),
+            block_size_xyz=(4, 3, 1),
+        )
+
+    _write_bdv_xml(
+        tmp_path / "CH00_000000.xml",
+        loader_format="bdv.n5",
+        data_file_name=source_path.name,
+        setup_channel_tile={
+            0: (0, 0),
+            1: (0, 1),
+            2: (1, 0),
+            3: (1, 1),
+        },
+    )
+
+    class _FailingOpener:
+        def open(self, *args, **kwargs):
+            raise AssertionError("ImageOpener.open should not be used for BDV N5.")
+
+    info = load_navigate_experiment_source_image_info(
+        experiment=experiment,
+        source_path=source_path,
+        opener=_FailingOpener(),
+    )
+
+    assert info.path == source_path.resolve()
+    assert info.shape == (1, 2, 2, 2, 3, 4)
+    assert info.dtype == np.dtype(np.uint16)
+    assert info.axes == "TPCZYX"
+    assert info.metadata is not None
+    assert info.metadata["source_layout"] == "navigate_bdv_n5"
+    assert info.metadata["source_component"] == "setup0/timepoint0/s0"
+    assert info.metadata["positions"] == 2
+    assert info.metadata["channels"] == 2
+
+
+def test_open_source_as_dask_rejects_standalone_n5_source(tmp_path: Path) -> None:
+    source_path = tmp_path / "standalone.n5"
+    _write_real_n5_dataset(
+        source_path,
+        component="setup0/timepoint0/s0",
+        data_xyz=np.zeros((4, 3, 2), dtype=np.uint16),
+        block_size_xyz=(4, 3, 1),
+    )
+
+    with ExitStack() as exit_stack, pytest.raises(ValueError, match="Standalone N5"):
+        experiment_module._open_source_as_dask(
+            source_path,
+            exit_stack=exit_stack,
+        )
 
 
 def test_materialize_experiment_data_store_stacks_bdv_ome_zarr_setups(

@@ -33,7 +33,8 @@ Materialization supports:
 - TIFF/OME-TIFF,
 - H5/HDF5/HDF,
 - NumPy ``.npy`` and ``.npz``,
-- generic Zarr / N5 stores,
+- generic Zarr stores,
+- Navigate BDV N5 acquisitions routed through ``experiment.yml``,
 - canonical OME-Zarr stores.
 
 Special collection logic is implemented for:
@@ -41,6 +42,14 @@ Special collection logic is implemented for:
 - Navigate TIFF ``Position*/CH*`` collections (stacked into canonical
   dimensions),
 - Navigate BDV H5/N5 setup collections (mapped with companion XML metadata).
+
+Navigate BDV N5 sources are source-only and are not opened through Zarr APIs.
+ClearEx reads ``setup*/timepoint*/s0`` datasets through TensorStore so Dask
+ingestion remains parallelized on ``zarr>=3``. Standalone bare ``.n5`` runtime
+input remains unsupported in this phase; use ``experiment.yml`` materialization
+to convert the source into canonical ``*.ome.zarr``.
+If stale legacy ClearEx groups such as ``data`` or ``results`` exist inside the
+source ``.n5`` tree, they are ignored for source selection.
 
 Canonical Store Path Policy
 ---------------------------

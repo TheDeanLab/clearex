@@ -61,6 +61,7 @@ from clearex.io.experiment import (
     infer_zyx_shape,
     is_navigate_experiment_file,
     load_navigate_experiment,
+    load_navigate_experiment_source_image_info,
     load_store_spatial_calibration,
     materialize_experiment_data_store,
     resolve_data_store_path,
@@ -6680,8 +6681,10 @@ if HAS_PYQT6:
             experiment_path, experiment, source_data_path = (
                 self._resolve_experiment_source_context(path=path)
             )
-            _, info = self._opener.open(
-                path=str(source_data_path),
+            info = load_navigate_experiment_source_image_info(
+                experiment=experiment,
+                source_path=source_data_path,
+                opener=self._opener,
                 prefer_dask=True,
                 chunks=self._chunks,
             )

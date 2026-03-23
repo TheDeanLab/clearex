@@ -9,9 +9,10 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
 ## Current Functionality
 - GUI-first entrypoint with headless fallback.
 - Headless CLI for scripted runs.
-- Input support for TIFF/OME-TIFF, Zarr/N5, HDF5 (`.h5/.hdf5/.hdf`), and NumPy (`.npy/.npz`).
+- Input support for TIFF/OME-TIFF, generic Zarr, HDF5 (`.h5/.hdf5/.hdf`), NumPy (`.npy/.npz`), and Navigate BDV N5 acquisitions through `experiment.yml`.
 - Navigate experiment ingestion from `experiment.yml` / `experiment.yaml`.
 - Canonical persisted store format is OME-Zarr v3 (`*.ome.zarr`).
+- Legacy `.n5` remains a source-only input format. Navigate BDV N5 materialization requires companion `*.xml` metadata and now reads `setup*/timepoint*/s0` datasets through TensorStore so Dask ingestion stays parallelized on `zarr>=3`.
 - Public microscopy-facing image data is published as OME-Zarr HCS collections, while ClearEx execution caches and non-image artifacts live under namespaced `clearex/...` groups.
 - Internal analysis image layout remains `(t, p, c, z, y, x)` for runtime-cache arrays and analysis kernels.
 - Store-level spatial calibration for Navigate multiposition data is persisted in `clearex/metadata` and applied to physical placement metadata without rewriting image data.
@@ -247,7 +248,8 @@ clearex --migrate-store /path/to/legacy_store.zarr
 ## Runtime Behavior Notes
 - If `--file` points to Navigate `experiment.yml`, ClearEx resolves acquisition data and materializes a canonical store first.
 - Existing canonical OME-Zarr stores are reused in place.
-- Non-canonical acquisition inputs, including TIFF/OME-TIFF, HDF5, NumPy, generic Zarr/N5, and Navigate source layouts, materialize to `data_store.ome.zarr` beside `experiment.yml`.
+- Non-canonical acquisition inputs, including TIFF/OME-TIFF, HDF5, NumPy, generic Zarr, Navigate BDV N5 sources, and other Navigate source layouts, materialize to `data_store.ome.zarr` beside `experiment.yml`.
+- Bare direct source `.n5` runtime input is not a supported phase-1 workflow. For N5 acquisitions, point `--file` at Navigate `experiment.yml` so ClearEx can resolve BDV XML metadata and materialize canonical `.ome.zarr`.
 - Legacy ClearEx `.zarr` / `.n5` stores are not treated as canonical runtime inputs. Migrate them first with `clearex --migrate-store`.
 - Canonical stores persist `spatial_calibration = {schema, stage_axis_map_zyx, theta_mode}` inside `clearex/metadata`. Missing metadata resolves to the identity mapping `z=+z,y=+y,x=+x`.
 - In the setup window, `Spatial Calibration` is configured per listed experiment. Draft mappings are tracked per experiment while the dialog is open, existing stores prefill the control, and `Next` writes the resolved mapping to every reused or newly prepared store before analysis selection opens.

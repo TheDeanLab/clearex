@@ -45,6 +45,13 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Legacy root `data`, root `data_pyramid`, and
   `results/<analysis>/latest/data` layouts are migration-only and must not be
   reintroduced as canonical outputs.
+- Legacy `.n5` inputs are source-only. For Navigate BDV N5, agents must use
+  TensorStore-backed reads from `setup*/timepoint*/s0` plus companion XML
+  `ViewSetup` metadata; do not reintroduce `zarr.open_group(...)` or
+  `da.from_zarr(...)` on raw `.n5` paths.
+- Bare standalone `.n5` runtime input remains unsupported in phase 1. If the
+  source is a Navigate N5 acquisition, route it through `experiment.yml`
+  materialization into canonical `.ome.zarr`.
 
 ## Dask Workload Policy
 
@@ -63,6 +70,9 @@ This directory contains the runtime orchestration surface for ClearEx.
   `(t, p, c, z, y, x)` data instead of materializing only the first TIFF file.
 - Navigate BDV `H5`/`N5` ingestion now stacks setup collections using companion
   XML `ViewSetup` metadata so channels/positions are preserved across formats.
+- Navigate BDV `N5` now reads through TensorStore because `zarr>=3` no longer
+  provides `N5Store`; legacy ClearEx groups inside source `.n5` trees must be
+  ignored during source selection.
 - Napari multiposition affine translations are now treated in world-space
   microns, with scale preferring stored `voxel_size_um_zyx` attrs.
 

@@ -14,9 +14,14 @@ arrays alongside public OME image collections.
 
    - TIFF/OME-TIFF
    - H5/HDF5
-   - generic Zarr/N5
+   - generic Zarr
+   - Navigate BDV N5 through ``experiment.yml`` plus companion XML
    - NumPy ``.npy`` / ``.npz``
    - canonical OME-Zarr
+
+   Navigate BDV ``.n5`` is read through TensorStore-backed access to
+   ``setup*/timepoint*/s0`` datasets. Raw Zarr API access to ``.n5`` is not the
+   supported runtime path on ``zarr>=3``.
 
 4. Infer and normalize axis order, coercing to canonical
    ``(t, p, c, z, y, x)`` for internal execution.
