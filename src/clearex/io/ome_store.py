@@ -183,7 +183,9 @@ def load_store_metadata(path_or_root: str | Path | zarr.Group) -> dict[str, Any]
     return {"schema": STORE_METADATA_SCHEMA}
 
 
-def update_store_metadata(path_or_root: str | Path | zarr.Group, **payload: Any) -> dict[str, Any]:
+def update_store_metadata(
+    path_or_root: str | Path | zarr.Group, **payload: Any
+) -> dict[str, Any]:
     """Merge and persist ClearEx namespaced store metadata."""
     root = (
         path_or_root
@@ -209,6 +211,66 @@ def store_has_public_ome_metadata(path_or_root: str | Path | zarr.Group) -> bool
     return isinstance(payload, Mapping)
 
 
+def store_has_valid_public_source_collection(
+    path_or_root: str | Path | zarr.Group,
+) -> bool:
+    """Return whether the root source HCS collection validates via OME models.
+
+    Parameters
+    ----------
+    path_or_root : str or pathlib.Path or zarr.Group
+        Store path or opened root group.
+
+    Returns
+    -------
+    bool
+        ``True`` when root/well/image OME metadata validates and every
+        declared multiscale dataset path exists.
+    """
+    root = (
+        path_or_root
+        if isinstance(path_or_root, zarr.Group)
+        else zarr.open_group(str(Path(path_or_root).expanduser().resolve()), mode="r")
+    )
+    well_path = f"{PUBLIC_WELL_ROW}/{PUBLIC_WELL_COLUMN}"
+    try:
+        root_ome = HCSAttrs.model_validate(getattr(root, "attrs", {}).get("ome"))
+        well_group = get_node(root, well_path)
+        well_ome = WellAttrs.model_validate(getattr(well_group, "attrs", {}).get("ome"))
+    except Exception:
+        return False
+
+    declared_wells = tuple(
+        str(entry.path).strip() for entry in root_ome.plate.wells if entry is not None
+    )
+    if well_path not in declared_wells:
+        return False
+
+    for image in well_ome.well.images:
+        image_token = str(image.path).strip()
+        if not image_token:
+            return False
+        image_component = f"{well_path}/{image_token}"
+        try:
+            image_group = get_node(root, image_component)
+            image_ome = ImageAttrs.model_validate(
+                getattr(image_group, "attrs", {}).get("ome")
+            )
+        except Exception:
+            return False
+        if not image_ome.multiscales:
+            return False
+        for multiscale in image_ome.multiscales:
+            for dataset in multiscale.datasets:
+                dataset_path = str(dataset.path).strip()
+                if not dataset_path:
+                    return False
+                if dataset_path not in image_group:
+                    return False
+
+    return True
+
+
 def is_legacy_clearex_store(path_or_root: str | Path | zarr.Group) -> bool:
     """Return whether a store still follows the legacy pre-OME ClearEx layout."""
     root = (
@@ -229,7 +291,9 @@ def is_legacy_clearex_store(path_or_root: str | Path | zarr.Group) -> bool:
     return any(bool(marker) for marker in legacy_markers)
 
 
-def load_store_spatial_calibration(path_or_root: str | Path | zarr.Group) -> SpatialCalibrationConfig:
+def load_store_spatial_calibration(
+    path_or_root: str | Path | zarr.Group,
+) -> SpatialCalibrationConfig:
     """Load store-level spatial calibration from the namespaced metadata group."""
     metadata = load_store_metadata(path_or_root)
     return spatial_calibration_from_dict(metadata.get("spatial_calibration"))
@@ -348,9 +412,18 @@ def compute_position_translations_zyx_um(
         row = rows[position_index] if position_index < len(rows) else reference
         translations.append(
             [
-                float(_binding_value(row, stage_axis_map["z"]) - _binding_value(reference, stage_axis_map["z"])),
-                float(_binding_value(row, stage_axis_map["y"]) - _binding_value(reference, stage_axis_map["y"])),
-                float(_binding_value(row, stage_axis_map["x"]) - _binding_value(reference, stage_axis_map["x"])),
+                float(
+                    _binding_value(row, stage_axis_map["z"])
+                    - _binding_value(reference, stage_axis_map["z"])
+                ),
+                float(
+                    _binding_value(row, stage_axis_map["y"])
+                    - _binding_value(reference, stage_axis_map["y"])
+                ),
+                float(
+                    _binding_value(row, stage_axis_map["x"])
+                    - _binding_value(reference, stage_axis_map["x"])
+                ),
             ]
         )
     return translations
@@ -380,18 +453,22 @@ def _level_component_paths(cache_root: str, root: zarr.Group) -> list[str]:
     return components
 
 
-def _level_downsample_factors(level_array: Any, *, level_index: int) -> tuple[int, int, int, int, int, int]:
+def _level_downsample_factors(
+    level_array: Any, *, level_index: int
+) -> tuple[int, int, int, int, int, int]:
     payload = getattr(level_array, "attrs", {}).get("downsample_factors_tpczyx")
     if isinstance(payload, (tuple, list)) and len(payload) == 6:
         try:
             return tuple(int(value) for value in payload)  # type: ignore[return-value]
         except Exception:
             pass
-    fallback = 2**max(0, int(level_index))
+    fallback = 2 ** max(0, int(level_index))
     return (1, 1, 1, fallback, fallback, fallback)
 
 
-def _set_hcs_group_attrs(collection_group: zarr.Group, *, name: str, field_count: int) -> None:
+def _set_hcs_group_attrs(
+    collection_group: zarr.Group, *, name: str, field_count: int
+) -> None:
     payload = HCSAttrs(
         version="0.5",
         plate=Plate(
@@ -412,7 +489,9 @@ def _set_hcs_group_attrs(collection_group: zarr.Group, *, name: str, field_count
     collection_group.attrs["ome"] = _model_payload(payload)
 
 
-def _set_well_group_attrs(well_group: zarr.Group, *, field_paths: Sequence[str]) -> None:
+def _set_well_group_attrs(
+    well_group: zarr.Group, *, field_paths: Sequence[str]
+) -> None:
     payload = WellAttrs(
         version="0.5",
         well=WellMeta(images=[WellImage(path=str(path)) for path in field_paths]),
@@ -456,7 +535,13 @@ def _set_image_group_attrs(
                     {"type": "scale", "scale": scale},
                     {
                         "type": "translation",
-                        "translation": [0.0, 0.0, translation[0], translation[1], translation[2]],
+                        "translation": [
+                            0.0,
+                            0.0,
+                            translation[0],
+                            translation[1],
+                            translation[2],
+                        ],
                     },
                 ],
             )
@@ -544,9 +629,11 @@ def publish_image_collection_from_cache(
             image_group,
             level_count=len(level_arrays),
             voxel_size_um_zyx=voxel_size_um_zyx,
-            position_translation_zyx_um=translations[position_index]
-            if position_index < len(translations)
-            else (0.0, 0.0, 0.0),
+            position_translation_zyx_um=(
+                translations[position_index]
+                if position_index < len(translations)
+                else (0.0, 0.0, 0.0)
+            ),
             level_factors_tpczyx=level_factors,
         )
         for level_index, level_array in enumerate(level_arrays):
@@ -558,11 +645,31 @@ def publish_image_collection_from_cache(
                 int(level_array.shape[5]),
             )
             level_chunks_tczyx = (
-                int(level_array.chunks[0]) if level_array.chunks is not None else level_shape_tczyx[0],
-                int(level_array.chunks[2]) if level_array.chunks is not None else level_shape_tczyx[1],
-                int(level_array.chunks[3]) if level_array.chunks is not None else level_shape_tczyx[2],
-                int(level_array.chunks[4]) if level_array.chunks is not None else level_shape_tczyx[3],
-                int(level_array.chunks[5]) if level_array.chunks is not None else level_shape_tczyx[4],
+                (
+                    int(level_array.chunks[0])
+                    if level_array.chunks is not None
+                    else level_shape_tczyx[0]
+                ),
+                (
+                    int(level_array.chunks[2])
+                    if level_array.chunks is not None
+                    else level_shape_tczyx[1]
+                ),
+                (
+                    int(level_array.chunks[3])
+                    if level_array.chunks is not None
+                    else level_shape_tczyx[2]
+                ),
+                (
+                    int(level_array.chunks[4])
+                    if level_array.chunks is not None
+                    else level_shape_tczyx[3]
+                ),
+                (
+                    int(level_array.chunks[5])
+                    if level_array.chunks is not None
+                    else level_shape_tczyx[4]
+                ),
             )
             if str(level_index) in image_group:
                 del image_group[str(level_index)]

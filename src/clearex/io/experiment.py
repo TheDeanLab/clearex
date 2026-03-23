@@ -86,6 +86,7 @@ from clearex.io.ome_store import (
     load_store_spatial_calibration as load_namespaced_store_spatial_calibration,
     publish_source_collection_from_cache,
     save_store_spatial_calibration as save_namespaced_store_spatial_calibration,
+    store_has_valid_public_source_collection,
     source_cache_component,
     update_store_metadata,
 )
@@ -192,7 +193,9 @@ def _tensorstore_n5_spec(*, source_path: Path, component: str) -> dict[str, Any]
 def _open_tensorstore_n5_dataset(source_path: Path, *, component: str) -> Any:
     """Open one N5 dataset with TensorStore."""
     _require_tensorstore_for_n5()
-    return ts.open(_tensorstore_n5_spec(source_path=source_path, component=component)).result()
+    return ts.open(
+        _tensorstore_n5_spec(source_path=source_path, component=component)
+    ).result()
 
 
 def _load_n5_attributes(source_path: Path, *, component: str) -> dict[str, Any]:
@@ -203,6 +206,39 @@ def _load_n5_attributes(source_path: Path, *, component: str) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _n5_component_has_persisted_chunks(source_path: Path, *, component: str) -> bool:
+    """Return whether an N5 component has at least one persisted chunk file.
+
+    Parameters
+    ----------
+    source_path : pathlib.Path
+        Root N5 directory path.
+    component : str
+        Dataset component path inside ``source_path``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the component contains at least one file other than
+        ``attributes.json``.
+
+    Notes
+    -----
+    Some legacy acquisition runs emit setup scaffolding with only
+    ``attributes.json`` and no chunk payload files. These placeholders read back
+    as implicit zeros and should not be treated as acquired data.
+    """
+    component_path = source_path / component
+    if not component_path.is_dir():
+        return False
+
+    for _, _, filenames in os.walk(component_path):
+        for filename in filenames:
+            if filename != "attributes.json":
+                return True
+    return False
 
 
 def _normalize_n5_chunks(
@@ -499,7 +535,10 @@ def _expected_pyramid_components(
     """
     return [
         SOURCE_CACHE_COMPONENT,
-        *[source_cache_component(level_index=idx) for idx in range(1, len(level_factors))],
+        *[
+            source_cache_component(level_index=idx)
+            for idx in range(1, len(level_factors))
+        ],
     ]
 
 
@@ -747,10 +786,16 @@ def has_complete_canonical_data_store(
     record = _read_ingestion_progress_record(root)
     if record is None:
         return True
-    return _ingestion_record_is_complete(
+    if _ingestion_record_is_complete(
         record=record,
         required_components=required_components,
-    )
+    ):
+        return True
+
+    # Recovery path: if ingestion-progress metadata is stale/incomplete but the
+    # canonical runtime-cache structure and public OME source collection are
+    # already valid, prefer reusing the existing canonical store.
+    return store_has_valid_public_source_collection(root)
 
 
 def _normalize_axis_token(token: Any) -> Optional[str]:
@@ -1287,6 +1332,8 @@ def _iter_navigate_bdv_n5_entries(source_path: Path) -> list[_NavigateBdvN5Entry
         dimensions = attributes.get("dimensions")
         if not isinstance(dimensions, (list, tuple)) or not dimensions:
             continue
+        if not _n5_component_has_persisted_chunks(source_path, component=component):
+            continue
         shape = tuple(int(size) for size in dimensions)
         chunks = _normalize_n5_chunks(shape=shape, attributes=attributes)
         entries.append(
@@ -1341,7 +1388,12 @@ def summarize_navigate_bdv_n5_image_info(
                 f"timepoint={entry.time_index}, setup={entry.setup_index}."
             )
 
-    if not time_indices or not position_indices or not channel_indices or base_shape is None:
+    if (
+        not time_indices
+        or not position_indices
+        or not channel_indices
+        or base_shape is None
+    ):
         return None
 
     sample_entry = min(
@@ -4733,6 +4785,7 @@ def _infer_multiposition_count(
     raw: Dict[str, Any],
     state: Dict[str, Any],
     save_directory: Path,
+    experiment_directory: Path,
 ) -> int:
     """Infer position count from sidecar metadata and experiment payload.
 
@@ -4744,6 +4797,8 @@ def _infer_multiposition_count(
         ``MicroscopeState`` mapping.
     save_directory : pathlib.Path
         Acquisition save directory.
+    experiment_directory : pathlib.Path
+        Directory containing ``experiment.yml`` and sidecar metadata.
 
     Returns
     -------
@@ -4754,9 +4809,15 @@ def _infer_multiposition_count(
 
     # Navigate records detailed position lists in the sidecar file.
     if is_multiposition:
-        rows = _load_multiposition_rows(save_directory=save_directory)
-        if rows is not None:
-            return max(1, len(rows))
+        seen: set[str] = set()
+        for directory in (save_directory, experiment_directory):
+            identity = _search_directory_identity(directory)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            rows = _load_multiposition_rows(save_directory=directory)
+            if rows is not None:
+                return max(1, len(rows))
 
     fallback = raw.get("MultiPositions", [])
     if isinstance(fallback, list) and fallback:
@@ -5037,6 +5098,7 @@ def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
         raw=raw,
         state=state,
         save_directory=save_directory,
+        experiment_directory=experiment_path.parent.resolve(),
     )
     microscope_name = (
         str(state.get("microscope_name"))
@@ -5487,7 +5549,9 @@ def initialize_analysis_store(
                     "axes": ["t", "p", "c", "z", "y", "x"],
                     "storage_policy": "latest_only",
                     "chunk_shape_tpczyx": existing_chunks,
-                    "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
+                    "configured_chunks_tpczyx": [
+                        int(chunk) for chunk in requested_chunks
+                    ],
                     "resolution_pyramid_factors_tpczyx": pyramid_payload,
                     "voxel_size_um_zyx": voxel_size_um_zyx,
                 }
