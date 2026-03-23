@@ -10771,7 +10771,7 @@ if HAS_PYQT6:
 
             helper = QLabel(
                 "Configure image/labels overlays for napari. "
-                "Use channels as comma-separated indices (leave blank for all)."
+                "Use the Channels selector to choose CH indices (leave empty for all)."
             )
             helper.setWordWrap(True)
             root.addWidget(helper)
@@ -10826,6 +10826,13 @@ if HAS_PYQT6:
             colormap_options = _available_visualization_colormap_options()
             rendering_options = _available_visualization_rendering_options()
             combo_height = max(30, row_height - 8)
+            store_path = str(self._base_config.file or "").strip()
+            store_root: Optional[Any] = None
+            if store_path and is_zarr_store_path(store_path):
+                try:
+                    store_root = zarr.open_group(store_path, mode="r")
+                except Exception:
+                    store_root = None
 
             def _configure_combo_size(combo: QComboBox) -> QComboBox:
                 combo.setMinimumHeight(combo_height)
@@ -10949,6 +10956,201 @@ if HAS_PYQT6:
                 selected_data = combo.currentData()
                 return str(selected_data).strip() if selected_data is not None else ""
 
+            def _available_channels_for_component(component_value: str) -> tuple[int, ...]:
+                component = str(component_value).strip() or "data"
+                resolved_component = resolve_analysis_input_component(component)
+                if store_root is None:
+                    return (0,)
+                try:
+                    return _discover_component_channels(
+                        root=store_root,
+                        source_component=resolved_component,
+                    )
+                except Exception:
+                    return (0,)
+
+            def _set_channel_selector_state(
+                button: QPushButton,
+                *,
+                selected_channels: Sequence[int],
+                available_channels: Sequence[int],
+            ) -> None:
+                normalized_available = sorted(
+                    {int(value) for value in available_channels if int(value) >= 0}
+                )
+                available_set = set(normalized_available)
+                normalized_selected = sorted(
+                    set(
+                        int(value)
+                        for value in self._normalize_visualization_channels(
+                            selected_channels
+                        )
+                    )
+                )
+                for value in normalized_selected:
+                    if value in available_set:
+                        continue
+                    normalized_available.append(int(value))
+                    available_set.add(int(value))
+                normalized_available = sorted(set(normalized_available))
+                normalized_selected = [
+                    int(value)
+                    for value in normalized_selected
+                    if int(value) in available_set
+                ]
+                button.setProperty(
+                    "_clearexSelectedChannels",
+                    [int(value) for value in normalized_selected],
+                )
+                button.setProperty(
+                    "_clearexAvailableChannels",
+                    [int(value) for value in normalized_available],
+                )
+                if not normalized_selected:
+                    button.setText("All channels")
+                else:
+                    button.setText(
+                        ", ".join(f"CH{int(value)}" for value in normalized_selected)
+                    )
+                button.setToolTip(
+                    "Selected channels for this layer. "
+                    "Leave empty to render all available channels."
+                )
+
+            def _open_channel_selector_dialog(
+                *,
+                anchor: QPushButton,
+                component_combo: QComboBox,
+            ) -> None:
+                component_value = _read_component_combo_value(component_combo)
+                available_channels = _available_channels_for_component(component_value)
+                selected_channels = self._normalize_visualization_channels(
+                    anchor.property("_clearexSelectedChannels")
+                )
+                selected_set = set(selected_channels)
+                picker_channels = sorted(
+                    set(int(value) for value in available_channels if int(value) >= 0)
+                    | set(int(value) for value in selected_set if int(value) >= 0)
+                )
+
+                picker = QDialog(dialog)
+                picker.setWindowTitle("Select Channels")
+                picker.setModal(True)
+                picker.setStyleSheet(_popup_dialog_stylesheet())
+                _apply_initial_dialog_geometry(
+                    picker,
+                    minimum_size=(320, 220),
+                    preferred_size=(420, 360),
+                )
+                picker_root = QVBoxLayout(picker)
+                apply_popup_root_spacing(picker_root)
+
+                picker_hint = QLabel(
+                    "Choose channels for this layer. "
+                    "Leave all unchecked to render all channels."
+                )
+                picker_hint.setWordWrap(True)
+                picker_root.addWidget(picker_hint)
+
+                channel_boxes: list[tuple[int, QCheckBox]] = []
+                for channel in picker_channels:
+                    value = int(channel)
+                    checkbox = QCheckBox(f"CH{value}", picker)
+                    checkbox.setChecked(value in selected_set)
+                    picker_root.addWidget(checkbox)
+                    channel_boxes.append((value, checkbox))
+
+                if not channel_boxes:
+                    picker_root.addWidget(QLabel("No channels available."))
+
+                quick_controls = QHBoxLayout()
+                select_all_button = QPushButton("All", picker)
+                clear_button = QPushButton("None", picker)
+                quick_controls.addWidget(select_all_button)
+                quick_controls.addWidget(clear_button)
+                quick_controls.addStretch(1)
+                picker_root.addLayout(quick_controls)
+
+                def _set_all_channels_checked(checked: bool) -> None:
+                    for _, checkbox in channel_boxes:
+                        checkbox.setChecked(bool(checked))
+
+                select_all_button.clicked.connect(
+                    lambda: _set_all_channels_checked(True)
+                )
+                clear_button.clicked.connect(lambda: _set_all_channels_checked(False))
+
+                button_box = QDialogButtonBox(
+                    QDialogButtonBox.StandardButton.Ok
+                    | QDialogButtonBox.StandardButton.Cancel,
+                    Qt.Orientation.Horizontal,
+                    picker,
+                )
+                picker_root.addWidget(button_box)
+                button_box.accepted.connect(picker.accept)
+                button_box.rejected.connect(picker.reject)
+
+                if picker.exec() != QDialog.DialogCode.Accepted:
+                    return
+
+                picked_channels = [
+                    int(channel)
+                    for channel, checkbox in channel_boxes
+                    if checkbox.isChecked()
+                ]
+                _set_channel_selector_state(
+                    anchor,
+                    selected_channels=picked_channels,
+                    available_channels=picker_channels,
+                )
+
+            def _make_channel_selector(
+                *,
+                current_channels: Sequence[int],
+                component_combo: QComboBox,
+            ) -> QPushButton:
+                button = QPushButton(table)
+                button.setMinimumHeight(combo_height)
+                button.setMaximumHeight(combo_height)
+                button.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Fixed,
+                )
+                button = cast(
+                    QPushButton,
+                    _install_table_row_selection_widget_hook(table, button),
+                )
+                _set_channel_selector_state(
+                    button,
+                    selected_channels=current_channels,
+                    available_channels=_available_channels_for_component(
+                        _read_component_combo_value(component_combo)
+                    ),
+                )
+                button.clicked.connect(
+                    lambda _checked=False, anchor=button, combo=component_combo: _open_channel_selector_dialog(
+                        anchor=anchor,
+                        component_combo=combo,
+                    )
+                )
+                return button
+
+            def _sync_channel_selector_for_component(
+                *,
+                component_combo: QComboBox,
+                channel_selector: QPushButton,
+            ) -> None:
+                available_channels = _available_channels_for_component(
+                    _read_component_combo_value(component_combo)
+                )
+                _set_channel_selector_state(
+                    channel_selector,
+                    selected_channels=self._normalize_visualization_channels(
+                        channel_selector.property("_clearexSelectedChannels")
+                    ),
+                    available_channels=available_channels,
+                )
+
             def _make_type_combo(current_value: str) -> QComboBox:
                 combo = _configure_combo_size(QComboBox(table))
                 combo.addItem("Image", "image")
@@ -10983,7 +11185,27 @@ if HAS_PYQT6:
                 channels = self._normalize_visualization_channels(
                     values.get("channels")
                 )
-                channels_text = ", ".join(str(value) for value in channels)
+                component_combo = _make_component_combo(
+                    str(
+                        values.get("component", values.get("source_component", ""))
+                    ).strip()
+                )
+                channels_selector = _make_channel_selector(
+                    current_channels=channels,
+                    component_combo=component_combo,
+                )
+                component_combo.currentIndexChanged.connect(
+                    lambda _index, combo=component_combo, selector=channels_selector: _sync_channel_selector_for_component(
+                        component_combo=combo,
+                        channel_selector=selector,
+                    )
+                )
+                component_combo.editTextChanged.connect(
+                    lambda _text, combo=component_combo, selector=channels_selector: _sync_channel_selector_for_component(
+                        component_combo=combo,
+                        channel_selector=selector,
+                    )
+                )
                 table.setCellWidget(
                     row_index,
                     0,
@@ -10995,11 +11217,7 @@ if HAS_PYQT6:
                 table.setCellWidget(
                     row_index,
                     1,
-                    _make_component_combo(
-                        str(
-                            values.get("component", values.get("source_component", ""))
-                        ).strip()
-                    ),
+                    component_combo,
                 )
                 table.setCellWidget(
                     row_index,
@@ -11009,10 +11227,7 @@ if HAS_PYQT6:
                 table.setCellWidget(
                     row_index,
                     3,
-                    _make_text_input(
-                        channels_text,
-                        placeholder_text="All channels",
-                    ),
+                    channels_selector,
                 )
                 table.setCellWidget(
                     row_index,
@@ -11152,9 +11367,15 @@ if HAS_PYQT6:
                         else "image"
                     ),
                     "channels": self._normalize_visualization_channels(
-                        channels_widget.text()
-                        if isinstance(channels_widget, QLineEdit)
-                        else ""
+                        (
+                            channels_widget.property("_clearexSelectedChannels")
+                            if isinstance(channels_widget, QPushButton)
+                            else (
+                                channels_widget.text()
+                                if isinstance(channels_widget, QLineEdit)
+                                else ""
+                            )
+                        )
                     ),
                     "visible": (
                         self._coerce_optional_bool(visible_widget.currentData())
