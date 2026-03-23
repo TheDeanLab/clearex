@@ -31,6 +31,12 @@ except ImportError:  # pragma: no cover - optional fast-path dependency
     _phase_cross_correlation = None  # type: ignore[assignment]
 
 from clearex.io.experiment import load_navigate_experiment
+from clearex.io.ome_store import (
+    analysis_auxiliary_root,
+    analysis_cache_data_component,
+    analysis_cache_root,
+    public_analysis_root,
+)
 from clearex.io.provenance import register_latest_output_reference
 from clearex.workflow import SpatialCalibrationConfig, spatial_calibration_from_dict
 
@@ -423,24 +429,40 @@ def _resolve_source_components_for_level(
 
 
 def _pyramid_factor_zyx_for_level(
-    root: zarr.hierarchy.Group, *, level: int
+    root: zarr.hierarchy.Group,
+    *,
+    level: int,
+    source_component: Optional[str] = None,
 ) -> tuple[float, float, float]:
     """Return per-axis pyramid factors in ``(z, y, x)`` order."""
     if level <= 0:
         return (1.0, 1.0, 1.0)
 
-    factors = root.attrs.get("data_pyramid_factors_tpczyx")
-    if isinstance(factors, (tuple, list)) and len(factors) > level:
-        entry = factors[level]
-        if isinstance(entry, (tuple, list)) and len(entry) >= 6:
-            try:
-                return (
-                    max(1.0, float(entry[3])),
-                    max(1.0, float(entry[4])),
-                    max(1.0, float(entry[5])),
-                )
-            except Exception:
-                pass
+    candidate_factors: list[Any] = []
+    if source_component:
+        try:
+            source_attrs = dict(root[str(source_component)].attrs)
+        except Exception:
+            source_attrs = {}
+        candidate_factors.extend(
+            [
+                source_attrs.get("pyramid_factors_tpczyx"),
+                source_attrs.get("resolution_pyramid_factors_tpczyx"),
+            ]
+        )
+    candidate_factors.append(root.attrs.get("data_pyramid_factors_tpczyx"))
+    for factors in candidate_factors:
+        if isinstance(factors, (tuple, list)) and len(factors) > level:
+            entry = factors[level]
+            if isinstance(entry, (tuple, list)) and len(entry) >= 6:
+                try:
+                    return (
+                        max(1.0, float(entry[3])),
+                        max(1.0, float(entry[4])),
+                        max(1.0, float(entry[5])),
+                    )
+                except Exception:
+                    pass
     uniform = float(2 ** int(level))
     return (uniform, uniform, uniform)
 
@@ -1900,11 +1922,13 @@ def _prepare_output_group(
         blend_weights_component)``
     """
     root = zarr.open_group(str(zarr_path), mode="a")
-    results_group = root.require_group("results")
-    registration_group = results_group.require_group("registration")
-    if "latest" in registration_group:
-        del registration_group["latest"]
-    latest = registration_group.create_group("latest")
+    cache_root = analysis_cache_root("registration")
+    auxiliary_root = analysis_auxiliary_root("registration")
+    if cache_root in root:
+        del root[cache_root]
+    if auxiliary_root in root:
+        del root[auxiliary_root]
+    latest = root.require_group(cache_root)
     latest.create_dataset(
         name="data",
         shape=output_shape_tpczyx,
@@ -1921,7 +1945,8 @@ def _prepare_output_group(
             "storage_policy": "latest_only",
         }
     )
-    latest.attrs.update(
+    auxiliary_group = root.require_group(auxiliary_root)
+    auxiliary_group.attrs.update(
         {
             "storage_policy": "latest_only",
             "source_component": str(source_component),
@@ -1930,9 +1955,10 @@ def _prepare_output_group(
             "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
             "voxel_size_um_zyx": [float(value) for value in voxel_size_um_zyx],
             "output_origin_xyz_um": [float(value) for value in output_origin_xyz],
+            "data_component": analysis_cache_data_component("registration"),
         }
     )
-    latest.create_dataset(
+    auxiliary_group.create_dataset(
         name="affines_tpx44",
         shape=(output_shape_tpczyx[0], int(root[source_component].shape[1]), 4, 4),
         dtype=np.float64,
@@ -1949,7 +1975,7 @@ def _prepare_output_group(
         blend_mode=str(blend_mode),
         overlap_zyx=overlap_zyx,
     )
-    blend_group = latest.create_group("blend_weights", overwrite=True)
+    blend_group = auxiliary_group.create_group("blend_weights", overwrite=True)
     blend_group.create_dataset(name="profile_z", data=prof_z, dtype=np.float32,
                                overwrite=True)
     blend_group.create_dataset(name="profile_y", data=prof_y, dtype=np.float32,
@@ -1958,10 +1984,10 @@ def _prepare_output_group(
                                overwrite=True)
 
     return (
-        "results/registration/latest",
-        "results/registration/latest/data",
-        "results/registration/latest/affines_tpx44",
-        "results/registration/latest/blend_weights",
+        public_analysis_root("registration"),
+        analysis_cache_data_component("registration"),
+        f"{auxiliary_root}/affines_tpx44",
+        f"{auxiliary_root}/blend_weights",
     )
 
 
@@ -2071,7 +2097,11 @@ def run_registration_analysis(
         raise ValueError("registration anchor_position is out of bounds.")
 
     full_voxel_size_um_zyx = _extract_voxel_size_um_zyx(root, source_component)
-    level_factor_zyx = _pyramid_factor_zyx_for_level(root, level=effective_level)
+    level_factor_zyx = _pyramid_factor_zyx_for_level(
+        root,
+        level=effective_level,
+        source_component=pairwise_source_component,
+    )
     pairwise_voxel_size_um_zyx = (
         float(full_voxel_size_um_zyx[0]) * float(level_factor_zyx[0]),
         float(full_voxel_size_um_zyx[1]) * float(level_factor_zyx[1]),
@@ -2346,7 +2376,7 @@ def run_registration_analysis(
         )
     )
     write_root = zarr.open_group(str(zarr_path), mode="a")
-    latest_group = write_root["results/registration/latest"]
+    latest_group = write_root[analysis_auxiliary_root("registration")]
     latest_group.create_dataset(
         name="edges_pe2",
         data=(
@@ -2409,7 +2439,9 @@ def run_registration_analysis(
             source_component=source_component,
             output_component=data_component,
             affines_component=affines_component,
-            transformed_bboxes_component="results/registration/latest/transformed_bboxes_tpx6",
+            transformed_bboxes_component=(
+                f"{analysis_auxiliary_root('registration')}/transformed_bboxes_tpx6"
+            ),
             blend_weights_component=blend_weights_component,
             t_index=t_index,
             c_index=c_index,

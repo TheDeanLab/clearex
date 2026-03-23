@@ -51,6 +51,7 @@ import zarr
 
 # Local Imports
 from clearex.io.experiment import load_navigate_experiment
+from clearex.io.ome_store import analysis_auxiliary_root, load_store_metadata
 from clearex.io.provenance import register_latest_output_reference
 from clearex.workflow import (
     SpatialCalibrationConfig,
@@ -937,7 +938,7 @@ def _build_napari_layer_payload(
         "detection_component": str(
             parameters.get(
                 "particle_detection_component",
-                "results/particle_detection/latest/detections",
+                f"{analysis_auxiliary_root('particle_detection')}/detections",
             )
         ),
         "source_data_path": root_attrs.get("source_data_path"),
@@ -994,10 +995,10 @@ def _normalize_visualization_parameters(
         str(
             normalized.get(
                 "particle_detection_component",
-                "results/particle_detection/latest/detections",
+                f"{analysis_auxiliary_root('particle_detection')}/detections",
             )
         ).strip()
-        or "results/particle_detection/latest/detections"
+        or f"{analysis_auxiliary_root('particle_detection')}/detections"
     )
     normalized["require_gpu_rendering"] = bool(
         normalized.get("require_gpu_rendering", True)
@@ -3062,6 +3063,8 @@ def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
 
 def _load_spatial_calibration(
     root_attrs: Mapping[str, Any],
+    *,
+    store_metadata: Optional[Mapping[str, Any]] = None,
 ) -> SpatialCalibrationConfig:
     """Load store-level spatial calibration from root attrs.
 
@@ -3075,11 +3078,17 @@ def _load_spatial_calibration(
     SpatialCalibrationConfig
         Parsed store calibration. Missing attrs resolve to identity.
     """
+    if isinstance(store_metadata, Mapping):
+        payload = store_metadata.get("spatial_calibration")
+        if payload is not None:
+            return spatial_calibration_from_dict(payload)
     return spatial_calibration_from_dict(root_attrs.get("spatial_calibration"))
 
 
 def _load_multiposition_stage_rows(
     root_attrs: Mapping[str, Any],
+    *,
+    store_metadata: Optional[Mapping[str, Any]] = None,
 ) -> list[dict[str, float]]:
     """Load multiposition stage rows from sidecar metadata when available.
 
@@ -3094,7 +3103,17 @@ def _load_multiposition_stage_rows(
         Parsed stage rows from ``multi_positions.yml`` or fallback metadata.
         Returns an empty list when stage metadata cannot be resolved.
     """
-    source_experiment = root_attrs.get("source_experiment")
+    if isinstance(store_metadata, Mapping):
+        stage_rows = store_metadata.get("stage_rows")
+        parsed_stage_rows = _parse_multiposition_stage_rows(stage_rows)
+        if parsed_stage_rows:
+            return parsed_stage_rows
+
+    source_experiment = (
+        store_metadata.get("source_experiment")
+        if isinstance(store_metadata, Mapping)
+        else root_attrs.get("source_experiment")
+    )
     if not isinstance(source_experiment, str):
         return []
 
@@ -3209,6 +3228,7 @@ def _resolve_world_axis_delta(
 def _resolve_position_affines_tczyx(
     *,
     root_attrs: Mapping[str, Any],
+    store_metadata: Optional[Mapping[str, Any]],
     selected_positions: Sequence[int],
     scale_tczyx: Sequence[float],
 ) -> tuple[dict[int, np.ndarray], list[dict[str, float]], SpatialCalibrationConfig]:
@@ -3232,8 +3252,14 @@ def _resolve_position_affines_tczyx(
     affines: dict[int, np.ndarray] = {
         int(index): np.eye(6, dtype=np.float64) for index in selected_positions
     }
-    spatial_calibration = _load_spatial_calibration(root_attrs)
-    stage_rows = _load_multiposition_stage_rows(root_attrs)
+    spatial_calibration = _load_spatial_calibration(
+        root_attrs,
+        store_metadata=store_metadata,
+    )
+    stage_rows = _load_multiposition_stage_rows(
+        root_attrs,
+        store_metadata=store_metadata,
+    )
     if not stage_rows:
         return affines, [], spatial_calibration
 
@@ -4095,13 +4121,11 @@ def _save_display_pyramid_metadata(
     run_id: Optional[str] = None,
 ) -> str:
     """Persist display-pyramid metadata in ``results/display_pyramid/latest``."""
-    component = "results/display_pyramid/latest"
     root = zarr.open_group(str(zarr_path), mode="a")
-    results_group = root.require_group("results")
-    display_pyramid_group = results_group.require_group("display_pyramid")
-    if "latest" in display_pyramid_group:
-        del display_pyramid_group["latest"]
-    latest_group = display_pyramid_group.create_group("latest")
+    component = analysis_auxiliary_root("display_pyramid")
+    if component in root:
+        del root[component]
+    latest_group = root.require_group(component)
 
     payload: Dict[str, Any] = {
         "source_component": str(source_component),
@@ -4356,13 +4380,11 @@ def _save_visualization_metadata(
     str
         Component path for the latest visualization metadata group.
     """
-    component = "results/visualization/latest"
     root = zarr.open_group(str(zarr_path), mode="a")
-    results_group = root.require_group("results")
-    visualization_group = results_group.require_group("visualization")
-    if "latest" in visualization_group:
-        del visualization_group["latest"]
-    latest_group = visualization_group.create_group("latest")
+    component = analysis_auxiliary_root("visualization")
+    if component in root:
+        del root[component]
+    latest_group = root.require_group(component)
 
     payload: Dict[str, Any] = {
         "source_component": str(source_component),
@@ -4556,6 +4578,7 @@ def run_visualization_analysis(
         spatial_calibration,
     ) = _resolve_position_affines_tczyx(
         root_attrs=dict(root.attrs),
+        store_metadata=load_store_metadata(root),
         selected_positions=selected_positions,
         scale_tczyx=napari_payload.scale_tczyx,
     )

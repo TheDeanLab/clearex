@@ -227,6 +227,25 @@ def create_parser() -> argparse.ArgumentParser:
         type=str,
         required=False,
     )
+    parser.add_argument(
+        "--migrate-store",
+        type=str,
+        default=None,
+        help="Migrate one legacy ClearEx .zarr/.n5 store into canonical OME-Zarr v3 layout.",
+    )
+    parser.add_argument(
+        "--migrate-output",
+        type=str,
+        default=None,
+        help="Optional destination path for --migrate-store (defaults to <name>.ome.zarr).",
+    )
+    parser.add_argument(
+        "--migrate-overwrite",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Overwrite the destination path when using --migrate-store.",
+    )
 
     parser.add_argument(
         "--dask",

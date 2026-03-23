@@ -47,6 +47,7 @@ from clearex.detect.particles import (
     preprocess,
     remove_close_blobs,
 )
+from clearex.io.ome_store import analysis_auxiliary_root
 from clearex.io.provenance import register_latest_output_reference
 
 if TYPE_CHECKING:
@@ -550,12 +551,11 @@ def save_particle_detections_to_store(
     str
         Latest component path for particle-detection results.
     """
+    component = analysis_auxiliary_root("particle_detection")
     root = zarr.open_group(str(zarr_path), mode="a")
-    results_group = root.require_group("results")
-    particle_group = results_group.require_group("particle_detection")
-    if "latest" in particle_group:
-        del particle_group["latest"]
-    latest_group = particle_group.create_group("latest")
+    if component in root:
+        del root[component]
+    latest_group = root.require_group(component)
 
     detection_array = np.asarray(detections, dtype=np.float32)
     row_chunks = int(min(max(1, detection_array.shape[0]), 16384))
@@ -590,12 +590,11 @@ def save_particle_detections_to_store(
             "channel_index": int(parameters.get("channel_index", 0)),
             "detection_count": int(detection_array.shape[0]),
             "parameters": {str(k): v for k, v in dict(parameters).items()},
-            "napari_points_component": "results/particle_detection/latest/points_tzyx",
+            "napari_points_component": f"{component}/points_tzyx",
             "run_id": run_id,
         }
     )
 
-    component = "results/particle_detection/latest"
     register_latest_output_reference(
         zarr_path=zarr_path,
         analysis_name="particle_detection",

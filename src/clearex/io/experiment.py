@@ -63,10 +63,26 @@ import zarr
 from dask.delayed import delayed
 
 # Local Imports
+from clearex.io.ome_store import (
+    CLEAREX_PROVENANCE_GROUP,
+    CLEAREX_RESULTS_GROUP,
+    CLEAREX_ROOT_GROUP,
+    CLEAREX_RUNTIME_SOURCE_ROOT,
+    SOURCE_CACHE_PYRAMID_ROOT,
+    SOURCE_CACHE_COMPONENT,
+    compute_position_translations_zyx_um,
+    default_ome_store_path,
+    ensure_group,
+    is_ome_zarr_path,
+    load_store_spatial_calibration as load_namespaced_store_spatial_calibration,
+    publish_source_collection_from_cache,
+    save_store_spatial_calibration as save_namespaced_store_spatial_calibration,
+    source_cache_component,
+    update_store_metadata,
+)
 from clearex.io.read import ImageInfo
 from clearex.workflow import (
     SpatialCalibrationConfig,
-    spatial_calibration_from_dict,
     spatial_calibration_to_dict,
 )
 
@@ -111,7 +127,7 @@ def _is_zarr_like_path(path: Path) -> bool:
 
 
 def has_canonical_data_component(zarr_path: Union[str, Path]) -> bool:
-    """Return whether a store contains canonical 6D analysis data.
+    """Return whether a store contains canonical 6D runtime-cache source data.
 
     Parameters
     ----------
@@ -121,24 +137,25 @@ def has_canonical_data_component(zarr_path: Union[str, Path]) -> bool:
     Returns
     -------
     bool
-        ``True`` when the store exposes a ``data`` array in canonical
+        ``True`` when the store exposes a namespaced runtime-cache ``data``
+        array in canonical
         ``(t, p, c, z, y, x)`` form. If axis metadata is present, it must
         also normalize to that same canonical order.
 
     Notes
     -----
     This helper is intentionally conservative and returns ``False`` for any
-    unreadable, missing, or malformed ``data`` component.
+        unreadable, missing, or malformed runtime-cache data component.
     """
     try:
         root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r")
     except Exception:
         return False
 
-    if "data" not in root:
+    if SOURCE_CACHE_COMPONENT not in root:
         return False
 
-    data = root["data"]
+    data = root[SOURCE_CACHE_COMPONENT]
     if not hasattr(data, "shape"):
         return False
 
@@ -237,7 +254,7 @@ def _write_ingestion_progress_record(
 def load_store_spatial_calibration(
     zarr_path: Union[str, Path],
 ) -> SpatialCalibrationConfig:
-    """Load store-level spatial calibration from root Zarr attrs.
+    """Load store-level spatial calibration from namespaced store metadata.
 
     Parameters
     ----------
@@ -254,15 +271,14 @@ def load_store_spatial_calibration(
     ValueError
         If stored spatial calibration metadata is malformed.
     """
-    root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r")
-    return spatial_calibration_from_dict(root.attrs.get(_SPATIAL_CALIBRATION_ATTR))
+    return load_namespaced_store_spatial_calibration(zarr_path)
 
 
 def save_store_spatial_calibration(
     zarr_path: Union[str, Path],
     calibration: SpatialCalibrationConfig,
 ) -> SpatialCalibrationConfig:
-    """Persist store-level spatial calibration into root Zarr attrs.
+    """Persist store-level spatial calibration into namespaced store metadata.
 
     Parameters
     ----------
@@ -276,11 +292,7 @@ def save_store_spatial_calibration(
     SpatialCalibrationConfig
         Normalized calibration written to the store.
     """
-    normalized = spatial_calibration_from_dict(calibration)
-    serialized = json.loads(json.dumps(spatial_calibration_to_dict(normalized)))
-    root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="a")
-    root.attrs[_SPATIAL_CALIBRATION_ATTR] = serialized
-    return normalized
+    return save_namespaced_store_spatial_calibration(zarr_path, calibration)
 
 
 def _resolve_expected_pyramid_level_factors(
@@ -352,7 +364,8 @@ def _expected_pyramid_components(
     Returns
     -------
     list[str]
-        Ordered component paths beginning with ``"data"``.
+        Ordered runtime-cache component paths beginning with the source base
+        component.
 
     Raises
     ------
@@ -360,8 +373,8 @@ def _expected_pyramid_components(
         This helper does not raise custom exceptions.
     """
     return [
-        "data",
-        *[f"data_pyramid/level_{idx}" for idx in range(1, len(level_factors))],
+        SOURCE_CACHE_COMPONENT,
+        *[source_cache_component(level_index=idx) for idx in range(1, len(level_factors))],
     ]
 
 
@@ -390,9 +403,9 @@ def _has_expected_pyramid_structure(
     None
         Structural mismatches return ``False``.
     """
-    if "data" not in root:
+    if SOURCE_CACHE_COMPONENT not in root:
         return False
-    data = root["data"]
+    data = root[SOURCE_CACHE_COMPONENT]
     if not hasattr(data, "shape") or not hasattr(data, "chunks"):
         return False
     try:
@@ -413,14 +426,14 @@ def _has_expected_pyramid_structure(
         return True
 
     expected_components = _expected_pyramid_components(level_factors)
-    configured_levels = root.attrs.get("data_pyramid_levels")
+    configured_levels = data.attrs.get("pyramid_levels")
     if isinstance(configured_levels, (list, tuple)):
         configured_paths = [str(value) for value in configured_levels]
         if configured_paths != expected_components:
             return False
 
     for level_index, factors in enumerate(level_factors[1:], start=1):
-        component = f"data_pyramid/level_{level_index}"
+        component = source_cache_component(level_index=level_index)
         if component not in root:
             return False
         level_array = root[component]
@@ -572,7 +585,7 @@ def has_complete_canonical_data_store(
     except Exception:
         return False
 
-    data = root.get("data")
+    data = root.get(SOURCE_CACHE_COMPONENT)
     if data is None or not hasattr(data, "shape") or not hasattr(data, "chunks"):
         return False
     if data.chunks is None:
@@ -603,7 +616,7 @@ def has_complete_canonical_data_store(
     required_components = (
         _expected_pyramid_components(level_factors)
         if level_factors is not None
-        else ["data"]
+        else [SOURCE_CACHE_COMPONENT]
     )
 
     record = _read_ingestion_progress_record(root)
@@ -3008,12 +3021,12 @@ def _materialize_data_pyramid(
         ]
     ] = None,
 ) -> list[str]:
-    """Build and persist downsampled Zarr pyramid levels in canonical store.
+    """Build and persist downsampled runtime-cache pyramid levels.
 
     Parameters
     ----------
     store_path : pathlib.Path
-        Target Zarr store containing canonical ``data`` array.
+        Target OME-Zarr store containing namespaced runtime-cache source data.
     base_chunks_tpczyx : tuple[int, int, int, int, int, int]
         Effective base chunking in canonical order.
     pyramid_factors : tuple[tuple[int, ...], ...]
@@ -3045,46 +3058,47 @@ def _materialize_data_pyramid(
     Raises
     ------
     ValueError
-        If canonical base data or pyramid configuration is invalid.
+        If runtime-cache base data or pyramid configuration is invalid.
 
     Notes
     -----
-    Levels are stored under ``data_pyramid/level_<n>`` where ``n`` starts at 1.
+    Levels are stored under ``clearex/runtime_cache/source/data_pyramid``.
     Downsampling uses stride-based nearest-neighbor decimation for speed and
     deterministic dtype preservation.
     """
     level_factors = _normalize_pyramid_level_factors(pyramid_factors)
     root = zarr.open_group(str(store_path), mode="a")
-    if "data" not in root:
-        raise ValueError(f"Expected canonical data array at {store_path}/data.")
-    base_dtype = np.dtype(root["data"].dtype)
+    if SOURCE_CACHE_COMPONENT not in root:
+        raise ValueError(
+            f"Expected runtime-cache data array at {store_path}/{SOURCE_CACHE_COMPONENT}."
+        )
+    base_dtype = np.dtype(root[SOURCE_CACHE_COMPONENT].dtype)
 
-    if not preserve_existing and "data_pyramid" in root:
-        del root["data_pyramid"]
-    root.require_group("data_pyramid")
+    if not preserve_existing and SOURCE_CACHE_PYRAMID_ROOT in root:
+        del root[SOURCE_CACHE_PYRAMID_ROOT]
+    ensure_group(root, SOURCE_CACHE_PYRAMID_ROOT)
     resume_offsets = dict(start_regions_by_component or {})
 
     base_shape = _normalize_tpczyx_shape(
-        tuple(int(size) for size in root["data"].shape)
+        tuple(int(size) for size in root[SOURCE_CACHE_COMPONENT].shape)
     )
-    level_paths = ["data"]
+    level_paths = [SOURCE_CACHE_COMPONENT]
     level_factor_payload = [[int(value) for value in level_factors[0]]]
     level_shapes_payload = [[int(value) for value in base_shape]]
     total_downsample_levels = max(0, len(level_factors) - 1)
 
     if total_downsample_levels == 0:
-        root["data"].attrs.update(
+        root[SOURCE_CACHE_COMPONENT].attrs.update(
             {
                 "pyramid_levels": level_paths,
                 "pyramid_factors_tpczyx": level_factor_payload,
             }
         )
-        root.attrs.update(
-            {
-                "data_pyramid_levels": level_paths,
-                "data_pyramid_factors_tpczyx": level_factor_payload,
-                "data_pyramid_shapes_tpczyx": level_shapes_payload,
-            }
+        update_store_metadata(
+            root,
+            data_pyramid_levels=level_paths,
+            data_pyramid_factors_tpczyx=level_factor_payload,
+            data_pyramid_shapes_tpczyx=level_shapes_payload,
         )
         if progress_callback is not None:
             progress_callback(
@@ -3092,7 +3106,7 @@ def _materialize_data_pyramid(
             )
         return level_paths
 
-    prior_component = "data"
+    prior_component = SOURCE_CACHE_COMPONENT
     prior_factors = level_factors[0]
     for level_index, absolute_factors in enumerate(level_factors[1:], start=1):
         all_relative = all(
@@ -3111,7 +3125,7 @@ def _materialize_data_pyramid(
             source_component = prior_component
             downsample_factors = relative_factors
         else:
-            source_component = "data"
+            source_component = SOURCE_CACHE_COMPONENT
             downsample_factors = absolute_factors
 
         message = (
@@ -3142,7 +3156,7 @@ def _materialize_data_pyramid(
         with dask.config.set({"array.rechunk.method": "tasks"}):
             downsampled = downsampled.rechunk(level_chunks)
 
-        component = f"data_pyramid/level_{level_index}"
+        component = source_cache_component(level_index=level_index)
         root = zarr.open_group(str(store_path), mode="a")
         level_total_regions = _count_tpczyx_chunk_regions(
             shape_tpczyx=level_shape,
@@ -3164,12 +3178,13 @@ def _materialize_data_pyramid(
         ):
             should_overwrite_level = False
         if should_overwrite_level:
-            root.create_dataset(
+            root.create_array(
                 name=component,
                 shape=level_shape,
                 chunks=level_chunks,
                 dtype=base_dtype.name,
                 overwrite=True,
+                dimension_names=("t", "p", "c", "z", "y", "x"),
             )
             start_region_index = 0
 
@@ -3218,18 +3233,17 @@ def _materialize_data_pyramid(
         prior_component = component
         prior_factors = absolute_factors
 
-    root["data"].attrs.update(
+    root[SOURCE_CACHE_COMPONENT].attrs.update(
         {
             "pyramid_levels": level_paths,
             "pyramid_factors_tpczyx": level_factor_payload,
         }
     )
-    root.attrs.update(
-        {
-            "data_pyramid_levels": level_paths,
-            "data_pyramid_factors_tpczyx": level_factor_payload,
-            "data_pyramid_shapes_tpczyx": level_shapes_payload,
-        }
+    update_store_metadata(
+        root,
+        data_pyramid_levels=level_paths,
+        data_pyramid_factors_tpczyx=level_factor_payload,
+        data_pyramid_shapes_tpczyx=level_shapes_payload,
     )
     if progress_callback is not None:
         progress_callback(int(progress_end), "Pyramid generation complete")
@@ -3335,9 +3349,9 @@ def resolve_data_store_path(
     Returns
     -------
     pathlib.Path
-        Destination Zarr store path. Existing Zarr/N5 sources are reused
-        in-place; non-Zarr sources are materialized as ``data_store.zarr``
-        next to ``experiment.yml``.
+        Destination OME-Zarr v3 store path. Existing OME-Zarr sources are
+        reused in-place; all other sources are materialized as
+        ``data_store.ome.zarr`` next to ``experiment.yml``.
 
     Raises
     ------
@@ -3345,9 +3359,9 @@ def resolve_data_store_path(
         This helper does not raise custom exceptions.
     """
     source = Path(source_path).expanduser().resolve()
-    if _is_zarr_like_path(source):
+    if is_ome_zarr_path(source):
         return source
-    return (experiment.path.parent / "data_store.zarr").resolve()
+    return default_ome_store_path(experiment.path.parent)
 
 
 def materialize_experiment_data_store(
@@ -3510,7 +3524,10 @@ def materialize_experiment_data_store(
             _emit_progress(100, "Canonical data store is already complete")
             data_root = zarr.open_group(str(store_path), mode="r")
             data_chunks = tuple(
-                int(value) for value in (data_root["data"].chunks or normalized_chunks)
+                int(value)
+                for value in (
+                    data_root[SOURCE_CACHE_COMPONENT].chunks or normalized_chunks
+                )
             )
             return MaterializedDataStore(
                 source_path=source_resolved,
@@ -3528,7 +3545,7 @@ def materialize_experiment_data_store(
                     shape=canonical_shape,
                     dtype=source_dtype,
                     axes="TPCZYX",
-                    metadata={"component": "data"},
+                    metadata={"component": SOURCE_CACHE_COMPONENT},
                 ),
                 chunks_tpczyx=_normalize_write_chunks(
                     shape_tpczyx=canonical_shape,
@@ -3622,9 +3639,7 @@ def materialize_experiment_data_store(
                 chunks_tpczyx=normalized_chunks,
             )
 
-        should_stage_same_component = (
-            store_path == source_resolved and source_component == "data"
-        )
+        should_stage_same_component = False
         checkpoint_resume_supported = not should_stage_same_component
         root = zarr.open_group(str(store_path), mode="a")
         existing_progress_record = _read_ingestion_progress_record(root)
@@ -3638,7 +3653,7 @@ def materialize_experiment_data_store(
                 record=existing_progress_record,
                 source_path=source_resolved,
                 source_component=source_component,
-                target_component="data",
+                target_component=SOURCE_CACHE_COMPONENT,
                 canonical_shape_tpczyx=canonical_shape,
                 chunks_tpczyx=normalized_chunks,
                 level_factors_tpczyx=level_factors_tpczyx,
@@ -3647,7 +3662,7 @@ def materialize_experiment_data_store(
             )
             and _component_matches_shape_and_chunks(
                 root=root,
-                component="data",
+                component=SOURCE_CACHE_COMPONENT,
                 shape_tpczyx=canonical_shape,
                 chunks_tpczyx=normalized_chunks,
             )
@@ -3673,7 +3688,7 @@ def materialize_experiment_data_store(
             ingestion_record = _create_ingestion_progress_record(
                 source_path=source_resolved,
                 source_component=source_component,
-                target_component="data",
+                target_component=SOURCE_CACHE_COMPONENT,
                 canonical_shape_tpczyx=canonical_shape,
                 chunks_tpczyx=normalized_chunks,
                 level_factors_tpczyx=level_factors_tpczyx,
@@ -3786,7 +3801,7 @@ def materialize_experiment_data_store(
                 shape_tpczyx=canonical_shape,
             )
             _write_canonical_component(
-                component="data",
+                component=SOURCE_CACHE_COMPONENT,
                 progress_start=55,
                 progress_end=70,
                 progress_label="Writing canonical data",
@@ -3855,7 +3870,7 @@ def materialize_experiment_data_store(
         if use_source_aligned_plane_writes
         else "chunk_region_batches"
     )
-    root["data"].attrs.update(
+    root[SOURCE_CACHE_COMPONENT].attrs.update(
         {
             "source_path": source_metadata_path,
             "source_axes": source_axes_attr,
@@ -3879,31 +3894,51 @@ def materialize_experiment_data_store(
         }
     )
     if source_component is not None:
-        root["data"].attrs["source_component"] = source_component
-    root.attrs.update(
-        {
-            "source_data_path": source_metadata_path,
-            "source_data_axes": source_axes_attr,
-            "source_data_component": source_component,
-            "voxel_size_um_zyx": voxel_size_um_zyx,
-            "materialization_write_strategy": write_strategy,
-            "source_aligned_z_batch_depth": (
-                int(source_aligned_z_batch_depth)
-                if source_aligned_z_batch_depth is not None
-                else None
-            ),
-            "source_aligned_worker_count": (
-                int(source_aligned_worker_count)
-                if source_aligned_worker_count is not None
-                else None
-            ),
-            "source_aligned_worker_memory_limit_bytes": (
-                int(source_aligned_worker_memory_limit_bytes)
-                if source_aligned_worker_memory_limit_bytes is not None
-                else None
-            ),
-        }
+        root[SOURCE_CACHE_COMPONENT].attrs["source_component"] = source_component
+
+    stage_rows_payload = _load_multiposition_rows(experiment.save_directory)
+    stage_rows = (
+        [row for row in stage_rows_payload if isinstance(row, dict)]
+        if isinstance(stage_rows_payload, list)
+        else []
     )
+    spatial_calibration = load_store_spatial_calibration(store_path)
+    position_translations_zyx_um = compute_position_translations_zyx_um(
+        stage_rows if stage_rows else None,
+        spatial_calibration,
+        position_count=int(canonical_shape[1]),
+    )
+    update_store_metadata(
+        root,
+        source_data_path=source_metadata_path,
+        source_data_axes=source_axes_attr,
+        source_data_component=source_component,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        materialization_write_strategy=write_strategy,
+        source_aligned_z_batch_depth=(
+            int(source_aligned_z_batch_depth)
+            if source_aligned_z_batch_depth is not None
+            else None
+        ),
+        source_aligned_worker_count=(
+            int(source_aligned_worker_count)
+            if source_aligned_worker_count is not None
+            else None
+        ),
+        source_aligned_worker_memory_limit_bytes=(
+            int(source_aligned_worker_memory_limit_bytes)
+            if source_aligned_worker_memory_limit_bytes is not None
+            else None
+        ),
+        selected_channels=[
+            {"name": channel.name, "laser": channel.laser}
+            for channel in experiment.selected_channels
+        ],
+        stage_rows=stage_rows if stage_rows else None,
+        position_translations_zyx_um=position_translations_zyx_um,
+        spatial_calibration=spatial_calibration_to_dict(spatial_calibration),
+    )
+    publish_source_collection_from_cache(store_path)
 
     source_image_path = Path(source_metadata_path).expanduser()
     if not source_image_path.is_absolute():
@@ -3921,7 +3956,7 @@ def materialize_experiment_data_store(
         shape=canonical_shape,
         dtype=source_dtype,
         axes="TPCZYX",
-        metadata={"component": "data"},
+        metadata={"component": SOURCE_CACHE_COMPONENT},
     )
     _emit_progress(100, "Materialization complete")
     return MaterializedDataStore(
@@ -4912,7 +4947,7 @@ def resolve_experiment_data_path(
 
 
 def default_analysis_store_path(experiment: NavigateExperiment) -> Path:
-    """Return canonical 6D analysis Zarr store path for an experiment.
+    """Return canonical OME-Zarr analysis-store path for an experiment.
 
     Parameters
     ----------
@@ -4922,9 +4957,9 @@ def default_analysis_store_path(experiment: NavigateExperiment) -> Path:
     Returns
     -------
     pathlib.Path
-        Path to canonical analysis store (``analysis_6d.zarr``).
+        Path to canonical analysis store (``analysis.ome.zarr``).
     """
-    return experiment.save_directory / "analysis_6d.zarr"
+    return experiment.save_directory / "analysis.ome.zarr"
 
 
 def infer_zyx_shape(
@@ -4969,7 +5004,7 @@ def initialize_analysis_store(
     ] = ((1,), (1,), (1,), (1, 2, 4, 8), (1, 2, 4, 8), (1, 2, 4, 8)),
     dtype: Optional[str] = None,
 ) -> Path:
-    """Initialize canonical 6D analysis Zarr store for an experiment.
+    """Initialize canonical runtime-cache arrays within an OME-Zarr store.
 
     Parameters
     ----------
@@ -4994,7 +5029,7 @@ def initialize_analysis_store(
     Returns
     -------
     pathlib.Path
-        Resolved Zarr store path.
+        Resolved OME-Zarr store path.
 
     Raises
     ------
@@ -5079,15 +5114,17 @@ def initialize_analysis_store(
 
     root = zarr.open_group(str(output_path), mode="a")
     root.require_group("results")
-    root.require_group("provenance")
-    spatial_calibration_payload = spatial_calibration_to_dict(
-        spatial_calibration_from_dict(root.attrs.get(_SPATIAL_CALIBRATION_ATTR))
-    )
-    if "data" in root:
+    ensure_group(root, CLEAREX_ROOT_GROUP)
+    ensure_group(root, CLEAREX_RESULTS_GROUP)
+    ensure_group(root, CLEAREX_PROVENANCE_GROUP)
+    ensure_group(root, CLEAREX_RUNTIME_SOURCE_ROOT)
+
+    cache_root = ensure_group(root, CLEAREX_RUNTIME_SOURCE_ROOT)
+    if "data" in cache_root:
         if overwrite:
-            del root["data"]
+            del cache_root["data"]
         else:
-            existing = root["data"]
+            existing = cache_root["data"]
             existing_chunks = (
                 [int(chunk) for chunk in existing.chunks]
                 if existing.chunks is not None
@@ -5098,40 +5135,33 @@ def initialize_analysis_store(
                     "axes": ["t", "p", "c", "z", "y", "x"],
                     "storage_policy": "latest_only",
                     "chunk_shape_tpczyx": existing_chunks,
-                    "configured_chunks_tpczyx": [
-                        int(chunk) for chunk in requested_chunks
-                    ],
+                    "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
                     "resolution_pyramid_factors_tpczyx": pyramid_payload,
                     "voxel_size_um_zyx": voxel_size_um_zyx,
                 }
             )
-            root.attrs.update(
-                {
-                    "schema": "clearex.analysis_store.v1",
-                    "axes": ["t", "p", "c", "z", "y", "x"],
-                    "source_experiment": str(experiment.path),
-                    "navigate_experiment": experiment.to_metadata_dict(),
-                    "storage_policy_analysis_outputs": "latest_only",
-                    "storage_policy_provenance": "append_only",
-                    _SPATIAL_CALIBRATION_ATTR: spatial_calibration_payload,
-                    "chunk_shape_tpczyx": existing_chunks,
-                    "configured_chunks_tpczyx": [
-                        int(chunk) for chunk in requested_chunks
-                    ],
-                    "resolution_pyramid_factors_tpczyx": pyramid_payload,
-                    "voxel_size_um_zyx": voxel_size_um_zyx,
-                }
+            update_store_metadata(
+                root,
+                source_experiment=str(experiment.path),
+                navigate_experiment=experiment.to_metadata_dict(),
+                storage_policy_analysis_outputs="latest_only",
+                storage_policy_provenance="append_only",
+                chunk_shape_tpczyx=existing_chunks,
+                configured_chunks_tpczyx=[int(chunk) for chunk in requested_chunks],
+                resolution_pyramid_factors_tpczyx=pyramid_payload,
+                voxel_size_um_zyx=voxel_size_um_zyx,
             )
             return output_path
 
-    root.create_dataset(
-        name="data",
+    cache_root.create_array(
+        "data",
         shape=shape,
         chunks=normalized_chunks,
         dtype=dtype,
         overwrite=True,
+        dimension_names=("t", "p", "c", "z", "y", "x"),
     )
-    root["data"].attrs.update(
+    cache_root["data"].attrs.update(
         {
             "axes": ["t", "p", "c", "z", "y", "x"],
             "storage_policy": "latest_only",
@@ -5139,22 +5169,24 @@ def initialize_analysis_store(
             "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
             "resolution_pyramid_factors_tpczyx": pyramid_payload,
             "voxel_size_um_zyx": voxel_size_um_zyx,
+            "pyramid_levels": _expected_pyramid_components(
+                _normalize_pyramid_level_factors(pyramid_factors)
+            ),
         }
     )
-    root.attrs.update(
-        {
-            "schema": "clearex.analysis_store.v1",
-            "axes": ["t", "p", "c", "z", "y", "x"],
-            "source_experiment": str(experiment.path),
-            "navigate_experiment": experiment.to_metadata_dict(),
-            "storage_policy_analysis_outputs": "latest_only",
-            "storage_policy_provenance": "append_only",
-            _SPATIAL_CALIBRATION_ATTR: spatial_calibration_payload,
-            "chunk_shape_tpczyx": [int(chunk) for chunk in normalized_chunks],
-            "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
-            "resolution_pyramid_factors_tpczyx": pyramid_payload,
-            "voxel_size_um_zyx": voxel_size_um_zyx,
-        }
+    update_store_metadata(
+        root,
+        source_experiment=str(experiment.path),
+        navigate_experiment=experiment.to_metadata_dict(),
+        storage_policy_analysis_outputs="latest_only",
+        storage_policy_provenance="append_only",
+        chunk_shape_tpczyx=[int(chunk) for chunk in normalized_chunks],
+        configured_chunks_tpczyx=[int(chunk) for chunk in requested_chunks],
+        resolution_pyramid_factors_tpczyx=pyramid_payload,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        spatial_calibration=spatial_calibration_to_dict(
+            load_namespaced_store_spatial_calibration(root)
+        ),
     )
     return output_path
 
@@ -5605,7 +5637,7 @@ def write_zyx_block(
         return da.to_zarr(
             block_6d,
             url=str(zarr_path),
-            component="data",
+            component=SOURCE_CACHE_COMPONENT,
             region=region,
             overwrite=False,
             compute=compute,
@@ -5613,7 +5645,7 @@ def write_zyx_block(
 
     if isinstance(block, np.ndarray):
         root = zarr.open_group(str(zarr_path), mode="a")
-        root["data"][region] = block[None, None, None, :, :, :]
+        root[SOURCE_CACHE_COMPONENT][region] = block[None, None, None, :, :, :]
         return None
 
     raise TypeError(

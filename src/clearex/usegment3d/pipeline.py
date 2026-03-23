@@ -52,6 +52,12 @@ from skimage.transform import resize
 import zarr
 
 # Local Imports
+from clearex.io.ome_store import (
+    analysis_auxiliary_root,
+    analysis_cache_data_component,
+    analysis_cache_root,
+    public_analysis_root,
+)
 from clearex.io.provenance import register_latest_output_reference
 from clearex.workflow import (
     default_analysis_operation_parameters,
@@ -400,6 +406,7 @@ def _pyramid_factor_zyx_for_level(
     root: zarr.hierarchy.Group,
     *,
     level: int,
+    source_component: Optional[str] = None,
 ) -> tuple[float, float, float]:
     """Return pyramid downsampling factors for one level in ``(z, y, x)``.
 
@@ -418,19 +425,33 @@ def _pyramid_factor_zyx_for_level(
     if level <= 0:
         return (1.0, 1.0, 1.0)
 
-    factors = root.attrs.get("data_pyramid_factors_tpczyx")
-    if isinstance(factors, (tuple, list)) and len(factors) > level:
-        level_entry = factors[level]
-        if isinstance(level_entry, (tuple, list)) and len(level_entry) >= 6:
-            try:
-                parsed = (
-                    max(1.0, float(level_entry[3])),
-                    max(1.0, float(level_entry[4])),
-                    max(1.0, float(level_entry[5])),
-                )
-                return parsed
-            except Exception:
-                pass
+    candidate_factors: list[Any] = []
+    if source_component:
+        try:
+            source_attrs = dict(root[str(source_component)].attrs)
+        except Exception:
+            source_attrs = {}
+        candidate_factors.extend(
+            [
+                source_attrs.get("pyramid_factors_tpczyx"),
+                source_attrs.get("resolution_pyramid_factors_tpczyx"),
+            ]
+        )
+    candidate_factors.append(root.attrs.get("data_pyramid_factors_tpczyx"))
+
+    for factors in candidate_factors:
+        if isinstance(factors, (tuple, list)) and len(factors) > level:
+            level_entry = factors[level]
+            if isinstance(level_entry, (tuple, list)) and len(level_entry) >= 6:
+                try:
+                    parsed = (
+                        max(1.0, float(level_entry[3])),
+                        max(1.0, float(level_entry[4])),
+                        max(1.0, float(level_entry[5])),
+                    )
+                    return parsed
+                except Exception:
+                    pass
 
     uniform = float(2 ** int(level))
     return (uniform, uniform, uniform)
@@ -592,11 +613,13 @@ def _prepare_output_array(
     )
     output_dtype = np.dtype(str(parameters.get("output_dtype", "uint32")))
 
-    results_group = root.require_group("results")
-    usegment_group = results_group.require_group("usegment3d")
-    if "latest" in usegment_group:
-        del usegment_group["latest"]
-    latest = usegment_group.create_group("latest")
+    cache_root = analysis_cache_root("usegment3d")
+    auxiliary_root = analysis_auxiliary_root("usegment3d")
+    if cache_root in root:
+        del root[cache_root]
+    if auxiliary_root in root:
+        del root[auxiliary_root]
+    latest = root.require_group(cache_root)
     latest.create_dataset(
         name="data",
         shape=output_shape,
@@ -634,7 +657,7 @@ def _prepare_output_array(
             dtype=output_dtype,
             overwrite=True,
         )
-        native_data_component = "results/usegment3d/latest/data_native"
+        native_data_component = f"{cache_root}/data_native"
     latest.attrs.update(
         {
             "storage_policy": "latest_only",
@@ -646,10 +669,11 @@ def _prepare_output_array(
             "run_id": None,
         }
     )
+    root.require_group(auxiliary_root).attrs.update(dict(latest.attrs))
 
     return (
-        "results/usegment3d/latest",
-        "results/usegment3d/latest/data",
+        public_analysis_root("usegment3d"),
+        analysis_cache_data_component("usegment3d"),
         (
             int(output_shape[0]),
             int(output_shape[1]),
@@ -1351,10 +1375,12 @@ def run_usegment3d_analysis(
     source_factor_zyx = _pyramid_factor_zyx_for_level(
         root,
         level=effective_resolution_level,
+        source_component=source_component,
     )
     output_factor_zyx = _pyramid_factor_zyx_for_level(
         root,
         level=output_resolution_level,
+        source_component=output_reference_component,
     )
     source_voxel_size_um_zyx = (
         float(base_voxel_size_um_zyx[0] * source_factor_zyx[0]),

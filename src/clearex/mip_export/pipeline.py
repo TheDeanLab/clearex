@@ -43,6 +43,7 @@ import tifffile
 import zarr
 
 # Local Imports
+from clearex.io.ome_store import analysis_auxiliary_root
 from clearex.io.provenance import register_latest_output_reference
 
 if TYPE_CHECKING:
@@ -2248,14 +2249,12 @@ def run_mip_export_analysis(
     task_results = sorted(task_results, key=lambda item: str(item.get("path", "")))
     exported_files = int(len(task_results))
 
-    component = "results/mip_export/latest"
+    component = analysis_auxiliary_root("mip_export")
     root_w = zarr.open_group(str(zarr_path), mode="a")
     try:
-        results_group = root_w.require_group("results")
-        mip_group = results_group.require_group("mip_export")
-        if "latest" in mip_group:
-            del mip_group["latest"]
-        latest_group = mip_group.create_group("latest")
+        if component in root_w:
+            del root_w[component]
+        latest_group = root_w.require_group(component)
         latest_group.attrs.update(
             {
                 "storage_policy": "latest_only",

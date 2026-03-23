@@ -51,6 +51,12 @@ import numpy as np
 import zarr
 
 # Local Imports
+from clearex.io.ome_store import (
+    analysis_auxiliary_root,
+    analysis_cache_data_component,
+    analysis_cache_root,
+    public_analysis_root,
+)
 from clearex.io.provenance import register_latest_output_reference
 
 if TYPE_CHECKING:
@@ -1251,17 +1257,19 @@ def run_shear_transform_analysis(
         min(source_chunks_tpczyx[4], output_shape_tpczyx[4]),
         min(source_chunks_tpczyx[5], output_shape_tpczyx[5]),
     )
-    component = "results/shear_transform/latest"
-    data_component = f"{component}/data"
+    component = public_analysis_root("shear_transform")
+    data_component = analysis_cache_data_component("shear_transform")
+    cache_root = analysis_cache_root("shear_transform")
+    auxiliary_root = analysis_auxiliary_root("shear_transform")
     output_dtype = str(normalized["output_dtype"])
 
     _emit(5, "Preparing shear-transform output layout")
     root_w = zarr.open_group(str(zarr_path), mode="a")
-    results_group = root_w.require_group("results")
-    shear_group = results_group.require_group("shear_transform")
-    if "latest" in shear_group:
-        del shear_group["latest"]
-    latest_group = shear_group.create_group("latest")
+    if cache_root in root_w:
+        del root_w[cache_root]
+    if auxiliary_root in root_w:
+        del root_w[auxiliary_root]
+    latest_group = root_w.require_group(cache_root)
     latest_group.create_dataset(
         name="data",
         shape=output_shape_tpczyx,
@@ -1297,6 +1305,7 @@ def run_shear_transform_analysis(
             "voxel_size_um_zyx": [float(v) for v in voxel_size_um_zyx],
         }
     )
+    root_w.require_group(auxiliary_root).attrs.update(dict(latest_group.attrs))
 
     out_z_bounds = _axis_chunk_bounds(output_shape_tpczyx[3], output_chunks_tpczyx[3])
     out_y_bounds = _axis_chunk_bounds(output_shape_tpczyx[4], output_chunks_tpczyx[4])
