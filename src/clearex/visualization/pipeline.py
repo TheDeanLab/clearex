@@ -1085,8 +1085,34 @@ def _resolve_effective_launch_mode(requested_mode: str) -> str:
     str
         Effective launch mode (``in_process`` or ``subprocess``).
     """
+
+    def _qt_application_is_active() -> bool:
+        """Return whether a Qt application instance is currently active."""
+        qt_widgets_module = sys.modules.get("PyQt6.QtWidgets")
+        application_cls = (
+            getattr(qt_widgets_module, "QApplication", None)
+            if qt_widgets_module is not None
+            else None
+        )
+        if application_cls is None:
+            try:
+                from PyQt6.QtWidgets import QApplication as _QApplication
+            except Exception:
+                return False
+            application_cls = _QApplication
+        instance_getter = getattr(application_cls, "instance", None)
+        if not callable(instance_getter):
+            return False
+        try:
+            return instance_getter() is not None
+        except Exception:
+            return False
+
     mode = str(requested_mode).strip().lower() or "auto"
     if mode == "auto":
+        if _qt_application_is_active():
+            # Keep GUI workflows non-blocking while napari remains open.
+            return "subprocess"
         if threading.current_thread() is threading.main_thread():
             return "in_process"
         return "subprocess"

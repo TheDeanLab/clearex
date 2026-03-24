@@ -290,6 +290,90 @@ def test_run_visualization_analysis_subprocess_launch(
     assert latest_attrs["keyframe_layer_overrides"] == []
 
 
+def test_resolve_effective_launch_mode_auto_prefers_subprocess_with_qt_app(
+    monkeypatch,
+) -> None:
+    class _FakeQApplication:
+        @staticmethod
+        def instance() -> object:
+            return object()
+
+    class _FakeQtWidgets:
+        QApplication = _FakeQApplication
+
+    monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", _FakeQtWidgets)
+    assert visualization_pipeline._resolve_effective_launch_mode("auto") == "subprocess"
+
+
+def test_resolve_effective_launch_mode_auto_prefers_in_process_without_qt_app(
+    monkeypatch,
+) -> None:
+    class _FakeQApplication:
+        @staticmethod
+        def instance() -> None:
+            return None
+
+    class _FakeQtWidgets:
+        QApplication = _FakeQApplication
+
+    monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", _FakeQtWidgets)
+    assert visualization_pipeline._resolve_effective_launch_mode("auto") == "in_process"
+
+
+def test_run_visualization_analysis_auto_uses_subprocess_with_active_qt_app(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_array(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    class _FakeQApplication:
+        @staticmethod
+        def instance() -> object:
+            return object()
+
+    class _FakeQtWidgets:
+        QApplication = _FakeQApplication
+
+    monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", _FakeQtWidgets)
+
+    captured: dict[str, object] = {}
+
+    def _fake_launch_napari_subprocess(
+        *,
+        zarr_path,
+        normalized_parameters,
+    ) -> int:
+        captured["zarr_path"] = str(zarr_path)
+        captured["parameters"] = dict(normalized_parameters)
+        return 98765
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_launch_napari_subprocess",
+        _fake_launch_napari_subprocess,
+    )
+
+    summary = run_visualization_analysis(
+        zarr_path=store_path,
+        parameters={
+            "launch_mode": "auto",
+            "overlay_particle_detections": False,
+        },
+    )
+
+    assert summary.launch_mode == "subprocess"
+    assert summary.viewer_pid == 98765
+    assert captured["zarr_path"] == str(store_path)
+    assert dict(captured["parameters"])["launch_mode"] == "in_process"
+
+
 def test_run_visualization_analysis_rejects_invalid_position(tmp_path: Path) -> None:
     store_path = tmp_path / "analysis_store.zarr"
     root = zarr.open_group(str(store_path), mode="w")

@@ -217,6 +217,11 @@ napari opened in 2D or 3D.
   display pyramids, not auto-building them.
 - The visualization GUI should describe 3D as a request that may fall back to
   2D for oversized image layers.
+- `launch_mode=auto` should resolve to `subprocess` whenever a Qt application
+  instance is active, so GUI workflows can continue and complete while napari
+  remains open.
+- `launch_mode=auto` in non-Qt contexts retains thread-based behavior:
+  main-thread runs stay `in_process`; non-main-thread runs use `subprocess`.
 
 ## Agent Expectations
 
