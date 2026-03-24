@@ -246,7 +246,6 @@ class TestReaderABC:
                 info = ImageInfo(path=path, shape=arr.shape, dtype=arr.dtype)
                 return arr, info
 
-        reader = EmptySuffixReader()
         assert EmptySuffixReader.claims(Path("any.file")) is False
 
     def test_open_method_signature(self):
@@ -487,6 +486,29 @@ class TestTiffReader:
         assert arr.shape == expected_arr.shape
         # Check that chunking was applied
         assert arr.chunks is not None
+
+    def test_open_tiff_as_dask_falls_back_when_store_is_unsupported(
+        self, monkeypatch, tiff_reader, temp_tiff_3d
+    ):
+        """TIFF Dask loads should still work when da.from_zarr rejects ZarrTiffStore."""
+        tiff_path, expected_arr = temp_tiff_3d
+        calls = {"count": 0}
+
+        def _raise_unsupported_store(*_args, **_kwargs):
+            calls["count"] += 1
+            raise TypeError("Unsupported type for store_like: 'ZarrTiffStore'")
+
+        monkeypatch.setattr(da, "from_zarr", _raise_unsupported_store)
+
+        arr, info = tiff_reader.open(
+            tiff_path, prefer_dask=True, chunks=(2, 64, 64)
+        )
+
+        assert calls["count"] >= 1
+        assert isinstance(arr, da.Array)
+        assert arr.shape == expected_arr.shape
+        assert arr.dtype == expected_arr.dtype
+        assert np.array_equal(arr.compute(), expected_arr)
 
     def test_open_tiff_with_single_chunk_size(self, tiff_reader, temp_tiff_3d):
         """Test opening a TIFF file with a single chunk size for all dimensions."""
@@ -1620,7 +1642,7 @@ class TestHDF5Reader:
 
         hdf5_path = tmp_path / "empty.h5"
         # Create an empty file with no datasets
-        with h5py.File(str(hdf5_path), "w") as f:
+        with h5py.File(str(hdf5_path), "w"):
             pass
 
         with pytest.raises(ValueError, match="No datasets found"):

@@ -90,7 +90,7 @@ from clearex.io.ome_store import (
     source_cache_component,
     update_store_metadata,
 )
-from clearex.io.read import ImageInfo
+from clearex.io.read import ImageInfo, open_tiff_as_dask
 from clearex.workflow import (
     SpatialCalibrationConfig,
     spatial_calibration_to_dict,
@@ -1110,8 +1110,7 @@ def _open_source_as_dask(
             axes = _normalize_axes_descriptor(
                 getattr(series, "axes", None), ndim=len(tuple(series.shape))
             )
-        tiff_store = tifffile.imread(str(source_path), aszarr=True)
-        source_array = da.from_zarr(tiff_store)
+        source_array = open_tiff_as_dask(source_path)
         return source_array, axes, meta
 
     if suffix in {".h5", ".hdf5", ".hdf"}:
@@ -1755,6 +1754,57 @@ def load_navigate_experiment_source_image_info(
         source layout.
     """
     resolved_source = Path(source_path).expanduser().resolve()
+
+    if resolved_source.suffix.lower() in {".tif", ".tiff"}:
+        with tifffile.TiffFile(str(resolved_source)) as tif:
+            series = tif.series[0]
+            axes = getattr(series, "axes", None)
+            metadata: dict[str, Any] = {
+                "tiff_page_count": int(len(tif.pages)),
+                "tiff_tag_names": tuple(
+                    str(tag.name) for tag in tif.pages[0].tags.values()
+                ),
+            }
+            image_description = tif.pages[0].description
+            if isinstance(image_description, str) and image_description.strip():
+                metadata["ImageDescription"] = image_description
+                try:
+                    description_payload = json.loads(image_description)
+                except Exception:
+                    description_payload = None
+                if isinstance(description_payload, dict):
+                    metadata.update(description_payload)
+                    spacing = description_payload.get("spacing")
+                    unit = str(description_payload.get("unit", "")).strip().lower()
+                    if spacing is not None and unit in {"um", "micron", "microns"}:
+                        try:
+                            spacing_um = float(spacing)
+                        except (TypeError, ValueError):
+                            spacing_um = None
+                        xy_um = (
+                            float(experiment.xy_pixel_size_um)
+                            if experiment.xy_pixel_size_um is not None
+                            and experiment.xy_pixel_size_um > 0
+                            else None
+                        )
+                        if (
+                            spacing_um is not None
+                            and spacing_um > 0
+                            and xy_um is not None
+                        ):
+                            metadata["voxel_size_um_zyx"] = (
+                                spacing_um,
+                                xy_um,
+                                xy_um,
+                            )
+            return ImageInfo(
+                path=resolved_source,
+                shape=tuple(int(v) for v in series.shape),
+                dtype=np.dtype(series.dtype),
+                axes=str(axes) if axes else None,
+                metadata=metadata,
+            )
+
     if (
         _normalize_file_type(experiment.file_type) == "N5"
         and resolved_source.suffix.lower() == ".n5"

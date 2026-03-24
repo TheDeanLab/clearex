@@ -49,6 +49,72 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 logger.addHandler(hdlr=logging.NullHandler())
 
 
+def open_tiff_as_dask(
+    path: Path,
+    *,
+    chunks: Optional[Union[int, Tuple[int, ...]]] = None,
+    **kwargs: Any,
+) -> da.Array:
+    """Open one TIFF path as a lazy Dask array with zarr3-safe fallback.
+
+    Parameters
+    ----------
+    path : Path
+        TIFF source path.
+    chunks : int or tuple[int, ...], optional
+        Optional Dask chunking override.
+    **kwargs : dict
+        Additional keyword arguments forwarded to tifffile readers.
+
+    Returns
+    -------
+    dask.array.Array
+        Lazy array view over the TIFF payload.
+
+    Notes
+    -----
+    Under ``zarr>=3``, ``da.from_zarr`` may reject tifffile's ``ZarrTiffStore``
+    objects. In that case we fall back to a memory-mapped TIFF view to preserve
+    lazy chunked reads without requiring zarr v2 behavior.
+    """
+    tiff_store = tifffile.imread(str(path), aszarr=True, **kwargs)
+    try:
+        return (
+            da.from_zarr(tiff_store, chunks=chunks)
+            if chunks is not None
+            else da.from_zarr(tiff_store)
+        )
+    except TypeError as exc:
+        if "Unsupported type for store_like" not in str(exc):
+            raise
+        close = getattr(tiff_store, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        logger.info(
+            "Falling back to tifffile.memmap for %s because ZarrTiffStore is "
+            "not supported by da.from_zarr under zarr3.",
+            path.name,
+        )
+
+    try:
+        mmap = tifffile.memmap(str(path), **kwargs)
+        return da.from_array(
+            mmap,
+            chunks=chunks if chunks is not None else "auto",
+            asarray=False,
+        )
+    except Exception:
+        logger.info(
+            "tifffile.memmap unavailable for %s; using tifffile.imread fallback.",
+            path.name,
+        )
+        arr = tifffile.imread(str(path), **kwargs)
+        return da.from_array(arr, chunks=chunks if chunks is not None else "auto")
+
+
 @dataclass
 class ImageInfo:
     """Container for image metadata.
@@ -360,8 +426,7 @@ class TiffReader(Reader):
         if prefer_dask:
             # Option A: use tifffile's OME-as-zarr path if possible
             # This keeps it lazy and chunked without loading into RAM
-            store = tifffile.imread(str(path), aszarr=True)
-            darr = da.from_zarr(store, chunks=chunks) if chunks else da.from_zarr(store)
+            darr = open_tiff_as_dask(path, chunks=chunks, **kwargs)
             info = ImageInfo(
                 path=path,
                 shape=tuple(darr.shape),
@@ -620,7 +685,9 @@ class ZarrReader(Reader):
             meta["ome_selected"] = True
             if prefer_dask:
                 darr = (
-                    da.from_zarr(array, chunks=chunks) if chunks else da.from_zarr(array)
+                    da.from_zarr(array, chunks=chunks)
+                    if chunks
+                    else da.from_zarr(array)
                 )
                 logger.info(f"Loaded public OME-Zarr array from {path.name}.")
                 info = ImageInfo(

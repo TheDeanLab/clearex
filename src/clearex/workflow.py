@@ -1806,9 +1806,7 @@ def _normalize_registration_parameters(
 
     ants_sampling_rate = float(normalized.get("ants_sampling_rate", 0.20))
     if ants_sampling_rate <= 0.0 or ants_sampling_rate > 1.0:
-        raise ValueError(
-            "registration ants_sampling_rate must be in the range (0, 1]."
-        )
+        raise ValueError("registration ants_sampling_rate must be in the range (0, 1].")
     normalized["ants_sampling_rate"] = ants_sampling_rate
 
     normalized["use_phase_correlation"] = bool(
