@@ -78,12 +78,12 @@ class RegistrationSummary:
     ----------
     component : str
         Output latest-group component.
-    data_component : str
-        Fused output data component.
     affines_component : str
         Optimized affine dataset component.
+    transformed_bboxes_component : str
+        Per-tile transformed bounding box dataset component.
     source_component : str
-        Full-resolution source component used for fusion.
+        Full-resolution source component used for downstream fusion.
     requested_source_component : str
         Requested input source before resolution-level expansion.
     pairwise_source_component : str
@@ -108,17 +108,17 @@ class RegistrationSummary:
         Total active edges after pruning across timepoints.
     dropped_edge_count : int
         Total dropped edges across timepoints.
+    output_origin_xyz_um : tuple[float, float, float]
+        World-space fused-output origin derived from transformed bounds.
     output_shape_tpczyx : tuple[int, int, int, int, int, int]
-        Output fused shape.
+        Fused output shape derived from transformed bounds.
     output_chunks_tpczyx : tuple[int, int, int, int, int, int]
-        Output chunk layout.
-    blend_mode : str
-        Blend mode applied during fusion.
+        Default fused-output chunk layout derived from source chunks.
     """
 
     component: str
-    data_component: str
     affines_component: str
+    transformed_bboxes_component: str
     source_component: str
     requested_source_component: str
     pairwise_source_component: str
@@ -132,9 +132,22 @@ class RegistrationSummary:
     edge_count: int
     active_edge_count: int
     dropped_edge_count: int
+    output_origin_xyz_um: tuple[float, float, float]
     output_shape_tpczyx: tuple[int, int, int, int, int, int]
     output_chunks_tpczyx: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class FusionSummary:
+    """Summary metadata for one fusion run."""
+
+    component: str
+    data_component: str
+    registration_component: str
+    source_component: str
     blend_mode: str
+    output_shape_tpczyx: tuple[int, int, int, int, int, int]
+    output_chunks_tpczyx: tuple[int, int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -1398,6 +1411,120 @@ def _register_pairwise_overlap(
     }
 
 
+def _estimate_pairwise_overlap_intensity(
+    *,
+    zarr_path: str,
+    source_component: str,
+    t_index: int,
+    registration_channel: int,
+    edge: _EdgeSpec,
+    fixed_transform_xyz: np.ndarray,
+    moving_transform_xyz: np.ndarray,
+    voxel_size_um_zyx: Sequence[float],
+    overlap_zyx: Sequence[int],
+    gain_clip_range: Sequence[float] = _DEFAULT_GAIN_CLIP_RANGE,
+) -> dict[str, Any]:
+    """Estimate moving-to-fixed intensity alignment for one overlap edge."""
+    root = zarr.open_group(str(zarr_path), mode="r")
+    source = root[source_component]
+    source_shape_zyx = tuple(int(v) for v in source.shape[3:])
+
+    crop_origin_xyz, crop_shape_zyx = _crop_from_overlap_bbox(
+        edge.overlap_bbox_xyz,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        overlap_zyx=overlap_zyx,
+    )
+    fixed_slices, fixed_adj_transform = _source_subvolume_for_overlap(
+        fixed_transform_xyz,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=crop_shape_zyx,
+        source_shape_zyx=source_shape_zyx,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+    )
+    moving_slices, moving_adj_transform = _source_subvolume_for_overlap(
+        moving_transform_xyz,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=crop_shape_zyx,
+        source_shape_zyx=source_shape_zyx,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+    )
+    if _slices_zyx_are_empty(fixed_slices) or _slices_zyx_are_empty(moving_slices):
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": False,
+            "overlap_voxels": int(edge.overlap_voxels),
+            "intensity_success": False,
+            "intensity_scale": 1.0,
+            "intensity_offset": 0.0,
+            "intensity_samples": 0,
+        }
+
+    fixed_source = np.asarray(
+        source[
+            int(t_index),
+            int(edge.fixed_position),
+            int(registration_channel),
+            fixed_slices[0],
+            fixed_slices[1],
+            fixed_slices[2],
+        ],
+        dtype=np.float32,
+    )
+    moving_source = np.asarray(
+        source[
+            int(t_index),
+            int(edge.moving_position),
+            int(registration_channel),
+            moving_slices[0],
+            moving_slices[1],
+            moving_slices[2],
+        ],
+        dtype=np.float32,
+    )
+    fixed_crop = _resample_source_to_world_grid(
+        fixed_source,
+        fixed_adj_transform,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=crop_shape_zyx,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        order=1,
+        cval=0.0,
+    )
+    moving_crop = _resample_source_to_world_grid(
+        moving_source,
+        moving_adj_transform,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=crop_shape_zyx,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        order=1,
+        cval=0.0,
+    )
+    overlap_pixels = int(
+        np.count_nonzero(
+            np.asarray(fixed_crop > 0, dtype=bool)
+            & np.asarray(moving_crop > 0, dtype=bool)
+        )
+    )
+    intensity_success, intensity_scale, intensity_offset, intensity_samples = (
+        _estimate_linear_intensity_map(
+            fixed_crop,
+            moving_crop,
+            gain_clip_range=gain_clip_range,
+        )
+    )
+    return {
+        "fixed_position": int(edge.fixed_position),
+        "moving_position": int(edge.moving_position),
+        "success": bool(overlap_pixels > 0 and intensity_success),
+        "overlap_voxels": int(overlap_pixels),
+        "intensity_success": bool(intensity_success),
+        "intensity_scale": float(intensity_scale),
+        "intensity_offset": float(intensity_offset),
+        "intensity_samples": int(intensity_samples),
+    }
+
+
 def _matrix_from_pose(params: np.ndarray, registration_type: str) -> np.ndarray:
     """Build a homogeneous correction matrix from pose parameters."""
     matrix = np.eye(4, dtype=np.float64)
@@ -2307,6 +2434,7 @@ def _process_and_write_registration_chunk(
 
 def _prepare_output_group(
     *,
+    analysis_name: str,
     zarr_path: Union[str, Path],
     source_component: str,
     parameters: Mapping[str, Any],
@@ -2319,8 +2447,9 @@ def _prepare_output_group(
     blend_mode: str,
     overlap_zyx: Sequence[int],
     blend_exponent: float,
+    create_affines: bool = True,
 ) -> tuple[str, str, str, str]:
-    """Create latest registration output datasets.
+    """Create latest output datasets for one image-producing analysis.
 
     Returns
     -------
@@ -2329,8 +2458,8 @@ def _prepare_output_group(
         blend_weights_component)``
     """
     root = zarr.open_group(str(zarr_path), mode="a")
-    cache_root = analysis_cache_root("registration")
-    auxiliary_root = analysis_auxiliary_root("registration")
+    cache_root = analysis_cache_root(str(analysis_name))
+    auxiliary_root = analysis_auxiliary_root(str(analysis_name))
     if cache_root in root:
         del root[cache_root]
     if auxiliary_root in root:
@@ -2364,15 +2493,16 @@ def _prepare_output_group(
             "voxel_size_um_zyx": [float(value) for value in voxel_size_um_zyx],
             "voxel_size_resolution_source": str(voxel_size_resolution_source),
             "output_origin_xyz_um": [float(value) for value in output_origin_xyz],
-            "data_component": analysis_cache_data_component("registration"),
+            "data_component": analysis_cache_data_component(str(analysis_name)),
         }
     )
-    auxiliary_group.create_array(
-        name="affines_tpx44",
-        shape=(output_shape_tpczyx[0], int(root[source_component].shape[1]), 4, 4),
-        dtype=np.float64,
-        overwrite=True,
-    )
+    if bool(create_affines):
+        auxiliary_group.create_array(
+            name="affines_tpx44",
+            shape=(output_shape_tpczyx[0], int(root[source_component].shape[1]), 4, 4),
+            dtype=np.float64,
+            overwrite=True,
+        )
 
     # Store the separable 1D blend-weight profiles so fusion workers can
     # reconstruct only the sub-volume they need on-the-fly.  The three
@@ -2410,8 +2540,8 @@ def _prepare_output_group(
     )
 
     return (
-        public_analysis_root("registration"),
-        analysis_cache_data_component("registration"),
+        public_analysis_root(str(analysis_name)),
+        analysis_cache_data_component(str(analysis_name)),
         f"{auxiliary_root}/affines_tpx44",
         f"{auxiliary_root}/blend_weights",
     )
@@ -2604,23 +2734,16 @@ def run_registration_analysis(
     effective_use_fft_initial_alignment = bool(
         parameters.get("use_fft_initial_alignment", True)
     )
-    blend_mode = _normalized_blend_mode(parameters.get("blend_mode", "feather"))
-    effective_blend_exponent = float(
-        parameters.get("blend_exponent", _DEFAULT_BLEND_EXPONENT)
-    )
-    gain_clip_range = parameters.get("gain_clip_range", _DEFAULT_GAIN_CLIP_RANGE)
+    effective_pairwise_overlap_zyx = [
+        int(value)
+        for value in parameters.get(
+            "pairwise_overlap_zyx",
+            parameters.get("overlap_zyx", [8, 32, 32]),
+        )
+    ]
     effective_gain_clip_range = (
-        max(1e-6, float(gain_clip_range[0])),
-        max(max(1e-6, float(gain_clip_range[0])), float(gain_clip_range[1])),
-    )
-    estimate_intensity_correction = _blend_uses_gain_compensation(blend_mode)
-    intensity_gains_tp = np.ones(
-        (int(source_shape_tpczyx[0]), int(source_shape_tpczyx[1])),
-        dtype=np.float32,
-    )
-    intensity_offsets_tp = np.zeros(
-        (int(source_shape_tpczyx[0]), int(source_shape_tpczyx[1])),
-        dtype=np.float32,
+        float(_DEFAULT_GAIN_CLIP_RANGE[0]),
+        float(_DEFAULT_GAIN_CLIP_RANGE[1]),
     )
 
     for t_index in range(int(source_shape_tpczyx[0])):
@@ -2641,9 +2764,7 @@ def run_registration_analysis(
                     int(edge.moving_position)
                 ],
                 voxel_size_um_zyx=pairwise_voxel_size_um_zyx,
-                overlap_zyx=[
-                    int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])
-                ],
+                overlap_zyx=effective_pairwise_overlap_zyx,
                 registration_type=str(
                     parameters.get("registration_type", "translation")
                 )
@@ -2654,7 +2775,7 @@ def run_registration_analysis(
                 ants_sampling_rate=effective_ants_sampling_rate,
                 use_phase_correlation=effective_use_phase_correlation,
                 use_fft_initial_alignment=effective_use_fft_initial_alignment,
-                estimate_intensity_correction=estimate_intensity_correction,
+                estimate_intensity_correction=False,
                 gain_clip_range=effective_gain_clip_range,
             )
             for edge in edge_specs
@@ -2711,23 +2832,6 @@ def run_registration_analysis(
             effective_corrections_tpx44[int(t_index), int(position_index)] = solved[
                 int(position_index)
             ]
-        if estimate_intensity_correction:
-            gains, offsets = _solve_intensity_corrections(
-                positions=positions,
-                active_edge_indices=[
-                    int(index) for index in np.flatnonzero(active_mask)
-                ],
-                edge_results=pairwise_results,
-                edges=edge_specs,
-                anchor_position=anchor_position,
-            )
-            for position_index in positions:
-                intensity_gains_tp[int(t_index), int(position_index)] = np.float32(
-                    gains[int(position_index)]
-                )
-                intensity_offsets_tp[int(t_index), int(position_index)] = np.float32(
-                    offsets[int(position_index)]
-                )
         for edge_index, result in enumerate(pairwise_results):
             correction_affines_tex44[int(t_index), int(edge_index)] = np.asarray(
                 result["correction_matrix_xyz"], dtype=np.float64
@@ -2807,50 +2911,21 @@ def run_registration_analysis(
         max(1, min(int(source_chunks[4]), int(output_shape_tpczyx[4]))),
         max(1, min(int(source_chunks[5]), int(output_shape_tpczyx[5]))),
     )
-    overlap_zyx = [int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])]
-
-    # --- Memory guard ---------------------------------------------------------
-    source_tile_shape_zyx = tuple(int(v) for v in source_shape_tpczyx[3:])
-    chunk_shape_zyx = output_chunks_tpczyx[3:]
-    est_bytes = _estimate_fusion_chunk_bytes(
-        chunk_shape_zyx,
-        source_tile_shape_zyx,
-        n_positions=int(source_shape_tpczyx[1]),
-    )
-    est_gib = est_bytes / (1024**3)
-    logger.info(
-        "Fusion memory estimate: %.1f GiB per worker (chunk %s, tile %s)",
-        est_gib,
-        chunk_shape_zyx,
-        source_tile_shape_zyx,
-    )
-    if est_gib > 64:
-        logger.warning(
-            "Estimated per-worker memory (%.1f GiB) exceeds 64 GiB. "
-            "Consider reducing output chunk sizes or downsampling tiles "
-            "before registration to avoid out-of-memory failures.",
-            est_gib,
-        )
-    # --------------------------------------------------------------------------
-
-    component, data_component, affines_component, blend_weights_component = (
-        _prepare_output_group(
-            zarr_path=zarr_path,
-            source_component=source_component,
-            parameters=parameters,
-            output_shape_tpczyx=output_shape_tpczyx,
-            output_chunks_tpczyx=output_chunks_tpczyx,
-            voxel_size_um_zyx=full_voxel_size_um_zyx,
-            voxel_size_resolution_source=str(voxel_size_resolution_source),
-            output_origin_xyz=output_min_xyz,
-            source_tile_shape_zyx=source_tile_shape_zyx,  # type: ignore[arg-type]
-            blend_mode=blend_mode,
-            overlap_zyx=overlap_zyx,
-            blend_exponent=effective_blend_exponent,
-        )
-    )
+    component = analysis_auxiliary_root("registration")
+    affines_component = f"{component}/affines_tpx44"
+    transformed_bboxes_component = f"{component}/transformed_bboxes_tpx6"
     write_root = zarr.open_group(str(zarr_path), mode="a")
-    latest_group = write_root[analysis_auxiliary_root("registration")]
+    cache_root = analysis_cache_root("registration")
+    if cache_root in write_root:
+        del write_root[cache_root]
+    if component in write_root:
+        del write_root[component]
+    latest_group = write_root.require_group(component)
+    latest_group.create_array(
+        name="affines_tpx44",
+        data=effective_transforms_tpx44,
+        overwrite=True,
+    )
     latest_group.create_array(
         name="edges_pe2",
         data=(
@@ -2886,61 +2961,397 @@ def run_registration_analysis(
         data=transformed_bboxes_tpx6,
         overwrite=True,
     )
-    latest_group.create_array(
+    _emit(progress_callback, 96, "Writing registration metadata and provenance")
+    active_edge_count = int(np.count_nonzero(edge_status_te))
+    dropped_edge_count = max(0, int(successful_edge_count) - int(active_edge_count))
+    latest_group.attrs.update(
+        {
+            "requested_source_component": str(requested_source_component),
+            "source_component": str(source_component),
+            "pairwise_source_component": str(pairwise_source_component),
+            "requested_input_resolution_level": int(requested_resolution_level),
+            "input_resolution_level": int(effective_level),
+            "registration_channel": int(registration_channel),
+            "registration_type": str(
+                parameters.get("registration_type", "translation")
+            ),
+            "pairwise_overlap_zyx": [
+                int(value) for value in effective_pairwise_overlap_zyx
+            ],
+            "anchor_positions": [int(value) for value in anchor_positions],
+            "edge_count": int(edge_count),
+            "active_edge_count": int(active_edge_count),
+            "dropped_edge_count": int(dropped_edge_count),
+            "affines_component": affines_component,
+            "transformed_bboxes_component": transformed_bboxes_component,
+            "max_pairwise_voxels": int(effective_max_pairwise_voxels),
+            "ants_iterations": [int(v) for v in effective_ants_iterations],
+            "ants_sampling_rate": float(effective_ants_sampling_rate),
+            "use_phase_correlation": bool(effective_use_phase_correlation),
+            "use_fft_initial_alignment": bool(effective_use_fft_initial_alignment),
+            "output_shape_tpczyx": [int(value) for value in output_shape_tpczyx],
+            "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
+            "voxel_size_um_zyx": [float(value) for value in full_voxel_size_um_zyx],
+            "voxel_size_resolution_source": str(voxel_size_resolution_source),
+            "output_origin_xyz_um": [float(value) for value in output_min_xyz],
+        }
+    )
+
+    register_latest_output_reference(
+        zarr_path=zarr_path,
+        analysis_name="registration",
+        component=component,
+        metadata={
+            "affines_component": affines_component,
+            "transformed_bboxes_component": transformed_bboxes_component,
+            "requested_source_component": requested_source_component,
+            "source_component": source_component,
+            "pairwise_source_component": pairwise_source_component,
+            "requested_input_resolution_level": int(requested_resolution_level),
+            "input_resolution_level": int(effective_level),
+            "registration_channel": int(registration_channel),
+            "registration_type": str(
+                parameters.get("registration_type", "translation")
+            ),
+            "pairwise_overlap_zyx": [
+                int(value) for value in effective_pairwise_overlap_zyx
+            ],
+            "anchor_positions": [int(value) for value in anchor_positions],
+            "edge_count": int(edge_count),
+            "active_edge_count": int(active_edge_count),
+            "dropped_edge_count": int(dropped_edge_count),
+            "max_pairwise_voxels": int(effective_max_pairwise_voxels),
+            "ants_iterations": [int(v) for v in effective_ants_iterations],
+            "ants_sampling_rate": float(effective_ants_sampling_rate),
+            "use_phase_correlation": bool(effective_use_phase_correlation),
+            "use_fft_initial_alignment": bool(effective_use_fft_initial_alignment),
+            "output_shape_tpczyx": [int(value) for value in output_shape_tpczyx],
+            "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
+            "voxel_size_um_zyx": [float(value) for value in full_voxel_size_um_zyx],
+            "voxel_size_resolution_source": str(voxel_size_resolution_source),
+            "output_origin_xyz_um": [float(value) for value in output_min_xyz],
+        },
+    )
+    _emit(progress_callback, 100, "Registration complete")
+    return RegistrationSummary(
+        component=component,
+        affines_component=affines_component,
+        transformed_bboxes_component=transformed_bboxes_component,
+        source_component=source_component,
+        requested_source_component=requested_source_component,
+        pairwise_source_component=pairwise_source_component,
+        input_resolution_level=int(effective_level),
+        requested_input_resolution_level=int(requested_resolution_level),
+        registration_channel=int(registration_channel),
+        registration_type=str(parameters.get("registration_type", "translation"))
+        .strip()
+        .lower(),
+        anchor_positions=tuple(int(value) for value in anchor_positions),
+        positions=int(source_shape_tpczyx[1]),
+        timepoints=int(source_shape_tpczyx[0]),
+        edge_count=int(edge_count),
+        active_edge_count=int(active_edge_count),
+        dropped_edge_count=int(dropped_edge_count),
+        output_origin_xyz_um=tuple(float(value) for value in output_min_xyz),
+        output_shape_tpczyx=tuple(int(value) for value in output_shape_tpczyx),
+        output_chunks_tpczyx=tuple(int(value) for value in output_chunks_tpczyx),
+    )
+
+
+def run_fusion_analysis(
+    *,
+    zarr_path: Union[str, Path],
+    parameters: Mapping[str, Any],
+    client: Optional["Client"] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> FusionSummary:
+    """Render a stitched fused volume from a completed registration result."""
+    root = zarr.open_group(str(zarr_path), mode="r")
+    requested_registration_component = (
+        str(parameters.get("input_source", "registration")).strip() or "registration"
+    )
+    registration_component = (
+        analysis_auxiliary_root("registration")
+        if requested_registration_component == "registration"
+        else requested_registration_component
+    )
+    if registration_component not in root:
+        raise ValueError(
+            f"fusion input component '{registration_component}' was not found."
+        )
+    registration_group = root[registration_component]
+    source_component = str(
+        registration_group.attrs.get(
+            "source_component", "clearex/runtime_cache/source/data"
+        )
+    ).strip()
+    if source_component not in root:
+        raise ValueError(
+            f"fusion source component '{source_component}' recorded by registration was not found."
+        )
+    source = root[source_component]
+    source_shape_tpczyx = tuple(int(v) for v in source.shape)
+    full_voxel_size_um_zyx = tuple(
+        float(v)
+        for v in registration_group.attrs.get(
+            "voxel_size_um_zyx",
+            source.attrs.get(
+                "voxel_size_um_zyx",
+                root.attrs.get("voxel_size_um_zyx", [1.0, 1.0, 1.0]),
+            ),
+        )
+    )
+    voxel_size_resolution_source = str(
+        registration_group.attrs.get("voxel_size_resolution_source", source_component)
+    )
+    output_origin_xyz = np.asarray(
+        registration_group.attrs.get("output_origin_xyz_um", [0.0, 0.0, 0.0]),
+        dtype=np.float64,
+    )
+    output_shape_tpczyx = tuple(
+        int(value)
+        for value in registration_group.attrs.get(
+            "output_shape_tpczyx",
+            [
+                int(source_shape_tpczyx[0]),
+                1,
+                int(source_shape_tpczyx[2]),
+                int(source_shape_tpczyx[3]),
+                int(source_shape_tpczyx[4]),
+                int(source_shape_tpczyx[5]),
+            ],
+        )
+    )
+    output_chunks_tpczyx = tuple(
+        int(value)
+        for value in registration_group.attrs.get(
+            "output_chunks_tpczyx",
+            [
+                1,
+                1,
+                1,
+                int(source.chunks[3]),
+                int(source.chunks[4]),
+                int(source.chunks[5]),
+            ],
+        )
+    )
+    affines_component = str(
+        registration_group.attrs.get(
+            "affines_component",
+            f"{registration_component}/affines_tpx44",
+        )
+    )
+    transformed_bboxes_component = str(
+        registration_group.attrs.get(
+            "transformed_bboxes_component",
+            f"{registration_component}/transformed_bboxes_tpx6",
+        )
+    )
+    if affines_component not in root or transformed_bboxes_component not in root:
+        raise ValueError(
+            "fusion requires completed registration affines and transformed bounding boxes."
+        )
+    edges_component = f"{registration_component}/edges_pe2"
+    edges_pe2 = (
+        np.asarray(root[edges_component][:], dtype=np.int32)
+        if edges_component in root
+        else np.zeros((0, 2), dtype=np.int32)
+    )
+    positions = tuple(range(int(source_shape_tpczyx[1])))
+    anchor_positions = [
+        int(value)
+        for value in registration_group.attrs.get(
+            "anchor_positions", [0] * int(source_shape_tpczyx[0])
+        )
+    ]
+    registration_channel = int(registration_group.attrs.get("registration_channel", 0))
+    blend_mode = _normalized_blend_mode(parameters.get("blend_mode", "feather"))
+    effective_blend_exponent = float(
+        parameters.get("blend_exponent", _DEFAULT_BLEND_EXPONENT)
+    )
+    overlap_zyx = [
+        int(value)
+        for value in parameters.get(
+            "blend_overlap_zyx",
+            parameters.get("overlap_zyx", [8, 32, 32]),
+        )
+    ]
+    gain_clip_range = parameters.get("gain_clip_range", _DEFAULT_GAIN_CLIP_RANGE)
+    effective_gain_clip_range = (
+        max(1e-6, float(gain_clip_range[0])),
+        max(max(1e-6, float(gain_clip_range[0])), float(gain_clip_range[1])),
+    )
+
+    source_tile_shape_zyx = tuple(int(v) for v in source_shape_tpczyx[3:])
+    chunk_shape_zyx = output_chunks_tpczyx[3:]
+    est_bytes = _estimate_fusion_chunk_bytes(
+        chunk_shape_zyx,
+        source_tile_shape_zyx,
+        n_positions=int(source_shape_tpczyx[1]),
+    )
+    est_gib = est_bytes / (1024**3)
+    logger.info(
+        "Fusion memory estimate: %.1f GiB per worker (chunk %s, tile %s)",
+        est_gib,
+        chunk_shape_zyx,
+        source_tile_shape_zyx,
+    )
+    if est_gib > 64:
+        logger.warning(
+            "Estimated per-worker memory (%.1f GiB) exceeds 64 GiB. "
+            "Consider reducing output chunk sizes before fusion to avoid out-of-memory failures.",
+            est_gib,
+        )
+
+    component, data_component, _unused_affines_component, blend_weights_component = (
+        _prepare_output_group(
+            analysis_name="fusion",
+            zarr_path=zarr_path,
+            source_component=source_component,
+            parameters=parameters,
+            output_shape_tpczyx=output_shape_tpczyx,
+            output_chunks_tpczyx=output_chunks_tpczyx,
+            voxel_size_um_zyx=full_voxel_size_um_zyx,
+            voxel_size_resolution_source=str(voxel_size_resolution_source),
+            output_origin_xyz=output_origin_xyz,
+            source_tile_shape_zyx=source_tile_shape_zyx,
+            blend_mode=blend_mode,
+            overlap_zyx=overlap_zyx,
+            blend_exponent=effective_blend_exponent,
+            create_affines=False,
+        )
+    )
+
+    intensity_gains_tp = np.ones(
+        (int(source_shape_tpczyx[0]), int(source_shape_tpczyx[1])),
+        dtype=np.float32,
+    )
+    intensity_offsets_tp = np.zeros(
+        (int(source_shape_tpczyx[0]), int(source_shape_tpczyx[1])),
+        dtype=np.float32,
+    )
+    transformed_bboxes = np.asarray(
+        root[transformed_bboxes_component][:], dtype=np.float64
+    )
+    affines = np.asarray(root[affines_component][:], dtype=np.float64)
+    if _blend_uses_gain_compensation(blend_mode) and edges_pe2.size > 0:
+        _emit(progress_callback, 12, "Estimating fusion intensity corrections")
+        for t_index in range(int(source_shape_tpczyx[0])):
+            edge_specs: list[_EdgeSpec] = []
+            edge_results: list[Mapping[str, Any]] = []
+            for fixed_position, moving_position in edges_pe2:
+                fixed_bbox = transformed_bboxes[int(t_index), int(fixed_position)]
+                moving_bbox = transformed_bboxes[int(t_index), int(moving_position)]
+                bbox_min = np.maximum(fixed_bbox[:3], moving_bbox[:3])
+                bbox_max = np.minimum(fixed_bbox[3:], moving_bbox[3:])
+                if np.any(bbox_max <= bbox_min):
+                    continue
+                edge_spec = _EdgeSpec(
+                    fixed_position=int(fixed_position),
+                    moving_position=int(moving_position),
+                    overlap_bbox_xyz=(
+                        (float(bbox_min[0]), float(bbox_max[0])),
+                        (float(bbox_min[1]), float(bbox_max[1])),
+                        (float(bbox_min[2]), float(bbox_max[2])),
+                    ),
+                    overlap_voxels=int(
+                        np.prod(
+                            np.maximum(
+                                0,
+                                np.ceil(
+                                    (bbox_max - bbox_min)
+                                    / np.asarray(
+                                        [
+                                            float(full_voxel_size_um_zyx[2]),
+                                            float(full_voxel_size_um_zyx[1]),
+                                            float(full_voxel_size_um_zyx[0]),
+                                        ],
+                                        dtype=np.float64,
+                                    )
+                                ).astype(int),
+                            )
+                        )
+                    ),
+                )
+                edge_specs.append(edge_spec)
+                edge_results.append(
+                    _estimate_pairwise_overlap_intensity(
+                        zarr_path=str(zarr_path),
+                        source_component=source_component,
+                        t_index=int(t_index),
+                        registration_channel=int(registration_channel),
+                        edge=edge_spec,
+                        fixed_transform_xyz=affines[int(t_index), int(fixed_position)],
+                        moving_transform_xyz=affines[
+                            int(t_index), int(moving_position)
+                        ],
+                        voxel_size_um_zyx=full_voxel_size_um_zyx,
+                        overlap_zyx=overlap_zyx,
+                        gain_clip_range=effective_gain_clip_range,
+                    )
+                )
+            if edge_specs:
+                gains, offsets = _solve_intensity_corrections(
+                    positions=positions,
+                    active_edge_indices=list(range(len(edge_specs))),
+                    edge_results=edge_results,
+                    edges=edge_specs,
+                    anchor_position=int(
+                        anchor_positions[min(t_index, len(anchor_positions) - 1)]
+                    ),
+                )
+                for position_index in positions:
+                    intensity_gains_tp[int(t_index), int(position_index)] = np.float32(
+                        gains[int(position_index)]
+                    )
+                    intensity_offsets_tp[int(t_index), int(position_index)] = (
+                        np.float32(offsets[int(position_index)])
+                    )
+
+    write_root = zarr.open_group(str(zarr_path), mode="a")
+    fusion_group = write_root[analysis_auxiliary_root("fusion")]
+    fusion_group.create_array(
         name="intensity_gains_tp",
         data=intensity_gains_tp,
         overwrite=True,
     )
-    latest_group.create_array(
+    fusion_group.create_array(
         name="intensity_offsets_tp",
         data=intensity_offsets_tp,
         overwrite=True,
     )
-    latest_group["affines_tpx44"][:] = effective_transforms_tpx44
 
     z_bounds = _axis_chunk_bounds(output_shape_tpczyx[3], output_chunks_tpczyx[3])
     y_bounds = _axis_chunk_bounds(output_shape_tpczyx[4], output_chunks_tpczyx[4])
     x_bounds = _axis_chunk_bounds(output_shape_tpczyx[5], output_chunks_tpczyx[5])
     fusion_tasks = [
-        (
-            int(t_index),
-            int(c_index),
-            z_chunk,
-            y_chunk,
-            x_chunk,
-        )
+        (int(t_index), int(c_index), z_chunk, y_chunk, x_chunk)
         for t_index in range(int(output_shape_tpczyx[0]))
         for c_index in range(int(output_shape_tpczyx[2]))
         for z_chunk in z_bounds
         for y_chunk in y_bounds
         for x_chunk in x_bounds
     ]
-    _emit(progress_callback, 45, f"Prepared {len(fusion_tasks)} fusion chunk tasks")
-
+    _emit(progress_callback, 20, f"Prepared {len(fusion_tasks)} fusion chunk tasks")
     task_kwargs = [
         dict(
             zarr_path=str(zarr_path),
             source_component=source_component,
             output_component=data_component,
             affines_component=affines_component,
-            transformed_bboxes_component=(
-                f"{analysis_auxiliary_root('registration')}/transformed_bboxes_tpx6"
-            ),
+            transformed_bboxes_component=transformed_bboxes_component,
             blend_weights_component=blend_weights_component,
-            intensity_gains_component=(
-                f"{analysis_auxiliary_root('registration')}/intensity_gains_tp"
-            ),
-            intensity_offsets_component=(
-                f"{analysis_auxiliary_root('registration')}/intensity_offsets_tp"
-            ),
+            intensity_gains_component=f"{analysis_auxiliary_root('fusion')}/intensity_gains_tp",
+            intensity_offsets_component=f"{analysis_auxiliary_root('fusion')}/intensity_offsets_tp",
             t_index=t_index,
             c_index=c_index,
             z_bounds=z_chunk,
             y_bounds=y_chunk,
             x_bounds=x_chunk,
-            output_origin_xyz=output_min_xyz,
+            output_origin_xyz=output_origin_xyz,
             voxel_size_um_zyx=full_voxel_size_um_zyx,
-            output_dtype=str(full_source.dtype),
+            output_dtype=str(source.dtype),
         )
         for t_index, c_index, z_chunk, y_chunk, x_chunk in fusion_tasks
     ]
@@ -2957,7 +3368,7 @@ def run_registration_analysis(
             completed += len(batch)
             _emit(
                 progress_callback,
-                45 + int((completed / total) * 50),
+                20 + int((completed / total) * 75),
                 f"Fusion chunk {completed}/{total}",
             )
     else:
@@ -2985,7 +3396,7 @@ def run_registration_analysis(
             completed += 1
             _emit(
                 progress_callback,
-                45 + int((completed / total) * 50),
+                20 + int((completed / total) * 75),
                 f"Fusion chunk {completed}/{total}",
             )
         for finished in completion_queue:
@@ -2993,107 +3404,58 @@ def run_registration_analysis(
             completed += 1
             _emit(
                 progress_callback,
-                45 + int((completed / total) * 50),
+                20 + int((completed / total) * 75),
                 f"Fusion chunk {completed}/{total}",
             )
 
-    _emit(progress_callback, 96, "Writing registration metadata and provenance")
-    active_edge_count = int(np.count_nonzero(edge_status_te))
-    dropped_edge_count = max(0, int(successful_edge_count) - int(active_edge_count))
-    latest_group.attrs.update(
+    _emit(progress_callback, 96, "Writing fusion metadata and provenance")
+    fusion_group.attrs.update(
         {
-            "requested_source_component": str(requested_source_component),
+            "registration_component": str(registration_component),
             "source_component": str(source_component),
-            "pairwise_source_component": str(pairwise_source_component),
-            "requested_input_resolution_level": int(requested_resolution_level),
-            "input_resolution_level": int(effective_level),
-            "registration_channel": int(registration_channel),
-            "registration_type": str(
-                parameters.get("registration_type", "translation")
-            ),
-            "anchor_positions": [int(value) for value in anchor_positions],
-            "edge_count": int(edge_count),
-            "active_edge_count": int(active_edge_count),
-            "dropped_edge_count": int(dropped_edge_count),
-            "blend_mode": blend_mode,
+            "affines_component": str(affines_component),
+            "transformed_bboxes_component": str(transformed_bboxes_component),
+            "blend_mode": str(blend_mode),
             "blend_exponent": float(effective_blend_exponent),
+            "blend_overlap_zyx": [int(value) for value in overlap_zyx],
             "gain_clip_range": [float(v) for v in effective_gain_clip_range],
-            "intensity_gains_component": (
-                f"{analysis_auxiliary_root('registration')}/intensity_gains_tp"
-            ),
-            "intensity_offsets_component": (
-                f"{analysis_auxiliary_root('registration')}/intensity_offsets_tp"
-            ),
-            "max_pairwise_voxels": int(effective_max_pairwise_voxels),
-            "ants_iterations": [int(v) for v in effective_ants_iterations],
-            "ants_sampling_rate": float(effective_ants_sampling_rate),
-            "use_phase_correlation": bool(effective_use_phase_correlation),
-            "use_fft_initial_alignment": bool(effective_use_fft_initial_alignment),
-        }
-    )
-
-    register_latest_output_reference(
-        zarr_path=zarr_path,
-        analysis_name="registration",
-        component=component,
-        metadata={
-            "data_component": data_component,
-            "affines_component": affines_component,
-            "requested_source_component": requested_source_component,
-            "source_component": source_component,
-            "pairwise_source_component": pairwise_source_component,
-            "requested_input_resolution_level": int(requested_resolution_level),
-            "input_resolution_level": int(effective_level),
-            "registration_channel": int(registration_channel),
-            "registration_type": str(
-                parameters.get("registration_type", "translation")
-            ),
-            "anchor_positions": [int(value) for value in anchor_positions],
-            "edge_count": int(edge_count),
-            "active_edge_count": int(active_edge_count),
-            "dropped_edge_count": int(dropped_edge_count),
-            "blend_mode": blend_mode,
-            "blend_exponent": float(effective_blend_exponent),
-            "gain_clip_range": [float(v) for v in effective_gain_clip_range],
-            "intensity_gains_component": (
-                f"{analysis_auxiliary_root('registration')}/intensity_gains_tp"
-            ),
-            "intensity_offsets_component": (
-                f"{analysis_auxiliary_root('registration')}/intensity_offsets_tp"
-            ),
-            "max_pairwise_voxels": int(effective_max_pairwise_voxels),
-            "ants_iterations": [int(v) for v in effective_ants_iterations],
-            "ants_sampling_rate": float(effective_ants_sampling_rate),
-            "use_phase_correlation": bool(effective_use_phase_correlation),
-            "use_fft_initial_alignment": bool(effective_use_fft_initial_alignment),
+            "intensity_gains_component": f"{analysis_auxiliary_root('fusion')}/intensity_gains_tp",
+            "intensity_offsets_component": f"{analysis_auxiliary_root('fusion')}/intensity_offsets_tp",
             "output_shape_tpczyx": [int(value) for value in output_shape_tpczyx],
             "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
             "voxel_size_um_zyx": [float(value) for value in full_voxel_size_um_zyx],
             "voxel_size_resolution_source": str(voxel_size_resolution_source),
-            "output_origin_xyz_um": [float(value) for value in output_min_xyz],
+            "output_origin_xyz_um": [float(value) for value in output_origin_xyz],
+        }
+    )
+    register_latest_output_reference(
+        zarr_path=zarr_path,
+        analysis_name="fusion",
+        component=component,
+        metadata={
+            "data_component": data_component,
+            "registration_component": str(registration_component),
+            "source_component": str(source_component),
+            "blend_mode": str(blend_mode),
+            "blend_exponent": float(effective_blend_exponent),
+            "blend_overlap_zyx": [int(value) for value in overlap_zyx],
+            "gain_clip_range": [float(v) for v in effective_gain_clip_range],
+            "intensity_gains_component": f"{analysis_auxiliary_root('fusion')}/intensity_gains_tp",
+            "intensity_offsets_component": f"{analysis_auxiliary_root('fusion')}/intensity_offsets_tp",
+            "output_shape_tpczyx": [int(value) for value in output_shape_tpczyx],
+            "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
+            "voxel_size_um_zyx": [float(value) for value in full_voxel_size_um_zyx],
+            "voxel_size_resolution_source": str(voxel_size_resolution_source),
+            "output_origin_xyz_um": [float(value) for value in output_origin_xyz],
         },
     )
-    _emit(progress_callback, 100, "Registration complete")
-    return RegistrationSummary(
-        component=component,
-        data_component=data_component,
-        affines_component=affines_component,
-        source_component=source_component,
-        requested_source_component=requested_source_component,
-        pairwise_source_component=pairwise_source_component,
-        input_resolution_level=int(effective_level),
-        requested_input_resolution_level=int(requested_resolution_level),
-        registration_channel=int(registration_channel),
-        registration_type=str(parameters.get("registration_type", "translation"))
-        .strip()
-        .lower(),
-        anchor_positions=tuple(int(value) for value in anchor_positions),
-        positions=int(source_shape_tpczyx[1]),
-        timepoints=int(source_shape_tpczyx[0]),
-        edge_count=int(edge_count),
-        active_edge_count=int(active_edge_count),
-        dropped_edge_count=int(dropped_edge_count),
+    _emit(progress_callback, 100, "Fusion complete")
+    return FusionSummary(
+        component=str(component),
+        data_component=str(data_component),
+        registration_component=str(registration_component),
+        source_component=str(source_component),
+        blend_mode=str(blend_mode),
         output_shape_tpczyx=tuple(int(value) for value in output_shape_tpczyx),
         output_chunks_tpczyx=tuple(int(value) for value in output_chunks_tpczyx),
-        blend_mode=str(parameters.get("blend_mode", "feather")).strip().lower(),
     )

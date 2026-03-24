@@ -59,8 +59,9 @@ ANALYSIS_OPERATION_ORDER = (
     "flatfield",
     "deconvolution",
     "shear_transform",
-    "display_pyramid",
     "registration",
+    "fusion",
+    "display_pyramid",
     "particle_detection",
     "usegment3d",
     "visualization",
@@ -73,7 +74,7 @@ ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS: Dict[str, str] = {
     "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
     "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
     "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
-    "registration": "clearex/runtime_cache/results/registration/latest/data",
+    "fusion": "clearex/runtime_cache/results/fusion/latest/data",
 }
 ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
     "data": "clearex/runtime_cache/source/data",
@@ -82,7 +83,8 @@ ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
     "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
     "particle_detection": "clearex/results/particle_detection/latest/detections",
     "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
-    "registration": "clearex/runtime_cache/results/registration/latest/data",
+    "registration": "clearex/results/registration/latest",
+    "fusion": "clearex/runtime_cache/results/fusion/latest/data",
     "display_pyramid": "clearex/results/display_pyramid/latest",
     "visualization": "clearex/results/visualization/latest",
     "mip_export": "clearex/results/mip_export/latest",
@@ -241,7 +243,50 @@ def resolve_analysis_input_component(
     component = analysis_chainable_output_component(source)
     if component is not None:
         return str(component)
+    known_component = ANALYSIS_KNOWN_OUTPUT_COMPONENTS.get(source)
+    if known_component is not None:
+        return str(known_component)
     return source
+
+
+_LEGACY_REGISTRATION_IMAGE_SOURCES = frozenset(
+    {
+        "registration",
+        "results/registration/latest/data",
+        "clearex/runtime_cache/results/registration/latest/data",
+    }
+)
+_OPERATIONS_CONSUMING_FUSED_IMAGES = frozenset(
+    {
+        "display_pyramid",
+        "particle_detection",
+        "usegment3d",
+        "visualization",
+        "mip_export",
+    }
+)
+
+
+def _normalize_operation_input_source_alias(
+    operation_name: str,
+    requested_source: Any,
+) -> str:
+    """Normalize legacy image-source aliases for one consumer operation."""
+    source = str(requested_source).strip() or "data"
+    if (
+        str(operation_name).strip() in _OPERATIONS_CONSUMING_FUSED_IMAGES
+        and source in _LEGACY_REGISTRATION_IMAGE_SOURCES
+    ):
+        return "fusion"
+    return source
+
+
+def _normalize_visualization_component_alias(component: Any) -> str:
+    """Normalize legacy visualization layer component aliases."""
+    value = str(component).strip()
+    if value in _LEGACY_REGISTRATION_IMAGE_SOURCES:
+        return "fusion"
+    return value
 
 
 def collect_analysis_input_references(
@@ -351,7 +396,15 @@ def _validate_analysis_input_reference(
 
     if producer_operation is not None:
         producer_name = _analysis_operation_display_name(producer_operation)
-        if producer_operation not in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS:
+        allow_non_chainable_registration = (
+            str(reference.consumer_operation).strip() == "fusion"
+            and producer_operation == "registration"
+            and field_name == "input_source"
+        )
+        if (
+            producer_operation not in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS
+            and not allow_non_chainable_registration
+        ):
             return AnalysisInputDependencyIssue(
                 consumer_operation=reference.consumer_operation,
                 field_name=field_name,
@@ -579,8 +632,41 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "output_dtype": "float32",
         "roi_padding_zyx": [2, 2, 2],
     },
+    "registration": {
+        "execution_order": 4,
+        "input_source": "data",
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": True,
+        "pairwise_overlap_zyx": [8, 32, 32],
+        "memory_overhead_factor": 2.5,
+        "registration_channel": 0,
+        "registration_type": "translation",
+        "input_resolution_level": 0,
+        "anchor_mode": "central",
+        "anchor_position": None,
+        "max_pairwise_voxels": 500000,
+        "ants_iterations": [200, 100, 50, 25],
+        "ants_sampling_rate": 0.20,
+        "use_phase_correlation": False,
+        "use_fft_initial_alignment": True,
+    },
+    "fusion": {
+        "execution_order": 5,
+        "input_source": "registration",
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": True,
+        "blend_overlap_zyx": [8, 32, 32],
+        "memory_overhead_factor": 2.5,
+        "blend_mode": "feather",
+        "blend_exponent": 1.0,
+        "gain_clip_range": [0.25, 4.0],
+    },
     "particle_detection": {
-        "execution_order": 6,
+        "execution_order": 7,
         "input_source": "data",
         "force_rerun": False,
         "channel_index": 0,
@@ -601,7 +687,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "min_distance_sigma": 10.0,
     },
     "usegment3d": {
-        "execution_order": 7,
+        "execution_order": 8,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -658,31 +744,8 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "postprocess_edt_fixed_point_percentile": 0.01,
         "output_dtype": "uint32",
     },
-    "registration": {
-        "execution_order": 5,
-        "input_source": "data",
-        "force_rerun": False,
-        "chunk_basis": "3d",
-        "detect_2d_per_slice": False,
-        "use_map_overlap": True,
-        "overlap_zyx": [8, 32, 32],
-        "memory_overhead_factor": 2.5,
-        "registration_channel": 0,
-        "registration_type": "translation",
-        "input_resolution_level": 0,
-        "anchor_mode": "central",
-        "anchor_position": None,
-        "blend_mode": "feather",
-        "blend_exponent": 1.0,
-        "gain_clip_range": [0.25, 4.0],
-        "max_pairwise_voxels": 500000,
-        "ants_iterations": [200, 100, 50, 25],
-        "ants_sampling_rate": 0.20,
-        "use_phase_correlation": False,
-        "use_fft_initial_alignment": True,
-    },
     "display_pyramid": {
-        "execution_order": 4,
+        "execution_order": 6,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -692,7 +755,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "memory_overhead_factor": 1.0,
     },
     "visualization": {
-        "execution_order": 8,
+        "execution_order": 9,
         "input_source": "data",
         "chunk_basis": "2d",
         "detect_2d_per_slice": True,
@@ -713,7 +776,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "volume_layers": [],
     },
     "mip_export": {
-        "execution_order": 9,
+        "execution_order": 10,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -1753,6 +1816,22 @@ def _normalize_registration_parameters(
     normalized = _normalize_common_operation_parameters("registration", params)
     normalized["detect_2d_per_slice"] = False
     normalized["use_map_overlap"] = bool(normalized.get("use_map_overlap", True))
+    normalized["input_source"] = _normalize_operation_input_source_alias(
+        "registration",
+        normalized.get("input_source", "data"),
+    )
+    normalized["pairwise_overlap_zyx"] = _normalize_parameter_int_triplet(
+        normalized.get(
+            "pairwise_overlap_zyx",
+            normalized.get("overlap_zyx", [8, 32, 32]),
+        ),
+        field_name="registration pairwise_overlap_zyx",
+        default=(8, 32, 32),
+    )
+    normalized.pop("overlap_zyx", None)
+    normalized.pop("blend_mode", None)
+    normalized.pop("blend_exponent", None)
+    normalized.pop("gain_clip_range", None)
     normalized["registration_channel"] = max(
         0, int(normalized.get("registration_channel", 0))
     )
@@ -1788,39 +1867,6 @@ def _normalize_registration_parameters(
             raise ValueError("registration anchor_position must be >= 0.")
         normalized["anchor_position"] = parsed_anchor
 
-    blend_mode = str(normalized.get("blend_mode", "feather")).strip().lower()
-    if blend_mode not in {
-        "average",
-        "feather",
-        "center_weighted",
-        "content_aware",
-        "gain_compensated_feather",
-    }:
-        raise ValueError(
-            "registration blend_mode must be one of average, feather, "
-            "center_weighted, content_aware, or gain_compensated_feather."
-        )
-    normalized["blend_mode"] = blend_mode
-    blend_exponent = float(normalized.get("blend_exponent", 1.0))
-    if blend_exponent <= 0.0:
-        raise ValueError("registration blend_exponent must be greater than zero.")
-    normalized["blend_exponent"] = blend_exponent
-
-    gain_clip_range = normalized.get("gain_clip_range", [0.25, 4.0])
-    if not isinstance(gain_clip_range, (tuple, list)) or len(gain_clip_range) != 2:
-        raise ValueError(
-            "registration gain_clip_range must define two floats: [min_gain, max_gain]."
-        )
-    gain_clip_min = float(gain_clip_range[0])
-    gain_clip_max = float(gain_clip_range[1])
-    if gain_clip_min <= 0.0 or gain_clip_max <= 0.0:
-        raise ValueError("registration gain_clip_range values must be > 0.")
-    if gain_clip_min > gain_clip_max:
-        raise ValueError(
-            "registration gain_clip_range must satisfy min_gain <= max_gain."
-        )
-    normalized["gain_clip_range"] = [gain_clip_min, gain_clip_max]
-
     # Performance-tuning parameters — passed through with validated defaults.
     max_pairwise_voxels = int(normalized.get("max_pairwise_voxels", 500_000))
     if max_pairwise_voxels < 0:
@@ -1845,6 +1891,67 @@ def _normalize_registration_parameters(
     normalized["use_fft_initial_alignment"] = bool(
         normalized.get("use_fft_initial_alignment", True)
     )
+    return normalized
+
+
+def _normalize_fusion_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize fusion runtime parameters."""
+    normalized = _normalize_common_operation_parameters("fusion", params)
+    normalized["chunk_basis"] = "3d"
+    normalized["detect_2d_per_slice"] = False
+    normalized["use_map_overlap"] = bool(normalized.get("use_map_overlap", True))
+    normalized["input_source"] = (
+        str(
+            _normalize_operation_input_source_alias(
+                "fusion",
+                normalized.get("input_source", "registration"),
+            )
+        ).strip()
+        or "registration"
+    )
+    normalized["blend_overlap_zyx"] = _normalize_parameter_int_triplet(
+        normalized.get(
+            "blend_overlap_zyx",
+            normalized.get("overlap_zyx", [8, 32, 32]),
+        ),
+        field_name="fusion blend_overlap_zyx",
+        default=(8, 32, 32),
+    )
+    normalized.pop("overlap_zyx", None)
+
+    blend_mode = str(normalized.get("blend_mode", "feather")).strip().lower()
+    if blend_mode not in {
+        "average",
+        "feather",
+        "center_weighted",
+        "content_aware",
+        "gain_compensated_feather",
+    }:
+        raise ValueError(
+            "fusion blend_mode must be one of average, feather, "
+            "center_weighted, content_aware, or gain_compensated_feather."
+        )
+    normalized["blend_mode"] = blend_mode
+
+    blend_exponent = float(normalized.get("blend_exponent", 1.0))
+    if blend_exponent <= 0.0:
+        raise ValueError("fusion blend_exponent must be greater than zero.")
+    normalized["blend_exponent"] = blend_exponent
+
+    gain_clip_range = normalized.get("gain_clip_range", [0.25, 4.0])
+    if not isinstance(gain_clip_range, (tuple, list)) or len(gain_clip_range) != 2:
+        raise ValueError(
+            "fusion gain_clip_range must define two floats: [min_gain, max_gain]."
+        )
+    gain_clip_min = float(gain_clip_range[0])
+    gain_clip_max = float(gain_clip_range[1])
+    if gain_clip_min <= 0.0 or gain_clip_max <= 0.0:
+        raise ValueError("fusion gain_clip_range values must be > 0.")
+    if gain_clip_min > gain_clip_max:
+        raise ValueError("fusion gain_clip_range must satisfy min_gain <= max_gain.")
+    normalized["gain_clip_range"] = [gain_clip_min, gain_clip_max]
     return normalized
 
 
@@ -2197,6 +2304,10 @@ def _normalize_visualization_parameters(
         If launch mode is unsupported.
     """
     normalized = _normalize_common_operation_parameters("visualization", params)
+    normalized["input_source"] = _normalize_operation_input_source_alias(
+        "visualization",
+        normalized.get("input_source", "data"),
+    )
     normalized["show_all_positions"] = bool(normalized.get("show_all_positions", False))
     normalized["position_index"] = max(0, int(normalized.get("position_index", 0)))
     normalized["use_multiscale"] = bool(normalized.get("use_multiscale", True))
@@ -2226,6 +2337,11 @@ def _normalize_visualization_parameters(
     normalized["volume_layers"] = _normalize_visualization_volume_layers(
         normalized.get("volume_layers", [])
     )
+    for row in normalized["volume_layers"]:
+        if isinstance(row, dict):
+            row["component"] = _normalize_visualization_component_alias(
+                row.get("component", "")
+            )
     if not normalized["volume_layers"]:
         default_source = str(normalized.get("input_source", "data")).strip() or "data"
         normalized["volume_layers"] = [
@@ -2274,6 +2390,10 @@ def _normalize_mip_export_parameters(
         If export mode values are unsupported.
     """
     normalized = _normalize_common_operation_parameters("mip_export", params)
+    normalized["input_source"] = _normalize_operation_input_source_alias(
+        "mip_export",
+        normalized.get("input_source", "data"),
+    )
     normalized["chunk_basis"] = "3d"
     normalized["detect_2d_per_slice"] = False
     normalized["use_map_overlap"] = False
@@ -2336,6 +2456,65 @@ def normalize_analysis_operation_parameters(
             )
         merged[str(key)] = {**merged.get(str(key), {}), **value}
 
+    provided_registration = (
+        dict(parameters.get("registration", {}))
+        if isinstance(parameters.get("registration"), Mapping)
+        else {}
+    )
+    provided_fusion = (
+        dict(parameters.get("fusion", {}))
+        if isinstance(parameters.get("fusion"), Mapping)
+        else {}
+    )
+    fusion_params = dict(merged.get("fusion", {}))
+    for legacy_key in ("blend_mode", "blend_exponent", "gain_clip_range"):
+        if legacy_key in provided_registration and legacy_key not in provided_fusion:
+            fusion_params[legacy_key] = provided_registration[legacy_key]
+    if (
+        "pairwise_overlap_zyx" not in provided_registration
+        and "overlap_zyx" in provided_registration
+    ):
+        merged.setdefault("registration", {})["pairwise_overlap_zyx"] = list(
+            provided_registration["overlap_zyx"]
+        )
+    if "blend_overlap_zyx" not in provided_fusion and "overlap_zyx" in provided_fusion:
+        fusion_params["blend_overlap_zyx"] = list(provided_fusion["overlap_zyx"])
+    if (
+        "blend_overlap_zyx" not in provided_fusion
+        and "overlap_zyx" in provided_registration
+    ):
+        fusion_params["blend_overlap_zyx"] = list(provided_registration["overlap_zyx"])
+    merged["fusion"] = fusion_params
+
+    for operation_name in _OPERATIONS_CONSUMING_FUSED_IMAGES:
+        operation_params = dict(merged.get(operation_name, {}))
+        operation_params["input_source"] = _normalize_operation_input_source_alias(
+            operation_name,
+            operation_params.get("input_source", "data"),
+        )
+        merged[operation_name] = operation_params
+    visualization_params = dict(merged.get("visualization", {}))
+    raw_rows = visualization_params.get("volume_layers", [])
+    if isinstance(raw_rows, (tuple, list)):
+        migrated_rows: list[Any] = []
+        for raw_row in raw_rows:
+            if not isinstance(raw_row, Mapping):
+                migrated_rows.append(raw_row)
+                continue
+            migrated_row = dict(raw_row)
+            component = migrated_row.get(
+                "component",
+                migrated_row.get("source_component", ""),
+            )
+            migrated_component = _normalize_visualization_component_alias(component)
+            if "component" in migrated_row:
+                migrated_row["component"] = migrated_component
+            if "source_component" in migrated_row:
+                migrated_row["source_component"] = migrated_component
+            migrated_rows.append(migrated_row)
+        visualization_params["volume_layers"] = migrated_rows
+    merged["visualization"] = visualization_params
+
     for operation_name in ANALYSIS_OPERATION_ORDER:
         if operation_name not in merged:
             continue
@@ -2363,6 +2542,10 @@ def normalize_analysis_operation_parameters(
             merged[operation_name] = _normalize_registration_parameters(
                 merged[operation_name]
             )
+        elif operation_name == "fusion":
+            merged[operation_name] = _normalize_fusion_parameters(
+                merged[operation_name]
+            )
         elif operation_name == "visualization":
             merged[operation_name] = _normalize_visualization_parameters(
                 merged[operation_name]
@@ -2384,6 +2567,7 @@ def selected_analysis_operations(
     flatfield: bool,
     deconvolution: bool,
     shear_transform: bool,
+    fusion: bool,
     particle_detection: bool,
     usegment3d: bool,
     registration: bool,
@@ -2401,6 +2585,8 @@ def selected_analysis_operations(
         Whether deconvolution is enabled.
     shear_transform : bool
         Whether shear transform is enabled.
+    fusion : bool
+        Whether fusion is enabled.
     particle_detection : bool
         Whether particle detection is enabled.
     usegment3d : bool
@@ -2426,10 +2612,12 @@ def selected_analysis_operations(
         selected.append("deconvolution")
     if shear_transform:
         selected.append("shear_transform")
-    if display_pyramid:
-        selected.append("display_pyramid")
     if registration:
         selected.append("registration")
+    if fusion:
+        selected.append("fusion")
+    if display_pyramid:
+        selected.append("display_pyramid")
     if particle_detection:
         selected.append("particle_detection")
     if usegment3d:
@@ -2446,6 +2634,7 @@ def resolve_analysis_execution_sequence(
     flatfield: bool,
     deconvolution: bool,
     shear_transform: bool,
+    fusion: bool,
     particle_detection: bool,
     usegment3d: bool,
     registration: bool,
@@ -2464,6 +2653,8 @@ def resolve_analysis_execution_sequence(
         Whether deconvolution is enabled.
     shear_transform : bool
         Whether shear transform is enabled.
+    fusion : bool
+        Whether fusion is enabled.
     particle_detection : bool
         Whether particle detection is enabled.
     usegment3d : bool
@@ -2491,6 +2682,7 @@ def resolve_analysis_execution_sequence(
         flatfield=flatfield,
         deconvolution=deconvolution,
         shear_transform=shear_transform,
+        fusion=fusion,
         particle_detection=particle_detection,
         usegment3d=usegment3d,
         registration=registration,
@@ -4652,6 +4844,8 @@ class WorkflowConfig:
         Flag indicating whether usegment3d workflow should run.
     registration : bool
         Flag indicating whether registration workflow should run.
+    fusion : bool
+        Flag indicating whether fusion workflow should run.
     display_pyramid : bool
         Flag indicating whether display-pyramid preparation should run.
     visualization : bool
@@ -4683,6 +4877,7 @@ class WorkflowConfig:
     particle_detection: bool = False
     usegment3d: bool = False
     registration: bool = False
+    fusion: bool = False
     display_pyramid: bool = False
     visualization: bool = False
     mip_export: bool = False
@@ -4758,8 +4953,36 @@ class WorkflowConfig:
                 selected_experiment_path if selected_experiment_path else None
             )
         self.analysis_apply_to_all = bool(self.analysis_apply_to_all)
+        raw_analysis_parameters = (
+            dict(self.analysis_parameters)
+            if isinstance(self.analysis_parameters, Mapping)
+            else {}
+        )
+        if (
+            self.registration
+            and not self.fusion
+            and "fusion" not in raw_analysis_parameters
+        ):
+            self.fusion = True
+            registration_parameters = (
+                raw_analysis_parameters.get("registration", {})
+                if isinstance(raw_analysis_parameters.get("registration"), Mapping)
+                else {}
+            )
+            raw_analysis_parameters["fusion"] = {
+                "execution_order": int(
+                    registration_parameters.get(
+                        "execution_order",
+                        DEFAULT_ANALYSIS_OPERATION_PARAMETERS["registration"][
+                            "execution_order"
+                        ],
+                    )
+                )
+                + 1,
+                "input_source": "registration",
+            }
         self.analysis_parameters = normalize_analysis_operation_parameters(
-            self.analysis_parameters
+            raw_analysis_parameters
         )
 
     def has_analysis_selection(self) -> bool:
@@ -4778,6 +5001,7 @@ class WorkflowConfig:
                 self.particle_detection,
                 self.usegment3d,
                 self.registration,
+                self.fusion,
                 self.display_pyramid,
                 self.visualization,
                 self.mip_export,

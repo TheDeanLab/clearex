@@ -196,6 +196,14 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     input_args.add_argument(
+        "--fusion",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Fusion Workflow",
+    )
+
+    input_args.add_argument(
         "--display-pyramid",
         required=False,
         default=False,

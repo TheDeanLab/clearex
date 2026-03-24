@@ -170,8 +170,10 @@ Runtime source aliases currently include:
 - ``flatfield`` -> ``clearex/runtime_cache/results/flatfield/latest/data``
 - ``deconvolution`` -> ``clearex/runtime_cache/results/deconvolution/latest/data``
 - ``shear_transform`` -> ``clearex/runtime_cache/results/shear_transform/latest/data``
+- ``fusion`` -> ``clearex/runtime_cache/results/fusion/latest/data``
 - ``usegment3d`` -> ``clearex/runtime_cache/results/usegment3d/latest/data``
-- ``registration`` -> ``clearex/runtime_cache/results/registration/latest/data``
+- ``registration`` -> ``clearex/results/registration/latest`` (metadata-only;
+  consumed by ``fusion``)
 
 Public OME image collections at the root and under ``results/<analysis>/latest``
 exist for interoperability and visualization. Analysis kernels should not write

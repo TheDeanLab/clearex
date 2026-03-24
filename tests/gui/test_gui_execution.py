@@ -364,6 +364,7 @@ def test_analysis_dialog_persists_registration_parameters(
     )
     dialog._persist_analysis_gui_state_for_target = lambda _target: None
     dialog._operation_checkboxes["registration"].setChecked(True)
+    dialog._operation_checkboxes["fusion"].setChecked(True)
     dialog._registration_type_combo.setCurrentIndex(
         dialog._registration_type_combo.findData("similarity")
     )
@@ -372,15 +373,18 @@ def test_analysis_dialog_persists_registration_parameters(
     )
     dialog._registration_anchor_position_spin.setMaximum(3)
     dialog._registration_anchor_position_spin.setValue(2)
-    dialog._registration_overlap_z_spin.setValue(5)
-    dialog._registration_overlap_y_spin.setValue(12)
-    dialog._registration_overlap_x_spin.setValue(20)
-    dialog._registration_blend_mode_combo.setCurrentIndex(
-        dialog._registration_blend_mode_combo.findData("gain_compensated_feather")
+    dialog._registration_pairwise_overlap_z_spin.setValue(5)
+    dialog._registration_pairwise_overlap_y_spin.setValue(12)
+    dialog._registration_pairwise_overlap_x_spin.setValue(20)
+    dialog._fusion_overlap_z_spin.setValue(6)
+    dialog._fusion_overlap_y_spin.setValue(14)
+    dialog._fusion_overlap_x_spin.setValue(22)
+    dialog._fusion_blend_mode_combo.setCurrentIndex(
+        dialog._fusion_blend_mode_combo.findData("gain_compensated_feather")
     )
-    dialog._registration_blend_exponent_spin.setValue(1.8)
-    dialog._registration_gain_clip_min_spin.setValue(0.6)
-    dialog._registration_gain_clip_max_spin.setValue(2.4)
+    dialog._fusion_blend_exponent_spin.setValue(1.8)
+    dialog._fusion_gain_clip_min_spin.setValue(0.6)
+    dialog._fusion_gain_clip_max_spin.setValue(2.4)
     input_combo = dialog._operation_input_combos["registration"]
     data_index = input_combo.findData("data")
     assert data_index >= 0
@@ -395,20 +399,24 @@ def test_analysis_dialog_persists_registration_parameters(
         dialog._registration_resolution_level_combo.setCurrentIndex(level_1_index)
         expected_resolution_level = 1
     app_module.AnalysisSelectionDialog._set_registration_parameter_enabled_state(dialog)
+    app_module.AnalysisSelectionDialog._set_fusion_parameter_enabled_state(dialog)
 
     dialog._on_run()
 
     params = dialog.result_config.analysis_parameters["registration"]
+    fusion = dialog.result_config.analysis_parameters["fusion"]
     assert dialog.result_config.registration is True
+    assert dialog.result_config.fusion is True
     assert params["registration_type"] == "similarity"
     assert params["anchor_mode"] == "manual"
     assert params["anchor_position"] == 2
-    assert params["overlap_zyx"] == [5, 12, 20]
-    assert params["blend_mode"] == "gain_compensated_feather"
-    assert params["blend_exponent"] == pytest.approx(1.8)
-    assert params["gain_clip_range"] == pytest.approx([0.6, 2.4])
+    assert params["pairwise_overlap_zyx"] == [5, 12, 20]
     assert params["registration_channel"] == 1
     assert params["input_resolution_level"] == expected_resolution_level
+    assert fusion["blend_overlap_zyx"] == [6, 14, 22]
+    assert fusion["blend_mode"] == "gain_compensated_feather"
+    assert fusion["blend_exponent"] == pytest.approx(1.8)
+    assert fusion["gain_clip_range"] == pytest.approx([0.6, 2.4])
 
 
 def test_registration_resolution_levels_follow_selected_input_source(
@@ -1537,6 +1545,7 @@ def test_build_input_source_options_includes_existing_store_outputs() -> None:
             "particle_detection",
             "usegment3d",
             "registration",
+            "fusion",
             "visualization",
         ),
         operation_labels={
@@ -1546,6 +1555,7 @@ def test_build_input_source_options_includes_existing_store_outputs() -> None:
             "particle_detection": "Particle Detection",
             "usegment3d": "uSegment3D",
             "registration": "Registration",
+            "fusion": "Fusion",
             "visualization": "Visualization",
         },
         operation_output_components={
@@ -1553,7 +1563,8 @@ def test_build_input_source_options_includes_existing_store_outputs() -> None:
             "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
             "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
             "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
-            "registration": "clearex/runtime_cache/results/registration/latest/data",
+            "registration": "clearex/results/registration/latest",
+            "fusion": "clearex/runtime_cache/results/fusion/latest/data",
         },
         available_store_output_components={
             "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
@@ -1578,6 +1589,7 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
             "particle_detection",
             "usegment3d",
             "registration",
+            "fusion",
             "visualization",
         ),
         operation_labels={
@@ -1587,6 +1599,7 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
             "particle_detection": "Particle Detection",
             "usegment3d": "uSegment3D",
             "registration": "Registration",
+            "fusion": "Fusion",
             "visualization": "Visualization",
         },
         operation_output_components={
@@ -1594,7 +1607,8 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
             "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
             "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
             "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
-            "registration": "clearex/runtime_cache/results/registration/latest/data",
+            "registration": "clearex/results/registration/latest",
+            "fusion": "clearex/runtime_cache/results/fusion/latest/data",
         },
         available_store_output_components={
             "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
@@ -1620,6 +1634,7 @@ def test_build_input_source_options_includes_scheduled_upstream_outputs() -> Non
             "particle_detection",
             "usegment3d",
             "registration",
+            "fusion",
             "visualization",
         ),
         operation_labels={
@@ -1629,6 +1644,7 @@ def test_build_input_source_options_includes_scheduled_upstream_outputs() -> Non
             "particle_detection": "Particle Detection",
             "usegment3d": "uSegment3D",
             "registration": "Registration",
+            "fusion": "Fusion",
             "visualization": "Visualization",
         },
         operation_output_components={
@@ -1636,7 +1652,8 @@ def test_build_input_source_options_includes_scheduled_upstream_outputs() -> Non
             "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
             "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
             "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
-            "registration": "clearex/runtime_cache/results/registration/latest/data",
+            "registration": "clearex/results/registration/latest",
+            "fusion": "clearex/runtime_cache/results/fusion/latest/data",
         },
         available_store_output_components={
             "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
@@ -1646,6 +1663,44 @@ def test_build_input_source_options_includes_scheduled_upstream_outputs() -> Non
     assert (
         "deconvolution",
         "Deconvolution output (clearex/runtime_cache/results/deconvolution/latest/data) [scheduled]",
+    ) in options
+
+
+def test_build_input_source_options_allows_registration_for_fusion() -> None:
+    options = app_module._build_input_source_options(
+        operation_name="fusion",
+        selected_order=["registration", "fusion"],
+        operation_key_order=(
+            "flatfield",
+            "deconvolution",
+            "shear_transform",
+            "registration",
+            "fusion",
+            "visualization",
+        ),
+        operation_labels={
+            "flatfield": "Flatfield Correction",
+            "deconvolution": "Deconvolution",
+            "shear_transform": "Shear Transform",
+            "registration": "Registration",
+            "fusion": "Fusion",
+            "visualization": "Visualization",
+        },
+        operation_output_components={
+            "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
+            "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
+            "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
+            "registration": "clearex/results/registration/latest",
+            "fusion": "clearex/runtime_cache/results/fusion/latest/data",
+        },
+        available_store_output_components={
+            "registration": "clearex/results/registration/latest",
+        },
+    )
+
+    assert (
+        "registration",
+        "Registration output (clearex/results/registration/latest) [scheduled]",
     ) in options
 
 

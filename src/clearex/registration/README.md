@@ -19,24 +19,26 @@ integration:
 - Canonical runtime inputs are OME-Zarr v3 `*.ome.zarr` stores.
 - `input_source` is a logical workflow alias by default (`data`,
   `flatfield`, `deconvolution`, `shear_transform`, `usegment3d`,
-  `registration`) and resolves to a ClearEx runtime-cache image component.
-- Registration writes fused image data to
-  `clearex/runtime_cache/results/registration/latest/data`.
-- Registration publishes its public image result as the OME collection
-  `results/registration/latest`.
-- Registration auxiliary artifacts stay under
+  `registration`, `fusion`) and resolves to the matching ClearEx runtime or
+  metadata component.
+- `registration` is metadata-only and writes transform/layout artifacts under
   `clearex/results/registration/latest`:
   - `affines_tpx44`
-  - `blend_weights`
   - `edges_pe2`
-  - `intensity_gains_tp`
-  - `intensity_offsets_tp`
   - `pairwise_affines_tex44`
   - `edge_status_te`
   - `edge_residual_te`
   - `transformed_bboxes_tpx6`
-- Do not reintroduce `results/registration/latest/data` as the canonical write
-  target. That legacy path is migration-only.
+- `fusion` consumes the latest registration result and writes stitched image
+  data to `clearex/runtime_cache/results/fusion/latest/data`.
+- `fusion` publishes its public image result as the OME collection
+  `results/fusion/latest`.
+- `fusion` auxiliary artifacts stay under `clearex/results/fusion/latest`:
+  - `blend_weights`
+  - `intensity_gains_tp`
+  - `intensity_offsets_tp`
+- Do not reintroduce `results/registration/latest/data` as a canonical image
+  target. Registration no longer owns a reusable image output.
 
 ## Quick Start
 
@@ -457,10 +459,19 @@ This design allows users to choose the appropriate level of abstraction for thei
 
 ## Performance Tuning (pipeline.py)
 
-The chunked tile-registration pipeline (`pipeline.py`) supports several
-parameters for tuning pairwise estimation and fusion throughput.  All
-parameters are passed through the `parameters` dict to
-`run_registration_analysis`.
+The chunked tile-registration pipeline (`pipeline.py`) now runs as two
+separate operations:
+
+- `run_registration_analysis(...)`
+  Estimates pairwise overlaps, solves global transforms, and persists layout
+  metadata for later rendering.
+- `run_fusion_analysis(...)`
+  Consumes the persisted registration result and renders the stitched image
+  volume.
+
+This split is intentional: registration usually needs much more memory per
+worker than fusion, so ClearEx now lets you run them in separate workflow
+executions with different Dask worker counts and memory limits.
 
 ### Dask/Zarr Design Principles
 
@@ -471,28 +482,39 @@ parameters are passed through the `parameters` dict to
   `_source_subvolume_for_overlap` to compute the minimal source Zarr slice
   that covers each output region, dramatically reducing I/O for large tiles.
 - **Cached blend profiles.** The separable blend-weight profiles are
-  pre-computed once and stored under
-  `clearex/results/registration/latest/blend_weights` in the analysis store.
+  pre-computed once during fusion and stored under
+  `clearex/results/fusion/latest/blend_weights` in the analysis store.
   Fusion workers lazily reconstruct only the sub-volume they need.
 
-### Configurable Parameters
+### Registration Parameters
+
+These parameters belong to the `registration` operation.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `registration_channel` | `0` | Channel index used for pairwise overlap registration. Choose a structurally stable, high-SNR channel that is present in every tile; avoid sparse labels or channels with strong bleaching. |
 | `registration_type` | `"translation"` | Pairwise ANTsPy transform family: `translation` (fastest), `rigid`, or `similarity`. Translation is the default for maximum throughput; combined with FFT initial alignment this converges in very few iterations. |
 | `input_resolution_level` | `0` | Pyramid level used only for pairwise overlap registration (`0` = full resolution). Final fusion always resamples the full-resolution source tiles. |
-| `overlap_zyx` | `(8, 32, 32)` | Overlap crop and blend-ramp width in `(z, y, x)` order. Larger values give pairwise registration more shared context and widen the fusion transition, but they increase I/O and registration cost. |
+| `pairwise_overlap_zyx` | `(8, 32, 32)` | Overlap crop padding in `(z, y, x)` order used for pairwise registration. Larger values give ANTs more shared context, but they increase I/O and registration cost. |
 | `anchor_mode` | `"central"` | Global graph anchor policy. `central` fixes the most central tile automatically; `manual` uses `anchor_position`. |
 | `anchor_position` | `None` | Tile index held fixed when `anchor_mode="manual"`. Use this only when you need a specific reference tile. |
-| `blend_mode` | `"feather"` | Fusion mode for overlapping tiles. `average` uses uniform weights, `feather` uses cosine edge ramps, `center_weighted` steepens the feather falloff, `content_aware` modulates feather weights by local gradient content, and `gain_compensated_feather` estimates a moving-to-fixed intensity match before feather blending. |
-| `blend_exponent` | `1.0` | Exponent applied to the spatial blend profile. Values above `1.0` make the edge transition steeper; values below `1.0` make it gentler. |
-| `gain_clip_range` | `(0.25, 4.0)` | Minimum and maximum allowed multiplicative gain for gain-compensated feather. The fitted overlap gain is clipped into this range before fusion. |
 | `use_fft_initial_alignment` | `True` | Run FFT phase correlation to pre-align the moving crop before ANTs. Gives ANTs a much better starting point so it converges faster with fewer iterations. |
 | `max_pairwise_voxels` | `500_000` | Maximum voxel budget for pairwise overlap crops. Crops exceeding this budget are isotropically downsampled before ANTs estimation. Set to `0` to disable. |
 | `ants_iterations` | `(200, 100, 50, 25)` | ANTsPy multi-resolution iteration schedule. Smaller values are faster; the legacy schedule `(2000, 1000, 500, 250)` is available as `_ANTS_AFF_ITERATIONS_LEGACY`. |
 | `ants_sampling_rate` | `0.20` | ANTsPy random voxel sampling rate. Reducing this saves per-iteration cost with minimal accuracy impact for tile registration. |
 | `use_phase_correlation` | `False` | When `True` and `registration_type` is `"translation"`, skip ANTs entirely and use FFT phase correlation only. Falls back to ANTs on failure. |
+
+### Fusion Parameters
+
+These parameters belong to the `fusion` operation.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `input_source` | `"registration"` | Registration result consumed by fusion. In the normal workflow this is the latest `registration` output. |
+| `blend_overlap_zyx` | `(8, 32, 32)` | Blend-ramp width in `(z, y, x)` order. Larger values widen the fusion transition and usually hide seams better, but they spread mismatch over a larger region. |
+| `blend_mode` | `"feather"` | Fusion mode for overlapping tiles. `average` uses uniform weights, `feather` uses cosine edge ramps, `center_weighted` steepens the feather falloff, `content_aware` modulates feather weights by local gradient content, and `gain_compensated_feather` estimates a moving-to-fixed intensity match before feather blending. |
+| `blend_exponent` | `1.0` | Exponent applied to the spatial blend profile. Values above `1.0` make the edge transition steeper; values below `1.0` make it gentler. |
+| `gain_clip_range` | `(0.25, 4.0)` | Minimum and maximum allowed multiplicative gain for gain-compensated feather. The fitted overlap gain is clipped into this range before fusion. |
 
 ### Practical Parameter Guidance
 
@@ -522,13 +544,16 @@ parameters are passed through the `parameters` dict to
 
 #### Choosing overlap width
 
-`overlap_zyx` affects both pairwise registration and the final fusion ramp, so it is one of the highest-leverage seam controls.
+`pairwise_overlap_zyx` and `blend_overlap_zyx` are now separate knobs. Increase
+pairwise overlap when registration needs more shared context; increase blend
+overlap when alignment is already acceptable but the seam transition is still
+too abrupt.
 
-| Goal | Suggested `overlap_zyx` | Notes |
-|------|-------------------------|-------|
-| Fast preview / throughput | `[8, 32, 32]` | Current default. Good when seams are already minor. |
-| Balanced seam reduction | `[16, 128, 128]` | Good starting point when the seam is visible but not severe. |
-| Aggressive seam reduction | `[24, 192, 192]` | Useful when the overlap has enough tissue context and the seam is still obvious after normal feathering. |
+| Goal | Suggested `pairwise_overlap_zyx` | Suggested `blend_overlap_zyx` | Notes |
+|------|----------------------------------|-------------------------------|-------|
+| Fast preview / throughput | `[8, 32, 32]` | `[8, 32, 32]` | Current default. Good when seams are already minor. |
+| Balanced seam reduction | `[12, 64, 64]` | `[16, 128, 128]` | Good starting point when the seam is visible but not severe. |
+| Aggressive seam reduction | `[16, 96, 96]` | `[24, 192, 192]` | Use when overlap has enough tissue context and the seam is still obvious. |
 
 Practical notes:
 
@@ -599,14 +624,17 @@ Use this when you want a quick check of seam direction and gross tile placement.
 registration:
   registration_type: translation
   input_resolution_level: 1
-  overlap_zyx: [8, 32, 32]
-  blend_mode: feather
-  blend_exponent: 1.0
+  pairwise_overlap_zyx: [8, 32, 32]
   max_pairwise_voxels: 250000
   ants_sampling_rate: 0.10
   ants_iterations: [200, 100, 50, 25]
   use_fft_initial_alignment: true
   use_phase_correlation: true
+fusion:
+  input_source: registration
+  blend_overlap_zyx: [8, 32, 32]
+  blend_mode: feather
+  blend_exponent: 1.0
 ```
 
 #### Balanced high-resolution stitching
@@ -617,14 +645,17 @@ Use this when the seam is visible and you want a stronger default without going 
 registration:
   registration_type: rigid
   input_resolution_level: 0
-  overlap_zyx: [16, 128, 128]
-  blend_mode: feather
-  blend_exponent: 1.25
+  pairwise_overlap_zyx: [12, 64, 64]
   max_pairwise_voxels: 1000000
   ants_sampling_rate: 0.25
   ants_iterations: [500, 250, 125, 50]
   use_fft_initial_alignment: true
   use_phase_correlation: false
+fusion:
+  input_source: registration
+  blend_overlap_zyx: [16, 128, 128]
+  blend_mode: feather
+  blend_exponent: 1.25
 ```
 
 #### Intensity-mismatch seam
@@ -635,15 +666,18 @@ Use this when the seam looks like a brightness or background jump across otherwi
 registration:
   registration_type: rigid
   input_resolution_level: 0
-  overlap_zyx: [16, 128, 128]
-  blend_mode: gain_compensated_feather
-  blend_exponent: 1.0
-  gain_clip_range: [0.5, 2.0]
+  pairwise_overlap_zyx: [12, 64, 64]
   max_pairwise_voxels: 1000000
   ants_sampling_rate: 0.25
   ants_iterations: [500, 250, 125, 50]
   use_fft_initial_alignment: true
   use_phase_correlation: false
+fusion:
+  input_source: registration
+  blend_overlap_zyx: [16, 128, 128]
+  blend_mode: gain_compensated_feather
+  blend_exponent: 1.0
+  gain_clip_range: [0.5, 2.0]
 ```
 
 #### Difficult seam with residual geometric mismatch
@@ -654,14 +688,17 @@ Use this when the seam remains visible after default fusion and the overlap stil
 registration:
   registration_type: similarity
   input_resolution_level: 0
-  overlap_zyx: [24, 192, 192]
-  blend_mode: content_aware
-  blend_exponent: 1.0
+  pairwise_overlap_zyx: [16, 96, 96]
   max_pairwise_voxels: 2000000
   ants_sampling_rate: 0.35
   ants_iterations: [1000, 500, 250, 100]
   use_fft_initial_alignment: true
   use_phase_correlation: false
+fusion:
+  input_source: registration
+  blend_overlap_zyx: [24, 192, 192]
+  blend_mode: content_aware
+  blend_exponent: 1.0
 ```
 
 ### GPU Acceleration (future)

@@ -91,6 +91,7 @@ from clearex.mip_export.pipeline import (
 
 try:
     from clearex.registration.pipeline import (
+        run_fusion_analysis,
         run_registration_analysis,
     )
 except ImportError:
@@ -122,6 +123,14 @@ except ImportError:
         del zarr_path, parameters, client, progress_callback
         raise RuntimeError(
             "registration analysis is unavailable: "
+            "could not import clearex.registration.pipeline."
+        )
+
+    def run_fusion_analysis(*, zarr_path, parameters, client, progress_callback):
+        """Fallback when the optional registration runtime module is unavailable."""
+        del zarr_path, parameters, client, progress_callback
+        raise RuntimeError(
+            "fusion analysis is unavailable: "
             "could not import clearex.registration.pipeline."
         )
 
@@ -165,6 +174,7 @@ except ImportError:
 
 from clearex.workflow import (
     ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS,
+    ANALYSIS_KNOWN_OUTPUT_COMPONENTS,
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
     DASK_BACKEND_SLURM_RUNNER,
@@ -203,6 +213,7 @@ _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
         "particle_detection",
         "usegment3d",
         "registration",
+        "fusion",
         "display_pyramid",
         "mip_export",
     }
@@ -215,6 +226,7 @@ _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
         "particle_detection",
         "usegment3d",
         "registration",
+        "fusion",
     }
 )
 _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
@@ -235,9 +247,10 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
         analysis_cache_data_component("usegment3d"),
         analysis_auxiliary_root("usegment3d"),
     ),
-    "registration": (
-        analysis_cache_data_component("registration"),
-        analysis_auxiliary_root("registration"),
+    "registration": (analysis_auxiliary_root("registration"),),
+    "fusion": (
+        analysis_cache_data_component("fusion"),
+        analysis_auxiliary_root("fusion"),
     ),
     "display_pyramid": (analysis_auxiliary_root("display_pyramid"),),
     "mip_export": (analysis_auxiliary_root("mip_export"),),
@@ -421,7 +434,7 @@ def _collect_available_analysis_components(
     if not zarr_path or not is_zarr_store_path(zarr_path):
         return available_components
 
-    for operation_name, component in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS.items():
+    for operation_name, component in ANALYSIS_KNOWN_OUTPUT_COMPONENTS.items():
         if operation_name == "data":
             continue
         if _zarr_component_exists(zarr_path, component):
@@ -673,6 +686,9 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         else SpatialCalibrationConfig()
     )
 
+    if hasattr(args, "fusion"):
+        usegment3d_analysis_parameters.setdefault("fusion", {})
+
     return WorkflowConfig(
         file=args.file,
         prefer_dask=args.dask,
@@ -688,6 +704,7 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         particle_detection=args.particle_detection,
         usegment3d=args.usegment3d,
         registration=args.registration,
+        fusion=bool(getattr(args, "fusion", False)),
         display_pyramid=bool(getattr(args, "display_pyramid", False)),
         visualization=args.visualization,
         mip_export=args.mip_export,
@@ -1430,6 +1447,7 @@ def _run_workflow(
             particle_detection=workflow.particle_detection,
             usegment3d=workflow.usegment3d,
             registration=workflow.registration,
+            fusion=workflow.fusion,
             display_pyramid=workflow.display_pyramid,
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,
@@ -2277,22 +2295,11 @@ def _run_workflow(
                             client=analysis_client,
                             progress_callback=_registration_progress,
                         )
-                        publish_analysis_collection_from_cache(
-                            provenance_store_path,
-                            analysis_name="registration",
-                        )
                         registration_component = str(
                             getattr(
                                 summary,
                                 "component",
-                                public_analysis_root("registration"),
-                            )
-                        )
-                        registration_data_component = str(
-                            getattr(
-                                summary,
-                                "data_component",
-                                analysis_cache_data_component("registration"),
+                                analysis_auxiliary_root("registration"),
                             )
                         )
                         registration_affines_component = str(
@@ -2302,6 +2309,13 @@ def _run_workflow(
                                 f"{analysis_auxiliary_root('registration')}/affines_tpx44",
                             )
                         )
+                        registration_transformed_bboxes_component = str(
+                            getattr(
+                                summary,
+                                "transformed_bboxes_component",
+                                f"{analysis_auxiliary_root('registration')}/transformed_bboxes_tpx6",
+                            )
+                        )
                         registration_source_component = str(
                             getattr(
                                 summary,
@@ -2309,13 +2323,17 @@ def _run_workflow(
                                 registration_parameters.get("input_source", "data"),
                             )
                         )
-                        produced_components["registration"] = (
-                            registration_data_component
+                        pairwise_overlap_zyx = list(
+                            registration_parameters.get(
+                                "pairwise_overlap_zyx",
+                                registration_parameters.get("overlap_zyx", [8, 32, 32]),
+                            )
                         )
+                        produced_components["registration"] = registration_component
                         output_records["registration"] = {
                             "component": registration_component,
-                            "data_component": registration_data_component,
                             "affines_component": registration_affines_component,
+                            "transformed_bboxes_component": registration_transformed_bboxes_component,
                             "source_component": registration_source_component,
                             "pairwise_source_component": str(
                                 getattr(
@@ -2355,6 +2373,7 @@ def _run_workflow(
                                     ),
                                 )
                             ),
+                            "pairwise_overlap_zyx": pairwise_overlap_zyx,
                             "edge_count": int(getattr(summary, "edge_count", 0)),
                             "active_edge_count": int(
                                 getattr(summary, "active_edge_count", 0)
@@ -2368,21 +2387,14 @@ def _run_workflow(
                             "output_chunks_tpczyx": list(
                                 getattr(summary, "output_chunks_tpczyx", ())
                             ),
-                            "blend_mode": str(
-                                getattr(
-                                    summary,
-                                    "blend_mode",
-                                    registration_parameters.get(
-                                        "blend_mode", "feather"
-                                    ),
-                                )
+                            "output_origin_xyz_um": list(
+                                getattr(summary, "output_origin_xyz_um", ())
                             ),
                             "storage_policy": "latest_only",
                         }
                         logger.info(
                             "Registration completed: "
                             f"component={registration_component}, "
-                            f"data_component={registration_data_component}, "
                             f"source={registration_source_component}, "
                             f"pairwise_source={getattr(summary, 'pairwise_source_component', registration_source_component)}, "
                             f"edges={getattr(summary, 'edge_count', 0)}, "
@@ -2395,8 +2407,8 @@ def _run_workflow(
                                 "parameters": {
                                     **registration_parameters,
                                     "component": registration_component,
-                                    "data_component": registration_data_component,
                                     "affines_component": registration_affines_component,
+                                    "transformed_bboxes_component": registration_transformed_bboxes_component,
                                     "source_component": registration_source_component,
                                     "pairwise_source_component": str(
                                         getattr(
@@ -2423,6 +2435,7 @@ def _run_workflow(
                                             ),
                                         )
                                     ),
+                                    "pairwise_overlap_zyx": pairwise_overlap_zyx,
                                     "input_resolution_level": int(
                                         getattr(summary, "input_resolution_level", 0)
                                     ),
@@ -2456,14 +2469,8 @@ def _run_workflow(
                                     "output_chunks_tpczyx": list(
                                         getattr(summary, "output_chunks_tpczyx", ())
                                     ),
-                                    "blend_mode": str(
-                                        getattr(
-                                            summary,
-                                            "blend_mode",
-                                            registration_parameters.get(
-                                                "blend_mode", "feather"
-                                            ),
-                                        )
+                                    "output_origin_xyz_um": list(
+                                        getattr(summary, "output_origin_xyz_um", ())
                                     ),
                                 },
                             }
@@ -2489,6 +2496,160 @@ def _run_workflow(
                         _emit_analysis_progress(
                             operation_end,
                             "Registration skipped (no Zarr/N5 store).",
+                        )
+                    continue
+
+                if operation_name == "fusion":
+                    fusion_parameters = dict(operation_parameters)
+                    _emit_analysis_progress(
+                        operation_start,
+                        "Running fusion workflow.",
+                    )
+                    logger.info(
+                        "Running fusion workflow (input=%s).",
+                        resolved_source,
+                    )
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
+                        progress_state = {"last_percent": -5}
+
+                        def _fusion_progress(percent: int, message: str) -> None:
+                            """Throttle fusion progress logs."""
+                            last_percent = int(progress_state["last_percent"])
+                            if percent >= 100 or percent - last_percent >= 5:
+                                progress_state["last_percent"] = int(percent)
+                                logger.info(f"[fusion] {int(percent)}% - {message}")
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            _emit_analysis_progress(mapped, f"fusion: {message}")
+
+                        summary = run_fusion_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=fusion_parameters,
+                            client=analysis_client,
+                            progress_callback=_fusion_progress,
+                        )
+                        publish_analysis_collection_from_cache(
+                            provenance_store_path,
+                            analysis_name="fusion",
+                        )
+                        fusion_component = str(
+                            getattr(
+                                summary,
+                                "component",
+                                public_analysis_root("fusion"),
+                            )
+                        )
+                        fusion_data_component = str(
+                            getattr(
+                                summary,
+                                "data_component",
+                                analysis_cache_data_component("fusion"),
+                            )
+                        )
+                        fusion_registration_component = str(
+                            getattr(
+                                summary,
+                                "registration_component",
+                                fusion_parameters.get("input_source", "registration"),
+                            )
+                        )
+                        fusion_source_component = str(
+                            getattr(summary, "source_component", "data")
+                        )
+                        blend_overlap_zyx = list(
+                            fusion_parameters.get(
+                                "blend_overlap_zyx",
+                                fusion_parameters.get("overlap_zyx", [8, 32, 32]),
+                            )
+                        )
+                        produced_components["fusion"] = fusion_data_component
+                        output_records["fusion"] = {
+                            "component": fusion_component,
+                            "data_component": fusion_data_component,
+                            "registration_component": fusion_registration_component,
+                            "source_component": fusion_source_component,
+                            "blend_mode": str(
+                                getattr(
+                                    summary,
+                                    "blend_mode",
+                                    fusion_parameters.get("blend_mode", "feather"),
+                                )
+                            ),
+                            "blend_overlap_zyx": blend_overlap_zyx,
+                            "blend_exponent": float(
+                                fusion_parameters.get("blend_exponent", 1.0)
+                            ),
+                            "output_shape_tpczyx": list(
+                                getattr(summary, "output_shape_tpczyx", ())
+                            ),
+                            "output_chunks_tpczyx": list(
+                                getattr(summary, "output_chunks_tpczyx", ())
+                            ),
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Fusion completed: "
+                            f"component={fusion_component}, "
+                            f"data_component={fusion_data_component}, "
+                            f"registration={fusion_registration_component}, "
+                            f"source={fusion_source_component}, "
+                            f"blend_mode={getattr(summary, 'blend_mode', fusion_parameters.get('blend_mode', 'feather'))}, "
+                            f"output_shape={getattr(summary, 'output_shape_tpczyx', ())}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "fusion",
+                                "parameters": {
+                                    **fusion_parameters,
+                                    "component": fusion_component,
+                                    "data_component": fusion_data_component,
+                                    "registration_component": fusion_registration_component,
+                                    "source_component": fusion_source_component,
+                                    "blend_mode": str(
+                                        getattr(
+                                            summary,
+                                            "blend_mode",
+                                            fusion_parameters.get(
+                                                "blend_mode", "feather"
+                                            ),
+                                        )
+                                    ),
+                                    "blend_overlap_zyx": blend_overlap_zyx,
+                                    "blend_exponent": float(
+                                        fusion_parameters.get("blend_exponent", 1.0)
+                                    ),
+                                    "output_shape_tpczyx": list(
+                                        getattr(summary, "output_shape_tpczyx", ())
+                                    ),
+                                    "output_chunks_tpczyx": list(
+                                        getattr(summary, "output_chunks_tpczyx", ())
+                                    ),
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Fusion complete.",
+                        )
+                    else:
+                        logger.warning("Fusion requires a canonical OME-Zarr store.")
+                        step_records.append(
+                            {
+                                "name": "fusion",
+                                "parameters": {
+                                    **fusion_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Fusion skipped (no Zarr/N5 store).",
                         )
                     continue
 
@@ -2990,6 +3151,7 @@ def _run_workflow(
             particle_detection=workflow.particle_detection,
             usegment3d=workflow.usegment3d,
             registration=workflow.registration,
+            fusion=workflow.fusion,
             display_pyramid=workflow.display_pyramid,
             visualization=workflow.visualization,
             mip_export=workflow.mip_export,

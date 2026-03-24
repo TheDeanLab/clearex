@@ -435,8 +435,7 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
             "input_resolution_level": 1,
             "anchor_mode": "central",
             "anchor_position": None,
-            "blend_mode": "feather",
-            "overlap_zyx": [0, 0, 2],
+            "pairwise_overlap_zyx": [0, 0, 2],
         },
         client=None,
         progress_callback=lambda percent, message: progress_updates.append(
@@ -446,7 +445,6 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
 
     root = zarr.open_group(str(store_path), mode="r")
     latest = root["clearex/results/registration/latest"]
-    data = root["clearex/runtime_cache/results/registration/latest/data"]
     affines = latest["affines_tpx44"]
 
     assert summary.source_component == "data"
@@ -455,28 +453,15 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
     assert summary.anchor_positions == (1, 1)
     assert summary.edge_count == 2
     assert summary.output_shape_tpczyx == (2, 1, 1, 4, 4, 14)
-    assert data.shape == (2, 1, 1, 4, 4, 14)
     assert latest["edges_pe2"].shape == (2, 2)
     assert latest["pairwise_affines_tex44"].shape == (2, 2, 4, 4)
     assert latest["edge_status_te"].shape == (2, 2)
     assert latest["edge_residual_te"].shape == (2, 2)
     assert latest["transformed_bboxes_tpx6"].shape == (2, 3, 6)
     assert affines[1, 2, 0, 3] == pytest.approx(3.0, abs=1e-6)
-    assert int(data[0, 0, 0, 0, 0, 4]) == 10
-    assert int(data[0, 0, 0, 0, 0, 5]) == 20
-    assert int(data[0, 0, 0, 0, 0, 8]) == 20
-    assert int(data[0, 0, 0, 0, 0, 9]) == 30
     assert latest.attrs["pairwise_source_component"] == "data_pyramid/level_1"
     assert latest.attrs["input_resolution_level"] == 1
-    assert latest.attrs["blend_mode"] == "feather"
-    assert latest.attrs["blend_exponent"] == pytest.approx(1.0)
-    assert latest.attrs["gain_clip_range"] == pytest.approx([0.25, 4.0])
-    assert "blend_weights" in latest
-    assert latest["blend_weights"]["profile_z"].shape == (4,)
-    assert latest["blend_weights"]["profile_y"].shape == (4,)
-    assert latest["blend_weights"]["profile_x"].shape == (6,)
-    np.testing.assert_array_equal(latest["intensity_gains_tp"][:], np.ones((2, 3)))
-    np.testing.assert_array_equal(latest["intensity_offsets_tp"][:], np.zeros((2, 3)))
+    assert latest.attrs["pairwise_overlap_zyx"] == [0, 0, 2]
     assert latest.attrs["max_pairwise_voxels"] == int(
         registration_pipeline._DEFAULT_MAX_PAIRWISE_VOXELS
     )
@@ -493,6 +478,41 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
     # Verify we get granular progress (not just start and end).
     progress_percents = [p for p, _ in progress_updates]
     assert len(progress_percents) >= 5
+
+    fusion_summary = registration_pipeline.run_fusion_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "registration",
+            "blend_mode": "feather",
+            "blend_overlap_zyx": [0, 0, 2],
+            "blend_exponent": 1.0,
+        },
+        client=None,
+    )
+    root = zarr.open_group(str(store_path), mode="r")
+    fusion_latest = root["clearex/results/fusion/latest"]
+    data = root["clearex/runtime_cache/results/fusion/latest/data"]
+    assert fusion_summary.blend_mode == "feather"
+    assert fusion_summary.output_shape_tpczyx == (2, 1, 1, 4, 4, 14)
+    assert data.shape == (2, 1, 1, 4, 4, 14)
+    assert int(data[0, 0, 0, 0, 0, 4]) == 10
+    assert int(data[0, 0, 0, 0, 0, 5]) == 20
+    assert int(data[0, 0, 0, 0, 0, 8]) == 20
+    assert int(data[0, 0, 0, 0, 0, 9]) == 30
+    assert fusion_latest.attrs["blend_mode"] == "feather"
+    assert fusion_latest.attrs["blend_exponent"] == pytest.approx(1.0)
+    assert fusion_latest.attrs["blend_overlap_zyx"] == [0, 0, 2]
+    assert "blend_weights" in fusion_latest
+    assert fusion_latest["blend_weights"]["profile_z"].shape == (4,)
+    assert fusion_latest["blend_weights"]["profile_y"].shape == (4,)
+    assert fusion_latest["blend_weights"]["profile_x"].shape == (6,)
+    np.testing.assert_array_equal(
+        fusion_latest["intensity_gains_tp"][:], np.ones((2, 3))
+    )
+    np.testing.assert_array_equal(
+        fusion_latest["intensity_offsets_tp"][:],
+        np.zeros((2, 3)),
+    )
 
 
 def test_run_registration_analysis_uses_namespaced_stage_metadata(
@@ -580,13 +600,20 @@ def test_run_registration_analysis_gain_compensated_feather_corrects_overlap_int
     def _fake_pairwise(**kwargs):
         edge = kwargs["edge"]
         correction = np.eye(4, dtype=np.float64)
-        return _edge_result(
-            edge,
-            correction,
-            intensity_success=True,
-            intensity_scale=0.5,
-            intensity_offset=0.0,
-        )
+        return _edge_result(edge, correction)
+
+    def _fake_intensity(**kwargs):
+        edge = kwargs["edge"]
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": True,
+            "overlap_voxels": int(edge.overlap_voxels),
+            "intensity_success": True,
+            "intensity_scale": 0.5,
+            "intensity_offset": 0.0,
+            "intensity_samples": int(edge.overlap_voxels),
+        }
 
     monkeypatch.setattr(registration_pipeline.dask, "compute", _sync_compute)
     monkeypatch.setattr(
@@ -594,8 +621,13 @@ def test_run_registration_analysis_gain_compensated_feather_corrects_overlap_int
         "_register_pairwise_overlap",
         _fake_pairwise,
     )
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_estimate_pairwise_overlap_intensity",
+        _fake_intensity,
+    )
 
-    summary = registration_pipeline.run_registration_analysis(
+    registration_pipeline.run_registration_analysis(
         zarr_path=store_path,
         parameters={
             "input_source": "data",
@@ -604,19 +636,28 @@ def test_run_registration_analysis_gain_compensated_feather_corrects_overlap_int
             "input_resolution_level": 0,
             "anchor_mode": "central",
             "anchor_position": None,
+            "pairwise_overlap_zyx": [0, 0, 2],
+        },
+        client=None,
+    )
+
+    fusion_summary = registration_pipeline.run_fusion_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "registration",
             "blend_mode": "gain_compensated_feather",
+            "blend_overlap_zyx": [0, 0, 2],
             "blend_exponent": 1.0,
             "gain_clip_range": [0.25, 4.0],
-            "overlap_zyx": [0, 0, 2],
         },
         client=None,
     )
 
     root = zarr.open_group(str(store_path), mode="r")
-    latest = root["clearex/results/registration/latest"]
-    fused = root["clearex/runtime_cache/results/registration/latest/data"]
+    latest = root["clearex/results/fusion/latest"]
+    fused = root["clearex/runtime_cache/results/fusion/latest/data"]
 
-    assert summary.blend_mode == "gain_compensated_feather"
+    assert fusion_summary.blend_mode == "gain_compensated_feather"
     assert latest.attrs["blend_mode"] == "gain_compensated_feather"
     np.testing.assert_allclose(
         latest["intensity_gains_tp"][:],
@@ -765,6 +806,7 @@ def test_process_and_write_registration_chunk_skips_empty_source_subvolumes(
     )
     _, output_component, affines_component, blend_weights_component = (
         registration_pipeline._prepare_output_group(
+            analysis_name="fusion",
             zarr_path=store_path,
             source_component="data",
             parameters={"input_source": "data", "blend_mode": "feather"},
@@ -780,7 +822,7 @@ def test_process_and_write_registration_chunk_skips_empty_source_subvolumes(
         )
     )
     root = zarr.open_group(str(store_path), mode="a")
-    auxiliary_root = registration_pipeline.analysis_auxiliary_root("registration")
+    auxiliary_root = registration_pipeline.analysis_auxiliary_root("fusion")
     root[affines_component][0, 0] = np.eye(4, dtype=np.float64)
     auxiliary_group = root[auxiliary_root]
     auxiliary_group.create_array(
@@ -813,9 +855,7 @@ def test_process_and_write_registration_chunk_skips_empty_source_subvolumes(
         source_component="data",
         output_component=output_component,
         affines_component=affines_component,
-        transformed_bboxes_component=(
-            f"{auxiliary_root}/transformed_bboxes_tpx6"
-        ),
+        transformed_bboxes_component=(f"{auxiliary_root}/transformed_bboxes_tpx6"),
         blend_weights_component=blend_weights_component,
         intensity_gains_component=f"{auxiliary_root}/intensity_gains_tp",
         intensity_offsets_component=f"{auxiliary_root}/intensity_offsets_tp",

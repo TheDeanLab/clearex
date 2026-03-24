@@ -1535,6 +1535,12 @@ def _build_input_source_options(
         if upstream_name in option_values:
             continue
         component = analysis_chainable_output_component(upstream_name)
+        if (
+            operation_name == "fusion"
+            and upstream_name == "registration"
+            and component is None
+        ):
+            component = operation_output_components.get("registration")
         if component is None or upstream_name == "data":
             continue
         label = operation_labels.get(
@@ -1549,7 +1555,9 @@ def _build_input_source_options(
         component = str(available.get(upstream_name, "")).strip()
         if not component:
             continue
-        if analysis_chainable_output_component(upstream_name) is None:
+        if analysis_chainable_output_component(upstream_name) is None and not (
+            operation_name == "fusion" and upstream_name == "registration"
+        ):
             continue
         label = operation_labels.get(
             upstream_name, upstream_name.replace("_", " ").title()
@@ -7057,6 +7065,7 @@ if HAS_PYQT6:
                 shear_transform=False,
                 particle_detection=False,
                 registration=False,
+                fusion=False,
                 visualization=False,
                 mip_export=False,
                 zarr_save=self._zarr_save_config,
@@ -7287,8 +7296,9 @@ if HAS_PYQT6:
             "flatfield",
             "deconvolution",
             "shear_transform",
-            "display_pyramid",
             "registration",
+            "fusion",
+            "display_pyramid",
             "particle_detection",
             "usegment3d",
             "visualization",
@@ -7301,6 +7311,7 @@ if HAS_PYQT6:
             "particle_detection",
             "usegment3d",
             "registration",
+            "fusion",
             "display_pyramid",
             "mip_export",
         )
@@ -7311,6 +7322,7 @@ if HAS_PYQT6:
             "particle_detection": "Particle Detection",
             "usegment3d": "uSegment3D",
             "registration": "Registration",
+            "fusion": "Fusion",
             "display_pyramid": "Pyramidal Downsampling",
             "visualization": "Napari",
             "mip_export": "MIP Export",
@@ -7322,8 +7334,9 @@ if HAS_PYQT6:
                     "flatfield",
                     "deconvolution",
                     "shear_transform",
-                    "display_pyramid",
                     "registration",
+                    "fusion",
+                    "display_pyramid",
                 ),
             ),
             ("Segmentation", ("particle_detection", "usegment3d")),
@@ -7334,7 +7347,8 @@ if HAS_PYQT6:
             "deconvolution": "results/deconvolution/latest/data",
             "shear_transform": "results/shear_transform/latest/data",
             "usegment3d": "results/usegment3d/latest/data",
-            "registration": "results/registration/latest/data",
+            "registration": "clearex/results/registration/latest",
+            "fusion": "results/fusion/latest/data",
             "display_pyramid": "results/display_pyramid/latest",
             "mip_export": "results/mip_export/latest",
         }
@@ -7399,25 +7413,37 @@ if HAS_PYQT6:
             "output_dtype": "uint32",
         }
         _DEFAULT_REGISTRATION_PARAMETERS: Dict[str, Any] = {
-            "execution_order": 5,
+            "execution_order": 4,
             "input_source": "data",
             "force_rerun": False,
             "chunk_basis": "3d",
             "detect_2d_per_slice": False,
             "use_map_overlap": True,
-            "overlap_zyx": [8, 32, 32],
+            "pairwise_overlap_zyx": [8, 32, 32],
             "memory_overhead_factor": 2.5,
             "registration_channel": 0,
             "registration_type": "translation",
             "input_resolution_level": 0,
             "anchor_mode": "central",
             "anchor_position": None,
-            "blend_mode": "feather",
             "max_pairwise_voxels": 500000,
             "ants_iterations": [200, 100, 50, 25],
             "ants_sampling_rate": 0.20,
             "use_phase_correlation": False,
             "use_fft_initial_alignment": True,
+        }
+        _DEFAULT_FUSION_PARAMETERS: Dict[str, Any] = {
+            "execution_order": 5,
+            "input_source": "registration",
+            "force_rerun": False,
+            "chunk_basis": "3d",
+            "detect_2d_per_slice": False,
+            "use_map_overlap": True,
+            "blend_overlap_zyx": [8, 32, 32],
+            "memory_overhead_factor": 2.5,
+            "blend_mode": "feather",
+            "blend_exponent": 1.0,
+            "gain_clip_range": [0.25, 4.0],
         }
         _PARAMETER_HINTS: Dict[str, str] = {
             "input_source": (
@@ -7655,18 +7681,28 @@ if HAS_PYQT6:
             "registration_anchor_position": (
                 "Tile index held fixed when anchor mode is set to manual."
             ),
-            "registration_blend_mode": (
-                "Overlap fusion mode for the final stitched volume. Feather "
-                "uses cosine edge ramps, center weighted emphasizes tile "
-                "centers more strongly, content aware favors sharper regions, "
-                "and gain-compensated feather estimates a per-edge intensity "
-                "match before feather blending."
+            "registration_pairwise_overlap_zyx": (
+                "Overlap padding in (z, y, x) voxels around the estimated pairwise "
+                "registration crop. Larger values make pairwise estimation more robust "
+                "but increase per-worker memory."
             ),
-            "registration_blend_exponent": (
+            "fusion_blend_mode": (
+                "Overlap fusion mode for the final stitched volume. Feather uses "
+                "cosine edge ramps, center weighted emphasizes tile centers more "
+                "strongly, content aware favors sharper regions, and "
+                "gain-compensated feather estimates a per-edge intensity match "
+                "before feather blending."
+            ),
+            "fusion_blend_overlap_zyx": (
+                "Blend ramp width in (z, y, x) voxels for feathered fusion. "
+                "Larger overlap widths generally hide seams better but can blur "
+                "local intensity disagreements over a wider region."
+            ),
+            "fusion_blend_exponent": (
                 "Blend-profile exponent. Values above 1.0 produce steeper "
                 "edge falloff; values below 1.0 make the transition gentler."
             ),
-            "registration_gain_clip_range": (
+            "fusion_gain_clip_range": (
                 "Minimum and maximum allowed gain when estimating moving-to-"
                 "fixed overlap intensity correction for gain-compensated feather."
             ),
@@ -7877,6 +7913,13 @@ if HAS_PYQT6:
                 )
             )
             self._operation_defaults["registration"] = dict(self._registration_defaults)
+            self._fusion_defaults = dict(
+                self._operation_defaults.get(
+                    "fusion",
+                    self._DEFAULT_FUSION_PARAMETERS,
+                )
+            )
+            self._operation_defaults["fusion"] = dict(self._fusion_defaults)
             self._visualization_defaults = dict(
                 self._operation_defaults.get("visualization", {})
             )
@@ -8281,6 +8324,7 @@ if HAS_PYQT6:
                 particle_detection=selected_flags["particle_detection"],
                 usegment3d=selected_flags["usegment3d"],
                 registration=selected_flags["registration"],
+                fusion=selected_flags["fusion"],
                 visualization=selected_flags["visualization"],
                 mip_export=selected_flags["mip_export"],
                 spatial_calibration=normalize_spatial_calibration(
@@ -8813,8 +8857,8 @@ if HAS_PYQT6:
             self._registration_anchor_mode_combo.currentIndexChanged.connect(
                 self._set_registration_parameter_enabled_state
             )
-            self._registration_blend_mode_combo.currentIndexChanged.connect(
-                self._set_registration_parameter_enabled_state
+            self._fusion_blend_mode_combo.currentIndexChanged.connect(
+                self._set_fusion_parameter_enabled_state
             )
             self._usegment3d_output_reference_combo.currentIndexChanged.connect(
                 self._set_usegment3d_parameter_enabled_state
@@ -9013,6 +9057,8 @@ if HAS_PYQT6:
                 self._build_usegment3d_parameter_rows(form)
             elif operation_name == "registration":
                 self._build_registration_parameter_rows(form)
+            elif operation_name == "fusion":
+                self._build_fusion_parameter_rows(form)
             elif operation_name == "visualization":
                 self._build_visualization_parameter_rows(form)
             elif operation_name == "mip_export":
@@ -10199,6 +10245,35 @@ if HAS_PYQT6:
                 self._registration_resolution_level_combo,
                 self._PARAMETER_HINTS["registration_resolution_level"],
             )
+            overlap_row = QHBoxLayout()
+            apply_compact_row_spacing(overlap_row)
+            self._registration_pairwise_overlap_z_spin = QSpinBox()
+            self._registration_pairwise_overlap_z_spin.setRange(0, 1_000_000)
+            self._registration_pairwise_overlap_y_spin = QSpinBox()
+            self._registration_pairwise_overlap_y_spin.setRange(0, 1_000_000)
+            self._registration_pairwise_overlap_x_spin = QSpinBox()
+            self._registration_pairwise_overlap_x_spin.setRange(0, 1_000_000)
+            overlap_row.addWidget(QLabel("z"))
+            overlap_row.addWidget(self._registration_pairwise_overlap_z_spin)
+            overlap_row.addWidget(QLabel("y"))
+            overlap_row.addWidget(self._registration_pairwise_overlap_y_spin)
+            overlap_row.addWidget(QLabel("x"))
+            overlap_row.addWidget(self._registration_pairwise_overlap_x_spin)
+            overlap_widget = QWidget()
+            overlap_widget.setLayout(overlap_row)
+            pairwise_form.addRow("overlap pad", overlap_widget)
+            self._register_parameter_hint(
+                self._registration_pairwise_overlap_z_spin,
+                self._PARAMETER_HINTS["registration_pairwise_overlap_zyx"],
+            )
+            self._register_parameter_hint(
+                self._registration_pairwise_overlap_y_spin,
+                self._PARAMETER_HINTS["registration_pairwise_overlap_zyx"],
+            )
+            self._register_parameter_hint(
+                self._registration_pairwise_overlap_x_spin,
+                self._PARAMETER_HINTS["registration_pairwise_overlap_zyx"],
+            )
             form.addRow(pairwise_section)
 
             global_section, global_form = self._build_parameter_section_card(
@@ -10225,101 +10300,6 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["registration_anchor_position"],
             )
             form.addRow(global_section)
-
-            fusion_section, fusion_form = self._build_parameter_section_card("Fusion")
-            overlap_row = QHBoxLayout()
-            apply_compact_row_spacing(overlap_row)
-            self._registration_overlap_z_spin = QSpinBox()
-            self._registration_overlap_z_spin.setRange(0, 1_000_000)
-            self._registration_overlap_y_spin = QSpinBox()
-            self._registration_overlap_y_spin.setRange(0, 1_000_000)
-            self._registration_overlap_x_spin = QSpinBox()
-            self._registration_overlap_x_spin.setRange(0, 1_000_000)
-            overlap_row.addWidget(QLabel("z"))
-            overlap_row.addWidget(self._registration_overlap_z_spin)
-            overlap_row.addWidget(QLabel("y"))
-            overlap_row.addWidget(self._registration_overlap_y_spin)
-            overlap_row.addWidget(QLabel("x"))
-            overlap_row.addWidget(self._registration_overlap_x_spin)
-            overlap_widget = QWidget()
-            overlap_widget.setLayout(overlap_row)
-            fusion_form.addRow("overlap pad", overlap_widget)
-            self._register_parameter_hint(
-                self._registration_overlap_z_spin,
-                self._PARAMETER_HINTS["overlap_zyx"],
-            )
-            self._register_parameter_hint(
-                self._registration_overlap_y_spin,
-                self._PARAMETER_HINTS["overlap_zyx"],
-            )
-            self._register_parameter_hint(
-                self._registration_overlap_x_spin,
-                self._PARAMETER_HINTS["overlap_zyx"],
-            )
-
-            self._registration_blend_mode_combo = QComboBox()
-            self._registration_blend_mode_combo.addItem("Feather", "feather")
-            self._registration_blend_mode_combo.addItem(
-                "Center weighted",
-                "center_weighted",
-            )
-            self._registration_blend_mode_combo.addItem(
-                "Content aware",
-                "content_aware",
-            )
-            self._registration_blend_mode_combo.addItem(
-                "Gain-compensated feather",
-                "gain_compensated_feather",
-            )
-            self._registration_blend_mode_combo.addItem("Average", "average")
-            fusion_form.addRow("blend mode", self._registration_blend_mode_combo)
-            self._register_parameter_hint(
-                self._registration_blend_mode_combo,
-                self._PARAMETER_HINTS["registration_blend_mode"],
-            )
-
-            self._registration_blend_exponent_spin = QDoubleSpinBox()
-            self._registration_blend_exponent_spin.setDecimals(2)
-            self._registration_blend_exponent_spin.setRange(0.10, 8.0)
-            self._registration_blend_exponent_spin.setSingleStep(0.10)
-            self._registration_blend_exponent_spin.setValue(1.0)
-            fusion_form.addRow(
-                "blend exponent",
-                self._registration_blend_exponent_spin,
-            )
-            self._register_parameter_hint(
-                self._registration_blend_exponent_spin,
-                self._PARAMETER_HINTS["registration_blend_exponent"],
-            )
-
-            gain_clip_row = QHBoxLayout()
-            apply_compact_row_spacing(gain_clip_row)
-            self._registration_gain_clip_min_spin = QDoubleSpinBox()
-            self._registration_gain_clip_min_spin.setDecimals(2)
-            self._registration_gain_clip_min_spin.setRange(0.01, 100.0)
-            self._registration_gain_clip_min_spin.setSingleStep(0.05)
-            self._registration_gain_clip_min_spin.setValue(0.25)
-            self._registration_gain_clip_max_spin = QDoubleSpinBox()
-            self._registration_gain_clip_max_spin.setDecimals(2)
-            self._registration_gain_clip_max_spin.setRange(0.01, 100.0)
-            self._registration_gain_clip_max_spin.setSingleStep(0.05)
-            self._registration_gain_clip_max_spin.setValue(4.0)
-            gain_clip_row.addWidget(QLabel("min"))
-            gain_clip_row.addWidget(self._registration_gain_clip_min_spin)
-            gain_clip_row.addWidget(QLabel("max"))
-            gain_clip_row.addWidget(self._registration_gain_clip_max_spin)
-            gain_clip_widget = QWidget()
-            gain_clip_widget.setLayout(gain_clip_row)
-            fusion_form.addRow("gain clip", gain_clip_widget)
-            self._register_parameter_hint(
-                self._registration_gain_clip_min_spin,
-                self._PARAMETER_HINTS["registration_gain_clip_range"],
-            )
-            self._register_parameter_hint(
-                self._registration_gain_clip_max_spin,
-                self._PARAMETER_HINTS["registration_gain_clip_range"],
-            )
-            form.addRow(fusion_section)
 
             perf_section, perf_form = self._build_parameter_section_card("Performance")
             self._registration_max_pairwise_voxels_spin = QSpinBox()
@@ -10353,6 +10333,94 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["registration_use_fft_initial_alignment"],
             )
             form.addRow(perf_section)
+
+        def _build_fusion_parameter_rows(self, form: QFormLayout) -> None:
+            """Add fusion parameter controls to a form."""
+            blend_section, blend_form = self._build_parameter_section_card("Blending")
+            overlap_row = QHBoxLayout()
+            apply_compact_row_spacing(overlap_row)
+            self._fusion_overlap_z_spin = QSpinBox()
+            self._fusion_overlap_z_spin.setRange(0, 1_000_000)
+            self._fusion_overlap_y_spin = QSpinBox()
+            self._fusion_overlap_y_spin.setRange(0, 1_000_000)
+            self._fusion_overlap_x_spin = QSpinBox()
+            self._fusion_overlap_x_spin.setRange(0, 1_000_000)
+            overlap_row.addWidget(QLabel("z"))
+            overlap_row.addWidget(self._fusion_overlap_z_spin)
+            overlap_row.addWidget(QLabel("y"))
+            overlap_row.addWidget(self._fusion_overlap_y_spin)
+            overlap_row.addWidget(QLabel("x"))
+            overlap_row.addWidget(self._fusion_overlap_x_spin)
+            overlap_widget = QWidget()
+            overlap_widget.setLayout(overlap_row)
+            blend_form.addRow("blend overlap", overlap_widget)
+            self._register_parameter_hint(
+                self._fusion_overlap_z_spin,
+                self._PARAMETER_HINTS["fusion_blend_overlap_zyx"],
+            )
+            self._register_parameter_hint(
+                self._fusion_overlap_y_spin,
+                self._PARAMETER_HINTS["fusion_blend_overlap_zyx"],
+            )
+            self._register_parameter_hint(
+                self._fusion_overlap_x_spin,
+                self._PARAMETER_HINTS["fusion_blend_overlap_zyx"],
+            )
+
+            self._fusion_blend_mode_combo = QComboBox()
+            self._fusion_blend_mode_combo.addItem("Feather", "feather")
+            self._fusion_blend_mode_combo.addItem("Center weighted", "center_weighted")
+            self._fusion_blend_mode_combo.addItem("Content aware", "content_aware")
+            self._fusion_blend_mode_combo.addItem(
+                "Gain-compensated feather",
+                "gain_compensated_feather",
+            )
+            self._fusion_blend_mode_combo.addItem("Average", "average")
+            blend_form.addRow("blend mode", self._fusion_blend_mode_combo)
+            self._register_parameter_hint(
+                self._fusion_blend_mode_combo,
+                self._PARAMETER_HINTS["fusion_blend_mode"],
+            )
+
+            self._fusion_blend_exponent_spin = QDoubleSpinBox()
+            self._fusion_blend_exponent_spin.setDecimals(2)
+            self._fusion_blend_exponent_spin.setRange(0.10, 8.0)
+            self._fusion_blend_exponent_spin.setSingleStep(0.10)
+            self._fusion_blend_exponent_spin.setValue(1.0)
+            blend_form.addRow("blend exponent", self._fusion_blend_exponent_spin)
+            self._register_parameter_hint(
+                self._fusion_blend_exponent_spin,
+                self._PARAMETER_HINTS["fusion_blend_exponent"],
+            )
+
+            gain_clip_row = QHBoxLayout()
+            apply_compact_row_spacing(gain_clip_row)
+            self._fusion_gain_clip_min_spin = QDoubleSpinBox()
+            self._fusion_gain_clip_min_spin.setDecimals(2)
+            self._fusion_gain_clip_min_spin.setRange(0.01, 100.0)
+            self._fusion_gain_clip_min_spin.setSingleStep(0.05)
+            self._fusion_gain_clip_min_spin.setValue(0.25)
+            self._fusion_gain_clip_max_spin = QDoubleSpinBox()
+            self._fusion_gain_clip_max_spin.setDecimals(2)
+            self._fusion_gain_clip_max_spin.setRange(0.01, 100.0)
+            self._fusion_gain_clip_max_spin.setSingleStep(0.05)
+            self._fusion_gain_clip_max_spin.setValue(4.0)
+            gain_clip_row.addWidget(QLabel("min"))
+            gain_clip_row.addWidget(self._fusion_gain_clip_min_spin)
+            gain_clip_row.addWidget(QLabel("max"))
+            gain_clip_row.addWidget(self._fusion_gain_clip_max_spin)
+            gain_clip_widget = QWidget()
+            gain_clip_widget.setLayout(gain_clip_row)
+            blend_form.addRow("gain clip", gain_clip_widget)
+            self._register_parameter_hint(
+                self._fusion_gain_clip_min_spin,
+                self._PARAMETER_HINTS["fusion_gain_clip_range"],
+            )
+            self._register_parameter_hint(
+                self._fusion_gain_clip_max_spin,
+                self._PARAMETER_HINTS["fusion_gain_clip_range"],
+            )
+            form.addRow(blend_section)
 
         def _rebuild_usegment3d_channel_checkboxes(
             self,
@@ -12305,9 +12373,12 @@ if HAS_PYQT6:
             return _discover_available_operation_output_components(
                 store_path=str(self._base_config.file or "").strip(),
                 operation_output_components={
-                    operation_name: component
-                    for operation_name, component in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS.items()
-                    if operation_name != "data"
+                    **{
+                        operation_name: component
+                        for operation_name, component in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS.items()
+                        if operation_name != "data"
+                    },
+                    "registration": self._OPERATION_OUTPUT_COMPONENTS["registration"],
                 },
             )
 
@@ -13178,6 +13249,7 @@ if HAS_PYQT6:
             self._set_particle_parameter_enabled_state()
             self._set_usegment3d_parameter_enabled_state()
             self._set_registration_parameter_enabled_state()
+            self._set_fusion_parameter_enabled_state()
             self._set_visualization_parameter_enabled_state()
             self._set_mip_export_parameter_enabled_state()
 
@@ -13637,13 +13709,9 @@ if HAS_PYQT6:
                 self._registration_type_combo,
                 self._registration_resolution_level_combo,
                 self._registration_anchor_mode_combo,
-                self._registration_overlap_z_spin,
-                self._registration_overlap_y_spin,
-                self._registration_overlap_x_spin,
-                self._registration_blend_mode_combo,
-                self._registration_blend_exponent_spin,
-                self._registration_gain_clip_min_spin,
-                self._registration_gain_clip_max_spin,
+                self._registration_pairwise_overlap_z_spin,
+                self._registration_pairwise_overlap_y_spin,
+                self._registration_pairwise_overlap_x_spin,
                 self._registration_max_pairwise_voxels_spin,
                 self._registration_use_phase_correlation_check,
                 self._registration_use_fft_initial_alignment_check,
@@ -13662,20 +13730,35 @@ if HAS_PYQT6:
             self._registration_anchor_position_spin.setVisible(manual_anchor)
             self._registration_anchor_position_label.setVisible(manual_anchor)
 
+        def _set_fusion_parameter_enabled_state(self) -> None:
+            """Enable/disable fusion widgets based on selection and blend mode."""
+            fusion_enabled = self._operation_checkboxes["fusion"].isChecked()
+            widgets = (
+                self._fusion_overlap_z_spin,
+                self._fusion_overlap_y_spin,
+                self._fusion_overlap_x_spin,
+                self._fusion_blend_mode_combo,
+                self._fusion_blend_exponent_spin,
+                self._fusion_gain_clip_min_spin,
+                self._fusion_gain_clip_max_spin,
+            )
+            for widget in widgets:
+                widget.setEnabled(fusion_enabled)
+
             blend_mode = (
-                str(self._registration_blend_mode_combo.currentData() or "feather")
+                str(self._fusion_blend_mode_combo.currentData() or "feather")
                 .strip()
                 .lower()
                 or "feather"
             )
-            self._registration_blend_exponent_spin.setEnabled(
-                registration_enabled and blend_mode != "average"
+            self._fusion_blend_exponent_spin.setEnabled(
+                fusion_enabled and blend_mode != "average"
             )
             gain_clip_enabled = (
-                registration_enabled and blend_mode == "gain_compensated_feather"
+                fusion_enabled and blend_mode == "gain_compensated_feather"
             )
-            self._registration_gain_clip_min_spin.setEnabled(gain_clip_enabled)
-            self._registration_gain_clip_max_spin.setEnabled(gain_clip_enabled)
+            self._fusion_gain_clip_min_spin.setEnabled(gain_clip_enabled)
+            self._fusion_gain_clip_max_spin.setEnabled(gain_clip_enabled)
 
         def _set_flatfield_parameter_enabled_state(self) -> None:
             """Enable/disable flatfield widgets based on selection and overlap mode.
@@ -13858,6 +13941,9 @@ if HAS_PYQT6:
             registration_params = dict(
                 normalized_parameters.get("registration", self._registration_defaults)
             )
+            fusion_params = dict(
+                normalized_parameters.get("fusion", self._fusion_defaults)
+            )
             visualization_params = dict(
                 normalized_parameters.get("visualization", self._visualization_defaults)
             )
@@ -13875,6 +13961,7 @@ if HAS_PYQT6:
                 "particle_detection": bool(initial.particle_detection),
                 "usegment3d": bool(getattr(initial, "usegment3d", False)),
                 "registration": bool(initial.registration),
+                "fusion": bool(getattr(initial, "fusion", False)),
                 "display_pyramid": bool(getattr(initial, "display_pyramid", False)),
                 "visualization": bool(initial.visualization),
                 "mip_export": bool(initial.mip_export),
@@ -14642,53 +14729,69 @@ if HAS_PYQT6:
                 )
             )
             registration_overlap_zyx = registration_params.get(
-                "overlap_zyx", [8, 32, 32]
+                "pairwise_overlap_zyx",
+                registration_params.get("overlap_zyx", [8, 32, 32]),
             )
             if (
                 not isinstance(registration_overlap_zyx, (tuple, list))
                 or len(registration_overlap_zyx) != 3
             ):
                 registration_overlap_zyx = [8, 32, 32]
-            self._registration_overlap_z_spin.setValue(
+            self._registration_pairwise_overlap_z_spin.setValue(
                 max(0, int(registration_overlap_zyx[0]))
             )
-            self._registration_overlap_y_spin.setValue(
+            self._registration_pairwise_overlap_y_spin.setValue(
                 max(0, int(registration_overlap_zyx[1]))
             )
-            self._registration_overlap_x_spin.setValue(
+            self._registration_pairwise_overlap_x_spin.setValue(
                 max(0, int(registration_overlap_zyx[2]))
             )
-            registration_blend_mode = (
-                str(registration_params.get("blend_mode", "feather")).strip().lower()
+
+            fusion_blend_overlap_zyx = fusion_params.get(
+                "blend_overlap_zyx",
+                fusion_params.get("overlap_zyx", [8, 32, 32]),
+            )
+            if (
+                not isinstance(fusion_blend_overlap_zyx, (tuple, list))
+                or len(fusion_blend_overlap_zyx) != 3
+            ):
+                fusion_blend_overlap_zyx = [8, 32, 32]
+            self._fusion_overlap_z_spin.setValue(
+                max(0, int(fusion_blend_overlap_zyx[0]))
+            )
+            self._fusion_overlap_y_spin.setValue(
+                max(0, int(fusion_blend_overlap_zyx[1]))
+            )
+            self._fusion_overlap_x_spin.setValue(
+                max(0, int(fusion_blend_overlap_zyx[2]))
+            )
+            fusion_blend_mode = (
+                str(fusion_params.get("blend_mode", "feather")).strip().lower()
                 or "feather"
             )
-            registration_blend_index = self._registration_blend_mode_combo.findData(
-                registration_blend_mode
+            fusion_blend_index = self._fusion_blend_mode_combo.findData(
+                fusion_blend_mode
             )
-            if registration_blend_index < 0:
-                registration_blend_index = self._registration_blend_mode_combo.findData(
-                    "feather"
-                )
-            if registration_blend_index < 0:
-                registration_blend_index = 0
-            self._registration_blend_mode_combo.setCurrentIndex(
-                registration_blend_index
+            if fusion_blend_index < 0:
+                fusion_blend_index = self._fusion_blend_mode_combo.findData("feather")
+            if fusion_blend_index < 0:
+                fusion_blend_index = 0
+            self._fusion_blend_mode_combo.setCurrentIndex(fusion_blend_index)
+            self._fusion_blend_exponent_spin.setValue(
+                max(0.10, float(fusion_params.get("blend_exponent", 1.0)))
             )
-            self._registration_blend_exponent_spin.setValue(
-                max(0.10, float(registration_params.get("blend_exponent", 1.0)))
-            )
-            gain_clip_range = registration_params.get("gain_clip_range", [0.25, 4.0])
+            gain_clip_range = fusion_params.get("gain_clip_range", [0.25, 4.0])
             if (
                 not isinstance(gain_clip_range, (tuple, list))
                 or len(gain_clip_range) != 2
             ):
                 gain_clip_range = [0.25, 4.0]
-            self._registration_gain_clip_min_spin.setValue(
+            self._fusion_gain_clip_min_spin.setValue(
                 max(0.01, float(gain_clip_range[0]))
             )
-            self._registration_gain_clip_max_spin.setValue(
+            self._fusion_gain_clip_max_spin.setValue(
                 max(
-                    float(self._registration_gain_clip_min_spin.value()),
+                    float(self._fusion_gain_clip_min_spin.value()),
                     float(gain_clip_range[1]),
                 )
             )
@@ -15570,10 +15673,10 @@ if HAS_PYQT6:
                 "chunk_basis": "3d",
                 "detect_2d_per_slice": False,
                 "use_map_overlap": True,
-                "overlap_zyx": [
-                    int(self._registration_overlap_z_spin.value()),
-                    int(self._registration_overlap_y_spin.value()),
-                    int(self._registration_overlap_x_spin.value()),
+                "pairwise_overlap_zyx": [
+                    int(self._registration_pairwise_overlap_z_spin.value()),
+                    int(self._registration_pairwise_overlap_y_spin.value()),
+                    int(self._registration_pairwise_overlap_x_spin.value()),
                 ],
                 "memory_overhead_factor": float(
                     self._registration_defaults.get("memory_overhead_factor", 2.5)
@@ -15586,20 +15689,6 @@ if HAS_PYQT6:
                 "input_resolution_level": int(input_resolution_level),
                 "anchor_mode": anchor_mode,
                 "anchor_position": anchor_position,
-                "blend_mode": str(
-                    self._registration_blend_mode_combo.currentData() or "feather"
-                ).strip()
-                or "feather",
-                "blend_exponent": float(self._registration_blend_exponent_spin.value()),
-                "gain_clip_range": [
-                    float(self._registration_gain_clip_min_spin.value()),
-                    float(
-                        max(
-                            self._registration_gain_clip_min_spin.value(),
-                            self._registration_gain_clip_max_spin.value(),
-                        )
-                    ),
-                ],
                 "max_pairwise_voxels": int(
                     self._registration_max_pairwise_voxels_spin.value()
                 ),
@@ -15617,6 +15706,36 @@ if HAS_PYQT6:
                 "use_fft_initial_alignment": bool(
                     self._registration_use_fft_initial_alignment_check.isChecked()
                 ),
+            }
+
+        def _collect_fusion_parameters(self) -> Dict[str, Any]:
+            """Collect fusion parameter values from widgets."""
+            return {
+                "chunk_basis": "3d",
+                "detect_2d_per_slice": False,
+                "use_map_overlap": True,
+                "blend_overlap_zyx": [
+                    int(self._fusion_overlap_z_spin.value()),
+                    int(self._fusion_overlap_y_spin.value()),
+                    int(self._fusion_overlap_x_spin.value()),
+                ],
+                "memory_overhead_factor": float(
+                    self._fusion_defaults.get("memory_overhead_factor", 2.5)
+                ),
+                "blend_mode": str(
+                    self._fusion_blend_mode_combo.currentData() or "feather"
+                ).strip()
+                or "feather",
+                "blend_exponent": float(self._fusion_blend_exponent_spin.value()),
+                "gain_clip_range": [
+                    float(self._fusion_gain_clip_min_spin.value()),
+                    float(
+                        max(
+                            self._fusion_gain_clip_min_spin.value(),
+                            self._fusion_gain_clip_max_spin.value(),
+                        )
+                    ),
+                ],
             }
 
         def _collect_visualization_parameters(self) -> Dict[str, Any]:
@@ -15760,6 +15879,8 @@ if HAS_PYQT6:
                 defaults.update(self._collect_usegment3d_parameters())
             elif operation_name == "registration":
                 defaults.update(self._collect_registration_parameters())
+            elif operation_name == "fusion":
+                defaults.update(self._collect_fusion_parameters())
             elif operation_name == "visualization":
                 defaults.update(self._collect_visualization_parameters())
             elif operation_name == "mip_export":
@@ -15911,6 +16032,7 @@ if HAS_PYQT6:
                 "shear_transform": selected_flags["shear_transform"],
                 "particle_detection": selected_flags["particle_detection"],
                 "registration": selected_flags["registration"],
+                "fusion": selected_flags["fusion"],
                 "display_pyramid": selected_flags["display_pyramid"],
                 "visualization": selected_flags["visualization"],
                 "mip_export": selected_flags["mip_export"],

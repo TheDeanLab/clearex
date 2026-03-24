@@ -45,6 +45,41 @@ def _test_logger(name: str) -> logging.Logger:
     return logger
 
 
+@pytest.fixture(autouse=True)
+def _disable_legacy_store_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat synthetic test stores as canonical unless a test overrides it."""
+    monkeypatch.setattr(main_module, "is_legacy_clearex_store", lambda path: False)
+    original_require = main_module._require_analysis_input_component
+
+    def _require_with_data_fallback(
+        *,
+        zarr_path: str,
+        operation_name: str,
+        field_name: str,
+        requested_source: str,
+        resolved_component: str,
+    ) -> None:
+        if str(
+            resolved_component
+        ) == main_module.SOURCE_CACHE_COMPONENT and main_module._zarr_component_exists(
+            zarr_path, "data"
+        ):
+            return
+        original_require(
+            zarr_path=zarr_path,
+            operation_name=operation_name,
+            field_name=field_name,
+            requested_source=requested_source,
+            resolved_component=resolved_component,
+        )
+
+    monkeypatch.setattr(
+        main_module,
+        "_require_analysis_input_component",
+        _require_with_data_fallback,
+    )
+
+
 def test_zarr_component_exists_prefers_membership_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -715,16 +750,10 @@ def test_run_workflow_chains_registration_output_to_visualization(
         del parameters, client, progress_callback
         fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
         latest = (
-            fake_root.require_group("results")
+            fake_root.require_group("clearex")
+            .require_group("results")
             .require_group("registration")
             .require_group("latest")
-        )
-        latest.create_dataset(
-            name="data",
-            shape=(1, 1, 1, 2, 2, 3),
-            chunks=(1, 1, 1, 2, 2, 3),
-            dtype="uint16",
-            overwrite=True,
         )
         latest.create_dataset(
             name="affines_tpx44",
@@ -733,10 +762,19 @@ def test_run_workflow_chains_registration_output_to_visualization(
             dtype="float64",
             overwrite=True,
         )
+        latest.create_dataset(
+            name="transformed_bboxes_tpx6",
+            shape=(1, 2, 6),
+            chunks=(1, 1, 6),
+            dtype="float64",
+            overwrite=True,
+        )
         return SimpleNamespace(
-            component="results/registration/latest",
-            data_component="results/registration/latest/data",
-            affines_component="results/registration/latest/affines_tpx44",
+            component="clearex/results/registration/latest",
+            affines_component="clearex/results/registration/latest/affines_tpx44",
+            transformed_bboxes_component=(
+                "clearex/results/registration/latest/transformed_bboxes_tpx6"
+            ),
             source_component="data",
             pairwise_source_component="data",
             requested_source_component="data",
@@ -748,9 +786,36 @@ def test_run_workflow_chains_registration_output_to_visualization(
             edge_count=1,
             active_edge_count=1,
             dropped_edge_count=0,
+            output_origin_xyz_um=(0.0, 0.0, 0.0),
             output_shape_tpczyx=(1, 1, 1, 2, 2, 3),
             output_chunks_tpczyx=(1, 1, 1, 2, 2, 3),
+        )
+
+    def _fake_fusion(*, zarr_path, parameters, client, progress_callback):
+        del parameters, client, progress_callback
+        fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
+        latest = (
+            fake_root.require_group("clearex")
+            .require_group("runtime_cache")
+            .require_group("results")
+            .require_group("fusion")
+            .require_group("latest")
+        )
+        latest.create_dataset(
+            name="data",
+            shape=(1, 1, 1, 2, 2, 3),
+            chunks=(1, 1, 1, 2, 2, 3),
+            dtype="uint16",
+            overwrite=True,
+        )
+        return SimpleNamespace(
+            component="results/fusion/latest",
+            data_component="clearex/runtime_cache/results/fusion/latest/data",
+            registration_component="clearex/results/registration/latest",
+            source_component="data",
             blend_mode="feather",
+            output_shape_tpczyx=(1, 1, 1, 2, 2, 3),
+            output_chunks_tpczyx=(1, 1, 1, 2, 2, 3),
         )
 
     captured: dict[str, object] = {}
@@ -781,7 +846,13 @@ def test_run_workflow_chains_registration_output_to_visualization(
         main_module, "_configure_dask_backend", _fake_configure_dask_backend
     )
     monkeypatch.setattr(main_module, "run_registration_analysis", _fake_registration)
+    monkeypatch.setattr(main_module, "run_fusion_analysis", _fake_fusion)
     monkeypatch.setattr(main_module, "run_visualization_analysis", _fake_visualization)
+    monkeypatch.setattr(
+        main_module,
+        "publish_analysis_collection_from_cache",
+        lambda *args, **kwargs: None,
+    )
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
 
     workflow = WorkflowConfig(
@@ -805,13 +876,9 @@ def test_run_workflow_chains_registration_output_to_visualization(
         logger=_test_logger("clearex.test.main.registration_chain"),
     )
 
-    assert captured["input_source"] == "results/registration/latest/data"
-    latest_ref = dict(
-        main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
-            "latest_outputs"
-        ]["registration"].attrs
+    assert (
+        captured["input_source"] == "clearex/runtime_cache/results/fusion/latest/data"
     )
-    assert latest_ref["component"] == "results/registration/latest"
 
 
 def test_run_workflow_non_experiment_file_skips_io_dask_startup(

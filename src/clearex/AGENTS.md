@@ -176,20 +176,28 @@ This directory contains the runtime orchestration surface for ClearEx.
 
 ## Recent Runtime Updates (2026-03-24)
 
-- Registration fusion now supports richer overlap blending controls:
+- Registration and fusion are now separate analysis operations:
+  - `registration` is metadata-only and writes transforms/layout artifacts
+    under `clearex/results/registration/latest`,
+  - `fusion` consumes the latest registration result and writes stitched image
+    output under `clearex/runtime_cache/results/fusion/latest/data`,
+  - this split exists so users can run registration and fusion in separate
+    workflow executions with different Dask worker counts and memory limits.
+- Fusion now supports richer overlap blending controls:
   - `blend_mode` accepts `average`, `feather`, `center_weighted`,
     `content_aware`, and `gain_compensated_feather`,
   - `blend_exponent` tunes feather/center-weighted falloff strength,
   - `gain_clip_range` constrains fitted overlap gain during
-    gain-compensated fusion.
+    gain-compensated fusion,
+  - `blend_overlap_zyx` controls fusion ramp width independently from
+    registration `pairwise_overlap_zyx`.
 - Gain-compensated feather now estimates per-edge moving-to-fixed linear
-  intensity maps on overlap crops, solves per-position gain/offset
-  corrections, and records the resulting `intensity_gains_tp` and
-  `intensity_offsets_tp` auxiliary arrays under
-  `clearex/results/registration/latest`.
-- Blend-weight storage for registration now persists separable 1D profiles
-  plus blend metadata under `clearex/results/registration/latest/blend_weights`
-  instead of assuming a materialized 3D volume.
+  intensity maps during fusion, solves per-position gain/offset corrections,
+  and records `intensity_gains_tp` / `intensity_offsets_tp` under
+  `clearex/results/fusion/latest`.
+- Blend-weight storage now persists separable 1D profiles plus blend metadata
+  under `clearex/results/fusion/latest/blend_weights` instead of assuming a
+  materialized 3D volume.
 
 ## Recent Runtime Updates (2026-03-22)
 
@@ -212,16 +220,17 @@ This directory contains the runtime orchestration surface for ClearEx.
   - Optional FFT-only fast path for translation-only registration
     (`use_phase_correlation=True`), using
     `skimage.registration.phase_cross_correlation`.
-  - Blend weight volume is pre-computed once and cached as a Zarr dataset
-    (`results/registration/latest/blend_weights_zyx`) so fusion workers lazily
-    load it instead of recomputing per tile per chunk.
+  - Blend-weight profiles are pre-computed once per fusion run and persisted as
+    separable 1D Zarr datasets under `clearex/results/fusion/latest/blend_weights`
+    so fusion workers can reconstruct separable weights lazily without
+    materializing a dense 3D blend volume.
   - GPU TODO: `_resample_source_to_world_grid` annotated for future
     `cupyx.scipy.ndimage.affine_transform` integration.
-  - Progress emission throughout `run_registration_analysis`: metadata loading,
-    transform building, edge preparation, per-edge pairwise progress (batched
-    for non-distributed scheduler), solving, layout computation, per-chunk
-    fusion progress (batched for non-distributed scheduler), and metadata
-    writing — progress bar no longer appears stalled.
+  - Progress emission now covers the pairwise registration and fusion phases
+    separately: registration reports metadata loading, transform building, edge
+    preparation, per-edge pairwise progress, solving, layout computation, and
+    metadata writing; fusion reports per-chunk render progress. The progress
+    bar no longer appears stalled during long runs.
   - All new parameters recorded in provenance metadata and group attrs.
 - Detailed operational guidance in `src/clearex/registration/README.md`.
 
