@@ -673,6 +673,8 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "anchor_mode": "central",
         "anchor_position": None,
         "blend_mode": "feather",
+        "blend_exponent": 1.0,
+        "gain_clip_range": [0.25, 4.0],
         "max_pairwise_voxels": 500000,
         "ants_iterations": [200, 100, 50, 25],
         "ants_sampling_rate": 0.20,
@@ -1787,9 +1789,37 @@ def _normalize_registration_parameters(
         normalized["anchor_position"] = parsed_anchor
 
     blend_mode = str(normalized.get("blend_mode", "feather")).strip().lower()
-    if blend_mode not in {"average", "feather"}:
-        raise ValueError("registration blend_mode must be 'average' or 'feather'.")
+    if blend_mode not in {
+        "average",
+        "feather",
+        "center_weighted",
+        "content_aware",
+        "gain_compensated_feather",
+    }:
+        raise ValueError(
+            "registration blend_mode must be one of average, feather, "
+            "center_weighted, content_aware, or gain_compensated_feather."
+        )
     normalized["blend_mode"] = blend_mode
+    blend_exponent = float(normalized.get("blend_exponent", 1.0))
+    if blend_exponent <= 0.0:
+        raise ValueError("registration blend_exponent must be greater than zero.")
+    normalized["blend_exponent"] = blend_exponent
+
+    gain_clip_range = normalized.get("gain_clip_range", [0.25, 4.0])
+    if not isinstance(gain_clip_range, (tuple, list)) or len(gain_clip_range) != 2:
+        raise ValueError(
+            "registration gain_clip_range must define two floats: [min_gain, max_gain]."
+        )
+    gain_clip_min = float(gain_clip_range[0])
+    gain_clip_max = float(gain_clip_range[1])
+    if gain_clip_min <= 0.0 or gain_clip_max <= 0.0:
+        raise ValueError("registration gain_clip_range values must be > 0.")
+    if gain_clip_min > gain_clip_max:
+        raise ValueError(
+            "registration gain_clip_range must satisfy min_gain <= max_gain."
+        )
+    normalized["gain_clip_range"] = [gain_clip_min, gain_clip_max]
 
     # Performance-tuning parameters — passed through with validated defaults.
     max_pairwise_voxels = int(normalized.get("max_pairwise_voxels", 500_000))

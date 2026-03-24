@@ -7657,7 +7657,18 @@ if HAS_PYQT6:
             ),
             "registration_blend_mode": (
                 "Overlap fusion mode for the final stitched volume. Feather "
-                "weights edges to reduce seams; average uses uniform weights."
+                "uses cosine edge ramps, center weighted emphasizes tile "
+                "centers more strongly, content aware favors sharper regions, "
+                "and gain-compensated feather estimates a per-edge intensity "
+                "match before feather blending."
+            ),
+            "registration_blend_exponent": (
+                "Blend-profile exponent. Values above 1.0 produce steeper "
+                "edge falloff; values below 1.0 make the transition gentler."
+            ),
+            "registration_gain_clip_range": (
+                "Minimum and maximum allowed gain when estimating moving-to-"
+                "fixed overlap intensity correction for gain-compensated feather."
             ),
             "registration_max_pairwise_voxels": (
                 "Maximum voxel budget for pairwise overlap crops. Crops "
@@ -8800,6 +8811,9 @@ if HAS_PYQT6:
                 self._set_usegment3d_parameter_enabled_state
             )
             self._registration_anchor_mode_combo.currentIndexChanged.connect(
+                self._set_registration_parameter_enabled_state
+            )
+            self._registration_blend_mode_combo.currentIndexChanged.connect(
                 self._set_registration_parameter_enabled_state
             )
             self._usegment3d_output_reference_combo.currentIndexChanged.connect(
@@ -10245,11 +10259,65 @@ if HAS_PYQT6:
 
             self._registration_blend_mode_combo = QComboBox()
             self._registration_blend_mode_combo.addItem("Feather", "feather")
+            self._registration_blend_mode_combo.addItem(
+                "Center weighted",
+                "center_weighted",
+            )
+            self._registration_blend_mode_combo.addItem(
+                "Content aware",
+                "content_aware",
+            )
+            self._registration_blend_mode_combo.addItem(
+                "Gain-compensated feather",
+                "gain_compensated_feather",
+            )
             self._registration_blend_mode_combo.addItem("Average", "average")
             fusion_form.addRow("blend mode", self._registration_blend_mode_combo)
             self._register_parameter_hint(
                 self._registration_blend_mode_combo,
                 self._PARAMETER_HINTS["registration_blend_mode"],
+            )
+
+            self._registration_blend_exponent_spin = QDoubleSpinBox()
+            self._registration_blend_exponent_spin.setDecimals(2)
+            self._registration_blend_exponent_spin.setRange(0.10, 8.0)
+            self._registration_blend_exponent_spin.setSingleStep(0.10)
+            self._registration_blend_exponent_spin.setValue(1.0)
+            fusion_form.addRow(
+                "blend exponent",
+                self._registration_blend_exponent_spin,
+            )
+            self._register_parameter_hint(
+                self._registration_blend_exponent_spin,
+                self._PARAMETER_HINTS["registration_blend_exponent"],
+            )
+
+            gain_clip_row = QHBoxLayout()
+            apply_compact_row_spacing(gain_clip_row)
+            self._registration_gain_clip_min_spin = QDoubleSpinBox()
+            self._registration_gain_clip_min_spin.setDecimals(2)
+            self._registration_gain_clip_min_spin.setRange(0.01, 100.0)
+            self._registration_gain_clip_min_spin.setSingleStep(0.05)
+            self._registration_gain_clip_min_spin.setValue(0.25)
+            self._registration_gain_clip_max_spin = QDoubleSpinBox()
+            self._registration_gain_clip_max_spin.setDecimals(2)
+            self._registration_gain_clip_max_spin.setRange(0.01, 100.0)
+            self._registration_gain_clip_max_spin.setSingleStep(0.05)
+            self._registration_gain_clip_max_spin.setValue(4.0)
+            gain_clip_row.addWidget(QLabel("min"))
+            gain_clip_row.addWidget(self._registration_gain_clip_min_spin)
+            gain_clip_row.addWidget(QLabel("max"))
+            gain_clip_row.addWidget(self._registration_gain_clip_max_spin)
+            gain_clip_widget = QWidget()
+            gain_clip_widget.setLayout(gain_clip_row)
+            fusion_form.addRow("gain clip", gain_clip_widget)
+            self._register_parameter_hint(
+                self._registration_gain_clip_min_spin,
+                self._PARAMETER_HINTS["registration_gain_clip_range"],
+            )
+            self._register_parameter_hint(
+                self._registration_gain_clip_max_spin,
+                self._PARAMETER_HINTS["registration_gain_clip_range"],
             )
             form.addRow(fusion_section)
 
@@ -13573,6 +13641,9 @@ if HAS_PYQT6:
                 self._registration_overlap_y_spin,
                 self._registration_overlap_x_spin,
                 self._registration_blend_mode_combo,
+                self._registration_blend_exponent_spin,
+                self._registration_gain_clip_min_spin,
+                self._registration_gain_clip_max_spin,
                 self._registration_max_pairwise_voxels_spin,
                 self._registration_use_phase_correlation_check,
                 self._registration_use_fft_initial_alignment_check,
@@ -13590,6 +13661,21 @@ if HAS_PYQT6:
             self._registration_anchor_position_spin.setEnabled(manual_anchor)
             self._registration_anchor_position_spin.setVisible(manual_anchor)
             self._registration_anchor_position_label.setVisible(manual_anchor)
+
+            blend_mode = (
+                str(self._registration_blend_mode_combo.currentData() or "feather")
+                .strip()
+                .lower()
+                or "feather"
+            )
+            self._registration_blend_exponent_spin.setEnabled(
+                registration_enabled and blend_mode != "average"
+            )
+            gain_clip_enabled = (
+                registration_enabled and blend_mode == "gain_compensated_feather"
+            )
+            self._registration_gain_clip_min_spin.setEnabled(gain_clip_enabled)
+            self._registration_gain_clip_max_spin.setEnabled(gain_clip_enabled)
 
         def _set_flatfield_parameter_enabled_state(self) -> None:
             """Enable/disable flatfield widgets based on selection and overlap mode.
@@ -14588,6 +14674,24 @@ if HAS_PYQT6:
             self._registration_blend_mode_combo.setCurrentIndex(
                 registration_blend_index
             )
+            self._registration_blend_exponent_spin.setValue(
+                max(0.10, float(registration_params.get("blend_exponent", 1.0)))
+            )
+            gain_clip_range = registration_params.get("gain_clip_range", [0.25, 4.0])
+            if (
+                not isinstance(gain_clip_range, (tuple, list))
+                or len(gain_clip_range) != 2
+            ):
+                gain_clip_range = [0.25, 4.0]
+            self._registration_gain_clip_min_spin.setValue(
+                max(0.01, float(gain_clip_range[0]))
+            )
+            self._registration_gain_clip_max_spin.setValue(
+                max(
+                    float(self._registration_gain_clip_min_spin.value()),
+                    float(gain_clip_range[1]),
+                )
+            )
 
             self._registration_max_pairwise_voxels_spin.setValue(
                 max(0, int(registration_params.get("max_pairwise_voxels", 500_000)))
@@ -15486,6 +15590,16 @@ if HAS_PYQT6:
                     self._registration_blend_mode_combo.currentData() or "feather"
                 ).strip()
                 or "feather",
+                "blend_exponent": float(self._registration_blend_exponent_spin.value()),
+                "gain_clip_range": [
+                    float(self._registration_gain_clip_min_spin.value()),
+                    float(
+                        max(
+                            self._registration_gain_clip_min_spin.value(),
+                            self._registration_gain_clip_max_spin.value(),
+                        )
+                    ),
+                ],
                 "max_pairwise_voxels": int(
                     self._registration_max_pairwise_voxels_spin.value()
                 ),

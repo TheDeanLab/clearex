@@ -182,11 +182,19 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["registration"]["execution_order"] == 5
         assert cfg.analysis_parameters["registration"]["input_source"] == "data"
         assert cfg.analysis_parameters["registration"]["registration_channel"] == 0
-        assert cfg.analysis_parameters["registration"]["registration_type"] == "translation"
+        assert (
+            cfg.analysis_parameters["registration"]["registration_type"]
+            == "translation"
+        )
         assert cfg.analysis_parameters["registration"]["input_resolution_level"] == 0
         assert cfg.analysis_parameters["registration"]["anchor_mode"] == "central"
         assert cfg.analysis_parameters["registration"]["anchor_position"] is None
         assert cfg.analysis_parameters["registration"]["blend_mode"] == "feather"
+        assert cfg.analysis_parameters["registration"]["blend_exponent"] == 1.0
+        assert cfg.analysis_parameters["registration"]["gain_clip_range"] == [
+            0.25,
+            4.0,
+        ]
         assert "particle_detection" in cfg.analysis_parameters
         assert cfg.analysis_parameters["particle_detection"]["bg_sigma"] == 20.0
         assert cfg.analysis_parameters["particle_detection"]["execution_order"] == 6
@@ -651,7 +659,9 @@ class TestWorkflowConfig:
                     "input_resolution_level": "3",
                     "anchor_mode": "manual",
                     "anchor_position": "4",
-                    "blend_mode": "average",
+                    "blend_mode": "gain_compensated_feather",
+                    "blend_exponent": "1.75",
+                    "gain_clip_range": [0.5, 2.5],
                     "force_rerun": 1,
                 }
             }
@@ -666,7 +676,9 @@ class TestWorkflowConfig:
         assert params["input_resolution_level"] == 3
         assert params["anchor_mode"] == "manual"
         assert params["anchor_position"] == 4
-        assert params["blend_mode"] == "average"
+        assert params["blend_mode"] == "gain_compensated_feather"
+        assert params["blend_exponent"] == pytest.approx(1.75)
+        assert params["gain_clip_range"] == [0.5, 2.5]
         assert params["force_rerun"] is True
 
     def test_rejects_invalid_registration_resolution_level(self):
@@ -679,6 +691,18 @@ class TestWorkflowConfig:
         with pytest.raises(ValueError):
             WorkflowConfig(
                 analysis_parameters={"registration": {"registration_type": "affine"}}
+            )
+
+    def test_rejects_invalid_registration_blend_exponent(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={"registration": {"blend_exponent": 0.0}}
+            )
+
+    def test_rejects_invalid_registration_gain_clip_range(self):
+        with pytest.raises(ValueError):
+            WorkflowConfig(
+                analysis_parameters={"registration": {"gain_clip_range": [2.0, 1.0]}}
             )
 
     def test_rejects_invalid_usegment3d_resolution_level(self):
@@ -1051,7 +1075,7 @@ def test_resolve_analysis_input_component_prefers_same_run_outputs() -> None:
 def test_resolve_analysis_input_component_supports_registration_alias() -> None:
     resolved = resolve_analysis_input_component("registration")
 
-    assert resolved == "results/registration/latest/data"
+    assert resolved == "clearex/runtime_cache/results/registration/latest/data"
 
 
 def test_validate_analysis_input_references_accepts_scheduled_chainable_input() -> None:
@@ -1097,14 +1121,17 @@ def test_validate_analysis_input_references_rejects_nonchainable_known_output() 
         analysis_parameters={
             "deconvolution": {
                 "execution_order": 1,
-                "input_source": "results/particle_detection/latest/detections",
+                "input_source": "particle_detection",
                 "psf_mode": "measured",
                 "measured_psf_paths": ["/tmp/psf.tif"],
                 "measured_psf_xy_um": [0.1],
                 "measured_psf_z_um": [0.5],
             }
         },
-        available_components={"data", "results/particle_detection/latest/detections"},
+        available_components={
+            "data",
+            "clearex/results/particle_detection/latest/detections",
+        },
     )
 
     assert len(issues) == 1

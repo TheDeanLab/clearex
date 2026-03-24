@@ -28,6 +28,9 @@ def _edge_result(
     matrix_xyz: np.ndarray,
     *,
     success: bool = True,
+    intensity_success: bool = False,
+    intensity_scale: float = 1.0,
+    intensity_offset: float = 0.0,
 ) -> dict[str, object]:
     """Build one synthetic pairwise edge result."""
     return {
@@ -38,6 +41,10 @@ def _edge_result(
         "correction_matrix_xyz": np.asarray(matrix_xyz, dtype=np.float64).tolist(),
         "overlap_voxels": int(edge.overlap_voxels),
         "nominal_overlap_pixels": int(edge.overlap_voxels),
+        "intensity_success": bool(intensity_success),
+        "intensity_scale": float(intensity_scale),
+        "intensity_offset": float(intensity_offset),
+        "intensity_samples": int(edge.overlap_voxels),
     }
 
 
@@ -462,10 +469,14 @@ def test_run_registration_analysis_fuses_output_and_writes_metadata(
     assert latest.attrs["pairwise_source_component"] == "data_pyramid/level_1"
     assert latest.attrs["input_resolution_level"] == 1
     assert latest.attrs["blend_mode"] == "feather"
+    assert latest.attrs["blend_exponent"] == pytest.approx(1.0)
+    assert latest.attrs["gain_clip_range"] == pytest.approx([0.25, 4.0])
     assert "blend_weights" in latest
     assert latest["blend_weights"]["profile_z"].shape == (4,)
     assert latest["blend_weights"]["profile_y"].shape == (4,)
     assert latest["blend_weights"]["profile_x"].shape == (6,)
+    np.testing.assert_array_equal(latest["intensity_gains_tp"][:], np.ones((2, 3)))
+    np.testing.assert_array_equal(latest["intensity_offsets_tp"][:], np.zeros((2, 3)))
     assert latest.attrs["max_pairwise_voxels"] == int(
         registration_pipeline._DEFAULT_MAX_PAIRWISE_VOXELS
     )
@@ -539,6 +550,91 @@ def test_run_registration_analysis_uses_namespaced_stage_metadata(
         )
 
 
+def test_run_registration_analysis_gain_compensated_feather_corrects_overlap_intensity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = _create_registration_store(
+        tmp_path,
+        timepoints=1,
+        positions=2,
+        channels=1,
+        shape_zyx=(4, 4, 6),
+        include_pyramid=False,
+    )
+    root = zarr.open_group(str(store_path), mode="a")
+    data = root["data"]
+    data[0, 0, 0] = np.full((4, 4, 6), 10, dtype=np.uint16)
+    data[0, 1, 0] = np.full((4, 4, 6), 20, dtype=np.uint16)
+
+    def _sync_compute(*tasks, scheduler=None):
+        del scheduler
+        results = []
+        for task in tasks:
+            if hasattr(task, "compute"):
+                results.append(task.compute())
+            else:
+                results.append(task)
+        return tuple(results)
+
+    def _fake_pairwise(**kwargs):
+        edge = kwargs["edge"]
+        correction = np.eye(4, dtype=np.float64)
+        return _edge_result(
+            edge,
+            correction,
+            intensity_success=True,
+            intensity_scale=0.5,
+            intensity_offset=0.0,
+        )
+
+    monkeypatch.setattr(registration_pipeline.dask, "compute", _sync_compute)
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_register_pairwise_overlap",
+        _fake_pairwise,
+    )
+
+    summary = registration_pipeline.run_registration_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "registration_channel": 0,
+            "registration_type": "translation",
+            "input_resolution_level": 0,
+            "anchor_mode": "central",
+            "anchor_position": None,
+            "blend_mode": "gain_compensated_feather",
+            "blend_exponent": 1.0,
+            "gain_clip_range": [0.25, 4.0],
+            "overlap_zyx": [0, 0, 2],
+        },
+        client=None,
+    )
+
+    root = zarr.open_group(str(store_path), mode="r")
+    latest = root["clearex/results/registration/latest"]
+    fused = root["clearex/runtime_cache/results/registration/latest/data"]
+
+    assert summary.blend_mode == "gain_compensated_feather"
+    assert latest.attrs["blend_mode"] == "gain_compensated_feather"
+    np.testing.assert_allclose(
+        latest["intensity_gains_tp"][:],
+        np.asarray([[1.0, 0.5]], dtype=np.float32),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        latest["intensity_offsets_tp"][:],
+        np.zeros((1, 2), dtype=np.float32),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(fused[0, 0, 0, 0, 0, 4:6], dtype=np.float32),
+        np.asarray([10.0, 10.0], dtype=np.float32),
+        atol=0.5,
+    )
+
+
 def test_source_subvolume_for_overlap_returns_tighter_slices() -> None:
     """_source_subvolume_for_overlap should return slices narrower than the full tile."""
     transform = np.eye(4, dtype=np.float64)
@@ -588,6 +684,156 @@ def test_source_subvolume_for_overlap_returns_tighter_slices() -> None:
         cval=0.0,
     )
     np.testing.assert_allclose(sub_result, full_result, atol=1e-5)
+
+
+def test_source_subvolume_for_overlap_returns_empty_slices_outside_source() -> None:
+    """Out-of-bounds overlap crops should not fall back to the full tile."""
+    transform = np.eye(4, dtype=np.float64)
+    slices, adjusted = registration_pipeline._source_subvolume_for_overlap(
+        transform,
+        reference_origin_xyz=np.asarray([1000.0, 1000.0, 1000.0], dtype=np.float64),
+        reference_shape_zyx=(8, 8, 8),
+        source_shape_zyx=(20, 100, 40),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        padding=2,
+    )
+
+    assert slices == (slice(0, 0), slice(0, 0), slice(0, 0))
+    assert registration_pipeline._slices_zyx_are_empty(slices) is True
+    np.testing.assert_array_equal(adjusted, transform)
+
+
+def test_register_pairwise_overlap_returns_failure_for_empty_subvolume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pairwise registration should fail cleanly when no source crop remains."""
+    store_path = _create_registration_store(
+        tmp_path,
+        timepoints=1,
+        positions=2,
+        channels=1,
+        shape_zyx=(4, 4, 6),
+        include_pyramid=False,
+    )
+    edge = registration_pipeline._EdgeSpec(
+        fixed_position=0,
+        moving_position=1,
+        overlap_bbox_xyz=((0.0, 2.0), (0.0, 2.0), (0.0, 2.0)),
+        overlap_voxels=8,
+    )
+
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_source_subvolume_for_overlap",
+        lambda *args, **kwargs: (
+            (slice(0, 0), slice(0, 0), slice(0, 0)),
+            np.eye(4, dtype=np.float64),
+        ),
+    )
+
+    result = registration_pipeline._register_pairwise_overlap(
+        zarr_path=str(store_path),
+        source_component="data",
+        t_index=0,
+        registration_channel=0,
+        edge=edge,
+        nominal_fixed_transform_xyz=np.eye(4, dtype=np.float64),
+        nominal_moving_transform_xyz=np.eye(4, dtype=np.float64),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        overlap_zyx=(0, 0, 0),
+        registration_type="translation",
+    )
+
+    assert result["success"] is False
+    assert result["reason"] == "overlap_outside_source_bounds"
+    assert result["nominal_overlap_pixels"] == 0
+
+
+def test_process_and_write_registration_chunk_skips_empty_source_subvolumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fusion should skip tiles whose chunk crop maps outside the source tile."""
+    store_path = _create_registration_store(
+        tmp_path,
+        timepoints=1,
+        positions=1,
+        channels=1,
+        shape_zyx=(2, 3, 4),
+        include_pyramid=False,
+    )
+    _, output_component, affines_component, blend_weights_component = (
+        registration_pipeline._prepare_output_group(
+            zarr_path=store_path,
+            source_component="data",
+            parameters={"input_source": "data", "blend_mode": "feather"},
+            output_shape_tpczyx=(1, 1, 1, 2, 3, 4),
+            output_chunks_tpczyx=(1, 1, 1, 2, 3, 4),
+            voxel_size_um_zyx=(1.0, 1.0, 1.0),
+            voxel_size_resolution_source="data",
+            output_origin_xyz=(0.0, 0.0, 0.0),
+            source_tile_shape_zyx=(2, 3, 4),
+            blend_mode="feather",
+            overlap_zyx=(1, 1, 1),
+            blend_exponent=1.0,
+        )
+    )
+    root = zarr.open_group(str(store_path), mode="a")
+    auxiliary_root = registration_pipeline.analysis_auxiliary_root("registration")
+    root[affines_component][0, 0] = np.eye(4, dtype=np.float64)
+    auxiliary_group = root[auxiliary_root]
+    auxiliary_group.create_array(
+        name="transformed_bboxes_tpx6",
+        data=np.asarray([[[0.0, 0.0, 0.0, 4.0, 3.0, 2.0]]], dtype=np.float64),
+        overwrite=True,
+    )
+    auxiliary_group.create_array(
+        name="intensity_gains_tp",
+        data=np.ones((1, 1), dtype=np.float32),
+        overwrite=True,
+    )
+    auxiliary_group.create_array(
+        name="intensity_offsets_tp",
+        data=np.zeros((1, 1), dtype=np.float32),
+        overwrite=True,
+    )
+
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_source_subvolume_for_overlap",
+        lambda *args, **kwargs: (
+            (slice(0, 0), slice(0, 0), slice(0, 0)),
+            np.eye(4, dtype=np.float64),
+        ),
+    )
+
+    written = registration_pipeline._process_and_write_registration_chunk(
+        zarr_path=str(store_path),
+        source_component="data",
+        output_component=output_component,
+        affines_component=affines_component,
+        transformed_bboxes_component=(
+            f"{auxiliary_root}/transformed_bboxes_tpx6"
+        ),
+        blend_weights_component=blend_weights_component,
+        intensity_gains_component=f"{auxiliary_root}/intensity_gains_tp",
+        intensity_offsets_component=f"{auxiliary_root}/intensity_offsets_tp",
+        t_index=0,
+        c_index=0,
+        z_bounds=(0, 2),
+        y_bounds=(0, 3),
+        x_bounds=(0, 4),
+        output_origin_xyz=(0.0, 0.0, 0.0),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        output_dtype="float32",
+    )
+
+    assert written == 1
+    np.testing.assert_array_equal(
+        np.asarray(root[output_component][:], dtype=np.float32),
+        np.zeros((1, 1, 1, 2, 3, 4), dtype=np.float32),
+    )
 
 
 def test_downsample_crop_for_registration_reduces_volume() -> None:
@@ -646,6 +892,24 @@ def test_phase_correlation_translation_recovers_known_shift() -> None:
     expected_xyz = np.asarray([1.0, -5.0, -6.0], dtype=np.float64)
     np.testing.assert_allclose(correction[:3, 3], expected_xyz, atol=1.0)
     np.testing.assert_allclose(correction[:3, :3], np.eye(3), atol=1e-10)
+
+
+def test_estimate_linear_intensity_map_recovers_scale_and_offset() -> None:
+    moving = np.linspace(1.0, 20.0, 128, dtype=np.float32).reshape(4, 4, 8)
+    fixed = (1.5 * moving) + 7.0
+
+    success, scale, offset, samples = (
+        registration_pipeline._estimate_linear_intensity_map(
+            fixed,
+            moving,
+            gain_clip_range=(0.25, 4.0),
+        )
+    )
+
+    assert success is True
+    assert samples == moving.size
+    assert scale == pytest.approx(1.5, rel=1e-3)
+    assert offset == pytest.approx(7.0, rel=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +972,24 @@ class TestBlendWeightProfiles:
         np.testing.assert_array_equal(pz, np.ones(4, dtype=np.float32))
         np.testing.assert_array_equal(py, np.ones(6, dtype=np.float32))
         np.testing.assert_array_equal(px, np.ones(8, dtype=np.float32))
+
+    def test_center_weighted_profiles_fall_off_faster_than_feather(self):
+        shape = (1, 1, 10)
+        feather = registration_pipeline._blend_weight_profiles(
+            shape,
+            blend_mode="feather",
+            overlap_zyx=(0, 0, 5),
+            blend_exponent=1.0,
+        )[2]
+        center_weighted = registration_pipeline._blend_weight_profiles(
+            shape,
+            blend_mode="center_weighted",
+            overlap_zyx=(0, 0, 5),
+            blend_exponent=1.0,
+        )[2]
+        assert center_weighted[1] < feather[1]
+        assert center_weighted[2] < feather[2]
+        assert center_weighted.max() == pytest.approx(1.0)
 
     def test_memory_estimate_positive(self):
         est = registration_pipeline._estimate_fusion_chunk_bytes(

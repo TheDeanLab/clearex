@@ -57,8 +57,14 @@ _ANTS_RANDOM_SAMPLING_RATE = 0.20
 _ABSOLUTE_RESIDUAL_THRESHOLD_PX = 3.5
 _RELATIVE_RESIDUAL_THRESHOLD = 2.5
 _DEFAULT_MAX_PAIRWISE_VOXELS = 500_000
+_DEFAULT_BLEND_EXPONENT = 1.0
+_DEFAULT_GAIN_CLIP_RANGE = (0.25, 4.0)
 _PHASE_CORRELATION_UPSAMPLE_FACTOR = 10
 _WEIGHT_EPS = np.float32(1e-6)
+_CONTENT_WEIGHT_FLOOR = np.float32(0.25)
+_CONTENT_WEIGHT_SIGMA = 1.0
+_MIN_INTENSITY_CORRECTION_SAMPLES = 128
+_MAX_INTENSITY_CORRECTION_SAMPLES = 250_000
 _PERMUTE_ZYX_TO_XYZ = np.asarray(
     [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64
 )
@@ -760,7 +766,7 @@ def _source_subvolume_for_overlap(
 
     if z1 <= z0 or y1 <= y0 or x1 <= x0:
         return (
-            (slice(0, sz), slice(0, sy), slice(0, sx)),
+            (slice(0, 0), slice(0, 0), slice(0, 0)),
             local_to_world_xyz.copy(),
         )
 
@@ -780,6 +786,15 @@ def _source_subvolume_for_overlap(
     adjusted = local_to_world_xyz.copy()
     adjusted[:3, 3] = adjusted[:3, 3] + (adjusted[:3, :3] @ offset_xyz)
     return slices_zyx, adjusted
+
+
+def _slices_zyx_are_empty(
+    slices_zyx: tuple[slice, slice, slice],
+) -> bool:
+    """Return ``True`` when any Z/Y/X slice has zero or negative extent."""
+    return any(
+        int(axis_slice.stop) <= int(axis_slice.start) for axis_slice in slices_zyx
+    )
 
 
 def _downsample_crop_for_registration(
@@ -969,6 +984,105 @@ def _phase_correlation_translation(
     return correction
 
 
+def _normalized_blend_mode(value: str) -> str:
+    """Return a normalized registration blend mode token."""
+    return str(value).strip().lower() or "feather"
+
+
+def _blend_uses_average_weights(blend_mode: str) -> bool:
+    """Return whether the selected mode uses uniform spatial weights."""
+    return _normalized_blend_mode(blend_mode) == "average"
+
+
+def _blend_uses_content_aware_weights(blend_mode: str) -> bool:
+    """Return whether the selected mode modulates weights from image content."""
+    return _normalized_blend_mode(blend_mode) == "content_aware"
+
+
+def _blend_uses_gain_compensation(blend_mode: str) -> bool:
+    """Return whether the selected mode estimates overlap intensity correction."""
+    return _normalized_blend_mode(blend_mode) == "gain_compensated_feather"
+
+
+def _effective_blend_exponent(blend_mode: str, blend_exponent: float) -> float:
+    """Return the profile exponent to apply for the selected blend mode."""
+    exponent = max(1e-3, float(blend_exponent))
+    if _normalized_blend_mode(blend_mode) == "center_weighted":
+        return max(1.0, exponent * 2.0)
+    return exponent
+
+
+def _estimate_linear_intensity_map(
+    fixed_crop_zyx: np.ndarray,
+    moving_crop_zyx: np.ndarray,
+    *,
+    gain_clip_range: Sequence[float],
+    max_samples: int = _MAX_INTENSITY_CORRECTION_SAMPLES,
+) -> tuple[bool, float, float, int]:
+    """Estimate a linear moving-to-fixed intensity map from one overlap crop.
+
+    The fitted model is ``fixed ~= scale * moving + offset`` using only
+    nonzero finite overlap voxels after light percentile trimming.
+    """
+    valid_mask = (
+        np.isfinite(fixed_crop_zyx)
+        & np.isfinite(moving_crop_zyx)
+        & (fixed_crop_zyx > 0)
+        & (moving_crop_zyx > 0)
+    )
+    sample_count = int(np.count_nonzero(valid_mask))
+    if sample_count < int(_MIN_INTENSITY_CORRECTION_SAMPLES):
+        return False, 1.0, 0.0, sample_count
+
+    moving = np.asarray(moving_crop_zyx[valid_mask], dtype=np.float64)
+    fixed = np.asarray(fixed_crop_zyx[valid_mask], dtype=np.float64)
+    if moving.size > int(max_samples):
+        sample_indices = np.linspace(
+            0,
+            int(moving.size) - 1,
+            int(max_samples),
+            dtype=np.int64,
+        )
+        moving = moving[sample_indices]
+        fixed = fixed[sample_indices]
+
+    if moving.size < int(_MIN_INTENSITY_CORRECTION_SAMPLES):
+        return False, 1.0, 0.0, int(moving.size)
+
+    try:
+        moving_lo, moving_hi = np.percentile(moving, [1.0, 99.0])
+        fixed_lo, fixed_hi = np.percentile(fixed, [1.0, 99.0])
+        robust_mask = (
+            (moving >= float(moving_lo))
+            & (moving <= float(moving_hi))
+            & (fixed >= float(fixed_lo))
+            & (fixed <= float(fixed_hi))
+        )
+        if int(np.count_nonzero(robust_mask)) >= int(_MIN_INTENSITY_CORRECTION_SAMPLES):
+            moving = moving[robust_mask]
+            fixed = fixed[robust_mask]
+    except Exception:
+        pass
+
+    mean_moving = float(np.mean(moving))
+    mean_fixed = float(np.mean(fixed))
+    moving_var = float(np.var(moving))
+    gain_min = max(1e-6, float(gain_clip_range[0]))
+    gain_max = max(gain_min, float(gain_clip_range[1]))
+    if moving_var <= 1e-12:
+        scale = mean_fixed / max(mean_moving, 1e-6)
+    else:
+        covariance = float(np.mean((moving - mean_moving) * (fixed - mean_fixed)))
+        scale = covariance / moving_var
+    if not np.isfinite(scale) or scale <= 0.0:
+        return False, 1.0, 0.0, int(moving.size)
+    scale = float(np.clip(scale, gain_min, gain_max))
+    offset = float(mean_fixed - (scale * mean_moving))
+    if not np.isfinite(offset):
+        offset = 0.0
+    return True, scale, offset, int(moving.size)
+
+
 def _register_pairwise_overlap(
     *,
     zarr_path: str,
@@ -986,6 +1100,8 @@ def _register_pairwise_overlap(
     ants_sampling_rate: float = _ANTS_RANDOM_SAMPLING_RATE,
     use_phase_correlation: bool = False,
     use_fft_initial_alignment: bool = True,
+    estimate_intensity_correction: bool = False,
+    gain_clip_range: Sequence[float] = _DEFAULT_GAIN_CLIP_RANGE,
 ) -> dict[str, Any]:
     """Register one nominal overlap crop and return a correction transform.
 
@@ -1024,6 +1140,11 @@ def _register_pairwise_overlap(
         When ``True``, run FFT phase correlation first to pre-align the
         moving crop before ANTs, reducing iteration requirements.  The
         ANTs result is then composed with the FFT correction.
+    estimate_intensity_correction : bool, optional
+        When ``True``, also fit a linear moving-to-fixed intensity map over
+        the nominal overlap crop for gain-compensated fusion.
+    gain_clip_range : sequence of float, optional
+        Minimum and maximum allowed multiplicative gain for the intensity fit.
     """
     root = zarr.open_group(str(zarr_path), mode="r")
     source = root[source_component]
@@ -1050,6 +1171,20 @@ def _register_pairwise_overlap(
         source_shape_zyx=source_shape_zyx,
         voxel_size_um_zyx=voxel_size_um_zyx,
     )
+    if _slices_zyx_are_empty(fixed_slices) or _slices_zyx_are_empty(moving_slices):
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": False,
+            "reason": "overlap_outside_source_bounds",
+            "correction_matrix_xyz": np.eye(4, dtype=np.float64).tolist(),
+            "overlap_voxels": int(edge.overlap_voxels),
+            "nominal_overlap_pixels": 0,
+            "intensity_success": False,
+            "intensity_scale": 1.0,
+            "intensity_offset": 0.0,
+            "intensity_samples": 0,
+        }
 
     fixed_source = np.asarray(
         source[
@@ -1096,6 +1231,21 @@ def _register_pairwise_overlap(
     fixed_mask = np.asarray(fixed_crop > 0, dtype=np.float32)
     moving_mask = np.asarray(moving_crop > 0, dtype=np.float32)
     overlap_pixels = int(np.count_nonzero((fixed_mask > 0) & (moving_mask > 0)))
+    intensity_success = False
+    intensity_scale = 1.0
+    intensity_offset = 0.0
+    intensity_samples = 0
+    if bool(estimate_intensity_correction):
+        (
+            intensity_success,
+            intensity_scale,
+            intensity_offset,
+            intensity_samples,
+        ) = _estimate_linear_intensity_map(
+            fixed_crop,
+            moving_crop,
+            gain_clip_range=gain_clip_range,
+        )
     if (
         overlap_pixels <= 0
         or float(np.std(fixed_crop)) <= 1e-6
@@ -1109,6 +1259,10 @@ def _register_pairwise_overlap(
             "correction_matrix_xyz": np.eye(4, dtype=np.float64).tolist(),
             "overlap_voxels": int(edge.overlap_voxels),
             "nominal_overlap_pixels": int(overlap_pixels),
+            "intensity_success": bool(intensity_success),
+            "intensity_scale": float(intensity_scale),
+            "intensity_offset": float(intensity_offset),
+            "intensity_samples": int(intensity_samples),
         }
 
     # Phase-correlation fast path — skip ANTs entirely for translation-only.
@@ -1131,6 +1285,10 @@ def _register_pairwise_overlap(
                 "correction_matrix_xyz": correction_matrix_xyz.tolist(),
                 "overlap_voxels": int(edge.overlap_voxels),
                 "nominal_overlap_pixels": int(overlap_pixels),
+                "intensity_success": bool(intensity_success),
+                "intensity_scale": float(intensity_scale),
+                "intensity_offset": float(intensity_offset),
+                "intensity_samples": int(intensity_samples),
             }
         except Exception:
             pass  # Fall through to ANTs path.
@@ -1233,6 +1391,10 @@ def _register_pairwise_overlap(
         "correction_matrix_xyz": correction_matrix_xyz.tolist(),
         "overlap_voxels": int(edge.overlap_voxels),
         "nominal_overlap_pixels": int(overlap_pixels),
+        "intensity_success": bool(intensity_success),
+        "intensity_scale": float(intensity_scale),
+        "intensity_offset": float(intensity_offset),
+        "intensity_samples": int(intensity_samples),
     }
 
 
@@ -1605,11 +1767,189 @@ def _solve_with_pruning(
     return solved, active_mask, residuals
 
 
+def _solve_log_intensity_gain_component(
+    *,
+    component_positions: Sequence[int],
+    active_edge_indices: Sequence[int],
+    edge_results: Sequence[Mapping[str, Any]],
+    edges: Sequence[_EdgeSpec],
+    anchor_position: int,
+) -> dict[int, float]:
+    """Solve multiplicative intensity gains for one connected component."""
+    solved = {int(position): 1.0 for position in component_positions}
+    variable_positions = [
+        int(position)
+        for position in component_positions
+        if int(position) != int(anchor_position)
+    ]
+    if not variable_positions:
+        return solved
+
+    column_index = {position: idx for idx, position in enumerate(variable_positions)}
+    equations: list[list[float]] = []
+    targets: list[float] = []
+    for edge_index in active_edge_indices:
+        edge = edges[int(edge_index)]
+        result = edge_results[int(edge_index)]
+        if not bool(result.get("intensity_success", False)):
+            continue
+        scale = float(result.get("intensity_scale", 1.0))
+        if not np.isfinite(scale) or scale <= 0.0:
+            continue
+        weight = math.sqrt(max(1.0, float(result.get("overlap_voxels", 1.0))))
+        row = [0.0] * len(variable_positions)
+        fixed_position = int(edge.fixed_position)
+        moving_position = int(edge.moving_position)
+        if fixed_position in column_index:
+            row[column_index[fixed_position]] -= float(weight)
+        if moving_position in column_index:
+            row[column_index[moving_position]] += float(weight)
+        equations.append(row)
+        targets.append(float(weight) * math.log(scale))
+
+    if not equations:
+        return solved
+
+    design = np.asarray(equations, dtype=np.float64)
+    target = np.asarray(targets, dtype=np.float64)
+    coefficients, *_ = np.linalg.lstsq(design, target, rcond=None)
+    for position in variable_positions:
+        solved[int(position)] = float(np.exp(coefficients[column_index[position]]))
+    return solved
+
+
+def _solve_intensity_offset_component(
+    *,
+    component_positions: Sequence[int],
+    active_edge_indices: Sequence[int],
+    edge_results: Sequence[Mapping[str, Any]],
+    edges: Sequence[_EdgeSpec],
+    anchor_position: int,
+    gains: Mapping[int, float],
+) -> dict[int, float]:
+    """Solve additive intensity offsets for one connected component."""
+    solved = {int(position): 0.0 for position in component_positions}
+    variable_positions = [
+        int(position)
+        for position in component_positions
+        if int(position) != int(anchor_position)
+    ]
+    if not variable_positions:
+        return solved
+
+    column_index = {position: idx for idx, position in enumerate(variable_positions)}
+    equations: list[list[float]] = []
+    targets: list[float] = []
+    for edge_index in active_edge_indices:
+        edge = edges[int(edge_index)]
+        result = edge_results[int(edge_index)]
+        if not bool(result.get("intensity_success", False)):
+            continue
+        offset = float(result.get("intensity_offset", 0.0))
+        if not np.isfinite(offset):
+            continue
+        fixed_position = int(edge.fixed_position)
+        moving_position = int(edge.moving_position)
+        weight = math.sqrt(max(1.0, float(result.get("overlap_voxels", 1.0))))
+        row = [0.0] * len(variable_positions)
+        if fixed_position in column_index:
+            row[column_index[fixed_position]] -= float(weight)
+        if moving_position in column_index:
+            row[column_index[moving_position]] += float(weight)
+        equations.append(row)
+        targets.append(float(weight) * float(gains[fixed_position]) * offset)
+
+    if not equations:
+        return solved
+
+    design = np.asarray(equations, dtype=np.float64)
+    target = np.asarray(targets, dtype=np.float64)
+    coefficients, *_ = np.linalg.lstsq(design, target, rcond=None)
+    for position in variable_positions:
+        solved[int(position)] = float(coefficients[column_index[position]])
+    return solved
+
+
+def _solve_intensity_corrections(
+    *,
+    positions: Sequence[int],
+    active_edge_indices: Sequence[int],
+    edge_results: Sequence[Mapping[str, Any]],
+    edges: Sequence[_EdgeSpec],
+    anchor_position: int,
+) -> tuple[dict[int, float], dict[int, float]]:
+    """Solve per-position intensity gains and offsets from pairwise edges."""
+    gains = {int(position): 1.0 for position in positions}
+    offsets = {int(position): 0.0 for position in positions}
+    if not active_edge_indices:
+        return gains, offsets
+
+    components = _component_positions(positions, active_edge_indices, edges)
+    for component_positions in components:
+        component_edges = [
+            int(edge_index)
+            for edge_index in active_edge_indices
+            if int(edges[int(edge_index)].fixed_position) in component_positions
+            and int(edges[int(edge_index)].moving_position) in component_positions
+        ]
+        component_anchor = (
+            int(anchor_position)
+            if int(anchor_position) in component_positions
+            else int(component_positions[0])
+        )
+        component_gains = _solve_log_intensity_gain_component(
+            component_positions=component_positions,
+            active_edge_indices=component_edges,
+            edge_results=edge_results,
+            edges=edges,
+            anchor_position=component_anchor,
+        )
+        gains.update(component_gains)
+        offsets.update(
+            _solve_intensity_offset_component(
+                component_positions=component_positions,
+                active_edge_indices=component_edges,
+                edge_results=edge_results,
+                edges=edges,
+                anchor_position=component_anchor,
+                gains=component_gains,
+            )
+        )
+    return gains, offsets
+
+
+def _content_aware_weight_volume(volume_zyx: np.ndarray) -> np.ndarray:
+    """Build a lightweight content-weight map from local image gradients."""
+    gradient_energy = np.zeros(volume_zyx.shape, dtype=np.float32)
+    for axis in range(3):
+        gradient = np.asarray(
+            ndimage.sobel(volume_zyx, axis=axis, mode="nearest"),
+            dtype=np.float32,
+        )
+        gradient_energy += gradient * gradient
+    np.sqrt(gradient_energy, out=gradient_energy)
+    content = ndimage.gaussian_filter(
+        gradient_energy,
+        sigma=float(_CONTENT_WEIGHT_SIGMA),
+        mode="nearest",
+    ).astype(np.float32, copy=False)
+    valid = np.asarray(content[np.isfinite(content)], dtype=np.float32)
+    if valid.size == 0:
+        return np.ones(volume_zyx.shape, dtype=np.float32)
+    reference = float(np.percentile(valid, 95.0))
+    if reference <= 1e-6:
+        return np.ones(volume_zyx.shape, dtype=np.float32)
+    content /= np.float32(reference)
+    np.clip(content, _CONTENT_WEIGHT_FLOOR, np.float32(1.5), out=content)
+    return content
+
+
 def _blend_weight_volume(
     shape_zyx: Sequence[int],
     *,
     blend_mode: str,
     overlap_zyx: Sequence[int],
+    blend_exponent: float = _DEFAULT_BLEND_EXPONENT,
 ) -> np.ndarray:
     """Build a separable edge-feathered weight volume.
 
@@ -1620,11 +1960,14 @@ def _blend_weight_volume(
        on-the-fly from the 1D profiles.
     """
     shape = tuple(int(value) for value in shape_zyx)
-    if str(blend_mode).strip().lower() == "average":
+    if _blend_uses_average_weights(blend_mode):
         return np.ones(shape, dtype=np.float32)
 
     profiles = _blend_weight_profiles(
-        shape_zyx, blend_mode=blend_mode, overlap_zyx=overlap_zyx
+        shape_zyx,
+        blend_mode=blend_mode,
+        overlap_zyx=overlap_zyx,
+        blend_exponent=blend_exponent,
     )
     return (
         profiles[0][:, np.newaxis, np.newaxis]
@@ -1638,6 +1981,7 @@ def _blend_weight_profiles(
     *,
     blend_mode: str,
     overlap_zyx: Sequence[int],
+    blend_exponent: float = _DEFAULT_BLEND_EXPONENT,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return the three separable 1D blend-weight profiles for ``(z, y, x)``.
 
@@ -1650,9 +1994,13 @@ def _blend_weight_profiles(
     shape_zyx : sequence of int
         Source tile shape in ``(z, y, x)`` order.
     blend_mode : str
-        ``"feather"`` or ``"average"``.
+        ``"average"``, ``"feather"``, ``"center_weighted"``,
+        ``"content_aware"``, or ``"gain_compensated_feather"``.
     overlap_zyx : sequence of int
         Ramp width per axis in ``(z, y, x)`` order.
+    blend_exponent : float, optional
+        Exponent applied to the spatial blend profile. ``center_weighted``
+        uses a stronger effective exponent internally.
 
     Returns
     -------
@@ -1660,9 +2008,11 @@ def _blend_weight_profiles(
         ``(profile_z, profile_y, profile_x)`` — each a 1D float32 array.
     """
     shape = tuple(int(value) for value in shape_zyx)
+    mode = _normalized_blend_mode(blend_mode)
+    effective_exponent = _effective_blend_exponent(mode, float(blend_exponent))
     profiles: list[np.ndarray] = []
     for axis_size, ramp_width in zip(shape, overlap_zyx, strict=False):
-        if str(blend_mode).strip().lower() == "average":
+        if _blend_uses_average_weights(mode):
             profiles.append(np.ones(int(axis_size), dtype=np.float32))
             continue
         profile = np.ones(int(axis_size), dtype=np.float32)
@@ -1671,6 +2021,11 @@ def _blend_weight_profiles(
             ramp = 0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, width, dtype=np.float32))
             profile[:width] = ramp
             profile[-width:] = np.minimum(profile[-width:], ramp[::-1])
+        if effective_exponent != 1.0:
+            profile = np.power(profile, np.float32(effective_exponent)).astype(
+                np.float32,
+                copy=False,
+            )
         profiles.append(profile)
     return (profiles[0], profiles[1], profiles[2])
 
@@ -1763,6 +2118,8 @@ def _process_and_write_registration_chunk(
     affines_component: str,
     transformed_bboxes_component: str,
     blend_weights_component: str,
+    intensity_gains_component: str,
+    intensity_offsets_component: str,
     t_index: int,
     c_index: int,
     z_bounds: tuple[int, int],
@@ -1787,7 +2144,11 @@ def _process_and_write_registration_chunk(
     transformed_bboxes_component : str
         Per-tile transformed bounding box dataset component.
     blend_weights_component : str
-        Pre-computed blend weight volume component (lazily loaded per worker).
+        Pre-computed blend weight profile group (lazily loaded per worker).
+    intensity_gains_component : str
+        Per-position multiplicative intensity gains for gain-compensated fusion.
+    intensity_offsets_component : str
+        Per-position additive intensity offsets for gain-compensated fusion.
     t_index : int
         Time index.
     c_index : int
@@ -1848,6 +2209,9 @@ def _process_and_write_registration_chunk(
     profile_z = np.asarray(blend_group["profile_z"][:], dtype=np.float32)
     profile_y = np.asarray(blend_group["profile_y"][:], dtype=np.float32)
     profile_x = np.asarray(blend_group["profile_x"][:], dtype=np.float32)
+    blend_mode = _normalized_blend_mode(blend_group.attrs.get("blend_mode", "feather"))
+    intensity_gains = root[intensity_gains_component]
+    intensity_offsets = root[intensity_offsets_component]
 
     chunk_sum = np.zeros(chunk_shape_zyx, dtype=np.float32)
     chunk_weight = np.zeros(chunk_shape_zyx, dtype=np.float32)
@@ -1876,6 +2240,8 @@ def _process_and_write_registration_chunk(
             source_shape_zyx=source_shape_zyx,
             voxel_size_um_zyx=voxel_size_um_zyx,
         )
+        if _slices_zyx_are_empty(src_slices):
+            continue
         source_volume = np.asarray(
             source[
                 int(t_index),
@@ -1896,6 +2262,12 @@ def _process_and_write_registration_chunk(
             order=1,
             cval=0.0,
         )
+        gain = float(intensity_gains[int(t_index), int(position_index)])
+        offset = float(intensity_offsets[int(t_index), int(position_index)])
+        if gain != 1.0 or offset != 0.0:
+            warped_volume = (
+                np.array(warped_volume, dtype=np.float32, copy=False) * np.float32(gain)
+            ) + np.float32(offset)
 
         # Reconstruct blend weights for only the needed source sub-volume
         # from the 1D profiles — avoids materializing the full 3D weight volume.
@@ -1914,6 +2286,8 @@ def _process_and_write_registration_chunk(
             order=1,
             cval=0.0,
         )
+        if _blend_uses_content_aware_weights(blend_mode):
+            warped_weight *= _content_aware_weight_volume(warped_volume)
         chunk_sum += warped_volume * warped_weight
         chunk_weight += warped_weight
 
@@ -1944,6 +2318,7 @@ def _prepare_output_group(
     source_tile_shape_zyx: tuple[int, int, int],
     blend_mode: str,
     overlap_zyx: Sequence[int],
+    blend_exponent: float,
 ) -> tuple[str, str, str, str]:
     """Create latest registration output datasets.
 
@@ -2008,8 +2383,16 @@ def _prepare_output_group(
         source_tile_shape_zyx,
         blend_mode=str(blend_mode),
         overlap_zyx=overlap_zyx,
+        blend_exponent=float(blend_exponent),
     )
     blend_group = auxiliary_group.create_group("blend_weights", overwrite=True)
+    blend_group.attrs.update(
+        {
+            "blend_mode": str(blend_mode),
+            "blend_exponent": float(blend_exponent),
+            "overlap_zyx": [int(value) for value in overlap_zyx],
+        }
+    )
     blend_group.create_array(
         name="profile_z",
         data=np.asarray(prof_z, dtype=np.float32),
@@ -2221,6 +2604,24 @@ def run_registration_analysis(
     effective_use_fft_initial_alignment = bool(
         parameters.get("use_fft_initial_alignment", True)
     )
+    blend_mode = _normalized_blend_mode(parameters.get("blend_mode", "feather"))
+    effective_blend_exponent = float(
+        parameters.get("blend_exponent", _DEFAULT_BLEND_EXPONENT)
+    )
+    gain_clip_range = parameters.get("gain_clip_range", _DEFAULT_GAIN_CLIP_RANGE)
+    effective_gain_clip_range = (
+        max(1e-6, float(gain_clip_range[0])),
+        max(max(1e-6, float(gain_clip_range[0])), float(gain_clip_range[1])),
+    )
+    estimate_intensity_correction = _blend_uses_gain_compensation(blend_mode)
+    intensity_gains_tp = np.ones(
+        (int(source_shape_tpczyx[0]), int(source_shape_tpczyx[1])),
+        dtype=np.float32,
+    )
+    intensity_offsets_tp = np.zeros(
+        (int(source_shape_tpczyx[0]), int(source_shape_tpczyx[1])),
+        dtype=np.float32,
+    )
 
     for t_index in range(int(source_shape_tpczyx[0])):
         anchor_positions.append(int(anchor_position))
@@ -2253,6 +2654,8 @@ def run_registration_analysis(
                 ants_sampling_rate=effective_ants_sampling_rate,
                 use_phase_correlation=effective_use_phase_correlation,
                 use_fft_initial_alignment=effective_use_fft_initial_alignment,
+                estimate_intensity_correction=estimate_intensity_correction,
+                gain_clip_range=effective_gain_clip_range,
             )
             for edge in edge_specs
         ]
@@ -2308,6 +2711,23 @@ def run_registration_analysis(
             effective_corrections_tpx44[int(t_index), int(position_index)] = solved[
                 int(position_index)
             ]
+        if estimate_intensity_correction:
+            gains, offsets = _solve_intensity_corrections(
+                positions=positions,
+                active_edge_indices=[
+                    int(index) for index in np.flatnonzero(active_mask)
+                ],
+                edge_results=pairwise_results,
+                edges=edge_specs,
+                anchor_position=anchor_position,
+            )
+            for position_index in positions:
+                intensity_gains_tp[int(t_index), int(position_index)] = np.float32(
+                    gains[int(position_index)]
+                )
+                intensity_offsets_tp[int(t_index), int(position_index)] = np.float32(
+                    offsets[int(position_index)]
+                )
         for edge_index, result in enumerate(pairwise_results):
             correction_affines_tex44[int(t_index), int(edge_index)] = np.asarray(
                 result["correction_matrix_xyz"], dtype=np.float64
@@ -2387,7 +2807,6 @@ def run_registration_analysis(
         max(1, min(int(source_chunks[4]), int(output_shape_tpczyx[4]))),
         max(1, min(int(source_chunks[5]), int(output_shape_tpczyx[5]))),
     )
-    blend_mode = str(parameters.get("blend_mode", "feather")).strip().lower()
     overlap_zyx = [int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])]
 
     # --- Memory guard ---------------------------------------------------------
@@ -2427,6 +2846,7 @@ def run_registration_analysis(
             source_tile_shape_zyx=source_tile_shape_zyx,  # type: ignore[arg-type]
             blend_mode=blend_mode,
             overlap_zyx=overlap_zyx,
+            blend_exponent=effective_blend_exponent,
         )
     )
     write_root = zarr.open_group(str(zarr_path), mode="a")
@@ -2466,6 +2886,16 @@ def run_registration_analysis(
         data=transformed_bboxes_tpx6,
         overwrite=True,
     )
+    latest_group.create_array(
+        name="intensity_gains_tp",
+        data=intensity_gains_tp,
+        overwrite=True,
+    )
+    latest_group.create_array(
+        name="intensity_offsets_tp",
+        data=intensity_offsets_tp,
+        overwrite=True,
+    )
     latest_group["affines_tpx44"][:] = effective_transforms_tpx44
 
     z_bounds = _axis_chunk_bounds(output_shape_tpczyx[3], output_chunks_tpczyx[3])
@@ -2497,6 +2927,12 @@ def run_registration_analysis(
                 f"{analysis_auxiliary_root('registration')}/transformed_bboxes_tpx6"
             ),
             blend_weights_component=blend_weights_component,
+            intensity_gains_component=(
+                f"{analysis_auxiliary_root('registration')}/intensity_gains_tp"
+            ),
+            intensity_offsets_component=(
+                f"{analysis_auxiliary_root('registration')}/intensity_offsets_tp"
+            ),
             t_index=t_index,
             c_index=c_index,
             z_bounds=z_chunk,
@@ -2580,6 +3016,14 @@ def run_registration_analysis(
             "active_edge_count": int(active_edge_count),
             "dropped_edge_count": int(dropped_edge_count),
             "blend_mode": blend_mode,
+            "blend_exponent": float(effective_blend_exponent),
+            "gain_clip_range": [float(v) for v in effective_gain_clip_range],
+            "intensity_gains_component": (
+                f"{analysis_auxiliary_root('registration')}/intensity_gains_tp"
+            ),
+            "intensity_offsets_component": (
+                f"{analysis_auxiliary_root('registration')}/intensity_offsets_tp"
+            ),
             "max_pairwise_voxels": int(effective_max_pairwise_voxels),
             "ants_iterations": [int(v) for v in effective_ants_iterations],
             "ants_sampling_rate": float(effective_ants_sampling_rate),
@@ -2609,6 +3053,14 @@ def run_registration_analysis(
             "active_edge_count": int(active_edge_count),
             "dropped_edge_count": int(dropped_edge_count),
             "blend_mode": blend_mode,
+            "blend_exponent": float(effective_blend_exponent),
+            "gain_clip_range": [float(v) for v in effective_gain_clip_range],
+            "intensity_gains_component": (
+                f"{analysis_auxiliary_root('registration')}/intensity_gains_tp"
+            ),
+            "intensity_offsets_component": (
+                f"{analysis_auxiliary_root('registration')}/intensity_offsets_tp"
+            ),
             "max_pairwise_voxels": int(effective_max_pairwise_voxels),
             "ants_iterations": [int(v) for v in effective_ants_iterations],
             "ants_sampling_rate": float(effective_ants_sampling_rate),

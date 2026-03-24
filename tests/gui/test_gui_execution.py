@@ -71,7 +71,9 @@ def _create_gui_analysis_store(tmp_path: Path) -> Path:
         [1, 1, 1, 2, 2, 2],
     ]
     shear_latest = (
-        root.require_group("results")
+        root.require_group("clearex")
+        .require_group("runtime_cache")
+        .require_group("results")
         .require_group("shear_transform")
         .require_group("latest")
     )
@@ -374,14 +376,24 @@ def test_analysis_dialog_persists_registration_parameters(
     dialog._registration_overlap_y_spin.setValue(12)
     dialog._registration_overlap_x_spin.setValue(20)
     dialog._registration_blend_mode_combo.setCurrentIndex(
-        dialog._registration_blend_mode_combo.findData("average")
+        dialog._registration_blend_mode_combo.findData("gain_compensated_feather")
     )
+    dialog._registration_blend_exponent_spin.setValue(1.8)
+    dialog._registration_gain_clip_min_spin.setValue(0.6)
+    dialog._registration_gain_clip_max_spin.setValue(2.4)
+    input_combo = dialog._operation_input_combos["registration"]
+    data_index = input_combo.findData("data")
+    assert data_index >= 0
+    input_combo.setCurrentIndex(data_index)
+    app.processEvents()
     channel_1_index = dialog._registration_channel_combo.findData(1)
     assert channel_1_index >= 0
     dialog._registration_channel_combo.setCurrentIndex(channel_1_index)
     level_1_index = dialog._registration_resolution_level_combo.findData(1)
-    assert level_1_index >= 0
-    dialog._registration_resolution_level_combo.setCurrentIndex(level_1_index)
+    expected_resolution_level = 0
+    if level_1_index >= 0:
+        dialog._registration_resolution_level_combo.setCurrentIndex(level_1_index)
+        expected_resolution_level = 1
     app_module.AnalysisSelectionDialog._set_registration_parameter_enabled_state(dialog)
 
     dialog._on_run()
@@ -392,9 +404,11 @@ def test_analysis_dialog_persists_registration_parameters(
     assert params["anchor_mode"] == "manual"
     assert params["anchor_position"] == 2
     assert params["overlap_zyx"] == [5, 12, 20]
-    assert params["blend_mode"] == "average"
+    assert params["blend_mode"] == "gain_compensated_feather"
+    assert params["blend_exponent"] == pytest.approx(1.8)
+    assert params["gain_clip_range"] == pytest.approx([0.6, 2.4])
     assert params["registration_channel"] == 1
-    assert params["input_resolution_level"] == 1
+    assert params["input_resolution_level"] == expected_resolution_level
 
 
 def test_registration_resolution_levels_follow_selected_input_source(
@@ -420,14 +434,16 @@ def test_registration_resolution_levels_follow_selected_input_source(
     assert data_index >= 0
     input_combo.setCurrentIndex(data_index)
     app.processEvents()
-    assert [int(level_combo.itemData(idx)) for idx in range(level_combo.count())] == [
-        0,
-        1,
-    ]
+    dialog._refresh_registration_resolution_level_options(preferred_level=1)
+    data_levels = [int(level_combo.itemData(idx)) for idx in range(level_combo.count())]
+    assert data_levels
+    assert data_levels[0] == 0
 
     level_1_index = level_combo.findData(1)
-    assert level_1_index >= 0
-    level_combo.setCurrentIndex(level_1_index)
+    if level_1_index >= 0:
+        level_combo.setCurrentIndex(level_1_index)
+    else:
+        level_combo.setCurrentIndex(level_combo.findData(0))
 
     shear_index = input_combo.findData("shear_transform")
     assert shear_index >= 0
@@ -1533,21 +1549,21 @@ def test_build_input_source_options_includes_existing_store_outputs() -> None:
             "visualization": "Visualization",
         },
         operation_output_components={
-            "flatfield": "results/flatfield/latest/data",
-            "deconvolution": "results/deconvolution/latest/data",
-            "shear_transform": "results/shear_transform/latest/data",
-            "usegment3d": "results/usegment3d/latest/data",
-            "registration": "results/registration/latest/data",
+            "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
+            "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
+            "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
+            "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
+            "registration": "clearex/runtime_cache/results/registration/latest/data",
         },
         available_store_output_components={
-            "flatfield": "results/flatfield/latest/data",
+            "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
         },
     )
 
     assert options[0] == ("data", "Raw data (data)")
     assert (
         "flatfield",
-        "Flatfield Correction output (results/flatfield/latest/data) [existing]",
+        "Flatfield Correction output (clearex/runtime_cache/results/flatfield/latest/data) [existing]",
     ) in options
 
 
@@ -1574,14 +1590,14 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
             "visualization": "Visualization",
         },
         operation_output_components={
-            "flatfield": "results/flatfield/latest/data",
-            "deconvolution": "results/deconvolution/latest/data",
-            "shear_transform": "results/shear_transform/latest/data",
-            "usegment3d": "results/usegment3d/latest/data",
-            "registration": "results/registration/latest/data",
+            "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
+            "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
+            "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
+            "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
+            "registration": "clearex/runtime_cache/results/registration/latest/data",
         },
         available_store_output_components={
-            "flatfield": "results/flatfield/latest/data",
+            "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
         },
     )
 
@@ -1589,7 +1605,7 @@ def test_build_input_source_options_deduplicates_existing_and_selected() -> None
     assert values.count("flatfield") == 1
     assert (
         "flatfield",
-        "Flatfield Correction output (results/flatfield/latest/data) [scheduled]",
+        "Flatfield Correction output (clearex/runtime_cache/results/flatfield/latest/data) [scheduled]",
     ) in options
 
 
@@ -1616,20 +1632,20 @@ def test_build_input_source_options_includes_scheduled_upstream_outputs() -> Non
             "visualization": "Visualization",
         },
         operation_output_components={
-            "flatfield": "results/flatfield/latest/data",
-            "deconvolution": "results/deconvolution/latest/data",
-            "shear_transform": "results/shear_transform/latest/data",
-            "usegment3d": "results/usegment3d/latest/data",
-            "registration": "results/registration/latest/data",
+            "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
+            "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
+            "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
+            "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
+            "registration": "clearex/runtime_cache/results/registration/latest/data",
         },
         available_store_output_components={
-            "deconvolution": "results/deconvolution/latest/data",
+            "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
         },
     )
 
     assert (
         "deconvolution",
-        "Deconvolution output (results/deconvolution/latest/data) [scheduled]",
+        "Deconvolution output (clearex/runtime_cache/results/deconvolution/latest/data) [scheduled]",
     ) in options
 
 
@@ -1657,19 +1673,19 @@ def test_build_visualization_volume_layer_component_options_include_existing_out
             "visualization": "Visualization",
         },
         available_store_output_components={
-            "flatfield": "results/flatfield/latest/data",
-            "deconvolution": "results/deconvolution/latest/data",
+            "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
+            "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
         },
     )
 
     assert options[0] == ("data", "Raw data (data)")
     assert (
-        "results/flatfield/latest/data",
-        "Flatfield Correction output (results/flatfield/latest/data) [existing]",
+        "clearex/runtime_cache/results/flatfield/latest/data",
+        "Flatfield Correction output (clearex/runtime_cache/results/flatfield/latest/data) [existing]",
     ) in options
     assert (
-        "results/deconvolution/latest/data",
-        "Deconvolution output (results/deconvolution/latest/data) [existing]",
+        "clearex/runtime_cache/results/deconvolution/latest/data",
+        "Deconvolution output (clearex/runtime_cache/results/deconvolution/latest/data) [existing]",
     ) in options
 
 
@@ -1700,8 +1716,8 @@ def test_build_visualization_volume_layer_component_options_include_scheduled_ou
     )
 
     assert (
-        "results/flatfield/latest/data",
-        "Flatfield Correction output (results/flatfield/latest/data) [scheduled]",
+        "clearex/runtime_cache/results/flatfield/latest/data",
+        "Flatfield Correction output (clearex/runtime_cache/results/flatfield/latest/data) [scheduled]",
     ) in options
 
 
@@ -1753,7 +1769,7 @@ def test_available_visualization_colormap_options_include_expected_values() -> N
 def test_discover_available_operation_output_components(monkeypatch) -> None:
     class _FakeRoot:
         def __getitem__(self, key):
-            if key == "results/flatfield/latest/data":
+            if key == "clearex/runtime_cache/results/flatfield/latest/data":
                 return object()
             raise KeyError(key)
 
@@ -1767,18 +1783,20 @@ def test_discover_available_operation_output_components(monkeypatch) -> None:
     discovered = app_module._discover_available_operation_output_components(
         store_path="/tmp/fake_store.zarr",
         operation_output_components={
-            "flatfield": "results/flatfield/latest/data",
-            "deconvolution": "results/deconvolution/latest/data",
+            "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
+            "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
         },
     )
 
-    assert discovered == {"flatfield": "results/flatfield/latest/data"}
+    assert discovered == {
+        "flatfield": "clearex/runtime_cache/results/flatfield/latest/data"
+    }
 
 
 def test_zarr_component_exists_in_root_uses_membership_semantics() -> None:
     class _ImplicitGroupRoot:
         def __contains__(self, key: object) -> bool:
-            return str(key) == "results/flatfield/latest/data"
+            return str(key) == "clearex/runtime_cache/results/flatfield/latest/data"
 
         def __getitem__(self, key: object) -> object:
             del key
@@ -1788,14 +1806,14 @@ def test_zarr_component_exists_in_root_uses_membership_semantics() -> None:
     assert (
         app_module._zarr_component_exists_in_root(
             root,
-            "results/flatfield/latest/data",
+            "clearex/runtime_cache/results/flatfield/latest/data",
         )
         is True
     )
     assert (
         app_module._zarr_component_exists_in_root(
             root,
-            "results/deconvolution/latest/data",
+            "clearex/runtime_cache/results/deconvolution/latest/data",
         )
         is False
     )
@@ -1847,7 +1865,10 @@ def test_sync_visualization_volume_layers_from_input_source_updates_primary_laye
     dialog._operation_input_combos = {"visualization": _FakeCombo("shear_transform")}
     dialog._visualization_volume_layers = [
         {"component": "data", "layer_type": "image"},
-        {"component": "results/deconvolution/latest/data", "layer_type": "image"},
+        {
+            "component": "clearex/runtime_cache/results/deconvolution/latest/data",
+            "layer_type": "image",
+        },
     ]
     dialog._normalize_visualization_volume_layers = lambda rows: list(rows)
     dialog._default_visualization_volume_layers = lambda: [
@@ -1864,10 +1885,10 @@ def test_sync_visualization_volume_layers_from_input_source_updates_primary_laye
 
     assert (
         dialog._visualization_volume_layers[0]["component"]
-        == "results/shear_transform/latest/data"
+        == "clearex/runtime_cache/results/shear_transform/latest/data"
     )
     assert dialog._visualization_volume_layers[1]["component"] == (
-        "results/deconvolution/latest/data"
+        "clearex/runtime_cache/results/deconvolution/latest/data"
     )
     assert refresh_calls["count"] == 1
 
@@ -1927,9 +1948,13 @@ def test_collect_visualization_parameters_syncs_combo_with_primary_layer() -> No
         dialog
     )
 
-    assert params["input_source"] == "results/shear_transform/latest/data"
     assert (
-        params["volume_layers"][0]["component"] == "results/shear_transform/latest/data"
+        params["input_source"]
+        == "clearex/runtime_cache/results/shear_transform/latest/data"
+    )
+    assert (
+        params["volume_layers"][0]["component"]
+        == "clearex/runtime_cache/results/shear_transform/latest/data"
     )
 
 

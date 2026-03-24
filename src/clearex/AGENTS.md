@@ -174,6 +174,23 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Reader selection now prefers validated/public OME metadata instead of
   “largest array wins” heuristics.
 
+## Recent Runtime Updates (2026-03-24)
+
+- Registration fusion now supports richer overlap blending controls:
+  - `blend_mode` accepts `average`, `feather`, `center_weighted`,
+    `content_aware`, and `gain_compensated_feather`,
+  - `blend_exponent` tunes feather/center-weighted falloff strength,
+  - `gain_clip_range` constrains fitted overlap gain during
+    gain-compensated fusion.
+- Gain-compensated feather now estimates per-edge moving-to-fixed linear
+  intensity maps on overlap crops, solves per-position gain/offset
+  corrections, and records the resulting `intensity_gains_tp` and
+  `intensity_offsets_tp` auxiliary arrays under
+  `clearex/results/registration/latest`.
+- Blend-weight storage for registration now persists separable 1D profiles
+  plus blend metadata under `clearex/results/registration/latest/blend_weights`
+  instead of assuming a materialized 3D volume.
+
 ## Recent Runtime Updates (2026-03-22)
 
 - Registration pipeline (`pipeline.py`) performance optimizations:
