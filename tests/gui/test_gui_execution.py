@@ -950,6 +950,35 @@ def test_setup_dialog_resolves_spatial_calibration_drafts_per_experiment() -> No
     dialog.close()
 
 
+def test_setup_dialog_delete_key_removes_selected_experiment() -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    first = Path("/tmp/cell_001/experiment.yml").resolve()
+    second = Path("/tmp/cell_002/experiment.yml").resolve()
+    dialog._set_experiment_list_paths((first, second), current_path=first)
+    dialog._experiment_list.setCurrentRow(0)
+
+    event = app_module.QKeyEvent(
+        app_module.QEvent.Type.KeyPress,
+        app_module.Qt.Key.Key_Delete,
+        app_module.Qt.KeyboardModifier.NoModifier,
+    )
+    handled = dialog.eventFilter(dialog._experiment_list, event)
+
+    assert handled is True
+    assert dialog._experiment_list.count() == 1
+    remaining = dialog._experiment_path_from_item(dialog._experiment_list.item(0))
+    assert remaining == second
+
+    dialog.close()
+
+
 def test_setup_dialog_prefills_spatial_calibration_from_existing_store(
     tmp_path: Path,
 ) -> None:

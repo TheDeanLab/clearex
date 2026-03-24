@@ -10,10 +10,19 @@ This folder owns the PyQt6 UX in `app.py`.
     - `Create Experiment List` for recursive folder scans or saved-list reloads,
     - drag and drop of experiments, folders, or `.clearex-experiment-list.json` files
   - Add/remove experiment entries from the list and persist the list for reuse
+    - the setup experiment list supports `Delete` / `Backspace` to remove the
+      current selection without using the `Remove Selected` button
   - Auto-load metadata when the current list selection changes
     - for Navigate BDV ``file_type: N5``, source metadata must come from the
       Navigate experiment context plus TensorStore-backed BDV source summary,
       not from sending the raw ``.n5`` path through the generic Zarr reader
+  - Setup metadata/source-resolution contexts are cached per experiment path to
+    avoid repeated recursive TIFF candidate scans and source re-opens when
+    reselecting experiments in the same session; cache entries are invalidated
+    on explicit reload, source-directory override changes, and list removal
+  - Navigate TIFF metadata verification should use `tifffile.TiffFile(...)`
+    header parsing instead of constructing a Dask-backed source array during
+    setup-screen metadata refresh
   - Configure Dask backend and OME-Zarr save options
   - Configure `Spatial Calibration` for the currently selected experiment:
     - map world `z/y/x` to Navigate stage `X/Y/Z/F` or `none`,
