@@ -2401,11 +2401,15 @@ def _fit_profile_tiled(
                 flatfield_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
-                ] += flatfield_tile.astype(np.float64) * blend_weights_64
+                ] += (
+                    flatfield_tile.astype(np.float64) * blend_weights_64
+                )
                 darkfield_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
-                ] += darkfield_tile.astype(np.float64) * blend_weights_64
+                ] += (
+                    darkfield_tile.astype(np.float64) * blend_weights_64
+                )
                 weight_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,

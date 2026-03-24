@@ -428,7 +428,14 @@ def _default_outputs(workflow: WorkflowConfig) -> Dict[str, Any]:
         key = _normalize_analysis_name(analysis_name)
         component = (
             public_analysis_root(key)
-            if key in {"flatfield", "deconvolution", "shear_transform", "usegment3d", "registration"}
+            if key
+            in {
+                "flatfield",
+                "deconvolution",
+                "shear_transform",
+                "usegment3d",
+                "registration",
+            }
             else analysis_auxiliary_root(key)
         )
         outputs[key] = {

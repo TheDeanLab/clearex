@@ -4925,9 +4925,9 @@ if HAS_PYQT6:
             self._experiment_list_file_path: Optional[Path] = None
             self._experiment_list_dirty = False
             self._source_data_directory_overrides: Dict[Path, Path] = {}
-            self._experiment_metadata_cache: Dict[Path, ExperimentMetadataCacheEntry] = (
-                {}
-            )
+            self._experiment_metadata_cache: Dict[
+                Path, ExperimentMetadataCacheEntry
+            ] = {}
             self._spatial_calibration_drafts: Dict[Path, SpatialCalibrationConfig] = {}
             self._current_spatial_calibration: SpatialCalibrationConfig = (
                 initial.spatial_calibration
@@ -10253,9 +10253,7 @@ if HAS_PYQT6:
             )
             form.addRow(fusion_section)
 
-            perf_section, perf_form = self._build_parameter_section_card(
-                "Performance"
-            )
+            perf_section, perf_form = self._build_parameter_section_card("Performance")
             self._registration_max_pairwise_voxels_spin = QSpinBox()
             self._registration_max_pairwise_voxels_spin.setRange(0, 100_000_000)
             self._registration_max_pairwise_voxels_spin.setSingleStep(50_000)
@@ -11167,7 +11165,9 @@ if HAS_PYQT6:
                 selected_data = combo.currentData()
                 return str(selected_data).strip() if selected_data is not None else ""
 
-            def _available_channels_for_component(component_value: str) -> tuple[int, ...]:
+            def _available_channels_for_component(
+                component_value: str,
+            ) -> tuple[int, ...]:
                 component = str(component_value).strip() or "data"
                 resolved_component = resolve_analysis_input_component(component)
                 if store_root is None:

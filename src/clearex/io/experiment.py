@@ -1787,7 +1787,11 @@ def load_navigate_experiment_source_image_info(
                             and experiment.xy_pixel_size_um > 0
                             else None
                         )
-                        if spacing_um is not None and spacing_um > 0 and xy_um is not None:
+                        if (
+                            spacing_um is not None
+                            and spacing_um > 0
+                            and xy_um is not None
+                        ):
                             metadata["voxel_size_um_zyx"] = (
                                 spacing_um,
                                 xy_um,
