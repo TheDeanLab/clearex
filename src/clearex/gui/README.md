@@ -11,19 +11,23 @@ This folder owns the PyQt6 UX in `app.py`.
     - drag and drop of experiments, folders, or `.clearex-experiment-list.json` files
   - Add/remove experiment entries from the list and persist the list for reuse
   - Auto-load metadata when the current list selection changes
-  - Configure Dask backend and Zarr save options
+    - for Navigate BDV ``file_type: N5``, source metadata must come from the
+      Navigate experiment context plus TensorStore-backed BDV source summary,
+      not from sending the raw ``.n5`` path through the generic Zarr reader
+  - Configure Dask backend and OME-Zarr save options
   - Configure `Spatial Calibration` for the currently selected experiment:
     - map world `z/y/x` to Navigate stage `X/Y/Z/F` or `none`,
     - prefill from the target store when available,
     - otherwise keep a per-experiment draft while setup remains open
   - Persist the last-used Zarr save config across sessions
   - Display image metadata
-  - On `Next`, batch-materialize only missing/incomplete canonical stores for
+  - On `Next`, batch-materialize only missing/incomplete canonical OME-Zarr
+    stores for
     every listed experiment, persist the resolved spatial calibration for
     every reused/new store, then continue with the currently selected
     experiment
-  - `Rebuild Canonical Store` forces the listed stores to be rebuilt with the
-    current GUI chunking and pyramid settings
+  - `Rebuild Canonical Store` forces the listed stores to be rebuilt as
+    `.ome.zarr` outputs with the current GUI chunking and pyramid settings
 - Analysis window (`AnalysisSelectionDialog`):
   - Top `Analysis Scope` panel:
     - choose the active `experiment.yml` from the loaded setup list,
@@ -52,7 +56,7 @@ This folder owns the PyQt6 UX in `app.py`.
 - Per-operation `Input source` options depend on selected upstream operations and execution order.
 - `Visualization` is treated as a terminal/view step; it should not be offered as an upstream image source for later operations.
 - Visualization placement should come from the active target store's persisted
-  `spatial_calibration`, not from one-off GUI-only state.
+  `clearex/metadata["spatial_calibration"]`, not from one-off GUI-only state.
 - Visualization configuration currently exposes:
   - `position_index` for multiposition datasets
   - multiscale loading toggle
@@ -75,6 +79,22 @@ This folder owns the PyQt6 UX in `app.py`.
   - `QComboBox QAbstractItemView`
   - selected background and selected text colors
 - Keep parameter cards, help panels, and popups visually aligned with title/label palette.
+
+## Canonical Store UX Rules
+
+- Treat `.ome.zarr` as the only canonical store suffix in labels, tooltips,
+  examples, and validation messages.
+- Treat source `.n5` as Navigate acquisition input only. GUI messaging should
+  point users to `experiment.yml` materialization, not direct raw `.n5`
+  runtime opening.
+- Present logical analysis inputs (`data`, `flatfield`, `deconvolution`,
+  `shear_transform`, `usegment3d`, `registration`) instead of raw internal
+  component paths wherever possible.
+- If the UI shows store structure for debugging, distinguish:
+  - public OME image collections at the root and under `results/<analysis>/latest`
+  - internal ClearEx execution/artifact paths under `clearex/...`
+- Do not teach users that root `data`, root `data_pyramid`, or
+  `results/<analysis>/latest/data` are the canonical public contract.
 
 ## Branding Assets and Layout
 

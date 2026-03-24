@@ -43,6 +43,10 @@ import tifffile
 import zarr
 
 # Local Imports
+from clearex.io.ome_store import (
+    analysis_auxiliary_root,
+    resolve_voxel_size_um_zyx_with_source,
+)
 from clearex.io.provenance import register_latest_output_reference
 
 if TYPE_CHECKING:
@@ -283,37 +287,11 @@ def _extract_voxel_size_um_zyx(
         Voxel sizes in microns for ``(z, y, x)``. Falls back to ``(1, 1, 1)``
         when metadata is unavailable.
     """
-    root_attrs = dict(root.attrs)
-    source_attrs: dict[str, Any] = {}
-    try:
-        source_attrs = dict(root[source_component].attrs)
-    except Exception:
-        source_attrs = {}
-
-    for attrs in (source_attrs, root_attrs):
-        voxel = attrs.get("voxel_size_um_zyx")
-        if not isinstance(voxel, (tuple, list)) or len(voxel) < 3:
-            continue
-        z_um = float(voxel[0])
-        y_um = float(voxel[1])
-        x_um = float(voxel[2])
-        if z_um > 0 and y_um > 0 and x_um > 0:
-            return z_um, y_um, x_um
-
-    for attrs in (source_attrs, root_attrs):
-        navigate = attrs.get("navigate_experiment")
-        if not isinstance(navigate, dict):
-            continue
-        xy_value = navigate.get("xy_pixel_size_um")
-        z_value = navigate.get("z_step_um")
-        if xy_value is None or z_value is None:
-            continue
-        xy_um = float(xy_value)
-        z_um = float(z_value)
-        if xy_um > 0 and z_um > 0:
-            return z_um, xy_um, xy_um
-
-    return 1.0, 1.0, 1.0
+    voxel_size_um_zyx, _ = resolve_voxel_size_um_zyx_with_source(
+        root,
+        source_component=source_component,
+    )
+    return voxel_size_um_zyx
 
 
 def _projection_pixel_size_um(
@@ -469,6 +447,7 @@ def _resample_axis_linear_to_uint16(
     dst_moved = np.moveaxis(dst, axis_index, 0)
     src_flat = src_moved.reshape(src_len, -1)
     dst_flat = dst_moved.reshape(dst_len, -1)
+    dst_requires_copy_back = not np.shares_memory(dst_flat, dst_moved)
 
     if dst_flat.size == 0:
         return
@@ -476,6 +455,8 @@ def _resample_axis_linear_to_uint16(
     if src_len <= 1:
         repeated = np.repeat(src_flat[:1, :], repeats=dst_len, axis=0)
         dst_flat[:, :] = _to_uint16(repeated)
+        if dst_requires_copy_back:
+            dst_moved[...] = dst_flat.reshape(dst_moved.shape)
         return
 
     sample_positions = np.linspace(
@@ -502,6 +483,9 @@ def _resample_axis_linear_to_uint16(
             lower_block * weight_lower[:, None] + upper_block * weight_upper[:, None]
         )
         dst_flat[:, start:stop] = _to_uint16(interpolated)
+
+    if dst_requires_copy_back:
+        dst_moved[...] = dst_flat.reshape(dst_moved.shape)
 
 
 def _resample_tiff_projection_z_axis_if_needed(
@@ -2248,14 +2232,12 @@ def run_mip_export_analysis(
     task_results = sorted(task_results, key=lambda item: str(item.get("path", "")))
     exported_files = int(len(task_results))
 
-    component = "results/mip_export/latest"
+    component = analysis_auxiliary_root("mip_export")
     root_w = zarr.open_group(str(zarr_path), mode="a")
     try:
-        results_group = root_w.require_group("results")
-        mip_group = results_group.require_group("mip_export")
-        if "latest" in mip_group:
-            del mip_group["latest"]
-        latest_group = mip_group.create_group("latest")
+        if component in root_w:
+            del root_w[component]
+        latest_group = root_w.require_group(component)
         latest_group.attrs.update(
             {
                 "storage_policy": "latest_only",

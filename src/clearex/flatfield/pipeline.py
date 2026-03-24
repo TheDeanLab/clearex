@@ -54,6 +54,14 @@ import numpy as np
 from numpy.typing import NDArray
 import zarr
 
+from clearex.io.ome_store import (
+    analysis_auxiliary_component,
+    analysis_auxiliary_root,
+    analysis_cache_data_component,
+    analysis_cache_root,
+    public_analysis_root,
+    resolve_voxel_size_um_zyx,
+)
 from clearex.io.provenance import register_latest_output_reference
 
 if TYPE_CHECKING:
@@ -971,10 +979,19 @@ def _copy_source_array_attrs(
     """
     source_attrs = dict(root[source_component].attrs)
     root_attrs = dict(root.attrs)
+    resolved_voxel_size_um_zyx = resolve_voxel_size_um_zyx(
+        root,
+        source_component=source_component,
+    )
     copied: dict[str, Any] = {
         "source_component": str(source_component),
         "chunk_shape_tpczyx": [int(v) for v in output_chunks],
-        "pyramid_levels": ["results/flatfield/latest/data"],
+        "pyramid_levels": [analysis_cache_data_component("flatfield")],
+        "voxel_size_um_zyx": [
+            float(resolved_voxel_size_um_zyx[0]),
+            float(resolved_voxel_size_um_zyx[1]),
+            float(resolved_voxel_size_um_zyx[2]),
+        ],
     }
     for key in (
         "scale_tpczyx",
@@ -1514,7 +1531,9 @@ def _checkpoint_dataset_specs(
 
 def _checkpoint_is_compatible(
     *,
+    root: zarr.Group,
     latest_group: zarr.Group,
+    data_component: str,
     source_component: str,
     shape_tpczyx: tuple[int, int, int, int, int, int],
     chunks_tpczyx: tuple[int, int, int, int, int, int],
@@ -1560,13 +1579,17 @@ def _checkpoint_is_compatible(
         int(shape_tpczyx[4]),
         int(shape_tpczyx[5]),
     )
-    if not _has_dataset(
-        latest_group, name="data", shape=shape_tpczyx, dtype=np.float32
-    ):
+    try:
+        data_array = root[data_component]
+    except Exception:
         return False
-    if tuple(int(v) for v in latest_group["data"].chunks) != tuple(
-        int(v) for v in chunks_tpczyx
-    ):
+    if not isinstance(data_array, zarr.Array):
+        return False
+    if tuple(int(v) for v in data_array.shape) != tuple(int(v) for v in shape_tpczyx):
+        return False
+    if np.dtype(data_array.dtype) != np.dtype(np.float32):
+        return False
+    if tuple(int(v) for v in data_array.chunks) != tuple(int(v) for v in chunks_tpczyx):
         return False
     if not _has_dataset(
         latest_group,
@@ -1630,6 +1653,9 @@ def _checkpoint_is_compatible(
             return False
 
     # Ensure pre-existing chunks decode cleanly before attempting resume.
+    if not _dataset_chunk_probe_is_readable(data_array):
+        return False
+
     for name in ("flatfield_pcyx", "darkfield_pcyx", "baseline_pctz"):
         candidate = latest_group.get(name)
         if candidate is None or not isinstance(candidate, zarr.Array):
@@ -1831,11 +1857,13 @@ def _initialize_latest_flatfield_group(
     zarr.Group
         Newly created latest group.
     """
-    results_group = root.require_group("results")
-    flatfield_group = results_group.require_group("flatfield")
-    if "latest" in flatfield_group:
-        del flatfield_group["latest"]
-    latest_group = flatfield_group.create_group("latest")
+    cache_root = analysis_cache_root("flatfield")
+    auxiliary_root = analysis_auxiliary_root("flatfield")
+    if cache_root in root:
+        del root[cache_root]
+    if auxiliary_root in root:
+        del root[auxiliary_root]
+    latest_group = root.require_group(cache_root)
 
     data_array = latest_group.create_dataset(
         name="data",
@@ -1857,7 +1885,36 @@ def _initialize_latest_flatfield_group(
         max(1, min(int(chunks_tpczyx[4]), int(shape_tpczyx[4]))),
         max(1, min(int(chunks_tpczyx[5]), int(shape_tpczyx[5]))),
     )
-    latest_group.create_dataset(
+
+    latest_group.attrs.update(
+        {
+            "storage_policy": "latest_only",
+            "run_id": None,
+            "source_component": str(source_component),
+            "data_component": analysis_cache_data_component("flatfield"),
+            "flatfield_component": analysis_auxiliary_component(
+                "flatfield", "flatfield_pcyx"
+            ),
+            "darkfield_component": analysis_auxiliary_component(
+                "flatfield", "darkfield_pcyx"
+            ),
+            "baseline_component": analysis_auxiliary_component(
+                "flatfield", "baseline_pctz"
+            ),
+            "parameters": _to_jsonable(dict(parameters)),
+            "resume_parameters": dict(parameter_payload),
+            "resume_parameters_json": str(parameter_json),
+            "resume_parameter_fingerprint": str(parameter_fingerprint),
+            "output_dtype": "float32",
+            "output_chunks_tpczyx": [int(v) for v in chunks_tpczyx],
+            "basicpy_version": basicpy_version,
+            "resume_schema_version": RESUME_SCHEMA_VERSION,
+            "updated_utc": _utc_now_iso(),
+        }
+    )
+
+    auxiliary_group = root.require_group(auxiliary_root)
+    auxiliary_group.create_dataset(
         name="flatfield_pcyx",
         shape=(
             int(shape_tpczyx[1]),
@@ -1869,7 +1926,7 @@ def _initialize_latest_flatfield_group(
         dtype=np.float32,
         overwrite=True,
     )
-    latest_group.create_dataset(
+    auxiliary_group.create_dataset(
         name="darkfield_pcyx",
         shape=(
             int(shape_tpczyx[1]),
@@ -1881,7 +1938,7 @@ def _initialize_latest_flatfield_group(
         dtype=np.float32,
         overwrite=True,
     )
-    latest_group.create_dataset(
+    auxiliary_group.create_dataset(
         name="baseline_pctz",
         shape=(
             int(shape_tpczyx[1]),
@@ -1898,29 +1955,9 @@ def _initialize_latest_flatfield_group(
         dtype=np.float32,
         overwrite=True,
     )
+    auxiliary_group.attrs.update(dict(latest_group.attrs))
 
-    latest_group.attrs.update(
-        {
-            "storage_policy": "latest_only",
-            "run_id": None,
-            "source_component": str(source_component),
-            "data_component": "results/flatfield/latest/data",
-            "flatfield_component": "results/flatfield/latest/flatfield_pcyx",
-            "darkfield_component": "results/flatfield/latest/darkfield_pcyx",
-            "baseline_component": "results/flatfield/latest/baseline_pctz",
-            "parameters": _to_jsonable(dict(parameters)),
-            "resume_parameters": dict(parameter_payload),
-            "resume_parameters_json": str(parameter_json),
-            "resume_parameter_fingerprint": str(parameter_fingerprint),
-            "output_dtype": "float32",
-            "output_chunks_tpczyx": [int(v) for v in chunks_tpczyx],
-            "basicpy_version": basicpy_version,
-            "resume_schema_version": RESUME_SCHEMA_VERSION,
-            "updated_utc": _utc_now_iso(),
-        }
-    )
-
-    checkpoint_group = latest_group.require_group(CHECKPOINT_GROUP_NAME)
+    checkpoint_group = auxiliary_group.require_group(CHECKPOINT_GROUP_NAME)
     _create_checkpoint_datasets(
         checkpoint_group=checkpoint_group,
         shape_tpczyx=shape_tpczyx,
@@ -2021,16 +2058,16 @@ def _prepare_output_arrays(
         parameter_payload
     )
 
-    component = "results/flatfield/latest"
-    data_component = "results/flatfield/latest/data"
-    flatfield_component = "results/flatfield/latest/flatfield_pcyx"
-    darkfield_component = "results/flatfield/latest/darkfield_pcyx"
-    baseline_component = "results/flatfield/latest/baseline_pctz"
-    checkpoint_component = "results/flatfield/latest/checkpoint"
+    component = public_analysis_root("flatfield")
+    data_component = analysis_cache_data_component("flatfield")
+    flatfield_component = analysis_auxiliary_component("flatfield", "flatfield_pcyx")
+    darkfield_component = analysis_auxiliary_component("flatfield", "darkfield_pcyx")
+    baseline_component = analysis_auxiliary_component("flatfield", "baseline_pctz")
+    checkpoint_component = analysis_auxiliary_component(
+        "flatfield", CHECKPOINT_GROUP_NAME
+    )
 
-    results_group = root.require_group("results")
-    flatfield_group = results_group.require_group("flatfield")
-    latest_group = flatfield_group.get("latest")
+    latest_group = root.get(analysis_auxiliary_root("flatfield"))
     should_resume = False
     if (
         latest_group is not None
@@ -2038,7 +2075,9 @@ def _prepare_output_arrays(
         and not bool(parameters.get("force_rerun", False))
     ):
         should_resume = _checkpoint_is_compatible(
+            root=root,
             latest_group=latest_group,
+            data_component=data_component,
             source_component=source_component,
             shape_tpczyx=shape_tpczyx,
             chunks_tpczyx=chunks_tpczyx,
@@ -2362,15 +2401,11 @@ def _fit_profile_tiled(
                 flatfield_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
-                ] += (
-                    flatfield_tile.astype(np.float64) * blend_weights_64
-                )
+                ] += flatfield_tile.astype(np.float64) * blend_weights_64
                 darkfield_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
-                ] += (
-                    darkfield_tile.astype(np.float64) * blend_weights_64
-                )
+                ] += darkfield_tile.astype(np.float64) * blend_weights_64
                 weight_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
@@ -3487,11 +3522,13 @@ def run_flatfield_analysis(
                     profile_key = (position_index, channel_index)
                     if profile_key in fallback_profile_keys:
                         return
-                    y_start, y_stop = int(tile_result.y_bounds[0]), int(
-                        tile_result.y_bounds[1]
+                    y_start, y_stop = (
+                        int(tile_result.y_bounds[0]),
+                        int(tile_result.y_bounds[1]),
                     )
-                    x_start, x_stop = int(tile_result.x_bounds[0]), int(
-                        tile_result.x_bounds[1]
+                    x_start, x_stop = (
+                        int(tile_result.x_bounds[0]),
+                        int(tile_result.x_bounds[1]),
                     )
                     profile_selection = (
                         slice(position_index, position_index + 1),
@@ -3764,7 +3801,9 @@ def run_flatfield_analysis(
                 progress_end=99,
             )
         )
-        latest_group = zarr.open_group(str(zarr_path), mode="a")[layout.component]
+        latest_group = zarr.open_group(str(zarr_path), mode="a")[
+            analysis_auxiliary_root("flatfield")
+        ]
         latest_group.attrs.update(
             {
                 "profile_count": int(profile_count),

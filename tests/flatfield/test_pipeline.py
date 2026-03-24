@@ -15,6 +15,37 @@ from clearex.io.experiment import create_dask_client
 import clearex.flatfield.pipeline as flatfield_pipeline
 
 
+def test_copy_source_array_attrs_preserves_voxel_size(tmp_path: Path) -> None:
+    """Flatfield output attrs should carry upstream physical voxel size."""
+    store_path = tmp_path / "flatfield_attr_copy_scale.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    source = root.create_dataset(
+        name="clearex/runtime_cache/source/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype=np.uint16,
+        overwrite=True,
+    )
+    source.attrs.update({"voxel_size_um_zyx": [5.0, 1.25, 1.25]})
+    target = root.create_dataset(
+        name="clearex/runtime_cache/results/flatfield/latest/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype=np.float32,
+        overwrite=True,
+    )
+
+    flatfield_pipeline._copy_source_array_attrs(
+        root=root,
+        source_component="clearex/runtime_cache/source/data",
+        target_array=target,
+        output_chunks=(1, 1, 1, 2, 2, 2),
+    )
+
+    attrs = dict(target.attrs)
+    assert attrs["voxel_size_um_zyx"] == [5.0, 1.25, 1.25]
+
+
 def test_run_flatfield_analysis_writes_latest_results(
     tmp_path: Path, monkeypatch
 ) -> None:

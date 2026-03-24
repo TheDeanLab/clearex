@@ -8,7 +8,33 @@ The registration module provides tools for aligning images using combined linear
 - `linear.py` - Linear/affine registration functions
 - `nonlinear.py` - Nonlinear/deformable registration functions  
 - `common.py` - Shared utilities (transform I/O, cropping, etc.)
-- `pipeline.py` - Chunked tile-registration workflow for canonical 6D analysis stores (Dask + Zarr)
+- `pipeline.py` - Chunked tile-registration workflow for canonical 6D OME-Zarr
+  stores (Dask + Zarr v3)
+
+## ClearEx Runtime Contract
+
+These notes are mandatory when editing `pipeline.py` and related runtime
+integration:
+
+- Canonical runtime inputs are OME-Zarr v3 `*.ome.zarr` stores.
+- `input_source` is a logical workflow alias by default (`data`,
+  `flatfield`, `deconvolution`, `shear_transform`, `usegment3d`,
+  `registration`) and resolves to a ClearEx runtime-cache image component.
+- Registration writes fused image data to
+  `clearex/runtime_cache/results/registration/latest/data`.
+- Registration publishes its public image result as the OME collection
+  `results/registration/latest`.
+- Registration auxiliary artifacts stay under
+  `clearex/results/registration/latest`:
+  - `affines_tpx44`
+  - `blend_weights`
+  - `edges_pe2`
+  - `pairwise_affines_tex44`
+  - `edge_status_te`
+  - `edge_residual_te`
+  - `transformed_bboxes_tpx6`
+- Do not reintroduce `results/registration/latest/data` as the canonical write
+  target. That legacy path is migration-only.
 
 ## Quick Start
 
@@ -443,7 +469,7 @@ parameters are passed through the `parameters` dict to
   `_source_subvolume_for_overlap` to compute the minimal source Zarr slice
   that covers each output region, dramatically reducing I/O for large tiles.
 - **Cached blend weights.** The blend weight volume is pre-computed once and
-  stored as `results/registration/latest/blend_weights_zyx` in the analysis
+  stored under `clearex/results/registration/latest/blend_weights` in the analysis
   store.  Fusion workers lazily load it instead of recomputing per tile per
   chunk.
 
@@ -466,4 +492,3 @@ drop-in GPU replacement via `cupyx.scipy.ndimage.affine_transform` is marked
 as a TODO for future integration.  This would benefit both pairwise
 registration and fusion.  The deconvolution subsystem already supports
 GPU-pinned `LocalCluster` workers; registration would reuse the same backend.
-

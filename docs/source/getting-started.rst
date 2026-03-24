@@ -62,6 +62,14 @@ Run in headless mode against an experiment file:
 
    uv run python -m clearex.main --headless --no-gui --file /path/to/experiment.yml --dask
 
+This materializes ``data_store.ome.zarr`` beside ``experiment.yml`` when a
+canonical store does not already exist.
+
+For Navigate BDV ``.n5`` acquisitions, point ClearEx at ``experiment.yml``
+rather than the raw ``.n5`` directory. ClearEx uses the companion BDV XML plus
+TensorStore-backed reads of ``setup*/timepoint*/s0`` to materialize the
+canonical OME-Zarr store.
+
 Run in headless mode with an explicit Navigate stage-to-world mapping:
 
 .. code-block:: bash
@@ -73,6 +81,13 @@ Run in headless mode with an explicit Navigate stage-to-world mapping:
 
 In the GUI setup flow, the same mapping can be authored through the
 ``Spatial Calibration`` panel before entering analysis selection.
+
+If you have a legacy ClearEx ``.zarr`` / ``.n5`` store that predates the OME
+transition, migrate it before using it as a canonical input:
+
+.. code-block:: bash
+
+   uv run clearex --migrate-store /path/to/legacy_store.zarr
 
 Documentation Build
 -------------------

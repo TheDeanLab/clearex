@@ -44,6 +44,14 @@ import zarr
 
 # Local Imports
 from clearex.deconvolution.petakit import run_petakit_deconvolution
+from clearex.io.ome_store import (
+    SOURCE_CACHE_COMPONENT,
+    analysis_auxiliary_root,
+    analysis_cache_data_component,
+    analysis_cache_root,
+    load_store_metadata,
+    public_analysis_root,
+)
 from clearex.io.provenance import register_latest_output_reference
 
 if TYPE_CHECKING:
@@ -462,13 +470,18 @@ def _extract_store_voxel_sizes_um(
         ``(xy_um, z_um)`` values when available.
     """
     root_attrs = dict(root.attrs)
-    data_attrs = dict(root["data"].attrs) if "data" in root else {}
+    store_metadata = load_store_metadata(root)
+    data_attrs = (
+        dict(root[SOURCE_CACHE_COMPONENT].attrs)
+        if SOURCE_CACHE_COMPONENT in root
+        else {}
+    )
 
-    for attrs in (data_attrs, root_attrs):
+    for attrs in (data_attrs, store_metadata, root_attrs):
         voxel = attrs.get("voxel_size_um_zyx")
         if isinstance(voxel, (list, tuple)) and len(voxel) >= 3:
             return float(voxel[2]), float(voxel[0])
-    for attrs in (root_attrs, data_attrs):
+    for attrs in (store_metadata, root_attrs, data_attrs):
         navigate = attrs.get("navigate_experiment")
         if not isinstance(navigate, dict):
             continue
@@ -1375,11 +1388,14 @@ def _prepare_output_array(
         int(shape[5]),
     )
 
-    results_group = root.require_group("results")
-    decon_group = results_group.require_group("deconvolution")
-    if "latest" in decon_group:
-        del decon_group["latest"]
-    latest = decon_group.create_group("latest")
+    cache_component = analysis_cache_data_component("deconvolution")
+    cache_root = analysis_cache_root("deconvolution")
+    auxiliary_root = analysis_auxiliary_root("deconvolution")
+    if cache_root in root:
+        del root[cache_root]
+    if auxiliary_root in root:
+        del root[auxiliary_root]
+    latest = root.require_group(cache_root)
     latest.create_dataset(
         name="data",
         shape=shape,
@@ -1395,8 +1411,17 @@ def _prepare_output_array(
             "run_id": None,
         }
     )
-    component = "results/deconvolution/latest"
-    data_component = "results/deconvolution/latest/data"
+    root.require_group(auxiliary_root).attrs.update(
+        {
+            "storage_policy": "latest_only",
+            "source_component": str(source_component),
+            "parameters": {str(key): value for key, value in dict(parameters).items()},
+            "run_id": None,
+            "data_component": cache_component,
+        }
+    )
+    component = public_analysis_root("deconvolution")
+    data_component = cache_component
     return (
         component,
         data_component,
@@ -1502,7 +1527,7 @@ def run_deconvolution_analysis(
         _emit(12, "Generating vectorial synthetic PSF assets")
         synthetic_psf_components = _persist_synthetic_psf_assets(
             zarr_path=zarr_path,
-            latest_component=component,
+            latest_component=analysis_auxiliary_root("deconvolution"),
             params=normalized,
             selected_channels=selected_channels,
             voxel_xy_um=float(voxel_xy_um),

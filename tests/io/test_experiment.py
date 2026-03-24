@@ -25,6 +25,7 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 # Standard Library Imports
+from contextlib import ExitStack
 from pathlib import Path
 import json
 
@@ -46,12 +47,18 @@ from clearex.io.experiment import (
     initialize_analysis_store,
     is_navigate_experiment_file,
     load_navigate_experiment,
+    load_navigate_experiment_source_image_info,
     load_store_spatial_calibration,
     materialize_experiment_data_store,
     resolve_data_store_path,
     resolve_experiment_data_path,
     save_store_spatial_calibration,
     write_zyx_block,
+)
+from clearex.io.ome_store import (
+    SOURCE_CACHE_COMPONENT,
+    SOURCE_CACHE_PYRAMID_ROOT,
+    source_cache_component,
 )
 from clearex.io.read import ImageInfo
 from clearex.workflow import SpatialCalibrationConfig
@@ -148,6 +155,74 @@ def _write_bdv_xml(
 </SpimData>
 """
     path.write_text(xml)
+
+
+def _tensorstore_module():
+    """Import TensorStore for real N5 fixture creation."""
+    return pytest.importorskip("tensorstore")
+
+
+def _write_real_n5_dataset(
+    root_path: Path,
+    *,
+    component: str,
+    data_xyz: np.ndarray,
+    block_size_xyz: tuple[int, int, int],
+) -> None:
+    """Create one real N5 dataset using TensorStore."""
+    ts = _tensorstore_module()
+    spec = {
+        "driver": "n5",
+        "kvstore": {"driver": "file", "path": str(root_path)},
+        "path": component,
+        "metadata": {
+            "blockSize": [int(v) for v in block_size_xyz],
+            "compression": {
+                "type": "blosc",
+                "cname": "lz4",
+                "clevel": 5,
+                "shuffle": 1,
+                "blocksize": 0,
+            },
+            "dataType": np.dtype(data_xyz.dtype).name,
+            "dimensions": [int(v) for v in data_xyz.shape],
+        },
+        "create": True,
+        "delete_existing": True,
+    }
+    dataset = ts.open(spec).result()
+    dataset[...] = data_xyz
+
+
+def _strip_n5_component_payload_files(root_path: Path, *, component: str) -> None:
+    """Remove chunk payload files while preserving ``attributes.json``."""
+    component_path = root_path / component
+    if not component_path.exists():
+        return
+    for path in component_path.rglob("*"):
+        if path.is_file() and path.name != "attributes.json":
+            path.unlink()
+    for path in sorted(
+        (entry for entry in component_path.rglob("*") if entry.is_dir()),
+        key=lambda entry: len(entry.parts),
+        reverse=True,
+    ):
+        try:
+            path.rmdir()
+        except OSError:
+            continue
+
+
+def _write_legacy_n5_group(
+    root_path: Path,
+    *,
+    component: str,
+    schema: str = "clearex.analysis_store.v1",
+) -> None:
+    """Write a stale legacy ClearEx group marker into an N5 tree."""
+    group_path = root_path / component
+    group_path.mkdir(parents=True, exist_ok=True)
+    (group_path / "attributes.json").write_text(json.dumps({"schema": schema}))
 
 
 def test_normalize_gpu_device_ids_deduplicates_and_strips() -> None:
@@ -558,6 +633,33 @@ def test_load_uses_multi_positions_sidecar_when_multiposition_enabled(tmp_path: 
     assert experiment.multiposition_count == 24
 
 
+def test_load_uses_experiment_dir_multi_positions_sidecar_when_save_directory_is_windows_path(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    payload = {
+        "Saving": {
+            "save_directory": r"E:\acquisition\remote_only",
+            "file_type": "N5",
+        },
+        "MicroscopeState": {
+            "timepoints": 1,
+            "number_z_steps": 2,
+            "is_multiposition": True,
+            "multiposition_count": 1,
+            "channels": {"channel_1": {"is_selected": True, "laser": "488nm"}},
+        },
+        "CameraParameters": {"img_x_pixels": 8, "img_y_pixels": 8},
+        "MultiPositions": [[0.0, 0.0, 0.0]],
+    }
+    experiment_path.write_text(json.dumps(payload, indent=2))
+    _write_multipositions_sidecar(tmp_path / "multi_positions.yml", count=2)
+
+    experiment = load_navigate_experiment(experiment_path)
+
+    assert experiment.multiposition_count == 2
+
+
 def test_load_infers_xy_pixel_size_from_zoom_and_binning(tmp_path: Path):
     experiment_path = tmp_path / "experiment.yml"
     payload = {
@@ -874,7 +976,7 @@ def test_has_complete_canonical_data_store_rejects_missing_expected_pyramid(
     )
 
 
-def test_has_complete_canonical_data_store_requires_completed_progress_record(
+def test_has_complete_canonical_data_store_accepts_stale_progress_when_public_ome_is_valid(
     tmp_path: Path,
 ):
     experiment_path = tmp_path / "experiment.yml"
@@ -906,7 +1008,52 @@ def test_has_complete_canonical_data_store_requires_completed_progress_record(
     root = zarr.open_group(str(materialized.store_path), mode="a")
     progress = dict(root.attrs["ingestion_progress"])
     progress["status"] = "in_progress"
+    progress["base_progress"] = {
+        "total_regions": int(progress.get("base_progress", {}).get("total_regions", 1)),
+        "completed_regions": 0,
+    }
     root.attrs["ingestion_progress"] = progress
+
+    assert (
+        has_complete_canonical_data_store(
+            materialized.store_path,
+            expected_chunks_tpczyx=(1, 1, 1, 1, 2, 2),
+            expected_pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+        )
+        is True
+    )
+
+
+def test_has_complete_canonical_data_store_rejects_stale_progress_when_public_ome_is_invalid(
+    tmp_path: Path,
+):
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="TIFF"
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_path = tmp_path / "source.npy"
+    np.save(source_path, source_data)
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 1, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="a")
+    progress = dict(root.attrs["ingestion_progress"])
+    progress["status"] = "in_progress"
+    progress["base_progress"] = {
+        "total_regions": int(progress.get("base_progress", {}).get("total_regions", 1)),
+        "completed_regions": 0,
+    }
+    root.attrs["ingestion_progress"] = progress
+    # Break OME-root validation to ensure stale/incomplete progress is rejected.
+    root.attrs["ome"] = {"version": "0.5"}
 
     assert (
         has_complete_canonical_data_store(
@@ -947,10 +1094,12 @@ def test_materialize_experiment_data_store_reuses_complete_store_by_default_and_
 
     root = zarr.open_group(str(initial.store_path), mode="r")
     assert reused.store_path == initial.store_path
-    assert tuple(root["data"].chunks) == (1, 1, 1, 1, 2, 2)
-    assert root.attrs["data_pyramid_levels"] == ["data"]
-    if "data_pyramid" in root:
-        assert list(root["data_pyramid"].array_keys()) == []
+    assert tuple(root[SOURCE_CACHE_COMPONENT].chunks) == (1, 1, 1, 1, 2, 2)
+    assert root[SOURCE_CACHE_COMPONENT].attrs["pyramid_levels"] == [
+        SOURCE_CACHE_COMPONENT
+    ]
+    if SOURCE_CACHE_PYRAMID_ROOT in root:
+        assert list(root[SOURCE_CACHE_PYRAMID_ROOT].array_keys()) == []
 
     rebuilt = materialize_experiment_data_store(
         experiment=experiment,
@@ -961,8 +1110,11 @@ def test_materialize_experiment_data_store_reuses_complete_store_by_default_and_
     )
 
     rebuilt_root = zarr.open_group(str(rebuilt.store_path), mode="r")
-    assert tuple(rebuilt_root["data"].chunks) == (1, 1, 1, 2, 3, 4)
-    assert rebuilt_root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
+    assert tuple(rebuilt_root[SOURCE_CACHE_COMPONENT].chunks) == (1, 1, 1, 2, 3, 4)
+    assert rebuilt_root[SOURCE_CACHE_COMPONENT].attrs["pyramid_levels"] == [
+        SOURCE_CACHE_COMPONENT,
+        source_cache_component(level_index=1),
+    ]
 
 
 def test_materialize_experiment_data_store_handles_same_component_rewrite(
@@ -1137,43 +1289,29 @@ def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
     experiment = load_navigate_experiment(experiment_path)
 
     source_path = tmp_path / "CH00_000000.n5"
-    source_root = zarr.open_group(str(source_path), mode="w")
     expected_blocks = {
         (0, 0): np.full((2, 3, 4), fill_value=11, dtype=np.uint16),
         (1, 0): np.full((2, 3, 4), fill_value=21, dtype=np.uint16),
         (0, 1): np.full((2, 3, 4), fill_value=31, dtype=np.uint16),
         (1, 1): np.full((2, 3, 4), fill_value=41, dtype=np.uint16),
     }
-    source_root.create_dataset(
-        "setup0/timepoint0/s0",
-        data=expected_blocks[(0, 0)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup1/timepoint0/s0",
-        data=expected_blocks[(1, 0)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup2/timepoint0/s0",
-        data=expected_blocks[(0, 1)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup3/timepoint0/s0",
-        data=expected_blocks[(1, 1)],
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
-    source_root.create_dataset(
-        "setup99/timepoint0/s0",
-        data=np.zeros((2, 3, 4), dtype=np.uint16),
-        chunks=(1, 3, 4),
-        overwrite=True,
-    )
+    for setup_index, block in {
+        0: expected_blocks[(0, 0)],
+        1: expected_blocks[(1, 0)],
+        2: expected_blocks[(0, 1)],
+        3: expected_blocks[(1, 1)],
+        99: np.zeros((2, 3, 4), dtype=np.uint16),
+    }.items():
+        _write_real_n5_dataset(
+            source_path,
+            component=f"setup{setup_index}/timepoint0/s0",
+            data_xyz=np.transpose(block, (2, 1, 0)),
+            block_size_xyz=(4, 3, 1),
+        )
+    _write_legacy_n5_group(source_path, component="data")
+    _write_legacy_n5_group(source_path, component="data_pyramid")
+    _write_legacy_n5_group(source_path, component="results")
+    _write_legacy_n5_group(source_path, component="provenance")
 
     _write_bdv_xml(
         tmp_path / "CH00_000000.xml",
@@ -1195,15 +1333,142 @@ def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
     )
 
     root = zarr.open_group(str(materialized.store_path), mode="r")
-    assert tuple(root["data"].shape) == (1, 2, 2, 2, 3, 4)
-    assert root.attrs["source_data_path"] == str(source_path.resolve())
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 2, 2, 2, 3, 4)
+    assert root["clearex/metadata"].attrs["source_data_path"] == str(
+        source_path.resolve()
+    )
+    assert materialized.source_image_info.shape == (1, 2, 2, 4, 3, 2)
+    assert materialized.source_image_info.axes == "TPCXYZ"
+    assert root["A/1/0/0"].shape == (1, 2, 2, 3, 4)
 
     for position_index in range(2):
         for channel_index in range(2):
-            loaded = np.array(root["data"][0, position_index, channel_index, :, :, :])
+            loaded = np.array(
+                root[SOURCE_CACHE_COMPONENT][0, position_index, channel_index, :, :, :]
+            )
             assert np.array_equal(
                 loaded, expected_blocks[(position_index, channel_index)]
             )
+
+
+def test_materialize_experiment_data_store_skips_n5_setups_without_persisted_chunks(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="N5",
+        is_multiposition=True,
+    )
+    _write_multipositions_sidecar(tmp_path / "multi_positions.yml", count=2)
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.n5"
+    expected_blocks = {
+        (0, 0): np.full((2, 3, 4), fill_value=13, dtype=np.uint16),
+        (1, 0): np.full((2, 3, 4), fill_value=23, dtype=np.uint16),
+    }
+    for setup_index, block in {
+        0: expected_blocks[(0, 0)],
+        1: expected_blocks[(1, 0)],
+        2: np.zeros((2, 3, 4), dtype=np.uint16),
+    }.items():
+        _write_real_n5_dataset(
+            source_path,
+            component=f"setup{setup_index}/timepoint0/s0",
+            data_xyz=np.transpose(block, (2, 1, 0)),
+            block_size_xyz=(4, 3, 1),
+        )
+    _strip_n5_component_payload_files(source_path, component="setup2/timepoint0/s0")
+
+    # Do not provide XML here: fallback setup indexing should still ignore
+    # placeholder setups without persisted chunks.
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 2, 1, 2, 3, 4)
+
+    for position_index in range(2):
+        loaded = np.array(root[SOURCE_CACHE_COMPONENT][0, position_index, 0, :, :, :])
+        assert np.array_equal(loaded, expected_blocks[(position_index, 0)])
+
+
+def test_load_navigate_experiment_source_image_info_summarizes_bdv_n5(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="N5",
+        is_multiposition=True,
+    )
+    _write_multipositions_sidecar(tmp_path / "multi_positions.yml", count=2)
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.n5"
+    for setup_index, fill_value in enumerate((11, 21, 31, 41)):
+        canonical_block = np.full((2, 3, 4), fill_value=fill_value, dtype=np.uint16)
+        _write_real_n5_dataset(
+            source_path,
+            component=f"setup{setup_index}/timepoint0/s0",
+            data_xyz=np.transpose(canonical_block, (2, 1, 0)),
+            block_size_xyz=(4, 3, 1),
+        )
+
+    _write_bdv_xml(
+        tmp_path / "CH00_000000.xml",
+        loader_format="bdv.n5",
+        data_file_name=source_path.name,
+        setup_channel_tile={
+            0: (0, 0),
+            1: (0, 1),
+            2: (1, 0),
+            3: (1, 1),
+        },
+    )
+
+    class _FailingOpener:
+        def open(self, *args, **kwargs):
+            raise AssertionError("ImageOpener.open should not be used for BDV N5.")
+
+    info = load_navigate_experiment_source_image_info(
+        experiment=experiment,
+        source_path=source_path,
+        opener=_FailingOpener(),
+    )
+
+    assert info.path == source_path.resolve()
+    assert info.shape == (1, 2, 2, 2, 3, 4)
+    assert info.dtype == np.dtype(np.uint16)
+    assert info.axes == "TPCZYX"
+    assert info.metadata is not None
+    assert info.metadata["source_layout"] == "navigate_bdv_n5"
+    assert info.metadata["source_component"] == "setup0/timepoint0/s0"
+    assert info.metadata["positions"] == 2
+    assert info.metadata["channels"] == 2
+
+
+def test_open_source_as_dask_rejects_standalone_n5_source(tmp_path: Path) -> None:
+    source_path = tmp_path / "standalone.n5"
+    _write_real_n5_dataset(
+        source_path,
+        component="setup0/timepoint0/s0",
+        data_xyz=np.zeros((4, 3, 2), dtype=np.uint16),
+        block_size_xyz=(4, 3, 1),
+    )
+
+    with ExitStack() as exit_stack, pytest.raises(ValueError, match="Standalone N5"):
+        experiment_module._open_source_as_dask(
+            source_path,
+            exit_stack=exit_stack,
+        )
 
 
 def test_materialize_experiment_data_store_stacks_bdv_ome_zarr_setups(
@@ -1467,3 +1732,72 @@ def test_estimate_source_plane_batch_depth_respects_worker_memory_limit():
 
     assert depth < 256
     assert depth <= 64
+
+
+def test_source_aligned_writes_require_serial_submission_when_chunk_misaligned() -> (
+    None
+):
+    assert (
+        experiment_module._source_aligned_writes_require_serial_submission(
+            z_batch_depth=128,
+            target_chunks_tpczyx=(1, 1, 1, 256, 256, 256),
+        )
+        is True
+    )
+    assert (
+        experiment_module._source_aligned_writes_require_serial_submission(
+            z_batch_depth=256,
+            target_chunks_tpczyx=(1, 1, 1, 256, 256, 256),
+        )
+        is False
+    )
+
+
+def test_write_source_aligned_batches_serializes_when_chunk_misaligned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "source_aligned_serialized.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        SOURCE_CACHE_COMPONENT,
+        shape=(1, 1, 1, 6, 4, 4),
+        chunks=(1, 1, 1, 4, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    source_data = np.arange(1 * 1 * 1 * 6 * 4 * 4, dtype=np.uint16).reshape(
+        (1, 1, 1, 6, 4, 4)
+    )
+    source = da.from_array(source_data, chunks=(1, 1, 1, 1, 4, 4))
+    compute_batch_sizes: list[int] = []
+    original_compute = experiment_module._compute_dask_graph
+
+    monkeypatch.setattr(
+        experiment_module,
+        "_estimate_source_aligned_submission_batch_count",
+        lambda **kwargs: 8,
+    )
+
+    def _capture_compute(graph, *, client=None):
+        compute_batch_sizes.append(len(list(graph)))
+        return original_compute(graph, client=client)
+
+    monkeypatch.setattr(experiment_module, "_compute_dask_graph", _capture_compute)
+
+    experiment_module._write_dask_array_source_aligned_plane_batches(
+        array=source,
+        store_path=store_path,
+        component=SOURCE_CACHE_COMPONENT,
+        shape_tpczyx=(1, 1, 1, 6, 4, 4),
+        z_batch_depth=2,
+        dtype_itemsize=int(np.dtype(source_data.dtype).itemsize),
+        target_chunks_tpczyx=(1, 1, 1, 4, 2, 2),
+    )
+
+    reloaded = np.asarray(
+        zarr.open_group(str(store_path), mode="r")[SOURCE_CACHE_COMPONENT]
+    )
+    assert np.array_equal(reloaded, source_data)
+    assert compute_batch_sizes == [1, 1, 1]

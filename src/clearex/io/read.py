@@ -29,7 +29,7 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple, Type, Union
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, Type, Union
 import logging
 
 # Third Party Imports
@@ -430,6 +430,96 @@ class ZarrReader(Reader):
 
     SUFFIXES = (".zarr", ".zarr/", ".n5", ".n5/")
 
+    @staticmethod
+    def _axes_from_ome_payload(payload: Any) -> Optional[list[str]]:
+        """Extract axis labels from an OME multiscales payload."""
+        if not isinstance(payload, Mapping):
+            return None
+        multiscales = payload.get("multiscales")
+        if not isinstance(multiscales, list) or not multiscales:
+            return None
+        first = multiscales[0]
+        if not isinstance(first, Mapping):
+            return None
+        axes_payload = first.get("axes")
+        if not isinstance(axes_payload, list):
+            return None
+        axes: list[str] = []
+        for axis in axes_payload:
+            if isinstance(axis, Mapping):
+                name = str(axis.get("name", "")).strip()
+                if name:
+                    axes.append(name)
+            elif axis is not None:
+                text = str(axis).strip()
+                if text:
+                    axes.append(text)
+        return axes or None
+
+    def _resolve_ome_array(
+        self,
+        group: zarr.Group,
+    ) -> Optional[tuple[str, Any, Optional[list[str]]]]:
+        """Resolve the primary public OME array from an OME-Zarr root/group."""
+        ome_payload = getattr(group, "attrs", {}).get("ome")
+        if not isinstance(ome_payload, Mapping):
+            return None
+
+        axes = self._axes_from_ome_payload(ome_payload)
+        if "multiscales" in ome_payload and "0" in group:
+            return ("0", group["0"], axes)
+
+        plate_payload = ome_payload.get("plate")
+        if isinstance(plate_payload, Mapping):
+            wells = plate_payload.get("wells")
+            if isinstance(wells, list) and wells:
+                first_well = wells[0]
+                if isinstance(first_well, Mapping):
+                    well_path = str(first_well.get("path", "")).strip()
+                    if well_path and well_path in group:
+                        well_group = group[well_path]
+                        well_ome = getattr(well_group, "attrs", {}).get("ome")
+                        if isinstance(well_ome, Mapping):
+                            well_payload = well_ome.get("well")
+                            if isinstance(well_payload, Mapping):
+                                images = well_payload.get("images")
+                                if isinstance(images, list) and images:
+                                    first_image = images[0]
+                                    if isinstance(first_image, Mapping):
+                                        image_path = str(
+                                            first_image.get("path", "")
+                                        ).strip()
+                                        if image_path and image_path in well_group:
+                                            image_group = well_group[image_path]
+                                            image_ome = getattr(
+                                                image_group, "attrs", {}
+                                            ).get("ome")
+                                            image_axes = self._axes_from_ome_payload(
+                                                image_ome
+                                            )
+                                            if "0" in image_group:
+                                                return (
+                                                    f"{well_path}/{image_path}/0",
+                                                    image_group["0"],
+                                                    image_axes,
+                                                )
+
+        well_payload = ome_payload.get("well")
+        if isinstance(well_payload, Mapping):
+            images = well_payload.get("images")
+            if isinstance(images, list) and images:
+                first_image = images[0]
+                if isinstance(first_image, Mapping):
+                    image_path = str(first_image.get("path", "")).strip()
+                    if image_path and image_path in group:
+                        image_group = group[image_path]
+                        image_ome = getattr(image_group, "attrs", {}).get("ome")
+                        image_axes = self._axes_from_ome_payload(image_ome)
+                        if "0" in image_group:
+                            return (f"{image_path}/0", image_group["0"], image_axes)
+
+        return None
+
     def open(
         self,
         path: Path,
@@ -520,6 +610,38 @@ class ZarrReader(Reader):
         dict_keys(['multiscales', 'omero', '_ARRAY_DIMENSIONS'])
         """
         grp = zarr.open_group(str(path), mode="r")
+
+        ome_selection = self._resolve_ome_array(grp)
+        if ome_selection is not None:
+            array_path, array, axes = ome_selection
+            meta = dict(getattr(grp, "attrs", {}))
+            meta.update(dict(getattr(array, "attrs", {})))
+            meta["selected_array_path"] = array_path
+            meta["ome_selected"] = True
+            if prefer_dask:
+                darr = (
+                    da.from_zarr(array, chunks=chunks) if chunks else da.from_zarr(array)
+                )
+                logger.info(f"Loaded public OME-Zarr array from {path.name}.")
+                info = ImageInfo(
+                    path=path,
+                    shape=tuple(darr.shape),
+                    dtype=darr.dtype,
+                    axes=axes,
+                    metadata=meta,
+                )
+                return darr, info
+
+            np_arr = np.asarray(array)
+            logger.info(f"Loaded public OME-Zarr array from {path.name}.")
+            info = ImageInfo(
+                path=path,
+                shape=tuple(np_arr.shape),
+                dtype=np_arr.dtype,
+                axes=axes,
+                metadata=meta,
+            )
+            return np_arr, info
 
         # Collect arrays recursively to support nested Zarr/N5 layouts.
         arrays: list[tuple[str, Any]] = []

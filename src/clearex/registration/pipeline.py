@@ -31,6 +31,14 @@ except ImportError:  # pragma: no cover - optional fast-path dependency
     _phase_cross_correlation = None  # type: ignore[assignment]
 
 from clearex.io.experiment import load_navigate_experiment
+from clearex.io.ome_store import (
+    analysis_auxiliary_root,
+    analysis_cache_data_component,
+    analysis_cache_root,
+    load_store_metadata,
+    public_analysis_root,
+    resolve_voxel_size_um_zyx_with_source,
+)
 from clearex.io.provenance import register_latest_output_reference
 from clearex.workflow import SpatialCalibrationConfig, spatial_calibration_from_dict
 
@@ -175,6 +183,20 @@ def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
 
     parsed: list[dict[str, float]] = []
     for row in rows:
+        if isinstance(row, Mapping):
+            parsed.append(
+                {
+                    "x": _safe_float(row.get("x", row.get("X")), default=0.0),
+                    "y": _safe_float(row.get("y", row.get("Y")), default=0.0),
+                    "z": _safe_float(row.get("z", row.get("Z")), default=0.0),
+                    "theta": _safe_float(
+                        row.get("theta", row.get("THETA")), default=0.0
+                    ),
+                    "f": _safe_float(row.get("f", row.get("F")), default=0.0),
+                }
+            )
+            continue
+
         if not isinstance(row, (list, tuple)):
             continue
 
@@ -198,6 +220,16 @@ def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
 
 def _load_stage_rows(root_attrs: Mapping[str, Any]) -> list[dict[str, float]]:
     """Load multiposition stage rows from experiment metadata."""
+    parsed = _parse_multiposition_stage_rows(root_attrs.get("stage_rows"))
+    if parsed:
+        return parsed
+
+    navigate_payload = root_attrs.get("navigate_experiment")
+    if isinstance(navigate_payload, Mapping):
+        parsed = _parse_multiposition_stage_rows(navigate_payload.get("MultiPositions"))
+        if parsed:
+            return parsed
+
     source_experiment = root_attrs.get("source_experiment")
     if not isinstance(source_experiment, str):
         return []
@@ -330,37 +362,11 @@ def _extract_voxel_size_um_zyx(
     root: zarr.hierarchy.Group, source_component: str
 ) -> tuple[float, float, float]:
     """Extract voxel size in ``(z, y, x)`` order."""
-    try:
-        source = root[source_component]
-    except Exception:
-        source = None
-
-    if source is not None:
-        try:
-            payload = source.attrs.get("voxel_size_um_zyx")
-            if isinstance(payload, (list, tuple)) and len(payload) >= 3:
-                parsed = tuple(float(value) for value in payload[:3])
-                if all(value > 0 for value in parsed):
-                    return parsed  # type: ignore[return-value]
-        except Exception:
-            pass
-
-    try:
-        payload = root.attrs.get("voxel_size_um_zyx")
-        if isinstance(payload, (list, tuple)) and len(payload) >= 3:
-            parsed = tuple(float(value) for value in payload[:3])
-            if all(value > 0 for value in parsed):
-                return parsed  # type: ignore[return-value]
-    except Exception:
-        pass
-
-    navigate = root.attrs.get("navigate_experiment")
-    if isinstance(navigate, Mapping):
-        xy_um = _safe_float(navigate.get("xy_pixel_size_um"), default=1.0)
-        z_um = _safe_float(navigate.get("z_step_um"), default=1.0)
-        if xy_um > 0 and z_um > 0:
-            return (float(z_um), float(xy_um), float(xy_um))
-    return (1.0, 1.0, 1.0)
+    voxel_size_um_zyx, _ = resolve_voxel_size_um_zyx_with_source(
+        root,
+        source_component=source_component,
+    )
+    return voxel_size_um_zyx
 
 
 def _component_level_suffix(component: str) -> Optional[int]:
@@ -423,24 +429,40 @@ def _resolve_source_components_for_level(
 
 
 def _pyramid_factor_zyx_for_level(
-    root: zarr.hierarchy.Group, *, level: int
+    root: zarr.hierarchy.Group,
+    *,
+    level: int,
+    source_component: Optional[str] = None,
 ) -> tuple[float, float, float]:
     """Return per-axis pyramid factors in ``(z, y, x)`` order."""
     if level <= 0:
         return (1.0, 1.0, 1.0)
 
-    factors = root.attrs.get("data_pyramid_factors_tpczyx")
-    if isinstance(factors, (tuple, list)) and len(factors) > level:
-        entry = factors[level]
-        if isinstance(entry, (tuple, list)) and len(entry) >= 6:
-            try:
-                return (
-                    max(1.0, float(entry[3])),
-                    max(1.0, float(entry[4])),
-                    max(1.0, float(entry[5])),
-                )
-            except Exception:
-                pass
+    candidate_factors: list[Any] = []
+    if source_component:
+        try:
+            source_attrs = dict(root[str(source_component)].attrs)
+        except Exception:
+            source_attrs = {}
+        candidate_factors.extend(
+            [
+                source_attrs.get("pyramid_factors_tpczyx"),
+                source_attrs.get("resolution_pyramid_factors_tpczyx"),
+            ]
+        )
+    candidate_factors.append(root.attrs.get("data_pyramid_factors_tpczyx"))
+    for factors in candidate_factors:
+        if isinstance(factors, (tuple, list)) and len(factors) > level:
+            entry = factors[level]
+            if isinstance(entry, (tuple, list)) and len(entry) >= 6:
+                try:
+                    return (
+                        max(1.0, float(entry[3])),
+                        max(1.0, float(entry[4])),
+                        max(1.0, float(entry[5])),
+                    )
+                except Exception:
+                    pass
     uniform = float(2 ** int(level))
     return (uniform, uniform, uniform)
 
@@ -697,8 +719,11 @@ def _source_subvolume_for_overlap(
         voxel_size_um_zyx=voxel_size_um_zyx,
     )
     # Build the eight corners of the output crop in output-index space.
-    rz, ry, rx = (int(reference_shape_zyx[0]), int(reference_shape_zyx[1]),
-                  int(reference_shape_zyx[2]))
+    rz, ry, rx = (
+        int(reference_shape_zyx[0]),
+        int(reference_shape_zyx[1]),
+        int(reference_shape_zyx[2]),
+    )
     output_corners = np.asarray(
         [
             [0.0, 0.0, 0.0],
@@ -717,12 +742,21 @@ def _source_subvolume_for_overlap(
     src_min = np.floor(np.min(source_indices, axis=0)).astype(int) - int(padding)
     src_max = np.ceil(np.max(source_indices, axis=0)).astype(int) + int(padding)
 
-    sz, sy, sx = (int(source_shape_zyx[0]), int(source_shape_zyx[1]),
-                  int(source_shape_zyx[2]))
-    z0, y0, x0 = (max(0, int(src_min[0])), max(0, int(src_min[1])),
-                  max(0, int(src_min[2])))
-    z1, y1, x1 = (min(sz, int(src_max[0])), min(sy, int(src_max[1])),
-                  min(sx, int(src_max[2])))
+    sz, sy, sx = (
+        int(source_shape_zyx[0]),
+        int(source_shape_zyx[1]),
+        int(source_shape_zyx[2]),
+    )
+    z0, y0, x0 = (
+        max(0, int(src_min[0])),
+        max(0, int(src_min[1])),
+        max(0, int(src_min[2])),
+    )
+    z1, y1, x1 = (
+        min(sz, int(src_max[0])),
+        min(sy, int(src_max[1])),
+        min(sx, int(src_max[2])),
+    )
 
     if z1 <= z0 or y1 <= y0 or x1 <= x0:
         return (
@@ -733,12 +767,16 @@ def _source_subvolume_for_overlap(
     slices_zyx = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
     # Shift the transform origin to account for the sub-volume offset.
     voxel_xyz = np.asarray(
-        [float(voxel_size_um_zyx[2]), float(voxel_size_um_zyx[1]),
-         float(voxel_size_um_zyx[0])],
+        [
+            float(voxel_size_um_zyx[2]),
+            float(voxel_size_um_zyx[1]),
+            float(voxel_size_um_zyx[0]),
+        ],
         dtype=np.float64,
     )
-    offset_xyz = np.asarray([float(x0), float(y0), float(z0)],
-                            dtype=np.float64) * voxel_xyz
+    offset_xyz = (
+        np.asarray([float(x0), float(y0), float(z0)], dtype=np.float64) * voxel_xyz
+    )
     adjusted = local_to_world_xyz.copy()
     adjusted[:3, 3] = adjusted[:3, 3] + (adjusted[:3, :3] @ offset_xyz)
     return slices_zyx, adjusted
@@ -1015,15 +1053,23 @@ def _register_pairwise_overlap(
 
     fixed_source = np.asarray(
         source[
-            int(t_index), int(edge.fixed_position), int(registration_channel),
-            fixed_slices[0], fixed_slices[1], fixed_slices[2],
+            int(t_index),
+            int(edge.fixed_position),
+            int(registration_channel),
+            fixed_slices[0],
+            fixed_slices[1],
+            fixed_slices[2],
         ],
         dtype=np.float32,
     )
     moving_source = np.asarray(
         source[
-            int(t_index), int(edge.moving_position), int(registration_channel),
-            moving_slices[0], moving_slices[1], moving_slices[2],
+            int(t_index),
+            int(edge.moving_position),
+            int(registration_channel),
+            moving_slices[0],
+            moving_slices[1],
+            moving_slices[2],
         ],
         dtype=np.float32,
     )
@@ -1122,7 +1168,11 @@ def _register_pairwise_overlap(
             shift_zyx = np.asarray(shift_zyx, dtype=np.float64)
             # Pre-align the moving crop using the detected shift.
             reg_moving = ndimage.shift(
-                reg_moving, shift_zyx, order=1, mode="constant", cval=0.0,
+                reg_moving,
+                shift_zyx,
+                order=1,
+                mode="constant",
+                cval=0.0,
             ).astype(np.float32, copy=False)
             reg_moving_mask = np.asarray(reg_moving > 0, dtype=np.float32)
             # Build the FFT correction in physical XYZ coordinates.
@@ -1138,9 +1188,7 @@ def _register_pairwise_overlap(
             fft_correction_xyz = np.eye(4, dtype=np.float64)
 
     try:
-        fixed_image = _ants_image_from_zyx(
-            reg_fixed, voxel_size_um_zyx=reg_voxel_size
-        )
+        fixed_image = _ants_image_from_zyx(reg_fixed, voxel_size_um_zyx=reg_voxel_size)
         moving_image = _ants_image_from_zyx(
             reg_moving, voxel_size_um_zyx=reg_voxel_size
         )
@@ -1620,9 +1668,7 @@ def _blend_weight_profiles(
         profile = np.ones(int(axis_size), dtype=np.float32)
         width = max(0, min(int(ramp_width), max(0, int(axis_size // 2))))
         if width > 0:
-            ramp = 0.5 - 0.5 * np.cos(
-                np.linspace(0.0, np.pi, width, dtype=np.float32)
-            )
+            ramp = 0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, width, dtype=np.float32))
             profile[:width] = ramp
             profile[-width:] = np.minimum(profile[-width:], ramp[::-1])
         profiles.append(profile)
@@ -1832,8 +1878,12 @@ def _process_and_write_registration_chunk(
         )
         source_volume = np.asarray(
             source[
-                int(t_index), int(position_index), int(c_index),
-                src_slices[0], src_slices[1], src_slices[2],
+                int(t_index),
+                int(position_index),
+                int(c_index),
+                src_slices[0],
+                src_slices[1],
+                src_slices[2],
             ],
             dtype=np.float32,
         )
@@ -1850,7 +1900,10 @@ def _process_and_write_registration_chunk(
         # Reconstruct blend weights for only the needed source sub-volume
         # from the 1D profiles — avoids materializing the full 3D weight volume.
         weight_sub = _blend_weight_subvolume_from_profiles(
-            profile_z, profile_y, profile_x, src_slices,
+            profile_z,
+            profile_y,
+            profile_x,
+            src_slices,
         )
         warped_weight = _resample_source_to_world_grid(
             weight_sub,
@@ -1886,6 +1939,7 @@ def _prepare_output_group(
     output_shape_tpczyx: tuple[int, int, int, int, int, int],
     output_chunks_tpczyx: tuple[int, int, int, int, int, int],
     voxel_size_um_zyx: Sequence[float],
+    voxel_size_resolution_source: str,
     output_origin_xyz: Sequence[float],
     source_tile_shape_zyx: tuple[int, int, int],
     blend_mode: str,
@@ -1900,12 +1954,14 @@ def _prepare_output_group(
         blend_weights_component)``
     """
     root = zarr.open_group(str(zarr_path), mode="a")
-    results_group = root.require_group("results")
-    registration_group = results_group.require_group("registration")
-    if "latest" in registration_group:
-        del registration_group["latest"]
-    latest = registration_group.create_group("latest")
-    latest.create_dataset(
+    cache_root = analysis_cache_root("registration")
+    auxiliary_root = analysis_auxiliary_root("registration")
+    if cache_root in root:
+        del root[cache_root]
+    if auxiliary_root in root:
+        del root[auxiliary_root]
+    latest = root.require_group(cache_root)
+    latest.create_array(
         name="data",
         shape=output_shape_tpczyx,
         chunks=output_chunks_tpczyx,
@@ -1917,11 +1973,13 @@ def _prepare_output_group(
             "axes": ["t", "p", "c", "z", "y", "x"],
             "source_component": str(source_component),
             "voxel_size_um_zyx": [float(value) for value in voxel_size_um_zyx],
+            "voxel_size_resolution_source": str(voxel_size_resolution_source),
             "output_origin_xyz_um": [float(value) for value in output_origin_xyz],
             "storage_policy": "latest_only",
         }
     )
-    latest.attrs.update(
+    auxiliary_group = root.require_group(auxiliary_root)
+    auxiliary_group.attrs.update(
         {
             "storage_policy": "latest_only",
             "source_component": str(source_component),
@@ -1929,10 +1987,12 @@ def _prepare_output_group(
             "output_shape_tpczyx": [int(value) for value in output_shape_tpczyx],
             "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
             "voxel_size_um_zyx": [float(value) for value in voxel_size_um_zyx],
+            "voxel_size_resolution_source": str(voxel_size_resolution_source),
             "output_origin_xyz_um": [float(value) for value in output_origin_xyz],
+            "data_component": analysis_cache_data_component("registration"),
         }
     )
-    latest.create_dataset(
+    auxiliary_group.create_array(
         name="affines_tpx44",
         shape=(output_shape_tpczyx[0], int(root[source_component].shape[1]), 4, 4),
         dtype=np.float64,
@@ -1949,19 +2009,28 @@ def _prepare_output_group(
         blend_mode=str(blend_mode),
         overlap_zyx=overlap_zyx,
     )
-    blend_group = latest.create_group("blend_weights", overwrite=True)
-    blend_group.create_dataset(name="profile_z", data=prof_z, dtype=np.float32,
-                               overwrite=True)
-    blend_group.create_dataset(name="profile_y", data=prof_y, dtype=np.float32,
-                               overwrite=True)
-    blend_group.create_dataset(name="profile_x", data=prof_x, dtype=np.float32,
-                               overwrite=True)
+    blend_group = auxiliary_group.create_group("blend_weights", overwrite=True)
+    blend_group.create_array(
+        name="profile_z",
+        data=np.asarray(prof_z, dtype=np.float32),
+        overwrite=True,
+    )
+    blend_group.create_array(
+        name="profile_y",
+        data=np.asarray(prof_y, dtype=np.float32),
+        overwrite=True,
+    )
+    blend_group.create_array(
+        name="profile_x",
+        data=np.asarray(prof_x, dtype=np.float32),
+        overwrite=True,
+    )
 
     return (
-        "results/registration/latest",
-        "results/registration/latest/data",
-        "results/registration/latest/affines_tpx44",
-        "results/registration/latest/blend_weights",
+        public_analysis_root("registration"),
+        analysis_cache_data_component("registration"),
+        f"{auxiliary_root}/affines_tpx44",
+        f"{auxiliary_root}/blend_weights",
     )
 
 
@@ -2044,10 +2113,18 @@ def run_registration_analysis(
         )
 
     root_attrs = dict(root.attrs)
+    try:
+        store_metadata = load_store_metadata(root)
+    except Exception:
+        store_metadata = {}
+    merged_metadata = dict(root_attrs)
+    if isinstance(store_metadata, Mapping):
+        merged_metadata.update(dict(store_metadata))
+
     spatial_calibration = spatial_calibration_from_dict(
-        root_attrs.get("spatial_calibration")
+        merged_metadata.get("spatial_calibration")
     )
-    stage_rows = _load_stage_rows(root_attrs)
+    stage_rows = _load_stage_rows(merged_metadata)
     if len(positions) > 1 and len(stage_rows) < len(positions):
         raise ValueError(
             "registration requires multiposition stage metadata when more than one position is present."
@@ -2070,8 +2147,17 @@ def run_registration_analysis(
     if anchor_position < 0 or anchor_position >= len(positions):
         raise ValueError("registration anchor_position is out of bounds.")
 
-    full_voxel_size_um_zyx = _extract_voxel_size_um_zyx(root, source_component)
-    level_factor_zyx = _pyramid_factor_zyx_for_level(root, level=effective_level)
+    full_voxel_size_um_zyx, voxel_size_resolution_source = (
+        resolve_voxel_size_um_zyx_with_source(
+            root,
+            source_component=source_component,
+        )
+    )
+    level_factor_zyx = _pyramid_factor_zyx_for_level(
+        root,
+        level=effective_level,
+        source_component=pairwise_source_component,
+    )
     pairwise_voxel_size_um_zyx = (
         float(full_voxel_size_um_zyx[0]) * float(level_factor_zyx[0]),
         float(full_voxel_size_um_zyx[1]) * float(level_factor_zyx[1]),
@@ -2121,8 +2207,7 @@ def run_registration_analysis(
 
     # Resolve configurable pairwise estimation parameters.
     effective_ants_iterations = tuple(
-        int(v)
-        for v in parameters.get("ants_iterations", _ANTS_AFF_ITERATIONS)
+        int(v) for v in parameters.get("ants_iterations", _ANTS_AFF_ITERATIONS)
     )
     effective_ants_sampling_rate = float(
         parameters.get("ants_sampling_rate", _ANTS_RANDOM_SAMPLING_RATE)
@@ -2158,7 +2243,9 @@ def run_registration_analysis(
                 overlap_zyx=[
                     int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])
                 ],
-                registration_type=str(parameters.get("registration_type", "translation"))
+                registration_type=str(
+                    parameters.get("registration_type", "translation")
+                )
                 .strip()
                 .lower(),
                 max_pairwise_voxels=effective_max_pairwise_voxels,
@@ -2175,9 +2262,7 @@ def run_registration_analysis(
             batch_size = max(1, min(total, 4))
             for batch_start in range(0, total, batch_size):
                 batch = delayed_edges[batch_start : batch_start + batch_size]
-                batch_results = list(
-                    dask.compute(*batch, scheduler="processes")
-                )
+                batch_results = list(dask.compute(*batch, scheduler="processes"))
                 pairwise_results.extend(batch_results)
                 completed = len(pairwise_results)
                 _emit(
@@ -2303,9 +2388,7 @@ def run_registration_analysis(
         max(1, min(int(source_chunks[5]), int(output_shape_tpczyx[5]))),
     )
     blend_mode = str(parameters.get("blend_mode", "feather")).strip().lower()
-    overlap_zyx = [
-        int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])
-    ]
+    overlap_zyx = [int(value) for value in parameters.get("overlap_zyx", [8, 32, 32])]
 
     # --- Memory guard ---------------------------------------------------------
     source_tile_shape_zyx = tuple(int(v) for v in source_shape_tpczyx[3:])
@@ -2315,7 +2398,7 @@ def run_registration_analysis(
         source_tile_shape_zyx,
         n_positions=int(source_shape_tpczyx[1]),
     )
-    est_gib = est_bytes / (1024 ** 3)
+    est_gib = est_bytes / (1024**3)
     logger.info(
         "Fusion memory estimate: %.1f GiB per worker (chunk %s, tile %s)",
         est_gib,
@@ -2339,6 +2422,7 @@ def run_registration_analysis(
             output_shape_tpczyx=output_shape_tpczyx,
             output_chunks_tpczyx=output_chunks_tpczyx,
             voxel_size_um_zyx=full_voxel_size_um_zyx,
+            voxel_size_resolution_source=str(voxel_size_resolution_source),
             output_origin_xyz=output_min_xyz,
             source_tile_shape_zyx=source_tile_shape_zyx,  # type: ignore[arg-type]
             blend_mode=blend_mode,
@@ -2346,8 +2430,8 @@ def run_registration_analysis(
         )
     )
     write_root = zarr.open_group(str(zarr_path), mode="a")
-    latest_group = write_root["results/registration/latest"]
-    latest_group.create_dataset(
+    latest_group = write_root[analysis_auxiliary_root("registration")]
+    latest_group.create_array(
         name="edges_pe2",
         data=(
             np.asarray(
@@ -2362,22 +2446,22 @@ def run_registration_analysis(
         ),
         overwrite=True,
     )
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="pairwise_affines_tex44",
         data=correction_affines_tex44,
         overwrite=True,
     )
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="edge_status_te",
         data=edge_status_te,
         overwrite=True,
     )
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="edge_residual_te",
         data=edge_residual_te,
         overwrite=True,
     )
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="transformed_bboxes_tpx6",
         data=transformed_bboxes_tpx6,
         overwrite=True,
@@ -2409,7 +2493,9 @@ def run_registration_analysis(
             source_component=source_component,
             output_component=data_component,
             affines_component=affines_component,
-            transformed_bboxes_component="results/registration/latest/transformed_bboxes_tpx6",
+            transformed_bboxes_component=(
+                f"{analysis_auxiliary_root('registration')}/transformed_bboxes_tpx6"
+            ),
             blend_weights_component=blend_weights_component,
             t_index=t_index,
             c_index=c_index,
@@ -2486,7 +2572,9 @@ def run_registration_analysis(
             "requested_input_resolution_level": int(requested_resolution_level),
             "input_resolution_level": int(effective_level),
             "registration_channel": int(registration_channel),
-            "registration_type": str(parameters.get("registration_type", "translation")),
+            "registration_type": str(
+                parameters.get("registration_type", "translation")
+            ),
             "anchor_positions": [int(value) for value in anchor_positions],
             "edge_count": int(edge_count),
             "active_edge_count": int(active_edge_count),
@@ -2513,7 +2601,9 @@ def run_registration_analysis(
             "requested_input_resolution_level": int(requested_resolution_level),
             "input_resolution_level": int(effective_level),
             "registration_channel": int(registration_channel),
-            "registration_type": str(parameters.get("registration_type", "translation")),
+            "registration_type": str(
+                parameters.get("registration_type", "translation")
+            ),
             "anchor_positions": [int(value) for value in anchor_positions],
             "edge_count": int(edge_count),
             "active_edge_count": int(active_edge_count),
@@ -2527,6 +2617,7 @@ def run_registration_analysis(
             "output_shape_tpczyx": [int(value) for value in output_shape_tpczyx],
             "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
             "voxel_size_um_zyx": [float(value) for value in full_voxel_size_um_zyx],
+            "voxel_size_resolution_source": str(voxel_size_resolution_source),
             "output_origin_xyz_um": [float(value) for value in output_min_xyz],
         },
     )

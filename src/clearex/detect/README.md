@@ -10,16 +10,19 @@ This folder contains particle-detection logic and chunk-parallel analysis execut
 ## Particle Pipeline Contract
 
 - Input is a canonical 6D component `(t, p, c, z, y, x)`.
-- `input_source` parameter selects the source component path (default: `data`).
+- `input_source` parameter selects a logical source alias or explicit internal
+  component path (default: `data`).
 - Channel selection is done with `channel_index`.
 - Chunk tasks run in parallel and return global-coordinate rows.
 
 ## Output Contract
 
-- Latest result root: `results/particle_detection/latest`
+- Latest result root: `clearex/results/particle_detection/latest`
 - Datasets:
   - `detections` columns: `t,p,c,z,y,x,sigma,intensity`
   - `points_tzyx` for Napari points rendering
+- Particle detection is a metadata/table output, not a public OME image
+  collection. Keep it in the ClearEx namespace.
 - Latest-output reference must be registered in provenance metadata.
 
 ## Performance Notes

@@ -14,24 +14,30 @@ ClearEx provenance is designed to answer:
 Storage Layout
 --------------
 
-Within a canonical Zarr/N5 store:
+Within a canonical OME-Zarr store:
 
-- run records: ``provenance/runs/<run_id>``
-- latest output references: ``provenance/latest_outputs/<analysis>``
+- run records: ``clearex/provenance/runs/<run_id>``
+- latest output references: ``clearex/provenance/latest_outputs/<analysis>``
+- public image collections: root source HCS collection and
+  ``results/<analysis>/latest`` for image-producing analyses
+- internal image outputs:
+  ``clearex/runtime_cache/results/<analysis>/latest``
+- ClearEx-owned non-image latest outputs:
+  ``clearex/results/<analysis>/latest``
 
-Run records are append-only. Large analysis outputs remain latest-only under
-``results/<analysis>/latest`` to control storage growth.
+Run records are append-only. Large image outputs remain latest-only in the
+runtime-cache/public-output split to control storage growth.
 
 Run Record Content
 ------------------
 
 ``persist_run_provenance`` stores:
 
-- run identifiers/index/status/timestamps,
+- run identifiers, index, status, and timestamps,
 - input summary and input fingerprint hash,
 - normalized workflow settings,
 - effective Dask backend payload and chunk/pyramid settings,
-- effective spatial-calibration payload/text/explicitness,
+- effective spatial-calibration payload and canonical text form,
 - selected analyses and per-analysis parameters,
 - ordered step records and output references,
 - software metadata (package version, git commit/branch/dirty),
@@ -67,8 +73,10 @@ Spatial Placement Reproducibility
 
 Store-level Navigate placement metadata is part of the reproducibility record:
 
-- workflow provenance stores the effective ``spatial_calibration`` payload,
-  canonical text form, and whether it was explicitly supplied by the operator;
+- canonical store metadata persists ``spatial_calibration`` in
+  ``clearex/metadata``,
+- workflow provenance stores the effective payload, canonical text form, and
+  whether it was explicitly supplied by the operator,
 - visualization latest metadata stores the effective spatial calibration used
   for multiposition placement.
 
@@ -87,4 +95,4 @@ execution:
 - if required outputs are missing, the operation is re-run.
 
 Current runtime applies this matching logic to flatfield, deconvolution,
-particle detection, and registration steps.
+particle detection, registration, and other latest-only analysis steps.

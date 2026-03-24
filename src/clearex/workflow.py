@@ -68,24 +68,24 @@ ANALYSIS_OPERATION_ORDER = (
 )
 
 ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS: Dict[str, str] = {
-    "data": "data",
-    "flatfield": "results/flatfield/latest/data",
-    "deconvolution": "results/deconvolution/latest/data",
-    "shear_transform": "results/shear_transform/latest/data",
-    "usegment3d": "results/usegment3d/latest/data",
-    "registration": "results/registration/latest/data",
+    "data": "clearex/runtime_cache/source/data",
+    "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
+    "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
+    "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
+    "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
+    "registration": "clearex/runtime_cache/results/registration/latest/data",
 }
 ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
-    "data": "data",
-    "flatfield": "results/flatfield/latest/data",
-    "deconvolution": "results/deconvolution/latest/data",
-    "shear_transform": "results/shear_transform/latest/data",
-    "particle_detection": "results/particle_detection/latest/detections",
-    "usegment3d": "results/usegment3d/latest/data",
-    "registration": "results/registration/latest/data",
-    "display_pyramid": "results/display_pyramid/latest",
-    "visualization": "results/visualization/latest",
-    "mip_export": "results/mip_export/latest",
+    "data": "clearex/runtime_cache/source/data",
+    "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
+    "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
+    "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
+    "particle_detection": "clearex/results/particle_detection/latest/detections",
+    "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
+    "registration": "clearex/runtime_cache/results/registration/latest/data",
+    "display_pyramid": "clearex/results/display_pyramid/latest",
+    "visualization": "clearex/results/visualization/latest",
+    "mip_export": "clearex/results/mip_export/latest",
 }
 _OUTPUT_COMPONENT_TO_OPERATION: Dict[str, str] = {
     str(component): str(operation_name)

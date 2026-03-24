@@ -82,11 +82,10 @@ def test_run_mip_export_analysis_writes_uint16_ome_tiff_outputs_with_calibration
     data = np.arange(1 * 2 * 1 * 3 * 4 * 5, dtype=np.float32).reshape(
         (1, 2, 1, 3, 4, 5)
     )
-    root.create_dataset(
+    root.create_array(
         name="data",
         data=data,
         chunks=(1, 1, 1, 3, 4, 5),
-        dtype="float32",
         overwrite=True,
     )
     root["data"].attrs["voxel_size_um_zyx"] = [5.0, 2.0, 3.0]
@@ -102,7 +101,7 @@ def test_run_mip_export_analysis_writes_uint16_ome_tiff_outputs_with_calibration
         client=None,
     )
 
-    assert summary.component == "results/mip_export/latest"
+    assert summary.component == "clearex/results/mip_export/latest"
     assert summary.export_format == "ome-tiff"
     assert summary.position_mode == "per_position"
     assert summary.exported_files == 6
@@ -156,19 +155,19 @@ def test_run_mip_export_analysis_writes_uint16_ome_tiff_outputs_with_calibration
     assert yz_pixels["PhysicalSizeY"] == "2.0"
 
     latest_attrs = dict(
-        zarr.open_group(str(store_path), mode="r")["results"]["mip_export"][
-            "latest"
-        ].attrs
+        zarr.open_group(str(store_path), mode="r")["clearex"]["results"][
+            "mip_export"
+        ]["latest"].attrs
     )
     assert latest_attrs["exported_files"] == 6
     assert latest_attrs["export_format"] == "ome-tiff"
     assert latest_attrs["voxel_size_um_zyx"] == [5.0, 2.0, 3.0]
     latest_ref_attrs = dict(
-        zarr.open_group(str(store_path), mode="r")["provenance"]["latest_outputs"][
-            "mip_export"
-        ].attrs
+        zarr.open_group(str(store_path), mode="r")["clearex"]["provenance"][
+            "latest_outputs"
+        ]["mip_export"].attrs
     )
-    assert latest_ref_attrs["component"] == "results/mip_export/latest"
+    assert latest_ref_attrs["component"] == "clearex/results/mip_export/latest"
 
 
 def test_run_mip_export_analysis_writes_multi_position_zarr_outputs(
@@ -177,11 +176,10 @@ def test_run_mip_export_analysis_writes_multi_position_zarr_outputs(
     store_path = tmp_path / "mip_zarr_store.zarr"
     root = zarr.open_group(str(store_path), mode="w")
     data = np.arange(2 * 3 * 2 * 4 * 3 * 5, dtype=np.uint16).reshape((2, 3, 2, 4, 3, 5))
-    root.create_dataset(
+    root.create_array(
         name="data",
         data=data,
         chunks=(1, 1, 1, 2, 3, 5),
-        dtype="uint16",
         overwrite=True,
     )
 
@@ -217,6 +215,86 @@ def test_run_mip_export_analysis_writes_multi_position_zarr_outputs(
     yz = np.asarray(yz_root["data"])
     assert tuple(yz.shape) == (3, 4, 3)
     assert list(yz_root["data"].attrs["axes"]) == ["p", "z", "y"]
+
+
+def test_run_mip_export_analysis_writes_multi_position_tiff_outputs_with_resampled_z(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "mip_multi_tiff_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 2 * 1 * 3 * 4 * 5, dtype=np.float32).reshape(
+        (1, 2, 1, 3, 4, 5)
+    )
+    root.create_array(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 2, 2, 2),
+        overwrite=True,
+    )
+    root["data"].attrs["voxel_size_um_zyx"] = [5.0, 2.0, 3.0]
+
+    summary = run_mip_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "position_mode": "multi_position",
+            "export_format": "tiff",
+            "output_directory": str(tmp_path / "mip_multi_tiff_outputs"),
+        },
+        client=None,
+    )
+
+    output_directory = Path(summary.output_directory)
+    xz_path = output_directory / "mip_xz_t0000_c0000.tif"
+    yz_path = output_directory / "mip_yz_t0000_c0000.tif"
+    assert xz_path.exists()
+    assert yz_path.exists()
+
+    xz = np.asarray(tifffile.imread(str(xz_path)))
+    yz = np.asarray(tifffile.imread(str(yz_path)))
+    expected_source = data[0, :, 0, :, :, :]
+    xz_expected = np.max(expected_source, axis=2).astype(np.uint16)
+    yz_expected = np.max(expected_source, axis=3).astype(np.uint16)
+
+    assert tuple(xz.shape) == (
+        2,
+        pipeline._resampled_axis_length(
+            axis_length=int(xz_expected.shape[1]),
+            source_spacing_um=5.0,
+            target_spacing_um=3.0,
+        ),
+        5,
+    )
+    assert tuple(yz.shape) == (
+        2,
+        pipeline._resampled_axis_length(
+            axis_length=int(yz_expected.shape[1]),
+            source_spacing_um=5.0,
+            target_spacing_um=2.0,
+        ),
+        4,
+    )
+    assert int(xz.max()) > 0
+    assert int(yz.max()) > 0
+    np.testing.assert_array_equal(xz[:, 0, :], xz_expected[:, 0, :])
+    np.testing.assert_array_equal(xz[:, -1, :], xz_expected[:, -1, :])
+    np.testing.assert_array_equal(yz[:, 0, :], yz_expected[:, 0, :])
+    np.testing.assert_array_equal(yz[:, -1, :], yz_expected[:, -1, :])
+
+
+def test_resample_axis_linear_to_uint16_writes_nonleading_axis() -> None:
+    source = np.arange(2 * 3 * 4, dtype=np.uint16).reshape((2, 3, 4))
+    destination = np.zeros((2, 7, 4), dtype=np.uint16)
+
+    pipeline._resample_axis_linear_to_uint16(
+        source=source,
+        destination=destination,
+        axis=1,
+    )
+
+    assert int(destination.max()) > 0
+    np.testing.assert_array_equal(destination[:, 0, :], source[:, 0, :])
+    np.testing.assert_array_equal(destination[:, -1, :], source[:, -1, :])
 
 
 @pytest.mark.parametrize(
@@ -304,11 +382,10 @@ def test_run_mip_export_analysis_distributed_writes_expected_outputs(
     store_path = tmp_path / "mip_distributed_store.zarr"
     root = zarr.open_group(str(store_path), mode="w")
     data = np.arange(1 * 2 * 1 * 4 * 6 * 8, dtype=np.uint16).reshape((1, 2, 1, 4, 6, 8))
-    root.create_dataset(
+    root.create_array(
         name="data",
         data=data,
         chunks=(1, 1, 1, 2, 3, 4),
-        dtype="uint16",
         overwrite=True,
     )
 

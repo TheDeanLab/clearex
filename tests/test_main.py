@@ -1483,6 +1483,83 @@ def test_run_workflow_force_rerun_ignores_matching_provenance(
     assert called["value"] is True
 
 
+def test_run_workflow_does_not_skip_mip_export_on_matching_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_mip_match.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name=main_module.SOURCE_CACHE_COMPONENT,
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.require_group(main_module.analysis_auxiliary_root("mip_export"))
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        mip_export=True,
+        analysis_parameters={
+            "mip_export": {
+                "input_source": "data",
+                "position_mode": "per_position",
+                "export_format": "ome-tiff",
+                "output_directory": "",
+                "force_rerun": False,
+            }
+        },
+    )
+
+    persist_run_provenance(
+        zarr_path=store_path,
+        workflow=workflow,
+        image_info=ImageInfo(
+            path=store_path,
+            shape=(1, 1, 1, 2, 2, 2),
+            dtype=np.uint16,
+            axes=["t", "p", "c", "z", "y", "x"],
+        ),
+        steps=[{"name": "mip_export", "parameters": {}}],
+        repo_root=tmp_path,
+    )
+
+    called = {"value": False}
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack, workload
+        return None
+
+    def _fake_mip_export(*, zarr_path, parameters, client, progress_callback):
+        del zarr_path, parameters, client, progress_callback
+        called["value"] = True
+        return SimpleNamespace(
+            component=main_module.analysis_auxiliary_root("mip_export"),
+            source_component="data",
+            output_directory=str(tmp_path / "mip_output"),
+            export_format="ome-tiff",
+            position_mode="per_position",
+            task_count=3,
+            exported_files=3,
+            projections=("xy", "xz", "yz"),
+        )
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+    monkeypatch.setattr(main_module, "run_mip_export_analysis", _fake_mip_export)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+    monkeypatch.setattr(main_module, "is_legacy_clearex_store", lambda path: False)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.mip_force_execution"),
+    )
+
+    assert called["value"] is True
+
+
 def test_run_workflow_skips_matching_provenance_usegment3d(
     tmp_path: Path, monkeypatch
 ) -> None:

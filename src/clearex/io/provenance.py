@@ -47,6 +47,14 @@ import numpy as np
 import zarr
 
 # Local Imports
+from clearex.io.ome_store import (
+    CLEAREX_GUI_STATE_GROUP,
+    CLEAREX_PROVENANCE_GROUP,
+    analysis_auxiliary_root,
+    ensure_group,
+    get_node,
+    public_analysis_root,
+)
 from clearex.io.read import ImageInfo
 from clearex.workflow import (
     WorkflowConfig,
@@ -64,6 +72,20 @@ _PROVENANCE_PARAMETER_COMPARE_EXCLUDE_KEYS = frozenset(
     {"execution_order", "force_rerun"}
 )
 _GUI_STATE_SCHEMA = "clearex.analysis_gui_state.v1"
+
+
+def _provenance_group(root: zarr.Group) -> zarr.Group:
+    """Return the namespaced ClearEx provenance group."""
+    return ensure_group(root, CLEAREX_PROVENANCE_GROUP)
+
+
+def _existing_provenance_group(root: zarr.Group) -> Optional[zarr.Group]:
+    """Return the namespaced ClearEx provenance group when present."""
+    try:
+        group = get_node(root, CLEAREX_PROVENANCE_GROUP)
+    except Exception:
+        return None
+    return group if isinstance(group, zarr.Group) else None
 
 
 def is_zarr_store_path(path: Union[str, Path]) -> bool:
@@ -404,8 +426,13 @@ def _default_outputs(workflow: WorkflowConfig) -> Dict[str, Any]:
     outputs: Dict[str, Any] = {}
     for analysis_name in _selected_analyses(workflow):
         key = _normalize_analysis_name(analysis_name)
+        component = (
+            public_analysis_root(key)
+            if key in {"flatfield", "deconvolution", "shear_transform", "usegment3d", "registration"}
+            else analysis_auxiliary_root(key)
+        )
         outputs[key] = {
-            "component": f"results/{key}/latest",
+            "component": component,
             "storage_policy": "latest_only",
         }
     return outputs
@@ -536,7 +563,7 @@ def summarize_analysis_history(
         raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
 
     root = zarr.open_group(str(zarr_path), mode="r")
-    provenance_group = root.get("provenance")
+    provenance_group = _existing_provenance_group(root)
     if provenance_group is None or "runs" not in provenance_group:
         return {
             "has_successful_run": False,
@@ -633,7 +660,7 @@ def load_latest_completed_workflow_state(
         raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
 
     root = zarr.open_group(str(zarr_path), mode="r")
-    provenance_group = root.get("provenance")
+    provenance_group = _existing_provenance_group(root)
     if provenance_group is None or "runs" not in provenance_group:
         return None
 
@@ -693,8 +720,7 @@ def persist_latest_analysis_gui_state(
         raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
 
     root = zarr.open_group(str(zarr_path), mode="a")
-    provenance_group = root.require_group("provenance")
-    gui_state_group = provenance_group.require_group("gui_state")
+    gui_state_group = ensure_group(root, CLEAREX_GUI_STATE_GROUP)
     latest_group = gui_state_group.require_group("analysis_dialog")
     latest_group.attrs.update(
         _to_jsonable(
@@ -733,10 +759,13 @@ def load_latest_analysis_gui_state(
         raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
 
     root = zarr.open_group(str(zarr_path), mode="r")
-    provenance_group = root.get("provenance")
+    provenance_group = _existing_provenance_group(root)
     if provenance_group is None:
         return None
-    gui_state_group = provenance_group.get("gui_state")
+    try:
+        gui_state_group = get_node(root, CLEAREX_GUI_STATE_GROUP)
+    except Exception:
+        gui_state_group = None
     if gui_state_group is None:
         return None
     latest_group = gui_state_group.get("analysis_dialog")
@@ -800,7 +829,7 @@ def register_latest_output_reference(
         raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
 
     root = zarr.open_group(str(zarr_path), mode="a")
-    provenance_group = root.require_group("provenance")
+    provenance_group = _provenance_group(root)
     latest_outputs_group = provenance_group.require_group("latest_outputs")
     key = _normalize_analysis_name(analysis_name)
     latest_group = latest_outputs_group.require_group(key)
@@ -972,7 +1001,7 @@ def persist_run_provenance(
     repository_root = Path(repo_root) if repo_root is not None else Path.cwd()
 
     root = zarr.open_group(str(zarr_path), mode="a")
-    provenance_group = root.require_group("provenance")
+    provenance_group = _provenance_group(root)
     runs_group = provenance_group.require_group("runs")
 
     run_id = uuid.uuid4().hex
@@ -1100,7 +1129,7 @@ def verify_provenance_chain(zarr_path: Union[str, Path]) -> tuple[bool, list[str
         raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
 
     root = zarr.open_group(str(zarr_path), mode="r")
-    provenance_group = root.get("provenance")
+    provenance_group = _existing_provenance_group(root)
     if provenance_group is None or "runs" not in provenance_group:
         return True, []
 

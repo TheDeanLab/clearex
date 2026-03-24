@@ -44,14 +44,20 @@ display pyramids for one selected source component.
 ### Storage contract
 
 - Latest task metadata is stored at:
-  - `results/display_pyramid/latest`
-- Prepared levels are written under:
-  - `results/display_pyramid/by_component/<sanitized_component_hash>/level_n`
+  - `clearex/results/display_pyramid/latest`
+- Prepared levels are written as ClearEx-owned helper arrays adjacent to the
+  selected internal source component:
+  - base-source helper levels use source-adjacent pyramid naming
+  - derived-source helper levels use `<source_component>_pyramid/level_n`
 - Source-component attrs store lookup metadata:
   - `display_pyramid_levels`
   - `display_pyramid_factors_tpczyx`
 - Root attrs store lookup metadata:
   - `display_pyramid_levels_by_component`
+
+These helper levels are not public OME image collections. They are internal
+visualization aids that should remain separate from the canonical OME source
+and analysis image collections.
 
 Compatibility attrs from older visualization-driven behavior are still written
 and still read:
@@ -165,8 +171,8 @@ When display metadata must be regenerated, use the sampled pipeline from
 
 ## Multiposition Policy
 
-Multiposition rendering continues to use store-level `spatial_calibration` and
-Navigate position metadata for affine placement.
+Multiposition rendering continues to use store-level spatial calibration from
+`clearex/metadata` and Navigate position metadata for affine placement.
 
 Default image blending has changed:
 
@@ -180,7 +186,7 @@ This avoids stripe artifacts from overlapping multiposition regions.
 
 Visualization metadata is stored at:
 
-- `results/visualization/latest`
+- `clearex/results/visualization/latest`
 
 The latest metadata must include:
 
@@ -211,6 +217,11 @@ napari opened in 2D or 3D.
   display pyramids, not auto-building them.
 - The visualization GUI should describe 3D as a request that may fall back to
   2D for oversized image layers.
+- `launch_mode=auto` should resolve to `subprocess` whenever a Qt application
+  instance is active, so GUI workflows can continue and complete while napari
+  remains open.
+- `launch_mode=auto` in non-Qt contexts retains thread-based behavior:
+  main-thread runs stay `in_process`; non-main-thread runs use `subprocess`.
 
 ## Agent Expectations
 
@@ -221,3 +232,6 @@ When editing this area:
 - update tests with behavior changes in the same change set
 - preserve compatibility reads for older stored visualization pyramid attrs
   until migration is intentional and explicit
+- do not document display-pyramid helper arrays as the canonical public image
+  contract; public OME collections remain the root source image and
+  `results/<analysis>/latest` image outputs

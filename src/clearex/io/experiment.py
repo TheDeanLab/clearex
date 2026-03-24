@@ -58,15 +58,41 @@ import dask
 import dask.array as da
 import h5py
 import numpy as np
+import numpy.typing as npt
 import tifffile
 import zarr
 from dask.delayed import delayed
 
+try:
+    import tensorstore as ts
+
+    HAS_TENSORSTORE = True
+except Exception:  # pragma: no cover - optional dependency import guard
+    ts = None
+    HAS_TENSORSTORE = False
+
 # Local Imports
+from clearex.io.ome_store import (
+    CLEAREX_PROVENANCE_GROUP,
+    CLEAREX_RESULTS_GROUP,
+    CLEAREX_ROOT_GROUP,
+    CLEAREX_RUNTIME_SOURCE_ROOT,
+    SOURCE_CACHE_PYRAMID_ROOT,
+    SOURCE_CACHE_COMPONENT,
+    compute_position_translations_zyx_um,
+    default_ome_store_path,
+    ensure_group,
+    is_ome_zarr_path,
+    load_store_spatial_calibration as load_namespaced_store_spatial_calibration,
+    publish_source_collection_from_cache,
+    save_store_spatial_calibration as save_namespaced_store_spatial_calibration,
+    store_has_valid_public_source_collection,
+    source_cache_component,
+    update_store_metadata,
+)
 from clearex.io.read import ImageInfo
 from clearex.workflow import (
     SpatialCalibrationConfig,
-    spatial_calibration_from_dict,
     spatial_calibration_to_dict,
 )
 
@@ -94,6 +120,41 @@ _INGESTION_PROGRESS_ATTR = "ingestion_progress"
 _SPATIAL_CALIBRATION_ATTR = "spatial_calibration"
 
 
+@dataclass(frozen=True)
+class _TensorStoreN5ArrayAdapter:
+    """Expose one TensorStore N5 dataset through Dask's array protocol.
+
+    Parameters
+    ----------
+    source_path : str
+        N5 root path on disk.
+    component : str
+        Dataset component path within the N5 root.
+    shape : tuple[int, ...]
+        Dataset shape in source axis order.
+    dtype : numpy.dtype
+        NumPy dtype of the dataset.
+    """
+
+    source_path: str
+    component: str
+    shape: tuple[int, ...]
+    dtype: npt.DTypeLike
+
+    @property
+    def ndim(self) -> int:
+        """Return dataset dimensionality."""
+        return len(self.shape)
+
+    def __getitem__(self, item: Any) -> np.ndarray[Any, Any]:
+        """Read one N5 selection as a NumPy array."""
+        dataset = _open_tensorstore_n5_dataset(
+            Path(self.source_path),
+            component=self.component,
+        )
+        return np.asarray(dataset[item].read().result(), dtype=np.dtype(self.dtype))
+
+
 def _is_zarr_like_path(path: Path) -> bool:
     """Return whether a path is a Zarr or N5 directory store.
 
@@ -110,8 +171,124 @@ def _is_zarr_like_path(path: Path) -> bool:
     return path.is_dir() and path.suffix.lower() in {".zarr", ".n5"}
 
 
+def _require_tensorstore_for_n5() -> None:
+    """Raise a clear error when TensorStore-backed N5 support is unavailable."""
+    if HAS_TENSORSTORE:
+        return
+    raise ImportError(
+        "TensorStore is required for Navigate BDV N5 ingestion with zarr>=3. "
+        "Install the 'tensorstore' dependency to read .n5 sources."
+    )
+
+
+def _tensorstore_n5_spec(*, source_path: Path, component: str) -> dict[str, Any]:
+    """Build a TensorStore N5 spec for one dataset component."""
+    return {
+        "driver": "n5",
+        "kvstore": {"driver": "file", "path": str(source_path)},
+        "path": str(component).strip("/"),
+    }
+
+
+def _open_tensorstore_n5_dataset(source_path: Path, *, component: str) -> Any:
+    """Open one N5 dataset with TensorStore."""
+    _require_tensorstore_for_n5()
+    return ts.open(
+        _tensorstore_n5_spec(source_path=source_path, component=component)
+    ).result()
+
+
+def _load_n5_attributes(source_path: Path, *, component: str) -> dict[str, Any]:
+    """Load ``attributes.json`` for one N5 dataset component."""
+    attributes_path = source_path / component / "attributes.json"
+    try:
+        payload = json.loads(attributes_path.read_text())
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _n5_component_has_persisted_chunks(source_path: Path, *, component: str) -> bool:
+    """Return whether an N5 component has at least one persisted chunk file.
+
+    Parameters
+    ----------
+    source_path : pathlib.Path
+        Root N5 directory path.
+    component : str
+        Dataset component path inside ``source_path``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the component contains at least one file other than
+        ``attributes.json``.
+
+    Notes
+    -----
+    Some legacy acquisition runs emit setup scaffolding with only
+    ``attributes.json`` and no chunk payload files. These placeholders read back
+    as implicit zeros and should not be treated as acquired data.
+    """
+    component_path = source_path / component
+    if not component_path.is_dir():
+        return False
+
+    for _, _, filenames in os.walk(component_path):
+        for filename in filenames:
+            if filename != "attributes.json":
+                return True
+    return False
+
+
+def _normalize_n5_chunks(
+    *,
+    shape: tuple[int, ...],
+    attributes: dict[str, Any],
+) -> tuple[int, ...]:
+    """Resolve Dask chunk sizes for one N5 dataset."""
+    raw_chunks = attributes.get("blockSize")
+    if not isinstance(raw_chunks, (list, tuple)) or len(raw_chunks) != len(shape):
+        return tuple(int(size) for size in shape)
+    normalized: list[int] = []
+    for dim_size, chunk_size in zip(shape, raw_chunks, strict=False):
+        try:
+            parsed = int(chunk_size)
+        except (TypeError, ValueError):
+            parsed = int(dim_size)
+        normalized.append(max(1, min(int(dim_size), parsed)))
+    return tuple(normalized)
+
+
+def _open_tensorstore_n5_as_dask(
+    source_path: Path,
+    *,
+    component: str,
+) -> tuple[da.Array, dict[str, Any]]:
+    """Open one N5 dataset as a lazy Dask array via TensorStore."""
+    dataset = _open_tensorstore_n5_dataset(source_path, component=component)
+    shape = tuple(int(size) for size in dataset.shape)
+    dtype = np.dtype(dataset.dtype.numpy_dtype)
+    attributes = _load_n5_attributes(source_path, component=component)
+    chunks = _normalize_n5_chunks(shape=shape, attributes=attributes)
+    adapter = _TensorStoreN5ArrayAdapter(
+        source_path=str(source_path),
+        component=component,
+        shape=shape,
+        dtype=dtype,
+    )
+    array = da.from_array(
+        adapter,
+        chunks=chunks,
+        asarray=False,
+        fancy=False,
+        meta=np.empty((0,) * len(shape), dtype=dtype),
+    )
+    return array, attributes
+
+
 def has_canonical_data_component(zarr_path: Union[str, Path]) -> bool:
-    """Return whether a store contains canonical 6D analysis data.
+    """Return whether a store contains canonical 6D runtime-cache source data.
 
     Parameters
     ----------
@@ -121,24 +298,25 @@ def has_canonical_data_component(zarr_path: Union[str, Path]) -> bool:
     Returns
     -------
     bool
-        ``True`` when the store exposes a ``data`` array in canonical
+        ``True`` when the store exposes a namespaced runtime-cache ``data``
+        array in canonical
         ``(t, p, c, z, y, x)`` form. If axis metadata is present, it must
         also normalize to that same canonical order.
 
     Notes
     -----
     This helper is intentionally conservative and returns ``False`` for any
-    unreadable, missing, or malformed ``data`` component.
+        unreadable, missing, or malformed runtime-cache data component.
     """
     try:
         root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r")
     except Exception:
         return False
 
-    if "data" not in root:
+    if SOURCE_CACHE_COMPONENT not in root:
         return False
 
-    data = root["data"]
+    data = root[SOURCE_CACHE_COMPONENT]
     if not hasattr(data, "shape"):
         return False
 
@@ -237,7 +415,7 @@ def _write_ingestion_progress_record(
 def load_store_spatial_calibration(
     zarr_path: Union[str, Path],
 ) -> SpatialCalibrationConfig:
-    """Load store-level spatial calibration from root Zarr attrs.
+    """Load store-level spatial calibration from namespaced store metadata.
 
     Parameters
     ----------
@@ -254,15 +432,14 @@ def load_store_spatial_calibration(
     ValueError
         If stored spatial calibration metadata is malformed.
     """
-    root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r")
-    return spatial_calibration_from_dict(root.attrs.get(_SPATIAL_CALIBRATION_ATTR))
+    return load_namespaced_store_spatial_calibration(zarr_path)
 
 
 def save_store_spatial_calibration(
     zarr_path: Union[str, Path],
     calibration: SpatialCalibrationConfig,
 ) -> SpatialCalibrationConfig:
-    """Persist store-level spatial calibration into root Zarr attrs.
+    """Persist store-level spatial calibration into namespaced store metadata.
 
     Parameters
     ----------
@@ -276,11 +453,7 @@ def save_store_spatial_calibration(
     SpatialCalibrationConfig
         Normalized calibration written to the store.
     """
-    normalized = spatial_calibration_from_dict(calibration)
-    serialized = json.loads(json.dumps(spatial_calibration_to_dict(normalized)))
-    root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="a")
-    root.attrs[_SPATIAL_CALIBRATION_ATTR] = serialized
-    return normalized
+    return save_namespaced_store_spatial_calibration(zarr_path, calibration)
 
 
 def _resolve_expected_pyramid_level_factors(
@@ -352,7 +525,8 @@ def _expected_pyramid_components(
     Returns
     -------
     list[str]
-        Ordered component paths beginning with ``"data"``.
+        Ordered runtime-cache component paths beginning with the source base
+        component.
 
     Raises
     ------
@@ -360,8 +534,11 @@ def _expected_pyramid_components(
         This helper does not raise custom exceptions.
     """
     return [
-        "data",
-        *[f"data_pyramid/level_{idx}" for idx in range(1, len(level_factors))],
+        SOURCE_CACHE_COMPONENT,
+        *[
+            source_cache_component(level_index=idx)
+            for idx in range(1, len(level_factors))
+        ],
     ]
 
 
@@ -390,9 +567,9 @@ def _has_expected_pyramid_structure(
     None
         Structural mismatches return ``False``.
     """
-    if "data" not in root:
+    if SOURCE_CACHE_COMPONENT not in root:
         return False
-    data = root["data"]
+    data = root[SOURCE_CACHE_COMPONENT]
     if not hasattr(data, "shape") or not hasattr(data, "chunks"):
         return False
     try:
@@ -413,14 +590,14 @@ def _has_expected_pyramid_structure(
         return True
 
     expected_components = _expected_pyramid_components(level_factors)
-    configured_levels = root.attrs.get("data_pyramid_levels")
+    configured_levels = data.attrs.get("pyramid_levels")
     if isinstance(configured_levels, (list, tuple)):
         configured_paths = [str(value) for value in configured_levels]
         if configured_paths != expected_components:
             return False
 
     for level_index, factors in enumerate(level_factors[1:], start=1):
-        component = f"data_pyramid/level_{level_index}"
+        component = source_cache_component(level_index=level_index)
         if component not in root:
             return False
         level_array = root[component]
@@ -572,7 +749,7 @@ def has_complete_canonical_data_store(
     except Exception:
         return False
 
-    data = root.get("data")
+    data = root.get(SOURCE_CACHE_COMPONENT)
     if data is None or not hasattr(data, "shape") or not hasattr(data, "chunks"):
         return False
     if data.chunks is None:
@@ -603,16 +780,22 @@ def has_complete_canonical_data_store(
     required_components = (
         _expected_pyramid_components(level_factors)
         if level_factors is not None
-        else ["data"]
+        else [SOURCE_CACHE_COMPONENT]
     )
 
     record = _read_ingestion_progress_record(root)
     if record is None:
         return True
-    return _ingestion_record_is_complete(
+    if _ingestion_record_is_complete(
         record=record,
         required_components=required_components,
-    )
+    ):
+        return True
+
+    # Recovery path: if ingestion-progress metadata is stale/incomplete but the
+    # canonical runtime-cache structure and public OME source collection are
+    # already valid, prefer reusing the existing canonical store.
+    return store_has_valid_public_source_collection(root)
 
 
 def _normalize_axis_token(token: Any) -> Optional[str]:
@@ -905,6 +1088,12 @@ def _open_source_as_dask(
     suffix = source_path.suffix.lower()
     meta: dict[str, Any] = {"source_path": str(source_path)}
 
+    if suffix == ".n5" and _is_zarr_like_path(source_path):
+        raise ValueError(
+            "Standalone N5 ingestion is not supported. Use Navigate "
+            "experiment.yml-driven BDV N5 materialization instead."
+        )
+
     if _is_zarr_like_path(source_path):
         array, component, axes = _collect_largest_zarr_array(source_path)
         source_array = (
@@ -971,6 +1160,91 @@ def _open_source_as_dask(
     raise ValueError(f"Unsupported source format for ingestion: {source_path}")
 
 
+def _candidate_bdv_xml_paths(path: Path) -> list[Path]:
+    """Return candidate BDV XML sidecar paths for one source path."""
+    candidates: list[Path] = []
+    candidates.append(path.with_suffix(".xml"))
+    candidates.append(path.parent / f"{path.name}.xml")
+
+    lower_name = path.name.lower()
+    for token in (".ome.zarr", ".zarr", ".n5", ".hdf5", ".hdf", ".h5"):
+        if not lower_name.endswith(token):
+            continue
+        stem = path.name[: -len(token)]
+        if stem:
+            candidates.append(path.parent / f"{stem}.xml")
+        break
+
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(candidate)
+    return ordered
+
+
+def _bdv_loader_format_matches_source_suffix(*, suffix: str, image_format: str) -> bool:
+    """Return whether a BDV XML loader format matches the source suffix."""
+    normalized = str(image_format).strip().lower()
+    if suffix in {".h5", ".hdf5", ".hdf"}:
+        return normalized in {"bdv.hdf5", "bdv.h5", "bdv.hdf"}
+    if suffix == ".n5":
+        return normalized == "bdv.n5" or normalized.startswith("bdv.n5.")
+    if suffix == ".zarr":
+        if normalized in {
+            "bdv.zarr",
+            "bdv.ome.zarr",
+            "bdv.ngff",
+            "bdv.omezarr",
+            "bdv.omengff",
+            "ome.zarr",
+            "ome-zarr",
+            "ome.ngff",
+            "ome-ngff",
+            "ngff",
+            "zarr",
+        }:
+            return True
+        return (
+            normalized.startswith("bdv.zarr.")
+            or normalized.startswith("bdv.ome.zarr.")
+            or normalized.startswith("bdv.ngff.")
+            or normalized.startswith("ome.zarr.")
+            or normalized.startswith("ome.ngff.")
+        )
+    return False
+
+
+def _load_navigate_bdv_xml_root(source_path: Path) -> Optional[ET.Element]:
+    """Load the companion BDV XML root when present and compatible."""
+    suffix = source_path.suffix.lower()
+    if suffix not in {".h5", ".hdf5", ".hdf", ".n5", ".zarr"}:
+        return None
+
+    for xml_path in _candidate_bdv_xml_paths(source_path):
+        if not xml_path.exists():
+            continue
+        try:
+            root = ET.fromstring(xml_path.read_text())
+        except Exception:
+            continue
+
+        image_loader = root.find("SequenceDescription/ImageLoader")
+        if image_loader is None:
+            continue
+        image_format = str(image_loader.attrib.get("format", ""))
+        if not _bdv_loader_format_matches_source_suffix(
+            suffix=suffix,
+            image_format=image_format,
+        ):
+            continue
+        return root
+    return None
+
+
 def _parse_navigate_bdv_setup_index_map(
     source_path: Path,
 ) -> Optional[dict[int, tuple[int, int]]]:
@@ -994,140 +1268,175 @@ def _parse_navigate_bdv_setup_index_map(
         Parsing is best-effort and falls back to ``None``.
     """
 
-    def _candidate_bdv_xml_paths(path: Path) -> list[Path]:
-        """Return candidate BDV XML sidecar paths for one source path.
-
-        Parameters
-        ----------
-        path : pathlib.Path
-            Source BDV container path.
-
-        Returns
-        -------
-        list[pathlib.Path]
-            Ordered XML candidate paths, deduplicated while preserving order.
-        """
-        candidates: list[Path] = []
-        candidates.append(path.with_suffix(".xml"))
-        candidates.append(path.parent / f"{path.name}.xml")
-
-        lower_name = path.name.lower()
-        for token in (".ome.zarr", ".zarr", ".n5", ".hdf5", ".hdf", ".h5"):
-            if not lower_name.endswith(token):
-                continue
-            stem = path.name[: -len(token)]
-            if stem:
-                candidates.append(path.parent / f"{stem}.xml")
-            break
-
-        ordered: list[Path] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            ordered.append(candidate)
-        return ordered
-
-    def _loader_format_matches_source_suffix(*, suffix: str, image_format: str) -> bool:
-        """Return whether a BDV XML loader format matches the source suffix.
-
-        Parameters
-        ----------
-        suffix : str
-            Source path suffix.
-        image_format : str
-            XML ``ImageLoader`` format value.
-
-        Returns
-        -------
-        bool
-            ``True`` when ``image_format`` is compatible with ``suffix``.
-        """
-        normalized = str(image_format).strip().lower()
-        if suffix in {".h5", ".hdf5", ".hdf"}:
-            return normalized in {"bdv.hdf5", "bdv.h5", "bdv.hdf"}
-        if suffix == ".n5":
-            return normalized == "bdv.n5" or normalized.startswith("bdv.n5.")
-        if suffix == ".zarr":
-            if normalized in {
-                "bdv.zarr",
-                "bdv.ome.zarr",
-                "bdv.ngff",
-                "bdv.omezarr",
-                "bdv.omengff",
-                "ome.zarr",
-                "ome-zarr",
-                "ome.ngff",
-                "ome-ngff",
-                "ngff",
-                "zarr",
-            }:
-                return True
-            return (
-                normalized.startswith("bdv.zarr.")
-                or normalized.startswith("bdv.ome.zarr.")
-                or normalized.startswith("bdv.ngff.")
-                or normalized.startswith("ome.zarr.")
-                or normalized.startswith("ome.ngff.")
-            )
-        return False
-
-    suffix = source_path.suffix.lower()
-    if suffix not in {".h5", ".hdf5", ".hdf", ".n5", ".zarr"}:
+    root = _load_navigate_bdv_xml_root(source_path)
+    if root is None:
         return None
 
-    xml_candidates = _candidate_bdv_xml_paths(source_path)
-    for xml_path in xml_candidates:
-        if not xml_path.exists():
+    raw_entries: list[tuple[int, int, int]] = []
+    for view_setup in root.findall("SequenceDescription/ViewSetups/ViewSetup"):
+        setup_text = view_setup.findtext("id")
+        channel_text = view_setup.findtext("attributes/channel")
+        tile_text = view_setup.findtext("attributes/tile")
+        if setup_text is None or channel_text is None or tile_text is None:
             continue
         try:
-            root = ET.fromstring(xml_path.read_text())
-        except Exception:
+            setup_index = int(setup_text)
+            channel_index = int(channel_text)
+            tile_index = int(tile_text)
+        except ValueError:
             continue
+        raw_entries.append((setup_index, channel_index, tile_index))
 
-        image_loader = root.find("SequenceDescription/ImageLoader")
-        if image_loader is None:
+    if not raw_entries:
+        return None
+
+    channel_values = sorted({entry[1] for entry in raw_entries})
+    tile_values = sorted({entry[2] for entry in raw_entries})
+    channel_lookup = {value: idx for idx, value in enumerate(channel_values)}
+    tile_lookup = {value: idx for idx, value in enumerate(tile_values)}
+
+    return {
+        int(setup_index): (
+            int(tile_lookup[tile_index]),
+            int(channel_lookup[channel_index]),
+        )
+        for setup_index, channel_index, tile_index in raw_entries
+    }
+
+
+@dataclass(frozen=True)
+class _NavigateBdvN5Entry:
+    """Describe one BDV N5 dataset component."""
+
+    time_index: int
+    setup_index: int
+    component: str
+    source_shape: tuple[int, ...]
+    source_chunks: tuple[int, ...]
+
+
+def _iter_navigate_bdv_n5_entries(source_path: Path) -> list[_NavigateBdvN5Entry]:
+    """Enumerate BDV-style N5 datasets from the filesystem layout."""
+    entries: list[_NavigateBdvN5Entry] = []
+    for attributes_path in sorted(source_path.rglob("attributes.json")):
+        component_path = attributes_path.parent
+        try:
+            relative_component = component_path.relative_to(source_path)
+        except ValueError:
             continue
-        image_format = str(image_loader.attrib.get("format", ""))
-        if not _loader_format_matches_source_suffix(
-            suffix=suffix,
-            image_format=image_format,
-        ):
+        component = relative_component.as_posix()
+        match = re.match(r"^setup(\d+)/timepoint(\d+)/s(\d+)$", component)
+        if match is None or int(match.group(3)) != 0:
             continue
-
-        raw_entries: list[tuple[int, int, int]] = []
-        for view_setup in root.findall("SequenceDescription/ViewSetups/ViewSetup"):
-            setup_text = view_setup.findtext("id")
-            channel_text = view_setup.findtext("attributes/channel")
-            tile_text = view_setup.findtext("attributes/tile")
-            if setup_text is None or channel_text is None or tile_text is None:
-                continue
-            try:
-                setup_index = int(setup_text)
-                channel_index = int(channel_text)
-                tile_index = int(tile_text)
-            except ValueError:
-                continue
-            raw_entries.append((setup_index, channel_index, tile_index))
-
-        if not raw_entries:
+        attributes = _load_n5_attributes(source_path, component=component)
+        dimensions = attributes.get("dimensions")
+        if not isinstance(dimensions, (list, tuple)) or not dimensions:
             continue
-
-        channel_values = sorted({entry[1] for entry in raw_entries})
-        tile_values = sorted({entry[2] for entry in raw_entries})
-        channel_lookup = {value: idx for idx, value in enumerate(channel_values)}
-        tile_lookup = {value: idx for idx, value in enumerate(tile_values)}
-
-        return {
-            int(setup_index): (
-                int(tile_lookup[tile_index]),
-                int(channel_lookup[channel_index]),
+        if not _n5_component_has_persisted_chunks(source_path, component=component):
+            continue
+        shape = tuple(int(size) for size in dimensions)
+        chunks = _normalize_n5_chunks(shape=shape, attributes=attributes)
+        entries.append(
+            _NavigateBdvN5Entry(
+                time_index=int(match.group(2)),
+                setup_index=int(match.group(1)),
+                component=component,
+                source_shape=shape,
+                source_chunks=chunks,
             )
-            for setup_index, channel_index, tile_index in raw_entries
-        }
-    return None
+        )
+    return entries
+
+
+def summarize_navigate_bdv_n5_image_info(
+    *,
+    experiment: "NavigateExperiment",
+    source_path: Path,
+) -> Optional[ImageInfo]:
+    """Summarize a Navigate BDV N5 collection as canonical ``ImageInfo``."""
+    if source_path.suffix.lower() != ".n5" or not _is_zarr_like_path(source_path):
+        return None
+
+    entries = _iter_navigate_bdv_n5_entries(source_path)
+    if len(entries) <= 1:
+        return None
+
+    setup_map = _parse_navigate_bdv_setup_index_map(source_path)
+    inferred_positions = max(1, int(experiment.multiposition_count))
+    time_indices: set[int] = set()
+    position_indices: set[int] = set()
+    channel_indices: set[int] = set()
+    base_shape: Optional[tuple[int, ...]] = None
+
+    for entry in entries:
+        if setup_map is not None and entry.setup_index not in setup_map:
+            continue
+        if setup_map is not None:
+            position_index, channel_index = setup_map[entry.setup_index]
+        else:
+            channel_index = int(entry.setup_index // inferred_positions)
+            position_index = int(entry.setup_index % inferred_positions)
+        time_indices.add(int(entry.time_index))
+        position_indices.add(int(position_index))
+        channel_indices.add(int(channel_index))
+        if base_shape is None:
+            base_shape = entry.source_shape
+        elif entry.source_shape != base_shape:
+            raise ValueError(
+                "Navigate BDV N5 collection has inconsistent source shapes: "
+                f"expected {base_shape}, got {entry.source_shape} at "
+                f"timepoint={entry.time_index}, setup={entry.setup_index}."
+            )
+
+    if (
+        not time_indices
+        or not position_indices
+        or not channel_indices
+        or base_shape is None
+    ):
+        return None
+
+    sample_entry = min(
+        entries,
+        key=lambda item: (item.time_index, item.setup_index, item.component),
+    )
+    sample_dataset = _open_tensorstore_n5_dataset(
+        source_path,
+        component=sample_entry.component,
+    )
+    dtype = np.dtype(sample_dataset.dtype.numpy_dtype)
+    x_size, y_size, z_size = (int(size) for size in base_shape)
+    metadata: dict[str, Any] = {
+        "source_component": sample_entry.component,
+        "source_layout": "navigate_bdv_n5",
+        "positions": len(position_indices),
+        "channels": len(channel_indices),
+    }
+    if (
+        experiment.z_step_um is not None
+        and experiment.xy_pixel_size_um is not None
+        and experiment.z_step_um > 0
+        and experiment.xy_pixel_size_um > 0
+    ):
+        metadata["voxel_size_um_zyx"] = [
+            float(experiment.z_step_um),
+            float(experiment.xy_pixel_size_um),
+            float(experiment.xy_pixel_size_um),
+        ]
+    return ImageInfo(
+        path=source_path,
+        shape=(
+            len(time_indices),
+            len(position_indices),
+            len(channel_indices),
+            z_size,
+            y_size,
+            x_size,
+        ),
+        dtype=dtype,
+        axes="TPCZYX",
+        metadata=metadata,
+    )
 
 
 def _open_navigate_bdv_collection_as_dask(
@@ -1240,6 +1549,52 @@ def _open_navigate_bdv_collection_as_dask(
                 if source_shape != base_shape:
                     raise ValueError(
                         "Navigate BDV H5 collection has inconsistent source shapes: "
+                        f"expected {base_shape}, got {source_shape} at "
+                        f"t={time_index}, setup={setup_index}."
+                    )
+            arrays_by_index[key] = source_array
+    elif is_n5:
+        entries = [
+            (entry.time_index, entry.setup_index, entry.component, ("x", "y", "z"))
+            for entry in _iter_navigate_bdv_n5_entries(source_path)
+        ]
+        if len(entries) <= 1:
+            return None
+
+        for time_index, setup_index, component, source_axes in sorted(
+            entries, key=lambda item: (item[0], item[1], item[2])
+        ):
+            if setup_map is not None and setup_index not in setup_map:
+                continue
+            if setup_map is not None:
+                position_index, channel_index = setup_map[setup_index]
+            else:
+                channel_index = int(setup_index // inferred_positions)
+                position_index = int(setup_index % inferred_positions)
+
+            key = (int(time_index), int(position_index), int(channel_index))
+            if key in arrays_by_index:
+                continue
+
+            source_array, _ = _open_tensorstore_n5_as_dask(
+                source_path,
+                component=component,
+            )
+            normalized_axes = tuple(source_axes)
+            source_shape = tuple(int(size) for size in source_array.shape)
+            if base_axes is None:
+                base_axes = normalized_axes
+                base_shape = source_shape
+            else:
+                if normalized_axes != base_axes:
+                    raise ValueError(
+                        "Navigate BDV N5 collection has inconsistent source axes: "
+                        f"expected {base_axes}, got {normalized_axes} at "
+                        f"t={time_index}, setup={setup_index}."
+                    )
+                if source_shape != base_shape:
+                    raise ValueError(
+                        "Navigate BDV N5 collection has inconsistent source shapes: "
                         f"expected {base_shape}, got {source_shape} at "
                         f"t={time_index}, setup={setup_index}."
                     )
@@ -1363,6 +1718,68 @@ def _open_navigate_bdv_collection_as_dask(
         ),
     }
     return source_array, source_axes, metadata
+
+
+def load_navigate_experiment_source_image_info(
+    *,
+    experiment: "NavigateExperiment",
+    source_path: Path,
+    opener: Any = None,
+    prefer_dask: bool = True,
+    chunks: Optional[Union[int, tuple[int, ...]]] = None,
+) -> ImageInfo:
+    """Load source metadata for one Navigate experiment input path.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    source_path : pathlib.Path
+        Resolved acquisition source path.
+    opener : object, optional
+        Existing ``ImageOpener``-compatible instance for non-N5 sources.
+    prefer_dask : bool, default=True
+        Forwarded to ``ImageOpener.open`` when non-N5 metadata is read.
+    chunks : int or tuple[int, ...], optional
+        Forwarded to ``ImageOpener.open`` when non-N5 metadata is read.
+
+    Returns
+    -------
+    ImageInfo
+        Metadata summary for the resolved acquisition source.
+
+    Raises
+    ------
+    ValueError
+        If Navigate ``file_type: N5`` does not resolve to a BDV-style N5
+        source layout.
+    """
+    resolved_source = Path(source_path).expanduser().resolve()
+    if (
+        _normalize_file_type(experiment.file_type) == "N5"
+        and resolved_source.suffix.lower() == ".n5"
+    ):
+        info = summarize_navigate_bdv_n5_image_info(
+            experiment=experiment,
+            source_path=resolved_source,
+        )
+        if info is None:
+            raise ValueError(
+                "Navigate file_type=N5 currently requires a BDV-style N5 source "
+                "with companion XML metadata."
+            )
+        return info
+
+    if opener is None:
+        from clearex.io.read import ImageOpener
+
+        opener = ImageOpener()
+    _, info = opener.open(
+        path=str(resolved_source),
+        prefer_dask=prefer_dask,
+        chunks=chunks,
+    )
+    return info
 
 
 def _parse_navigate_tiff_indices(path: Path) -> tuple[int, int, int]:
@@ -2357,6 +2774,31 @@ def _estimate_source_aligned_submission_batch_count(
     )
 
 
+def _source_aligned_writes_require_serial_submission(
+    *,
+    z_batch_depth: int,
+    target_chunks_tpczyx: CanonicalShapeTpczyx,
+) -> bool:
+    """Return whether source-aligned writes must serialize region submissions.
+
+    Parameters
+    ----------
+    z_batch_depth : int
+        Source-aligned z-planes per write region.
+    target_chunks_tpczyx : tuple[int, int, int, int, int, int]
+        Target chunk shape in canonical ``(t, p, c, z, y, x)`` order.
+
+    Returns
+    -------
+    bool
+        ``True`` when source-aligned z regions do not land on target z-chunk
+        boundaries and concurrent submissions could clobber partially-written
+        chunks.
+    """
+    target_chunk_z = max(1, int(target_chunks_tpczyx[3]))
+    return int(max(1, int(z_batch_depth))) % int(target_chunk_z) != 0
+
+
 def _write_numpy_region(
     block: np.ndarray,
     *,
@@ -2514,6 +2956,7 @@ def _write_dask_array_source_aligned_plane_batches(
     shape_tpczyx: CanonicalShapeTpczyx,
     z_batch_depth: int,
     dtype_itemsize: int,
+    target_chunks_tpczyx: Optional[CanonicalShapeTpczyx] = None,
     client: Optional["Client"] = None,
     progress_callback: Optional[ProgressCallback] = None,
     progress_start: int = 0,
@@ -2538,6 +2981,9 @@ def _write_dask_array_source_aligned_plane_batches(
         Full output shape.
     z_batch_depth : int
         Number of z-planes per source-aligned write region.
+    target_chunks_tpczyx : tuple[int, int, int, int, int, int], optional
+        Target canonical chunk shape. When provided, submission concurrency is
+        constrained to avoid concurrent partial writes into the same z chunk.
     dtype_itemsize : int
         Bytes per array element.
     client : dask.distributed.Client, optional
@@ -2605,6 +3051,18 @@ def _write_dask_array_source_aligned_plane_batches(
         worker_count=detected_worker_count,
         worker_memory_limit_bytes=detected_worker_memory_limit_bytes,
     )
+    if (
+        target_chunks_tpczyx is not None
+        and _source_aligned_writes_require_serial_submission(
+            z_batch_depth=z_batch_depth,
+            target_chunks_tpczyx=target_chunks_tpczyx,
+        )
+    ):
+        # Concurrent source-aligned writes can race when z-regions split target
+        # z chunks (read-modify-write overlap). Serialize submissions in this
+        # case to preserve correctness.
+        regions_per_submission = 1
+
     remaining_regions = int(total_regions - start_region)
     total_batches = max(1, math.ceil(remaining_regions / regions_per_submission))
     completed_regions = int(start_region)
@@ -3008,12 +3466,12 @@ def _materialize_data_pyramid(
         ]
     ] = None,
 ) -> list[str]:
-    """Build and persist downsampled Zarr pyramid levels in canonical store.
+    """Build and persist downsampled runtime-cache pyramid levels.
 
     Parameters
     ----------
     store_path : pathlib.Path
-        Target Zarr store containing canonical ``data`` array.
+        Target OME-Zarr store containing namespaced runtime-cache source data.
     base_chunks_tpczyx : tuple[int, int, int, int, int, int]
         Effective base chunking in canonical order.
     pyramid_factors : tuple[tuple[int, ...], ...]
@@ -3045,46 +3503,47 @@ def _materialize_data_pyramid(
     Raises
     ------
     ValueError
-        If canonical base data or pyramid configuration is invalid.
+        If runtime-cache base data or pyramid configuration is invalid.
 
     Notes
     -----
-    Levels are stored under ``data_pyramid/level_<n>`` where ``n`` starts at 1.
+    Levels are stored under ``clearex/runtime_cache/source/data_pyramid``.
     Downsampling uses stride-based nearest-neighbor decimation for speed and
     deterministic dtype preservation.
     """
     level_factors = _normalize_pyramid_level_factors(pyramid_factors)
     root = zarr.open_group(str(store_path), mode="a")
-    if "data" not in root:
-        raise ValueError(f"Expected canonical data array at {store_path}/data.")
-    base_dtype = np.dtype(root["data"].dtype)
+    if SOURCE_CACHE_COMPONENT not in root:
+        raise ValueError(
+            f"Expected runtime-cache data array at {store_path}/{SOURCE_CACHE_COMPONENT}."
+        )
+    base_dtype = np.dtype(root[SOURCE_CACHE_COMPONENT].dtype)
 
-    if not preserve_existing and "data_pyramid" in root:
-        del root["data_pyramid"]
-    root.require_group("data_pyramid")
+    if not preserve_existing and SOURCE_CACHE_PYRAMID_ROOT in root:
+        del root[SOURCE_CACHE_PYRAMID_ROOT]
+    ensure_group(root, SOURCE_CACHE_PYRAMID_ROOT)
     resume_offsets = dict(start_regions_by_component or {})
 
     base_shape = _normalize_tpczyx_shape(
-        tuple(int(size) for size in root["data"].shape)
+        tuple(int(size) for size in root[SOURCE_CACHE_COMPONENT].shape)
     )
-    level_paths = ["data"]
+    level_paths = [SOURCE_CACHE_COMPONENT]
     level_factor_payload = [[int(value) for value in level_factors[0]]]
     level_shapes_payload = [[int(value) for value in base_shape]]
     total_downsample_levels = max(0, len(level_factors) - 1)
 
     if total_downsample_levels == 0:
-        root["data"].attrs.update(
+        root[SOURCE_CACHE_COMPONENT].attrs.update(
             {
                 "pyramid_levels": level_paths,
                 "pyramid_factors_tpczyx": level_factor_payload,
             }
         )
-        root.attrs.update(
-            {
-                "data_pyramid_levels": level_paths,
-                "data_pyramid_factors_tpczyx": level_factor_payload,
-                "data_pyramid_shapes_tpczyx": level_shapes_payload,
-            }
+        update_store_metadata(
+            root,
+            data_pyramid_levels=level_paths,
+            data_pyramid_factors_tpczyx=level_factor_payload,
+            data_pyramid_shapes_tpczyx=level_shapes_payload,
         )
         if progress_callback is not None:
             progress_callback(
@@ -3092,7 +3551,7 @@ def _materialize_data_pyramid(
             )
         return level_paths
 
-    prior_component = "data"
+    prior_component = SOURCE_CACHE_COMPONENT
     prior_factors = level_factors[0]
     for level_index, absolute_factors in enumerate(level_factors[1:], start=1):
         all_relative = all(
@@ -3111,7 +3570,7 @@ def _materialize_data_pyramid(
             source_component = prior_component
             downsample_factors = relative_factors
         else:
-            source_component = "data"
+            source_component = SOURCE_CACHE_COMPONENT
             downsample_factors = absolute_factors
 
         message = (
@@ -3142,7 +3601,7 @@ def _materialize_data_pyramid(
         with dask.config.set({"array.rechunk.method": "tasks"}):
             downsampled = downsampled.rechunk(level_chunks)
 
-        component = f"data_pyramid/level_{level_index}"
+        component = source_cache_component(level_index=level_index)
         root = zarr.open_group(str(store_path), mode="a")
         level_total_regions = _count_tpczyx_chunk_regions(
             shape_tpczyx=level_shape,
@@ -3164,12 +3623,13 @@ def _materialize_data_pyramid(
         ):
             should_overwrite_level = False
         if should_overwrite_level:
-            root.create_dataset(
+            root.create_array(
                 name=component,
                 shape=level_shape,
                 chunks=level_chunks,
                 dtype=base_dtype.name,
                 overwrite=True,
+                dimension_names=("t", "p", "c", "z", "y", "x"),
             )
             start_region_index = 0
 
@@ -3218,18 +3678,17 @@ def _materialize_data_pyramid(
         prior_component = component
         prior_factors = absolute_factors
 
-    root["data"].attrs.update(
+    root[SOURCE_CACHE_COMPONENT].attrs.update(
         {
             "pyramid_levels": level_paths,
             "pyramid_factors_tpczyx": level_factor_payload,
         }
     )
-    root.attrs.update(
-        {
-            "data_pyramid_levels": level_paths,
-            "data_pyramid_factors_tpczyx": level_factor_payload,
-            "data_pyramid_shapes_tpczyx": level_shapes_payload,
-        }
+    update_store_metadata(
+        root,
+        data_pyramid_levels=level_paths,
+        data_pyramid_factors_tpczyx=level_factor_payload,
+        data_pyramid_shapes_tpczyx=level_shapes_payload,
     )
     if progress_callback is not None:
         progress_callback(int(progress_end), "Pyramid generation complete")
@@ -3335,9 +3794,9 @@ def resolve_data_store_path(
     Returns
     -------
     pathlib.Path
-        Destination Zarr store path. Existing Zarr/N5 sources are reused
-        in-place; non-Zarr sources are materialized as ``data_store.zarr``
-        next to ``experiment.yml``.
+        Destination OME-Zarr v3 store path. Existing OME-Zarr sources are
+        reused in-place; all other sources are materialized as
+        ``data_store.ome.zarr`` next to ``experiment.yml``.
 
     Raises
     ------
@@ -3345,9 +3804,9 @@ def resolve_data_store_path(
         This helper does not raise custom exceptions.
     """
     source = Path(source_path).expanduser().resolve()
-    if _is_zarr_like_path(source):
+    if is_ome_zarr_path(source):
         return source
-    return (experiment.path.parent / "data_store.zarr").resolve()
+    return default_ome_store_path(experiment.path.parent)
 
 
 def materialize_experiment_data_store(
@@ -3510,7 +3969,10 @@ def materialize_experiment_data_store(
             _emit_progress(100, "Canonical data store is already complete")
             data_root = zarr.open_group(str(store_path), mode="r")
             data_chunks = tuple(
-                int(value) for value in (data_root["data"].chunks or normalized_chunks)
+                int(value)
+                for value in (
+                    data_root[SOURCE_CACHE_COMPONENT].chunks or normalized_chunks
+                )
             )
             return MaterializedDataStore(
                 source_path=source_resolved,
@@ -3528,7 +3990,7 @@ def materialize_experiment_data_store(
                     shape=canonical_shape,
                     dtype=source_dtype,
                     axes="TPCZYX",
-                    metadata={"component": "data"},
+                    metadata={"component": SOURCE_CACHE_COMPONENT},
                 ),
                 chunks_tpczyx=_normalize_write_chunks(
                     shape_tpczyx=canonical_shape,
@@ -3577,6 +4039,7 @@ def materialize_experiment_data_store(
                     component=component,
                     shape_tpczyx=canonical_shape,
                     z_batch_depth=source_aligned_z_batch_depth,
+                    target_chunks_tpczyx=normalized_chunks,
                     dtype_itemsize=int(source_dtype.itemsize),
                     client=write_client,
                     progress_callback=progress_callback,
@@ -3622,9 +4085,7 @@ def materialize_experiment_data_store(
                 chunks_tpczyx=normalized_chunks,
             )
 
-        should_stage_same_component = (
-            store_path == source_resolved and source_component == "data"
-        )
+        should_stage_same_component = False
         checkpoint_resume_supported = not should_stage_same_component
         root = zarr.open_group(str(store_path), mode="a")
         existing_progress_record = _read_ingestion_progress_record(root)
@@ -3638,7 +4099,7 @@ def materialize_experiment_data_store(
                 record=existing_progress_record,
                 source_path=source_resolved,
                 source_component=source_component,
-                target_component="data",
+                target_component=SOURCE_CACHE_COMPONENT,
                 canonical_shape_tpczyx=canonical_shape,
                 chunks_tpczyx=normalized_chunks,
                 level_factors_tpczyx=level_factors_tpczyx,
@@ -3647,7 +4108,7 @@ def materialize_experiment_data_store(
             )
             and _component_matches_shape_and_chunks(
                 root=root,
-                component="data",
+                component=SOURCE_CACHE_COMPONENT,
                 shape_tpczyx=canonical_shape,
                 chunks_tpczyx=normalized_chunks,
             )
@@ -3673,7 +4134,7 @@ def materialize_experiment_data_store(
             ingestion_record = _create_ingestion_progress_record(
                 source_path=source_resolved,
                 source_component=source_component,
-                target_component="data",
+                target_component=SOURCE_CACHE_COMPONENT,
                 canonical_shape_tpczyx=canonical_shape,
                 chunks_tpczyx=normalized_chunks,
                 level_factors_tpczyx=level_factors_tpczyx,
@@ -3786,7 +4247,7 @@ def materialize_experiment_data_store(
                 shape_tpczyx=canonical_shape,
             )
             _write_canonical_component(
-                component="data",
+                component=SOURCE_CACHE_COMPONENT,
                 progress_start=55,
                 progress_end=70,
                 progress_label="Writing canonical data",
@@ -3855,7 +4316,7 @@ def materialize_experiment_data_store(
         if use_source_aligned_plane_writes
         else "chunk_region_batches"
     )
-    root["data"].attrs.update(
+    root[SOURCE_CACHE_COMPONENT].attrs.update(
         {
             "source_path": source_metadata_path,
             "source_axes": source_axes_attr,
@@ -3879,31 +4340,51 @@ def materialize_experiment_data_store(
         }
     )
     if source_component is not None:
-        root["data"].attrs["source_component"] = source_component
-    root.attrs.update(
-        {
-            "source_data_path": source_metadata_path,
-            "source_data_axes": source_axes_attr,
-            "source_data_component": source_component,
-            "voxel_size_um_zyx": voxel_size_um_zyx,
-            "materialization_write_strategy": write_strategy,
-            "source_aligned_z_batch_depth": (
-                int(source_aligned_z_batch_depth)
-                if source_aligned_z_batch_depth is not None
-                else None
-            ),
-            "source_aligned_worker_count": (
-                int(source_aligned_worker_count)
-                if source_aligned_worker_count is not None
-                else None
-            ),
-            "source_aligned_worker_memory_limit_bytes": (
-                int(source_aligned_worker_memory_limit_bytes)
-                if source_aligned_worker_memory_limit_bytes is not None
-                else None
-            ),
-        }
+        root[SOURCE_CACHE_COMPONENT].attrs["source_component"] = source_component
+
+    stage_rows_payload = _load_multiposition_rows(experiment.save_directory)
+    stage_rows = (
+        [row for row in stage_rows_payload if isinstance(row, dict)]
+        if isinstance(stage_rows_payload, list)
+        else []
     )
+    spatial_calibration = load_store_spatial_calibration(store_path)
+    position_translations_zyx_um = compute_position_translations_zyx_um(
+        stage_rows if stage_rows else None,
+        spatial_calibration,
+        position_count=int(canonical_shape[1]),
+    )
+    update_store_metadata(
+        root,
+        source_data_path=source_metadata_path,
+        source_data_axes=source_axes_attr,
+        source_data_component=source_component,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        materialization_write_strategy=write_strategy,
+        source_aligned_z_batch_depth=(
+            int(source_aligned_z_batch_depth)
+            if source_aligned_z_batch_depth is not None
+            else None
+        ),
+        source_aligned_worker_count=(
+            int(source_aligned_worker_count)
+            if source_aligned_worker_count is not None
+            else None
+        ),
+        source_aligned_worker_memory_limit_bytes=(
+            int(source_aligned_worker_memory_limit_bytes)
+            if source_aligned_worker_memory_limit_bytes is not None
+            else None
+        ),
+        selected_channels=[
+            {"name": channel.name, "laser": channel.laser}
+            for channel in experiment.selected_channels
+        ],
+        stage_rows=stage_rows if stage_rows else None,
+        position_translations_zyx_um=position_translations_zyx_um,
+        spatial_calibration=spatial_calibration_to_dict(spatial_calibration),
+    )
+    publish_source_collection_from_cache(store_path)
 
     source_image_path = Path(source_metadata_path).expanduser()
     if not source_image_path.is_absolute():
@@ -3921,7 +4402,7 @@ def materialize_experiment_data_store(
         shape=canonical_shape,
         dtype=source_dtype,
         axes="TPCZYX",
-        metadata={"component": "data"},
+        metadata={"component": SOURCE_CACHE_COMPONENT},
     )
     _emit_progress(100, "Materialization complete")
     return MaterializedDataStore(
@@ -4346,6 +4827,7 @@ def _infer_multiposition_count(
     raw: Dict[str, Any],
     state: Dict[str, Any],
     save_directory: Path,
+    experiment_directory: Path,
 ) -> int:
     """Infer position count from sidecar metadata and experiment payload.
 
@@ -4357,6 +4839,8 @@ def _infer_multiposition_count(
         ``MicroscopeState`` mapping.
     save_directory : pathlib.Path
         Acquisition save directory.
+    experiment_directory : pathlib.Path
+        Directory containing ``experiment.yml`` and sidecar metadata.
 
     Returns
     -------
@@ -4367,9 +4851,15 @@ def _infer_multiposition_count(
 
     # Navigate records detailed position lists in the sidecar file.
     if is_multiposition:
-        rows = _load_multiposition_rows(save_directory=save_directory)
-        if rows is not None:
-            return max(1, len(rows))
+        seen: set[str] = set()
+        for directory in (save_directory, experiment_directory):
+            identity = _search_directory_identity(directory)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            rows = _load_multiposition_rows(save_directory=directory)
+            if rows is not None:
+                return max(1, len(rows))
 
     fallback = raw.get("MultiPositions", [])
     if isinstance(fallback, list) and fallback:
@@ -4650,6 +5140,7 @@ def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
         raw=raw,
         state=state,
         save_directory=save_directory,
+        experiment_directory=experiment_path.parent.resolve(),
     )
     microscope_name = (
         str(state.get("microscope_name"))
@@ -4912,7 +5403,7 @@ def resolve_experiment_data_path(
 
 
 def default_analysis_store_path(experiment: NavigateExperiment) -> Path:
-    """Return canonical 6D analysis Zarr store path for an experiment.
+    """Return canonical OME-Zarr analysis-store path for an experiment.
 
     Parameters
     ----------
@@ -4922,9 +5413,9 @@ def default_analysis_store_path(experiment: NavigateExperiment) -> Path:
     Returns
     -------
     pathlib.Path
-        Path to canonical analysis store (``analysis_6d.zarr``).
+        Path to canonical analysis store (``analysis.ome.zarr``).
     """
-    return experiment.save_directory / "analysis_6d.zarr"
+    return experiment.save_directory / "analysis.ome.zarr"
 
 
 def infer_zyx_shape(
@@ -4969,7 +5460,7 @@ def initialize_analysis_store(
     ] = ((1,), (1,), (1,), (1, 2, 4, 8), (1, 2, 4, 8), (1, 2, 4, 8)),
     dtype: Optional[str] = None,
 ) -> Path:
-    """Initialize canonical 6D analysis Zarr store for an experiment.
+    """Initialize canonical runtime-cache arrays within an OME-Zarr store.
 
     Parameters
     ----------
@@ -4994,7 +5485,7 @@ def initialize_analysis_store(
     Returns
     -------
     pathlib.Path
-        Resolved Zarr store path.
+        Resolved OME-Zarr store path.
 
     Raises
     ------
@@ -5079,15 +5570,17 @@ def initialize_analysis_store(
 
     root = zarr.open_group(str(output_path), mode="a")
     root.require_group("results")
-    root.require_group("provenance")
-    spatial_calibration_payload = spatial_calibration_to_dict(
-        spatial_calibration_from_dict(root.attrs.get(_SPATIAL_CALIBRATION_ATTR))
-    )
-    if "data" in root:
+    ensure_group(root, CLEAREX_ROOT_GROUP)
+    ensure_group(root, CLEAREX_RESULTS_GROUP)
+    ensure_group(root, CLEAREX_PROVENANCE_GROUP)
+    ensure_group(root, CLEAREX_RUNTIME_SOURCE_ROOT)
+
+    cache_root = ensure_group(root, CLEAREX_RUNTIME_SOURCE_ROOT)
+    if "data" in cache_root:
         if overwrite:
-            del root["data"]
+            del cache_root["data"]
         else:
-            existing = root["data"]
+            existing = cache_root["data"]
             existing_chunks = (
                 [int(chunk) for chunk in existing.chunks]
                 if existing.chunks is not None
@@ -5105,33 +5598,28 @@ def initialize_analysis_store(
                     "voxel_size_um_zyx": voxel_size_um_zyx,
                 }
             )
-            root.attrs.update(
-                {
-                    "schema": "clearex.analysis_store.v1",
-                    "axes": ["t", "p", "c", "z", "y", "x"],
-                    "source_experiment": str(experiment.path),
-                    "navigate_experiment": experiment.to_metadata_dict(),
-                    "storage_policy_analysis_outputs": "latest_only",
-                    "storage_policy_provenance": "append_only",
-                    _SPATIAL_CALIBRATION_ATTR: spatial_calibration_payload,
-                    "chunk_shape_tpczyx": existing_chunks,
-                    "configured_chunks_tpczyx": [
-                        int(chunk) for chunk in requested_chunks
-                    ],
-                    "resolution_pyramid_factors_tpczyx": pyramid_payload,
-                    "voxel_size_um_zyx": voxel_size_um_zyx,
-                }
+            update_store_metadata(
+                root,
+                source_experiment=str(experiment.path),
+                navigate_experiment=experiment.to_metadata_dict(),
+                storage_policy_analysis_outputs="latest_only",
+                storage_policy_provenance="append_only",
+                chunk_shape_tpczyx=existing_chunks,
+                configured_chunks_tpczyx=[int(chunk) for chunk in requested_chunks],
+                resolution_pyramid_factors_tpczyx=pyramid_payload,
+                voxel_size_um_zyx=voxel_size_um_zyx,
             )
             return output_path
 
-    root.create_dataset(
-        name="data",
+    cache_root.create_array(
+        "data",
         shape=shape,
         chunks=normalized_chunks,
         dtype=dtype,
         overwrite=True,
+        dimension_names=("t", "p", "c", "z", "y", "x"),
     )
-    root["data"].attrs.update(
+    cache_root["data"].attrs.update(
         {
             "axes": ["t", "p", "c", "z", "y", "x"],
             "storage_policy": "latest_only",
@@ -5139,22 +5627,24 @@ def initialize_analysis_store(
             "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
             "resolution_pyramid_factors_tpczyx": pyramid_payload,
             "voxel_size_um_zyx": voxel_size_um_zyx,
+            "pyramid_levels": _expected_pyramid_components(
+                _normalize_pyramid_level_factors(pyramid_factors)
+            ),
         }
     )
-    root.attrs.update(
-        {
-            "schema": "clearex.analysis_store.v1",
-            "axes": ["t", "p", "c", "z", "y", "x"],
-            "source_experiment": str(experiment.path),
-            "navigate_experiment": experiment.to_metadata_dict(),
-            "storage_policy_analysis_outputs": "latest_only",
-            "storage_policy_provenance": "append_only",
-            _SPATIAL_CALIBRATION_ATTR: spatial_calibration_payload,
-            "chunk_shape_tpczyx": [int(chunk) for chunk in normalized_chunks],
-            "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
-            "resolution_pyramid_factors_tpczyx": pyramid_payload,
-            "voxel_size_um_zyx": voxel_size_um_zyx,
-        }
+    update_store_metadata(
+        root,
+        source_experiment=str(experiment.path),
+        navigate_experiment=experiment.to_metadata_dict(),
+        storage_policy_analysis_outputs="latest_only",
+        storage_policy_provenance="append_only",
+        chunk_shape_tpczyx=[int(chunk) for chunk in normalized_chunks],
+        configured_chunks_tpczyx=[int(chunk) for chunk in requested_chunks],
+        resolution_pyramid_factors_tpczyx=pyramid_payload,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        spatial_calibration=spatial_calibration_to_dict(
+            load_namespaced_store_spatial_calibration(root)
+        ),
     )
     return output_path
 
@@ -5605,7 +6095,7 @@ def write_zyx_block(
         return da.to_zarr(
             block_6d,
             url=str(zarr_path),
-            component="data",
+            component=SOURCE_CACHE_COMPONENT,
             region=region,
             overwrite=False,
             compute=compute,
@@ -5613,7 +6103,7 @@ def write_zyx_block(
 
     if isinstance(block, np.ndarray):
         root = zarr.open_group(str(zarr_path), mode="a")
-        root["data"][region] = block[None, None, None, :, :, :]
+        root[SOURCE_CACHE_COMPONENT][region] = block[None, None, None, :, :, :]
         return None
 
     raise TypeError(

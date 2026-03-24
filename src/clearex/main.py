@@ -53,6 +53,16 @@ from clearex.io.experiment import (
 )
 from clearex.io.cli import create_parser, display_logo
 from clearex.io.log import initiate_logger
+from clearex.io.ome_store import (
+    LEGACY_STORE_MIGRATION_HINT,
+    SOURCE_CACHE_COMPONENT,
+    analysis_auxiliary_root,
+    analysis_cache_data_component,
+    is_legacy_clearex_store,
+    migrate_legacy_store,
+    public_analysis_root,
+    publish_analysis_collection_from_cache,
+)
 from clearex.io.provenance import (
     is_zarr_store_path,
     persist_run_provenance,
@@ -205,24 +215,32 @@ _ANALYSIS_OPERATIONS_WITH_PROVENANCE_DEDUP = frozenset(
         "particle_detection",
         "usegment3d",
         "registration",
-        "mip_export",
     }
 )
 _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "flatfield": (
-        "results/flatfield/latest/data",
-        "results/flatfield/latest/data_pyramid",
-        "results/flatfield/latest/flatfield_pcyx",
-        "results/flatfield/latest/darkfield_pcyx",
-        "results/flatfield/latest/baseline_pctz",
+        analysis_cache_data_component("flatfield"),
+        analysis_auxiliary_root("flatfield"),
     ),
-    "deconvolution": ("results/deconvolution/latest/data",),
-    "shear_transform": ("results/shear_transform/latest/data",),
-    "particle_detection": ("results/particle_detection/latest/detections",),
-    "usegment3d": ("results/usegment3d/latest/data",),
-    "registration": ("results/registration/latest/data",),
-    "display_pyramid": ("results/display_pyramid/latest",),
-    "mip_export": ("results/mip_export/latest",),
+    "deconvolution": (
+        analysis_cache_data_component("deconvolution"),
+        analysis_auxiliary_root("deconvolution"),
+    ),
+    "shear_transform": (
+        analysis_cache_data_component("shear_transform"),
+        analysis_auxiliary_root("shear_transform"),
+    ),
+    "particle_detection": (analysis_auxiliary_root("particle_detection"),),
+    "usegment3d": (
+        analysis_cache_data_component("usegment3d"),
+        analysis_auxiliary_root("usegment3d"),
+    ),
+    "registration": (
+        analysis_cache_data_component("registration"),
+        analysis_auxiliary_root("registration"),
+    ),
+    "display_pyramid": (analysis_auxiliary_root("display_pyramid"),),
+    "mip_export": (analysis_auxiliary_root("mip_export"),),
 }
 _DISTRIBUTED_TEARDOWN_NOISE_LOGGERS = ("distributed.batched",)
 
@@ -399,7 +417,7 @@ def _collect_available_analysis_components(
     set[str]
         Components known to exist in the current store.
     """
-    available_components = {"data"}
+    available_components = {"data", SOURCE_CACHE_COMPONENT}
     if not zarr_path or not is_zarr_store_path(zarr_path):
         return available_components
 
@@ -1329,8 +1347,8 @@ def _run_workflow(
                 )
                 _log_loaded_image(image_info, logger)
                 logger.info(
-                    "Materialized source data to Zarr store "
-                    f"{materialized.store_path} (component=data, "
+                    "Materialized source data to OME-Zarr store "
+                    f"{materialized.store_path} (component={SOURCE_CACHE_COMPONENT}, "
                     f"chunks_tpczyx={materialized.chunks_tpczyx}, "
                     "spatial_calibration="
                     f"{format_spatial_calibration(runtime_spatial_calibration)})."
@@ -1342,7 +1360,7 @@ def _run_workflow(
                             "source_path": str(materialized.source_path),
                             "source_component": materialized.source_component,
                             "store_path": str(materialized.store_path),
-                            "target_component": "data",
+                            "target_component": SOURCE_CACHE_COMPONENT,
                             "canonical_shape_tpczyx": list(
                                 materialized.data_image_info.shape
                             ),
@@ -1361,6 +1379,14 @@ def _run_workflow(
                     }
                 )
             else:
+                selected_input_path = Path(str(input_path)).expanduser().resolve()
+                if is_zarr_store_path(selected_input_path) and is_legacy_clearex_store(
+                    selected_input_path
+                ):
+                    raise ValueError(
+                        f"Legacy ClearEx store detected at {selected_input_path}. "
+                        f"{LEGACY_STORE_MIGRATION_HINT}"
+                    )
                 opener = ImageOpener()
                 _, info = opener.open(
                     input_path,
@@ -1487,7 +1513,7 @@ def _run_workflow(
             else None
         )
 
-        produced_components: Dict[str, str] = {"data": "data"}
+        produced_components: Dict[str, str] = {"data": SOURCE_CACHE_COMPONENT}
         total_operations = max(1, len(execution_sequence))
         try:
             if failure_exc is not None:
@@ -1672,6 +1698,10 @@ def _run_workflow(
                             client=analysis_client,
                             progress_callback=_flatfield_progress,
                         )
+                        publish_analysis_collection_from_cache(
+                            provenance_store_path,
+                            analysis_name="flatfield",
+                        )
                         flatfield_source_component = str(
                             getattr(
                                 summary,
@@ -1729,7 +1759,7 @@ def _run_workflow(
                         )
                     else:
                         logger.warning(
-                            "Flatfield correction requires a canonical Zarr/N5 data store."
+                            "Flatfield correction requires a canonical OME-Zarr store."
                         )
                         step_records.append(
                             {
@@ -1790,6 +1820,10 @@ def _run_workflow(
                             client=analysis_client,
                             progress_callback=_decon_progress,
                         )
+                        publish_analysis_collection_from_cache(
+                            provenance_store_path,
+                            analysis_name="deconvolution",
+                        )
                         produced_components["deconvolution"] = summary.data_component
                         output_records["deconvolution"] = {
                             "component": summary.component,
@@ -1826,7 +1860,7 @@ def _run_workflow(
                         )
                     else:
                         logger.warning(
-                            "Deconvolution requires a canonical Zarr/N5 data store."
+                            "Deconvolution requires a canonical OME-Zarr store."
                         )
                         step_records.append(
                             {
@@ -1886,6 +1920,10 @@ def _run_workflow(
                             parameters=shear_parameters,
                             client=analysis_client,
                             progress_callback=_shear_progress,
+                        )
+                        publish_analysis_collection_from_cache(
+                            provenance_store_path,
+                            analysis_name="shear_transform",
                         )
                         produced_components["shear_transform"] = summary.data_component
                         output_records["shear_transform"] = {
@@ -1947,7 +1985,7 @@ def _run_workflow(
                         )
                     else:
                         logger.warning(
-                            "Shear transform requires a canonical Zarr/N5 data store."
+                            "Shear transform requires a canonical OME-Zarr store."
                         )
                         step_records.append(
                             {
@@ -2039,7 +2077,7 @@ def _run_workflow(
                         )
                     else:
                         logger.warning(
-                            "Particle detection requires a canonical Zarr/N5 data store."
+                            "Particle detection requires a canonical OME-Zarr store."
                         )
                         step_records.append(
                             {
@@ -2098,14 +2136,22 @@ def _run_workflow(
                             client=analysis_client,
                             progress_callback=_usegment3d_progress,
                         )
+                        publish_analysis_collection_from_cache(
+                            provenance_store_path,
+                            analysis_name="usegment3d",
+                        )
                         usegment3d_component = str(
-                            getattr(summary, "component", "results/usegment3d/latest")
+                            getattr(
+                                summary,
+                                "component",
+                                public_analysis_root("usegment3d"),
+                            )
                         )
                         usegment3d_data_component = str(
                             getattr(
                                 summary,
                                 "data_component",
-                                f"{usegment3d_component}/data",
+                                analysis_cache_data_component("usegment3d"),
                             )
                         )
                         usegment3d_source_component = str(
@@ -2162,7 +2208,7 @@ def _run_workflow(
                         )
                     else:
                         logger.warning(
-                            "usegment3d requires a canonical Zarr/N5 data store."
+                            "usegment3d requires a canonical OME-Zarr store."
                         )
                         step_records.append(
                             {
@@ -2231,21 +2277,29 @@ def _run_workflow(
                             client=analysis_client,
                             progress_callback=_registration_progress,
                         )
+                        publish_analysis_collection_from_cache(
+                            provenance_store_path,
+                            analysis_name="registration",
+                        )
                         registration_component = str(
-                            getattr(summary, "component", "results/registration/latest")
+                            getattr(
+                                summary,
+                                "component",
+                                public_analysis_root("registration"),
+                            )
                         )
                         registration_data_component = str(
                             getattr(
                                 summary,
                                 "data_component",
-                                f"{registration_component}/data",
+                                analysis_cache_data_component("registration"),
                             )
                         )
                         registration_affines_component = str(
                             getattr(
                                 summary,
                                 "affines_component",
-                                f"{registration_component}/affines_tpx44",
+                                f"{analysis_auxiliary_root('registration')}/affines_tpx44",
                             )
                         )
                         registration_source_component = str(
@@ -2420,7 +2474,7 @@ def _run_workflow(
                         )
                     else:
                         logger.warning(
-                            "Registration requires a canonical Zarr/N5 data store."
+                            "Registration requires a canonical OME-Zarr store."
                         )
                         step_records.append(
                             {
@@ -2524,7 +2578,7 @@ def _run_workflow(
                         )
                     else:
                         logger.warning(
-                            "Display pyramid preparation requires a canonical Zarr/N5 "
+                            "Display pyramid preparation requires a canonical OME-Zarr "
                             "data store."
                         )
                         step_records.append(
@@ -2751,7 +2805,7 @@ def _run_workflow(
                             )
                     else:
                         logger.warning(
-                            "Visualization requires a canonical Zarr/N5 data store."
+                            "Visualization requires a canonical OME-Zarr store."
                         )
                         step_records.append(
                             {
@@ -2847,7 +2901,7 @@ def _run_workflow(
                         )
                     else:
                         logger.warning(
-                            "MIP export requires a canonical Zarr/N5 data store."
+                            "MIP export requires a canonical OME-Zarr store."
                         )
                         step_records.append(
                             {
@@ -3017,6 +3071,24 @@ def main() -> None:
     parser = create_parser()
     args = parser.parse_args()
     bootstrap_logger = _create_bootstrap_logger()
+
+    migrate_store_path = str(getattr(args, "migrate_store", "") or "").strip()
+    if migrate_store_path:
+        try:
+            migrated_path = migrate_legacy_store(
+                migrate_store_path,
+                output_path=getattr(args, "migrate_output", None),
+                overwrite=bool(getattr(args, "migrate_overwrite", False)),
+            )
+        except Exception as exc:
+            parser.error(f"Store migration failed: {exc}")
+            return
+        bootstrap_logger.info(
+            "Migrated legacy ClearEx store '%s' to '%s'.",
+            migrate_store_path,
+            migrated_path,
+        )
+        return
 
     try:
         workflow = _build_workflow_config(args)

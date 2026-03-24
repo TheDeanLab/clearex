@@ -8,9 +8,8 @@ For Navigate runs, ``experiment.yml``/``experiment.yaml`` is the first-class
 entrypoint. ``clearex.io.experiment`` parses:
 
 - save directory and declared file type,
-- timepoints/z steps/channels/positions,
-- camera dimensions,
-- pixel size metadata,
+- timepoints, z steps, channels, and positions,
+- camera dimensions and pixel-size metadata,
 - multiposition metadata (including ``multi_positions.yml`` and its
   ``X/Y/Z/F/THETA`` stage rows when available).
 
@@ -23,7 +22,7 @@ Source candidates are resolved from ordered search roots:
 2. ``Saving.save_directory``,
 3. directory containing ``experiment.yml``.
 
-File-type aliases are normalized (for example OME-TIFF/OME-ZARR aliases), and
+File-type aliases are normalized (for example OME-TIFF / OME-Zarr aliases), and
 TIFF discovery prefers primary stack files over MIP preview artifacts.
 
 Supported Source Inputs
@@ -33,8 +32,10 @@ Materialization supports:
 
 - TIFF/OME-TIFF,
 - H5/HDF5/HDF,
-- Zarr/N5 (including nested group layouts),
-- NumPy ``.npy`` and ``.npz``.
+- NumPy ``.npy`` and ``.npz``,
+- generic Zarr stores,
+- Navigate BDV N5 acquisitions routed through ``experiment.yml``,
+- canonical OME-Zarr stores.
 
 Special collection logic is implemented for:
 
@@ -42,78 +43,108 @@ Special collection logic is implemented for:
   dimensions),
 - Navigate BDV H5/N5 setup collections (mapped with companion XML metadata).
 
+Navigate BDV N5 sources are source-only and are not opened through Zarr APIs.
+ClearEx reads ``setup*/timepoint*/s0`` datasets through TensorStore so Dask
+ingestion remains parallelized on ``zarr>=3``. Standalone bare ``.n5`` runtime
+input remains unsupported in this phase; use ``experiment.yml`` materialization
+to convert the source into canonical ``*.ome.zarr``.
+If stale legacy ClearEx groups such as ``data`` or ``results`` exist inside the
+source ``.n5`` tree, they are ignored for source selection.
+
 Canonical Store Path Policy
 ---------------------------
 
 ``resolve_data_store_path`` follows this policy:
 
-- Source already Zarr/N5: reuse source store path in place.
-- Source not Zarr/N5: write canonical store to ``data_store.zarr`` beside
+- Existing canonical OME-Zarr store: reuse the ``*.ome.zarr`` path in place.
+- Non-canonical source input: materialize ``data_store.ome.zarr`` beside
   ``experiment.yml``.
+- Legacy ClearEx canonical stores (root ``data`` / ``data_pyramid`` layout):
+  migrate them first with ``clearex --migrate-store`` before treating them as a
+  canonical runtime input.
 
 Canonical Layout Contract
 -------------------------
 
-Base analysis data:
+Canonical ClearEx stores have two layers of structure:
 
-- component: ``data``
-- axis order: ``(t, p, c, z, y, x)``
+Public OME image contract
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pyramid levels:
+- Root source data is published as a synthetic single-well HCS collection:
+  ``A/1/<field>/<level>``.
+- Image-producing analyses publish sibling HCS collections under
+  ``results/<analysis>/latest``.
+- Each field image is ``TCZYX`` with OME multiscale metadata and coordinate
+  transforms.
 
-- ``data_pyramid/level_1``, ``data_pyramid/level_2``, ...
-- per-axis factors normalized from workflow save settings
+Internal ClearEx execution contract
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Store metadata captures source path/component/axes and effective write strategy
-for reproducibility.
+- Source runtime array:
+  ``clearex/runtime_cache/source/data``
+- Source internal pyramids:
+  ``clearex/runtime_cache/source/data_pyramid/level_<n>``
+- Image-analysis runtime outputs:
+  ``clearex/runtime_cache/results/<analysis>/latest/data``
+- Image-analysis runtime pyramids:
+  ``clearex/runtime_cache/results/<analysis>/latest/data_pyramid/level_<n>``
+- ClearEx-owned metadata and non-image artifacts:
+  ``clearex/metadata``, ``clearex/provenance``, ``clearex/gui_state``,
+  ``clearex/results/<analysis>/latest``
 
 Store-Level Spatial Calibration
 -------------------------------
 
-Canonical analysis stores also persist optional placement metadata for Navigate
-multiposition datasets in the root attr ``spatial_calibration``.
+Canonical analysis stores persist optional placement metadata for Navigate
+multiposition datasets in ``clearex/metadata["spatial_calibration"]``.
 
 - Schema payload is ``{schema, stage_axis_map_zyx, theta_mode}``.
 - Missing metadata resolves to the identity mapping
   ``z=+z,y=+y,x=+x``.
-- Calibration is metadata-only and does not rewrite canonical ``data``.
+- Calibration is metadata-only and does not rewrite source image payloads.
 - GUI setup writes the resolved mapping on ``Next`` for every prepared or
   reused store in the experiment list.
 - Headless ``--stage-axis-map`` writes an explicit override after
   materialization for ``experiment.yml`` inputs and before analysis for
-  existing Zarr/N5 stores.
-- Legacy stores without this attr are backfilled logically as identity, while
-  stores that already have a mapping keep it unless the operator explicitly
-  overrides it.
+  existing canonical OME-Zarr stores.
+- Legacy stores without this metadata are backfilled logically as identity
+  during migration, while stores that already have a mapping keep it unless the
+  operator explicitly overrides it.
 
 Materialization Lifecycle
 -------------------------
 
 ``materialize_experiment_data_store`` performs:
 
-1. source open + metadata extraction,
-2. axis coercion to canonical order,
+1. source open and metadata extraction,
+2. axis coercion to canonical ``(t, p, c, z, y, x)``,
 3. chunk normalization,
-4. canonical base data writes,
-5. pyramid level materialization,
-6. ingestion completion metadata update and store-metadata preservation.
+4. internal source-array writes to
+   ``clearex/runtime_cache/source/data``,
+5. internal source-pyramid materialization,
+6. stage-to-world translation computation from Navigate stage rows and spatial
+   calibration,
+7. publication of the root public OME HCS source collection,
+8. namespaced metadata update for reproducibility and resume checks.
 
-If a store is already complete for expected chunks/pyramid settings,
-materialization returns quickly without rewriting data.
+If a store is already complete for expected chunks and pyramid settings,
+materialization returns quickly without rewriting image data.
 
 Ingestion Progress and Resume
 -----------------------------
 
-Ingestion progress is tracked in store metadata and validated via:
+Ingestion progress is tracked in namespaced store metadata and validated via
+completion checks over the runtime-cache source component and public OME
+metadata.
 
-- ``has_canonical_data_component``
-- ``has_complete_canonical_data_store``
-
-Progress records include completion counters for base/pyramid regions. This
+Progress records include completion counters for base and pyramid regions. This
 enables robust completion checks and resume-aware writes for interrupted runs.
 
 Operational Rule for Downstream Analyses
 ----------------------------------------
 
-After canonical ``data`` is established, downstream analyses treat base source
-data as immutable and write derived outputs under ``results/<analysis>/latest``.
+After canonical source data is established, downstream analyses should resolve
+logical input aliases to internal runtime-cache components. New code should not
+treat root arrays or legacy ``results/.../data`` paths as the canonical public
+interface.
