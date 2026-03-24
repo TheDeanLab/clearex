@@ -94,11 +94,10 @@ def test_run_shear_transform_auto_estimate_updates_applied_shear(
         slab_thickness_z=5,
         z_offset=6,
     )
-    root.create_dataset(
+    root.create_array(
         name="data",
         data=source,
         chunks=(1, 1, 1, 16, 24, 14),
-        dtype="float32",
         overwrite=True,
     )
     root["data"].attrs["voxel_size_um_zyx"] = [1.0, 1.0, 1.0]
@@ -123,15 +122,58 @@ def test_run_shear_transform_auto_estimate_updates_applied_shear(
     assert np.isclose(observed_angle_deg, expected_angle_deg, atol=2.0)
 
 
+def test_run_shear_transform_inherits_voxel_size_from_source_chain(
+    tmp_path: Path,
+) -> None:
+    """Shear should resolve voxel size through ``source_component`` ancestry."""
+    store_path = tmp_path / "shear_voxel_chain.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    source = root.create_array(
+        name="clearex/runtime_cache/source/data",
+        data=np.arange(1 * 1 * 1 * 4 * 4 * 4, dtype=np.uint16).reshape(
+            (1, 1, 1, 4, 4, 4)
+        ),
+        chunks=(1, 1, 1, 2, 2, 2),
+        overwrite=True,
+    )
+    source.attrs["voxel_size_um_zyx"] = [5.0, 1.25, 1.25]
+    flatfield = root.create_array(
+        name="clearex/runtime_cache/results/flatfield/latest/data",
+        data=np.asarray(source, dtype=np.float32),
+        chunks=(1, 1, 1, 2, 2, 2),
+        overwrite=True,
+    )
+    flatfield.attrs["source_component"] = "clearex/runtime_cache/source/data"
+
+    summary = run_shear_transform_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "clearex/runtime_cache/results/flatfield/latest/data",
+            "interpolation": "nearestneighbor",
+            "output_dtype": "float32",
+            "roi_padding_zyx": [1, 1, 1],
+        },
+        client=None,
+    )
+
+    assert summary.voxel_size_um_zyx == (5.0, 1.25, 1.25)
+    attrs = dict(
+        zarr.open_group(str(store_path), mode="r")[summary.data_component].attrs
+    )
+    assert attrs["voxel_size_um_zyx"] == [5.0, 1.25, 1.25]
+    assert attrs["voxel_size_resolution_source"] == (
+        "component:clearex/runtime_cache/source/data"
+    )
+
+
 def test_run_shear_transform_identity_preserves_data(tmp_path: Path) -> None:
     store_path = tmp_path / "shear_identity.zarr"
     root = zarr.open_group(str(store_path), mode="w")
     data = np.arange(1 * 1 * 1 * 4 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 4, 4, 4))
-    root.create_dataset(
+    root.create_array(
         name="data",
         data=data,
         chunks=(1, 1, 1, 2, 2, 2),
-        dtype="uint16",
         overwrite=True,
     )
     root["data"].attrs["voxel_size_um_zyx"] = [1.0, 1.0, 1.0]
@@ -155,11 +197,9 @@ def test_run_shear_transform_identity_preserves_data(tmp_path: Path) -> None:
     )
 
     output = np.asarray(
-        zarr.open_group(str(store_path), mode="r")[
-            "results/shear_transform/latest/data"
-        ]
+        zarr.open_group(str(store_path), mode="r")[summary.data_component]
     )
-    assert summary.data_component == "results/shear_transform/latest/data"
+    assert summary.component == "results/shear_transform/latest"
     assert output.shape == data.shape
     np.testing.assert_array_equal(output, data)
 
@@ -171,11 +211,10 @@ def test_run_shear_transform_emits_larger_bounds_for_nonzero_shear(
     root = zarr.open_group(str(store_path), mode="w")
     data = np.zeros((1, 1, 1, 6, 6, 6), dtype=np.float32)
     data[0, 0, 0, 2:4, 2:4, 2:4] = 1.0
-    root.create_dataset(
+    root.create_array(
         name="data",
         data=data,
         chunks=(1, 1, 1, 3, 3, 3),
-        dtype="float32",
         overwrite=True,
     )
     root["data"].attrs["voxel_size_um_zyx"] = [2.0, 1.0, 1.0]
@@ -194,9 +233,7 @@ def test_run_shear_transform_emits_larger_bounds_for_nonzero_shear(
     )
 
     output = np.asarray(
-        zarr.open_group(str(store_path), mode="r")[
-            "results/shear_transform/latest/data"
-        ]
+        zarr.open_group(str(store_path), mode="r")[summary.data_component]
     )
     assert output.shape == summary.output_shape_tpczyx
     assert np.max(output) > 0.0
@@ -208,16 +245,15 @@ def test_run_shear_transform_linear_normalizes_edge_support(tmp_path: Path) -> N
     store_path = tmp_path / "shear_linear_support_normalization.zarr"
     root = zarr.open_group(str(store_path), mode="w")
     data = np.full((1, 1, 1, 16, 16, 16), 100.0, dtype=np.float32)
-    root.create_dataset(
+    root.create_array(
         name="data",
         data=data,
         chunks=(1, 1, 1, 8, 8, 8),
-        dtype="float32",
         overwrite=True,
     )
     root["data"].attrs["voxel_size_um_zyx"] = [1.0, 1.0, 1.0]
 
-    run_shear_transform_analysis(
+    summary = run_shear_transform_analysis(
         zarr_path=store_path,
         parameters={
             "input_source": "data",
@@ -231,9 +267,7 @@ def test_run_shear_transform_linear_normalizes_edge_support(tmp_path: Path) -> N
     )
 
     output = np.asarray(
-        zarr.open_group(str(store_path), mode="r")[
-            "results/shear_transform/latest/data"
-        ]
+        zarr.open_group(str(store_path), mode="r")[summary.data_component]
     )
     positive = output[output > 0.0]
     assert positive.size > 0
@@ -249,11 +283,10 @@ def test_run_shear_transform_identity_with_distributed_client(
     store_path = tmp_path / "shear_identity_distributed.zarr"
     root = zarr.open_group(str(store_path), mode="w")
     data = np.arange(1 * 1 * 1 * 4 * 4 * 4, dtype=np.uint16).reshape((1, 1, 1, 4, 4, 4))
-    root.create_dataset(
+    root.create_array(
         name="data",
         data=data,
         chunks=(1, 1, 1, 2, 2, 2),
-        dtype="uint16",
         overwrite=True,
     )
     root["data"].attrs["voxel_size_um_zyx"] = [1.0, 1.0, 1.0]
@@ -284,9 +317,7 @@ def test_run_shear_transform_identity_with_distributed_client(
             )
 
     output = np.asarray(
-        zarr.open_group(str(store_path), mode="r")[
-            "results/shear_transform/latest/data"
-        ]
+        zarr.open_group(str(store_path), mode="r")[summary.data_component]
     )
     assert output.shape == data.shape
     assert summary.output_shape_tpczyx == data.shape

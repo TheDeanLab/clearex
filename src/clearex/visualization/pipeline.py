@@ -51,7 +51,11 @@ import zarr
 
 # Local Imports
 from clearex.io.experiment import load_navigate_experiment
-from clearex.io.ome_store import analysis_auxiliary_root, load_store_metadata
+from clearex.io.ome_store import (
+    analysis_auxiliary_root,
+    load_store_metadata,
+    resolve_voxel_size_um_zyx_with_source,
+)
 from clearex.io.provenance import register_latest_output_reference
 from clearex.workflow import (
     SpatialCalibrationConfig,
@@ -488,6 +492,8 @@ def _extract_scale_tczyx_from_attrs(
     ----------
     root_attrs : mapping[str, Any]
         Root Zarr attributes.
+    store_metadata : mapping[str, Any], optional
+        ClearEx namespaced metadata attrs.
     source_attrs : mapping[str, Any]
         Source-array attributes.
 
@@ -630,6 +636,8 @@ def _parse_binning_xy(value: Any) -> tuple[float, float]:
 
 def _load_source_experiment_raw(
     root_attrs: Mapping[str, Any],
+    *,
+    store_metadata: Optional[Mapping[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Load source Navigate experiment raw metadata when available.
 
@@ -648,7 +656,11 @@ def _load_source_experiment_raw(
     None
         Failures are handled internally and return ``None``.
     """
-    source_experiment = root_attrs.get("source_experiment")
+    source_experiment = (
+        store_metadata.get("source_experiment")
+        if isinstance(store_metadata, Mapping)
+        else root_attrs.get("source_experiment")
+    )
     if not isinstance(source_experiment, str):
         return None
     text = source_experiment.strip()
@@ -868,15 +880,32 @@ def _build_napari_layer_payload(
     source_component = str(primary_layer.component)
     source_components = tuple(str(item) for item in primary_layer.source_components)
     root_attrs = dict(root.attrs)
+    store_metadata = load_store_metadata(root)
     source_array = root[str(source_component)]
     source_attrs = dict(source_array.attrs)
-    source_experiment_raw = _load_source_experiment_raw(root_attrs)
+    source_experiment_raw = _load_source_experiment_raw(
+        root_attrs,
+        store_metadata=store_metadata,
+    )
+    resolved_voxel_size_um_zyx, voxel_size_resolution_source = (
+        resolve_voxel_size_um_zyx_with_source(
+            root,
+            source_component=source_component,
+        )
+    )
     scale_tczyx = (
         _extract_scale_tczyx_from_attrs(
             root_attrs=root_attrs,
             source_attrs=source_attrs,
         )
         or _extract_scale_tczyx_from_navigate_raw(source_experiment_raw)
+        or (
+            1.0,
+            1.0,
+            float(resolved_voxel_size_um_zyx[0]),
+            float(resolved_voxel_size_um_zyx[1]),
+            float(resolved_voxel_size_um_zyx[2]),
+        )
         or (1.0, 1.0, 1.0, 1.0, 1.0)
     )
     multiscale_levels = _collect_multiscale_level_metadata(
@@ -890,6 +919,8 @@ def _build_napari_layer_payload(
         "store_path": str(Path(zarr_path).expanduser().resolve()),
         "axis_labels_tczyx": list(_AXIS_LABELS_TCZYX),
         "scale_tczyx": [float(value) for value in scale_tczyx],
+        "voxel_size_um_zyx": [float(value) for value in resolved_voxel_size_um_zyx],
+        "voxel_size_resolution_source": str(voxel_size_resolution_source),
         "source_component": str(source_component),
         "source_components": [str(item) for item in source_components],
         "volume_layers": volume_layers_payload,
@@ -3511,11 +3542,16 @@ def _launch_napari_viewer(
     scale = tuple(float(value) for value in scale_tczyx)
     scale_root: Optional[zarr.hierarchy.Group] = None
     scale_root_attrs: Dict[str, Any] = {}
-    scale_source_experiment_raw: Dict[str, Any] = {}
+    scale_store_metadata: Dict[str, Any] = {}
+    scale_source_experiment_raw: Optional[Dict[str, Any]] = None
     try:
         scale_root = zarr.open_group(str(zarr_path), mode="r")
         scale_root_attrs = dict(scale_root.attrs)
-        scale_source_experiment_raw = _load_source_experiment_raw(scale_root_attrs)
+        scale_store_metadata = load_store_metadata(scale_root)
+        scale_source_experiment_raw = _load_source_experiment_raw(
+            scale_root_attrs,
+            store_metadata=scale_store_metadata,
+        )
     except Exception:
         scale_root = None
     layer_scale_cache: dict[str, tuple[float, float, float, float, float]] = {}
@@ -3547,6 +3583,34 @@ def _launch_napari_viewer(
             root_attrs={},
             source_attrs=source_attrs,
         )
+        resolver_base_scale_hint: Optional[tuple[float, float, float, float, float]] = (
+            None
+        )
+        if resolved_scale is None:
+            resolved_voxel_size_um_zyx, voxel_resolution_source = (
+                resolve_voxel_size_um_zyx_with_source(
+                    scale_root,
+                    source_component=key,
+                )
+            )
+            if str(voxel_resolution_source) != "default":
+                resolver_scale = (
+                    float(scale[0]),
+                    float(scale[1]),
+                    float(resolved_voxel_size_um_zyx[0]),
+                    float(resolved_voxel_size_um_zyx[1]),
+                    float(resolved_voxel_size_um_zyx[2]),
+                )
+                resolution_source = str(voxel_resolution_source).strip().lower()
+                component_specific = resolution_source.startswith(
+                    "component:"
+                ) or resolution_source.startswith("component_navigate:")
+                if key == "data" or component_specific:
+                    resolved_scale = resolver_scale
+                else:
+                    # Root/store-level voxel metadata describes base spacing.
+                    # Non-base components still need shape-ratio upscaling.
+                    resolver_base_scale_hint = resolver_scale
         if resolved_scale is None and key == "data":
             resolved_scale = _extract_scale_tczyx_from_attrs(
                 root_attrs=scale_root_attrs,
@@ -3558,7 +3622,11 @@ def _launch_napari_viewer(
             )
 
         if resolved_scale is None:
-            base_scale = scale
+            base_scale = (
+                resolver_base_scale_hint
+                if resolver_base_scale_hint is not None
+                else scale
+            )
             base_shape: Optional[tuple[int, int, int, int, int, int]] = None
             try:
                 base_array = scale_root["data"]
@@ -3568,6 +3636,7 @@ def _launch_napari_viewer(
                         root_attrs=scale_root_attrs,
                         source_attrs=dict(base_array.attrs),
                     )
+                    or resolver_base_scale_hint
                     or _extract_scale_tczyx_from_navigate_raw(
                         scale_source_experiment_raw
                     )

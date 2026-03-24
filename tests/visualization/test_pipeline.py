@@ -552,9 +552,9 @@ def test_run_display_pyramid_analysis_rebuilds_legacy_component_layout(
     )
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    assert (
-        "results/shear_transform/latest/data_pyramid/level_1" in output_root
-    ), "Expected source-adjacent level_1 pyramid after migration."
+    assert "results/shear_transform/latest/data_pyramid/level_1" in output_root, (
+        "Expected source-adjacent level_1 pyramid after migration."
+    )
     source_attrs = dict(output_root["results/shear_transform/latest/data"].attrs)
     assert source_attrs["display_pyramid_levels"][1].startswith(
         "results/shear_transform/latest/data_pyramid/level_"
@@ -722,6 +722,96 @@ def test_run_visualization_analysis_prefers_voxel_size_um_attrs(
     )
 
     assert captured["scale_tczyx"] == (1.0, 1.0, 2.5, 3.5, 4.5)
+
+
+def test_run_visualization_analysis_resolves_scale_from_source_chain(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Visualization should recover scale from source-component ancestry."""
+    store_path = tmp_path / "analysis_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    source = root.create_dataset(
+        name="clearex/runtime_cache/source/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    source.attrs["voxel_size_um_zyx"] = [4.0, 1.5, 1.5]
+    flatfield = root.create_dataset(
+        name="clearex/runtime_cache/results/flatfield/latest/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="float32",
+        overwrite=True,
+    )
+    flatfield.attrs["source_component"] = "clearex/runtime_cache/source/data"
+    shear = root.create_dataset(
+        name="clearex/runtime_cache/results/shear_transform/latest/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="float32",
+        overwrite=True,
+    )
+    shear.attrs["source_component"] = (
+        "clearex/runtime_cache/results/flatfield/latest/data"
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_launch_napari_viewer(
+        *,
+        zarr_path,
+        volume_layers,
+        selected_positions,
+        points_by_position,
+        point_properties_by_position,
+        position_affines_tczyx,
+        axis_labels,
+        scale_tczyx,
+        image_metadata,
+        points_metadata,
+        require_gpu_rendering,
+        capture_keyframes,
+        keyframe_manifest_path,
+        keyframe_layer_overrides,
+    ) -> None:
+        del zarr_path
+        del volume_layers
+        del selected_positions
+        del points_by_position
+        del point_properties_by_position
+        del position_affines_tczyx
+        del axis_labels
+        del points_metadata
+        del require_gpu_rendering
+        del capture_keyframes
+        del keyframe_manifest_path
+        del keyframe_layer_overrides
+        captured["scale_tczyx"] = tuple(float(value) for value in scale_tczyx)
+        captured["image_metadata"] = dict(image_metadata)
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_launch_napari_viewer",
+        _fake_launch_napari_viewer,
+    )
+
+    run_visualization_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "clearex/runtime_cache/results/shear_transform/latest/data",
+            "launch_mode": "in_process",
+            "overlay_particle_detections": False,
+        },
+    )
+
+    assert captured["scale_tczyx"] == (1.0, 1.0, 4.0, 1.5, 1.5)
+    image_metadata = dict(captured["image_metadata"])
+    assert image_metadata["voxel_size_um_zyx"] == [4.0, 1.5, 1.5]
+    assert image_metadata["voxel_size_resolution_source"] == (
+        "component:clearex/runtime_cache/source/data"
+    )
 
 
 def test_run_visualization_analysis_show_all_positions_uses_stage_affines(

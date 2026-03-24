@@ -56,6 +56,7 @@ from clearex.io.ome_store import (
     analysis_cache_data_component,
     analysis_cache_root,
     public_analysis_root,
+    resolve_voxel_size_um_zyx_with_source,
 )
 from clearex.io.provenance import register_latest_output_reference
 
@@ -679,37 +680,11 @@ def _extract_voxel_size_um_zyx(
     -----
     Missing metadata falls back to isotropic ``(1.0, 1.0, 1.0)`` microns.
     """
-    root_attrs = dict(root.attrs)
-    source_attrs: dict[str, Any] = {}
-    try:
-        source_attrs = dict(root[source_component].attrs)
-    except Exception:
-        source_attrs = {}
-
-    for attrs in (source_attrs, root_attrs):
-        voxel = attrs.get("voxel_size_um_zyx")
-        if not isinstance(voxel, (tuple, list)) or len(voxel) < 3:
-            continue
-        z_um = float(voxel[0])
-        y_um = float(voxel[1])
-        x_um = float(voxel[2])
-        if z_um > 0 and y_um > 0 and x_um > 0:
-            return z_um, y_um, x_um
-
-    for attrs in (source_attrs, root_attrs):
-        navigate = attrs.get("navigate_experiment")
-        if not isinstance(navigate, dict):
-            continue
-        xy_value = navigate.get("xy_pixel_size_um")
-        z_value = navigate.get("z_step_um")
-        if xy_value is None or z_value is None:
-            continue
-        xy_um = float(xy_value)
-        z_um = float(z_value)
-        if xy_um > 0 and z_um > 0:
-            return z_um, xy_um, xy_um
-
-    return 1.0, 1.0, 1.0
+    voxel_size_um_zyx, _ = resolve_voxel_size_um_zyx_with_source(
+        root,
+        source_component=source_component,
+    )
+    return voxel_size_um_zyx
 
 
 def _rotation_matrix_xyz(*, deg_x: float, deg_y: float, deg_z: float) -> np.ndarray:
@@ -1207,9 +1182,11 @@ def run_shear_transform_analysis(
             f"Input component '{source_component}' is incompatible."
         )
 
-    voxel_size_um_zyx = _extract_voxel_size_um_zyx(
-        root=root,
-        source_component=source_component,
+    voxel_size_um_zyx, voxel_size_resolution_source = (
+        resolve_voxel_size_um_zyx_with_source(
+            root,
+            source_component=source_component,
+        )
     )
     if bool(normalized.get("auto_estimate_shear_yz", False)):
         _emit(3, "Estimating shear_yz_deg from x-extreme source slabs")
@@ -1223,7 +1200,7 @@ def run_shear_transform_analysis(
             normalized["shear_yz"] = float(np.tan(np.deg2rad(estimated_shear_yz_deg)))
             _emit(
                 4,
-                "Auto-estimated shear_yz_deg=" f"{float(estimated_shear_yz_deg):.3f}",
+                f"Auto-estimated shear_yz_deg={float(estimated_shear_yz_deg):.3f}",
             )
         else:
             _emit(4, "Auto-estimation failed; using configured shear parameters")
@@ -1282,6 +1259,7 @@ def run_shear_transform_analysis(
         {
             "axes": ["t", "p", "c", "z", "y", "x"],
             "voxel_size_um_zyx": [float(v) for v in voxel_size_um_zyx],
+            "voxel_size_resolution_source": str(voxel_size_resolution_source),
             "source_component": source_component,
             "output_origin_xyz_um": [float(v) for v in geometry.output_origin_xyz],
             "affine_matrix_xyz": geometry.matrix_xyz.tolist(),
@@ -1303,6 +1281,7 @@ def run_shear_transform_analysis(
             "output_chunks_tpczyx": [int(v) for v in output_chunks_tpczyx],
             "output_origin_xyz_um": [float(v) for v in geometry.output_origin_xyz],
             "voxel_size_um_zyx": [float(v) for v in voxel_size_um_zyx],
+            "voxel_size_resolution_source": str(voxel_size_resolution_source),
         }
     )
     root_w.require_group(auxiliary_root).attrs.update(dict(latest_group.attrs))
@@ -1433,6 +1412,7 @@ def run_shear_transform_analysis(
             "output_shape_tpczyx": [int(v) for v in output_shape_tpczyx],
             "output_chunks_tpczyx": [int(v) for v in output_chunks_tpczyx],
             "voxel_size_um_zyx": [float(v) for v in voxel_size_um_zyx],
+            "voxel_size_resolution_source": str(voxel_size_resolution_source),
             "output_origin_xyz_um": [float(v) for v in geometry.output_origin_xyz],
             "applied_shear": {
                 "xy": float(normalized["shear_xy"]),

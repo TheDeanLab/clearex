@@ -43,7 +43,10 @@ import tifffile
 import zarr
 
 # Local Imports
-from clearex.io.ome_store import analysis_auxiliary_root
+from clearex.io.ome_store import (
+    analysis_auxiliary_root,
+    resolve_voxel_size_um_zyx_with_source,
+)
 from clearex.io.provenance import register_latest_output_reference
 
 if TYPE_CHECKING:
@@ -284,37 +287,11 @@ def _extract_voxel_size_um_zyx(
         Voxel sizes in microns for ``(z, y, x)``. Falls back to ``(1, 1, 1)``
         when metadata is unavailable.
     """
-    root_attrs = dict(root.attrs)
-    source_attrs: dict[str, Any] = {}
-    try:
-        source_attrs = dict(root[source_component].attrs)
-    except Exception:
-        source_attrs = {}
-
-    for attrs in (source_attrs, root_attrs):
-        voxel = attrs.get("voxel_size_um_zyx")
-        if not isinstance(voxel, (tuple, list)) or len(voxel) < 3:
-            continue
-        z_um = float(voxel[0])
-        y_um = float(voxel[1])
-        x_um = float(voxel[2])
-        if z_um > 0 and y_um > 0 and x_um > 0:
-            return z_um, y_um, x_um
-
-    for attrs in (source_attrs, root_attrs):
-        navigate = attrs.get("navigate_experiment")
-        if not isinstance(navigate, dict):
-            continue
-        xy_value = navigate.get("xy_pixel_size_um")
-        z_value = navigate.get("z_step_um")
-        if xy_value is None or z_value is None:
-            continue
-        xy_um = float(xy_value)
-        z_um = float(z_value)
-        if xy_um > 0 and z_um > 0:
-            return z_um, xy_um, xy_um
-
-    return 1.0, 1.0, 1.0
+    voxel_size_um_zyx, _ = resolve_voxel_size_um_zyx_with_source(
+        root,
+        source_component=source_component,
+    )
+    return voxel_size_um_zyx
 
 
 def _projection_pixel_size_um(

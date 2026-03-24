@@ -115,6 +115,45 @@ def _create_registration_store(
     return store_path
 
 
+def test_extract_voxel_size_uses_source_component_chain(tmp_path: Path) -> None:
+    """Registration voxel-size lookup should follow ``source_component`` ancestry."""
+    store_path = tmp_path / "registration_voxel_chain.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    source = root.create_dataset(
+        name="clearex/runtime_cache/source/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    source.attrs["voxel_size_um_zyx"] = [6.0, 1.1, 1.1]
+    flatfield = root.create_dataset(
+        name="clearex/runtime_cache/results/flatfield/latest/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="float32",
+        overwrite=True,
+    )
+    flatfield.attrs["source_component"] = "clearex/runtime_cache/source/data"
+    shear = root.create_dataset(
+        name="clearex/runtime_cache/results/shear_transform/latest/data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="float32",
+        overwrite=True,
+    )
+    shear.attrs["source_component"] = (
+        "clearex/runtime_cache/results/flatfield/latest/data"
+    )
+
+    voxel = registration_pipeline._extract_voxel_size_um_zyx(
+        root,
+        "clearex/runtime_cache/results/shear_transform/latest/data",
+    )
+
+    assert voxel == (6.0, 1.1, 1.1)
+
+
 def test_build_edge_specs_only_keeps_overlapping_neighbors() -> None:
     nominal = {
         0: _translation_matrix(0.0),
@@ -621,10 +660,14 @@ class TestBlendWeightProfiles:
         shape = (8, 12, 10)
         overlap = (4, 6, 5)
         full_vol = registration_pipeline._blend_weight_volume(
-            shape, blend_mode="feather", overlap_zyx=overlap,
+            shape,
+            blend_mode="feather",
+            overlap_zyx=overlap,
         )
         pz, py, px = registration_pipeline._blend_weight_profiles(
-            shape, blend_mode="feather", overlap_zyx=overlap,
+            shape,
+            blend_mode="feather",
+            overlap_zyx=overlap,
         )
         reconstructed = (
             pz[:, np.newaxis, np.newaxis]
@@ -637,21 +680,30 @@ class TestBlendWeightProfiles:
         shape = (8, 12, 10)
         overlap = (4, 6, 5)
         full_vol = registration_pipeline._blend_weight_volume(
-            shape, blend_mode="feather", overlap_zyx=overlap,
+            shape,
+            blend_mode="feather",
+            overlap_zyx=overlap,
         )
         pz, py, px = registration_pipeline._blend_weight_profiles(
-            shape, blend_mode="feather", overlap_zyx=overlap,
+            shape,
+            blend_mode="feather",
+            overlap_zyx=overlap,
         )
         slices = (slice(2, 6), slice(3, 9), slice(1, 7))
         sub = registration_pipeline._blend_weight_subvolume_from_profiles(
-            pz, py, px, slices,
+            pz,
+            py,
+            px,
+            slices,
         )
         np.testing.assert_allclose(sub, full_vol[slices], atol=1e-7)
 
     def test_average_mode_profiles(self):
         shape = (4, 6, 8)
         pz, py, px = registration_pipeline._blend_weight_profiles(
-            shape, blend_mode="average", overlap_zyx=(2, 3, 4),
+            shape,
+            blend_mode="average",
+            overlap_zyx=(2, 3, 4),
         )
         np.testing.assert_array_equal(pz, np.ones(4, dtype=np.float32))
         np.testing.assert_array_equal(py, np.ones(6, dtype=np.float32))

@@ -60,6 +60,7 @@ from clearex.io.ome_store import (
     analysis_cache_data_component,
     analysis_cache_root,
     public_analysis_root,
+    resolve_voxel_size_um_zyx,
 )
 from clearex.io.provenance import register_latest_output_reference
 
@@ -978,10 +979,19 @@ def _copy_source_array_attrs(
     """
     source_attrs = dict(root[source_component].attrs)
     root_attrs = dict(root.attrs)
+    resolved_voxel_size_um_zyx = resolve_voxel_size_um_zyx(
+        root,
+        source_component=source_component,
+    )
     copied: dict[str, Any] = {
         "source_component": str(source_component),
         "chunk_shape_tpczyx": [int(v) for v in output_chunks],
         "pyramid_levels": [analysis_cache_data_component("flatfield")],
+        "voxel_size_um_zyx": [
+            float(resolved_voxel_size_um_zyx[0]),
+            float(resolved_voxel_size_um_zyx[1]),
+            float(resolved_voxel_size_um_zyx[2]),
+        ],
     }
     for key in (
         "scale_tpczyx",
@@ -2391,15 +2401,11 @@ def _fit_profile_tiled(
                 flatfield_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
-                ] += (
-                    flatfield_tile.astype(np.float64) * blend_weights_64
-                )
+                ] += flatfield_tile.astype(np.float64) * blend_weights_64
                 darkfield_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
-                ] += (
-                    darkfield_tile.astype(np.float64) * blend_weights_64
-                )
+                ] += darkfield_tile.astype(np.float64) * blend_weights_64
                 weight_sum[
                     y_read_start:y_read_stop,
                     x_read_start:x_read_stop,
@@ -3516,11 +3522,13 @@ def run_flatfield_analysis(
                     profile_key = (position_index, channel_index)
                     if profile_key in fallback_profile_keys:
                         return
-                    y_start, y_stop = int(tile_result.y_bounds[0]), int(
-                        tile_result.y_bounds[1]
+                    y_start, y_stop = (
+                        int(tile_result.y_bounds[0]),
+                        int(tile_result.y_bounds[1]),
                     )
-                    x_start, x_stop = int(tile_result.x_bounds[0]), int(
-                        tile_result.x_bounds[1]
+                    x_start, x_stop = (
+                        int(tile_result.x_bounds[0]),
+                        int(tile_result.x_bounds[1]),
                     )
                     profile_selection = (
                         slice(position_index, position_index + 1),

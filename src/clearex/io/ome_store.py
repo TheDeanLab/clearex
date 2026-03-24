@@ -35,6 +35,7 @@ import json
 import shutil
 
 import dask.array as da
+import numpy as np
 import zarr
 
 from ome_zarr_models.common.plate import Column, Row, WellInPlate
@@ -174,13 +175,204 @@ def load_store_metadata(path_or_root: str | Path | zarr.Group) -> dict[str, Any]
     root = (
         path_or_root
         if isinstance(path_or_root, zarr.Group)
-        else zarr.open_group(str(Path(path_or_root).expanduser().resolve()), mode="a")
+        else zarr.open_group(str(Path(path_or_root).expanduser().resolve()), mode="r")
     )
-    group = ensure_group(root, CLEAREX_METADATA_GROUP)
-    payload = dict(group.attrs)
+    try:
+        group = get_node(root, CLEAREX_METADATA_GROUP)
+        payload = dict(getattr(group, "attrs", {}))
+    except Exception:
+        payload = {}
     if payload:
         return payload
     return {"schema": STORE_METADATA_SCHEMA}
+
+
+def _coerce_positive_numeric_sequence(payload: Any) -> Optional[tuple[float, ...]]:
+    """Return a finite positive numeric tuple when possible."""
+    if not isinstance(payload, (list, tuple)):
+        return None
+    try:
+        parsed = tuple(float(value) for value in payload)
+    except Exception:
+        return None
+    if len(parsed) <= 0:
+        return None
+    if not all(np.isfinite(value) and value > 0 for value in parsed):
+        return None
+    return parsed
+
+
+def _coerce_voxel_size_um_zyx_from_attrs(
+    attrs: Mapping[str, Any],
+) -> Optional[tuple[float, float, float]]:
+    """Parse voxel size in ``(z, y, x)`` order from one attribute mapping."""
+    direct_keys = (
+        "voxel_size_um_zyx",
+        "voxel_size_zyx",
+        "pixel_size_zyx",
+        "physical_pixel_size_zyx",
+    )
+    tczyx_keys = ("scale_tczyx", "scale")
+    tpczyx_keys = (
+        "scale_tpczyx",
+        "physical_scale_tpczyx",
+        "voxel_size_tpczyx",
+        "pixel_size_tpczyx",
+        "physical_pixel_size_tpczyx",
+    )
+
+    for key in direct_keys:
+        if key not in attrs:
+            continue
+        parsed = _coerce_positive_numeric_sequence(attrs.get(key))
+        if parsed is None or len(parsed) < 3:
+            continue
+        return (float(parsed[0]), float(parsed[1]), float(parsed[2]))
+    for key in tczyx_keys:
+        if key not in attrs:
+            continue
+        parsed = _coerce_positive_numeric_sequence(attrs.get(key))
+        if parsed is None or len(parsed) < 5:
+            continue
+        return (float(parsed[2]), float(parsed[3]), float(parsed[4]))
+    for key in tpczyx_keys:
+        if key not in attrs:
+            continue
+        parsed = _coerce_positive_numeric_sequence(attrs.get(key))
+        if parsed is None or len(parsed) < 6:
+            continue
+        return (float(parsed[3]), float(parsed[4]), float(parsed[5]))
+    return None
+
+
+def _coerce_voxel_size_um_zyx_from_navigate_payload(
+    payload: Any,
+) -> Optional[tuple[float, float, float]]:
+    """Parse voxel size in ``(z, y, x)`` order from Navigate payload."""
+    if not isinstance(payload, Mapping):
+        return None
+    xy_value = payload.get("xy_pixel_size_um")
+    z_value = payload.get("z_step_um")
+    if xy_value is None or z_value is None:
+        return None
+    try:
+        xy_um = float(xy_value)
+        z_um = float(z_value)
+    except Exception:
+        return None
+    if not np.isfinite(xy_um) or not np.isfinite(z_um):
+        return None
+    if xy_um <= 0 or z_um <= 0:
+        return None
+    return (float(z_um), float(xy_um), float(xy_um))
+
+
+def _iter_component_attr_chain(
+    root: zarr.Group,
+    source_component: Optional[str],
+    *,
+    max_depth: int = 32,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return source-component attrs followed by ancestor component attrs."""
+    component = str(source_component or "").strip()
+    if not component:
+        return []
+
+    chain: list[tuple[str, dict[str, Any]]] = []
+    visited: set[str] = set()
+    for _ in range(max(1, int(max_depth))):
+        if not component or component in visited:
+            break
+        visited.add(component)
+        try:
+            node = get_node(root, component)
+            attrs = dict(getattr(node, "attrs", {}))
+        except Exception:
+            break
+        chain.append((component, attrs))
+        next_component = attrs.get("source_component")
+        if isinstance(next_component, str) and next_component.strip():
+            component = next_component.strip()
+            continue
+        break
+    return chain
+
+
+def resolve_voxel_size_um_zyx_with_source(
+    path_or_root: str | Path | zarr.Group,
+    *,
+    source_component: Optional[str] = None,
+) -> tuple[tuple[float, float, float], str]:
+    """Resolve voxel size metadata with provenance of the selected source.
+
+    Parameters
+    ----------
+    path_or_root : str or pathlib.Path or zarr.Group
+        Store path or opened root group.
+    source_component : str, optional
+        Preferred component for direct + source-chain metadata lookup.
+
+    Returns
+    -------
+    tuple[tuple[float, float, float], str]
+        Resolved voxel size in ``(z, y, x)`` order and a machine-readable
+        source label.
+    """
+    root = (
+        path_or_root
+        if isinstance(path_or_root, zarr.Group)
+        else zarr.open_group(str(Path(path_or_root).expanduser().resolve()), mode="r")
+    )
+    store_metadata = load_store_metadata(root)
+    root_attrs = dict(root.attrs)
+    component_chain = _iter_component_attr_chain(root, source_component)
+
+    for component, attrs in component_chain:
+        voxel = _coerce_voxel_size_um_zyx_from_attrs(attrs)
+        if voxel is not None:
+            return voxel, f"component:{component}"
+
+    metadata_voxel = _coerce_voxel_size_um_zyx_from_attrs(store_metadata)
+    if metadata_voxel is not None:
+        return metadata_voxel, "store_metadata"
+
+    root_voxel = _coerce_voxel_size_um_zyx_from_attrs(root_attrs)
+    if root_voxel is not None:
+        return root_voxel, "root_attrs"
+
+    for component, attrs in component_chain:
+        navigate_voxel = _coerce_voxel_size_um_zyx_from_navigate_payload(
+            attrs.get("navigate_experiment")
+        )
+        if navigate_voxel is not None:
+            return navigate_voxel, f"component_navigate:{component}"
+
+    metadata_navigate_voxel = _coerce_voxel_size_um_zyx_from_navigate_payload(
+        store_metadata.get("navigate_experiment")
+    )
+    if metadata_navigate_voxel is not None:
+        return metadata_navigate_voxel, "store_metadata_navigate"
+
+    root_navigate_voxel = _coerce_voxel_size_um_zyx_from_navigate_payload(
+        root_attrs.get("navigate_experiment")
+    )
+    if root_navigate_voxel is not None:
+        return root_navigate_voxel, "root_navigate"
+
+    return (1.0, 1.0, 1.0), "default"
+
+
+def resolve_voxel_size_um_zyx(
+    path_or_root: str | Path | zarr.Group,
+    *,
+    source_component: Optional[str] = None,
+) -> tuple[float, float, float]:
+    """Resolve voxel size in ``(z, y, x)`` order from store metadata."""
+    voxel, _ = resolve_voxel_size_um_zyx_with_source(
+        path_or_root,
+        source_component=source_component,
+    )
+    return voxel
 
 
 def update_store_metadata(
@@ -599,7 +791,12 @@ def publish_image_collection_from_cache(
 
     shape_tpczyx = tuple(int(value) for value in base_array.shape)
     position_count = max(1, int(shape_tpczyx[1]))
-    voxel_size_um_zyx = base_array.attrs.get("voxel_size_um_zyx")
+    voxel_size_um_zyx, voxel_size_resolution_source = (
+        resolve_voxel_size_um_zyx_with_source(
+            root,
+            source_component=cache_components[0],
+        )
+    )
     metadata = load_store_metadata(root)
     translations = metadata.get("position_translations_zyx_um")
     if not isinstance(translations, list):
@@ -635,6 +832,9 @@ def publish_image_collection_from_cache(
                 else (0.0, 0.0, 0.0)
             ),
             level_factors_tpczyx=level_factors,
+        )
+        image_group.attrs["voxel_size_resolution_source"] = str(
+            voxel_size_resolution_source
         )
         for level_index, level_array in enumerate(level_arrays):
             level_shape_tczyx = (
