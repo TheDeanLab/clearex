@@ -685,7 +685,9 @@ class ZarrReader(Reader):
             meta["ome_selected"] = True
             if prefer_dask:
                 darr = (
-                    da.from_zarr(array, chunks=chunks) if chunks else da.from_zarr(array)
+                    da.from_zarr(array, chunks=chunks)
+                    if chunks
+                    else da.from_zarr(array)
                 )
                 logger.info(f"Loaded public OME-Zarr array from {path.name}.")
                 info = ImageInfo(
