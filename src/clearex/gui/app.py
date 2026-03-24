@@ -146,6 +146,7 @@ try:
         QIcon,
         QImage,
         QImageReader,
+        QKeyEvent,
         QPixmap,
     )
     from PyQt6.QtWidgets import (
@@ -2068,6 +2069,54 @@ def _apply_experiment_overrides(
         f"{summary.get('metadata_keys', 'n/a')} | file_type={experiment.file_type}"
     )
     return out
+
+
+def _path_signature(path: Path) -> Optional[tuple[int, int]]:
+    """Return a lightweight `(mtime_ns, size)` signature for cache validation.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Path to stat.
+
+    Returns
+    -------
+    tuple[int, int], optional
+        Signature tuple when stat succeeds, otherwise ``None``.
+    """
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return None
+    return int(stat_result.st_mtime_ns), int(stat_result.st_size)
+
+
+@dataclass(frozen=True)
+class ExperimentMetadataCacheEntry:
+    """Cache one resolved setup metadata context for an experiment path.
+
+    Parameters
+    ----------
+    experiment : NavigateExperiment
+        Parsed experiment metadata.
+    source_data_path : pathlib.Path
+        Resolved acquisition source path.
+    image_info : ImageInfo
+        Source metadata summary loaded for the setup panel.
+    experiment_signature : tuple[int, int], optional
+        Cached signature of the experiment descriptor file.
+    source_signature : tuple[int, int], optional
+        Cached signature of the resolved source path.
+    override_directory : pathlib.Path, optional
+        Source-directory override active at cache creation time.
+    """
+
+    experiment: NavigateExperiment
+    source_data_path: Path
+    image_info: ImageInfo
+    experiment_signature: Optional[tuple[int, int]]
+    source_signature: Optional[tuple[int, int]]
+    override_directory: Optional[Path]
 
 
 @dataclass(frozen=True)
@@ -4876,6 +4925,9 @@ if HAS_PYQT6:
             self._experiment_list_file_path: Optional[Path] = None
             self._experiment_list_dirty = False
             self._source_data_directory_overrides: Dict[Path, Path] = {}
+            self._experiment_metadata_cache: Dict[Path, ExperimentMetadataCacheEntry] = (
+                {}
+            )
             self._spatial_calibration_drafts: Dict[Path, SpatialCalibrationConfig] = {}
             self._current_spatial_calibration: SpatialCalibrationConfig = (
                 initial.spatial_calibration
@@ -5774,6 +5826,128 @@ if HAS_PYQT6:
                     experiment_paths.append(path)
             return experiment_paths
 
+        def _prune_experiment_metadata_cache(self, valid_paths: Sequence[Path]) -> None:
+            """Drop cached metadata entries no longer present in the list.
+
+            Parameters
+            ----------
+            valid_paths : sequence[pathlib.Path]
+                Experiment paths that should remain cache-eligible.
+
+            Returns
+            -------
+            None
+                Cache is pruned in-place.
+            """
+            keep = {Path(path).expanduser().resolve() for path in valid_paths}
+            for cached_path in list(self._experiment_metadata_cache):
+                if cached_path not in keep:
+                    self._experiment_metadata_cache.pop(cached_path, None)
+
+        def _invalidate_experiment_metadata_cache_entry(
+            self,
+            experiment_path: Path,
+        ) -> None:
+            """Invalidate one cached experiment metadata entry.
+
+            Parameters
+            ----------
+            experiment_path : pathlib.Path
+                Experiment path whose cache entry should be removed.
+
+            Returns
+            -------
+            None
+                Cache is updated in-place.
+            """
+            resolved_path = Path(experiment_path).expanduser().resolve()
+            self._experiment_metadata_cache.pop(resolved_path, None)
+
+        def _cached_experiment_metadata_context(
+            self,
+            experiment_path: Path,
+        ) -> Optional[tuple[Path, NavigateExperiment, Path, ImageInfo]]:
+            """Return a valid cached metadata context when available.
+
+            Parameters
+            ----------
+            experiment_path : pathlib.Path
+                Experiment descriptor path to resolve.
+
+            Returns
+            -------
+            tuple[pathlib.Path, NavigateExperiment, pathlib.Path, ImageInfo], optional
+                Cached context tuple when signatures and overrides still match.
+            """
+            resolved_experiment_path = Path(experiment_path).expanduser().resolve()
+            entry = self._experiment_metadata_cache.get(resolved_experiment_path)
+            if entry is None:
+                return None
+
+            current_override = self._source_data_directory_overrides.get(
+                resolved_experiment_path
+            )
+            if current_override != entry.override_directory:
+                self._experiment_metadata_cache.pop(resolved_experiment_path, None)
+                return None
+
+            if _path_signature(resolved_experiment_path) != entry.experiment_signature:
+                self._experiment_metadata_cache.pop(resolved_experiment_path, None)
+                return None
+
+            resolved_source_path = Path(entry.source_data_path).expanduser().resolve()
+            if _path_signature(resolved_source_path) != entry.source_signature:
+                self._experiment_metadata_cache.pop(resolved_experiment_path, None)
+                return None
+
+            return (
+                resolved_experiment_path,
+                entry.experiment,
+                resolved_source_path,
+                entry.image_info,
+            )
+
+        def _store_experiment_metadata_context(
+            self,
+            *,
+            experiment_path: Path,
+            experiment: NavigateExperiment,
+            source_data_path: Path,
+            info: ImageInfo,
+        ) -> None:
+            """Store one resolved metadata context in the in-memory cache.
+
+            Parameters
+            ----------
+            experiment_path : pathlib.Path
+                Experiment descriptor path.
+            experiment : NavigateExperiment
+                Parsed experiment metadata.
+            source_data_path : pathlib.Path
+                Resolved source path for the experiment.
+            info : ImageInfo
+                Source metadata summary.
+
+            Returns
+            -------
+            None
+                Cache is updated in-place.
+            """
+            resolved_experiment_path = Path(experiment_path).expanduser().resolve()
+            resolved_source_path = Path(source_data_path).expanduser().resolve()
+            self._experiment_metadata_cache[resolved_experiment_path] = (
+                ExperimentMetadataCacheEntry(
+                    experiment=experiment,
+                    source_data_path=resolved_source_path,
+                    image_info=info,
+                    experiment_signature=_path_signature(resolved_experiment_path),
+                    source_signature=_path_signature(resolved_source_path),
+                    override_directory=self._source_data_directory_overrides.get(
+                        resolved_experiment_path
+                    ),
+                )
+            )
+
         def _current_selected_experiment_path(self) -> Optional[Path]:
             """Return the current experiment selection path.
 
@@ -5810,6 +5984,7 @@ if HAS_PYQT6:
                 Widget state is updated in-place.
             """
             normalized_paths = _deduplicate_resolved_paths(experiment_paths)
+            self._prune_experiment_metadata_cache(normalized_paths)
             prior_block_state = self._experiment_list.blockSignals(True)
             self._experiment_list.clear()
             for experiment_path in normalized_paths:
@@ -6003,7 +6178,7 @@ if HAS_PYQT6:
             self._loaded_target_store_path = None
 
         def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-            """Handle drag/drop events routed through the experiment list.
+            """Handle list keyboard removal and drag/drop routed through the list.
 
             Parameters
             ----------
@@ -6019,6 +6194,15 @@ if HAS_PYQT6:
                 event filter result.
             """
             if watched in {self._experiment_list, self._experiment_list.viewport()}:
+                if (
+                    watched is self._experiment_list
+                    and isinstance(event, QKeyEvent)
+                    and event.type() == QEvent.Type.KeyPress
+                    and event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}
+                ):
+                    self._on_remove_selected_experiments()
+                    event.accept()
+                    return True
                 if isinstance(event, QDragEnterEvent):
                     if self._can_accept_experiment_drop(event.mimeData()):
                         event.acceptProposedAction()
@@ -6342,6 +6526,7 @@ if HAS_PYQT6:
 
             for removed_path in selected_paths:
                 self._source_data_directory_overrides.pop(removed_path, None)
+                self._invalidate_experiment_metadata_cache_entry(removed_path)
             if (
                 self._experiment_list_file_path is not None
                 and remaining_paths != self._experiment_list_paths()
@@ -6543,9 +6728,25 @@ if HAS_PYQT6:
                 return
 
             try:
-                loaded_path, experiment, source_data_path, info = (
-                    self._load_experiment_context(path=resolved_experiment_path)
+                cached_context = (
+                    None
+                    if force_reload
+                    else self._cached_experiment_metadata_context(
+                        resolved_experiment_path
+                    )
                 )
+                if cached_context is None:
+                    loaded_path, experiment, source_data_path, info = (
+                        self._load_experiment_context(path=resolved_experiment_path)
+                    )
+                    self._store_experiment_metadata_context(
+                        experiment_path=loaded_path,
+                        experiment=experiment,
+                        source_data_path=source_data_path,
+                        info=info,
+                    )
+                else:
+                    loaded_path, experiment, source_data_path, info = cached_context
             except Exception as exc:
                 logging.getLogger(__name__).exception(
                     "Failed to load experiment metadata from %s.",
@@ -6649,6 +6850,7 @@ if HAS_PYQT6:
                 self._source_data_directory_overrides[
                     experiment.path.expanduser().resolve()
                 ] = override_directory
+                self._invalidate_experiment_metadata_cache_entry(experiment.path)
                 return source_data_path
 
         def _load_experiment_context(
@@ -6715,11 +6917,17 @@ if HAS_PYQT6:
                 experiment = self._loaded_experiment
                 source_data_path = self._loaded_source_data_path
             else:
-                _loaded_path, experiment, source_data_path = (
-                    self._resolve_experiment_source_context(
-                        path=resolved_experiment_path
-                    )
+                cached_context = self._cached_experiment_metadata_context(
+                    resolved_experiment_path
                 )
+                if cached_context is not None:
+                    _loaded_path, experiment, source_data_path, _info = cached_context
+                else:
+                    _loaded_path, experiment, source_data_path = (
+                        self._resolve_experiment_source_context(
+                            path=resolved_experiment_path
+                        )
+                    )
             target_store = resolve_data_store_path(experiment, source_data_path)
             return ExperimentStorePreparationRequest(
                 experiment_path=resolved_experiment_path,

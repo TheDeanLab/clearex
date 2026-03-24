@@ -39,6 +39,7 @@ import zarr
 
 # Local Imports
 import clearex.io.experiment as experiment_module
+import clearex.io.read as read_module
 from clearex.io.experiment import (
     default_analysis_store_path,
     find_experiment_data_candidates,
@@ -1455,6 +1456,48 @@ def test_load_navigate_experiment_source_image_info_summarizes_bdv_n5(
     assert info.metadata["channels"] == 2
 
 
+def test_load_navigate_experiment_source_image_info_reads_tiff_header_only(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="TIFF",
+        is_multiposition=False,
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.tiff"
+    expected = np.arange(2 * 3 * 4, dtype=np.uint16).reshape((2, 3, 4))
+    tifffile.imwrite(
+        str(source_path),
+        expected,
+        metadata={"axes": "ZYX", "spacing": 0.2, "unit": "um"},
+    )
+
+    class _FailingOpener:
+        def open(self, *args, **kwargs):
+            raise AssertionError("ImageOpener.open should not be used for TIFF.")
+
+    info = load_navigate_experiment_source_image_info(
+        experiment=experiment,
+        source_path=source_path,
+        opener=_FailingOpener(),
+    )
+
+    assert info.path == source_path.resolve()
+    assert info.shape == expected.shape
+    assert info.dtype == np.dtype(np.uint16)
+    assert info.axes == "ZYX"
+    assert info.metadata is not None
+    assert int(info.metadata["tiff_page_count"]) >= 1
+    assert "ImageDescription" in info.metadata
+    assert info.metadata["axes"] == "ZYX"
+    assert info.metadata["spacing"] == 0.2
+    assert info.metadata["unit"] == "um"
+
+
 def test_open_source_as_dask_rejects_standalone_n5_source(tmp_path: Path) -> None:
     source_path = tmp_path / "standalone.n5"
     _write_real_n5_dataset(
@@ -1469,6 +1512,31 @@ def test_open_source_as_dask_rejects_standalone_n5_source(tmp_path: Path) -> Non
             source_path,
             exit_stack=exit_stack,
         )
+
+
+def test_open_source_as_dask_tiff_falls_back_when_store_is_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source.tiff"
+    expected = np.arange(2 * 3 * 4, dtype=np.uint16).reshape((2, 3, 4))
+    tifffile.imwrite(str(source_path), expected, metadata={"axes": "ZYX"})
+
+    def _raise_unsupported_store(*_args, **_kwargs):
+        raise TypeError("Unsupported type for store_like: 'ZarrTiffStore'")
+
+    monkeypatch.setattr(read_module.da, "from_zarr", _raise_unsupported_store)
+
+    with ExitStack() as exit_stack:
+        source_array, source_axes, source_meta = experiment_module._open_source_as_dask(
+            source_path,
+            exit_stack=exit_stack,
+        )
+
+    assert isinstance(source_array, da.Array)
+    assert tuple(source_array.shape) == expected.shape
+    assert np.array_equal(source_array.compute(), expected)
+    assert tuple(source_axes or ()) == ("z", "y", "x")
+    assert source_meta["source_path"] == str(source_path)
 
 
 def test_materialize_experiment_data_store_stacks_bdv_ome_zarr_setups(

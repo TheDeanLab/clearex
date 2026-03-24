@@ -51,6 +51,27 @@ to convert the source into canonical ``*.ome.zarr``.
 If stale legacy ClearEx groups such as ``data`` or ``results`` exist inside the
 source ``.n5`` tree, they are ignored for source selection.
 
+Materialization Execution Model
+-------------------------------
+
+Pressing ``Next`` in the setup flow starts
+``materialize_experiment_data_store(...)`` and enters the Dask-backed ingestion
+path. Setup metadata selection itself does not materialize TIFF payloads.
+
+Current execution behavior is format-dependent:
+
+- TIFF/OME-TIFF, HDF5, ``.npy``, and ``.npz`` sources are opened as lazy Dask
+  arrays and written in bounded parallel batches, but the write graph currently
+  executes through Dask's local threaded scheduler.
+- Generic Zarr and canonical OME-Zarr sources can use the active distributed
+  Dask ``Client`` for canonical writes.
+- Navigate BDV ``.n5`` sources remain Dask-parallel through TensorStore-backed
+  reads and the active client path.
+
+This distinction is intentional in the current implementation because some
+file-backed graphs, especially TIFF/HDF-backed graphs with locks or
+non-serializable handles, do not reliably serialize to distributed workers.
+
 Canonical Store Path Policy
 ---------------------------
 
