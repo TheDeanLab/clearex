@@ -5022,8 +5022,21 @@ if HAS_PYQT6:
                 Widgets are created and connected in-place.
             """
             outer_root = QVBoxLayout(self)
-            outer_root.setContentsMargins(0, 0, 0, 0)
-            outer_root.setSpacing(0)
+            apply_window_root_spacing(outer_root)
+
+            header = QFrame()
+            header.setObjectName("headerCard")
+            header_layout = QVBoxLayout(header)
+            apply_stack_spacing(header_layout)
+            header_image = _create_scaled_branding_label(
+                filename=_GUI_HEADER_IMAGE,
+                max_width=840,
+                max_height=120,
+                object_name="brandHeaderImage",
+            )
+            if header_image is not None:
+                header_layout.addWidget(header_image)
+            outer_root.addWidget(header)
 
             content_scroll = QScrollArea(self)
             content_scroll.setObjectName("setupDialogScroll")
@@ -5039,21 +5052,7 @@ if HAS_PYQT6:
             content_scroll.setWidget(content_widget)
 
             root = QVBoxLayout(content_widget)
-            apply_window_root_spacing(root)
-
-            header = QFrame()
-            header.setObjectName("headerCard")
-            header_layout = QVBoxLayout(header)
-            apply_stack_spacing(header_layout)
-            header_image = _create_scaled_branding_label(
-                filename=_GUI_HEADER_IMAGE,
-                max_width=840,
-                max_height=150,
-                object_name="brandHeaderImage",
-            )
-            if header_image is not None:
-                header_layout.addWidget(header_image)
-            root.addWidget(header)
+            apply_stack_spacing(root)
 
             data_group = QGroupBox("Navigate Experiment")
             data_layout = QVBoxLayout(data_group)
@@ -5167,8 +5166,8 @@ if HAS_PYQT6:
             root.addWidget(metadata_group)
 
             zarr_group = QGroupBox("Zarr Save Config")
-            zarr_layout = QVBoxLayout(zarr_group)
-            apply_stack_spacing(zarr_layout)
+            zarr_layout = QGridLayout(zarr_group)
+            apply_dialog_grid_spacing(zarr_layout)
             zarr_layout.setContentsMargins(10, 8, 10, 10)
             self._zarr_config_summary = QLabel("n/a")
             self._zarr_config_summary.setObjectName("zarrConfigSummary")
@@ -5176,18 +5175,29 @@ if HAS_PYQT6:
             self._zarr_config_summary.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            zarr_layout.addWidget(self._zarr_config_summary)
-            zarr_button_row = QHBoxLayout()
-            apply_row_spacing(zarr_button_row)
-            zarr_button_row.addStretch(1)
             self._zarr_config_button = QPushButton("Edit Zarr Settings")
-            zarr_button_row.addWidget(self._zarr_config_button)
-            zarr_layout.addLayout(zarr_button_row)
+            self._zarr_config_button.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Fixed,
+            )
+            zarr_layout.addWidget(
+                self._zarr_config_summary,
+                0,
+                0,
+                alignment=Qt.AlignmentFlag.AlignTop,
+            )
+            zarr_layout.addWidget(
+                self._zarr_config_button,
+                0,
+                1,
+                alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+            )
+            zarr_layout.setColumnStretch(0, 1)
             root.addWidget(zarr_group)
 
             spatial_group = QGroupBox("Spatial Calibration")
-            spatial_layout = QVBoxLayout(spatial_group)
-            apply_stack_spacing(spatial_layout)
+            spatial_layout = QGridLayout(spatial_group)
+            apply_dialog_grid_spacing(spatial_layout)
             spatial_layout.setContentsMargins(10, 8, 10, 10)
             self._spatial_calibration_summary = QLabel("n/a")
             self._spatial_calibration_summary.setObjectName("metadataFieldValue")
@@ -5195,18 +5205,29 @@ if HAS_PYQT6:
             self._spatial_calibration_summary.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            spatial_layout.addWidget(self._spatial_calibration_summary)
-            spatial_button_row = QHBoxLayout()
-            apply_row_spacing(spatial_button_row)
-            spatial_button_row.addStretch(1)
             self._spatial_calibration_button = QPushButton("Edit Spatial Calibration")
-            spatial_button_row.addWidget(self._spatial_calibration_button)
-            spatial_layout.addLayout(spatial_button_row)
+            self._spatial_calibration_button.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Fixed,
+            )
+            spatial_layout.addWidget(
+                self._spatial_calibration_summary,
+                0,
+                0,
+                alignment=Qt.AlignmentFlag.AlignTop,
+            )
+            spatial_layout.addWidget(
+                self._spatial_calibration_button,
+                0,
+                1,
+                alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+            )
+            spatial_layout.setColumnStretch(0, 1)
             root.addWidget(spatial_group)
 
             dask_backend_group = QGroupBox("Dask Backend")
-            dask_backend_layout = QVBoxLayout(dask_backend_group)
-            apply_stack_spacing(dask_backend_layout)
+            dask_backend_layout = QGridLayout(dask_backend_group)
+            apply_dialog_grid_spacing(dask_backend_layout)
             dask_backend_layout.setContentsMargins(10, 8, 10, 10)
             self._dask_backend_summary = QLabel("n/a")
             self._dask_backend_summary.setObjectName("metadataFieldValue")
@@ -5214,14 +5235,35 @@ if HAS_PYQT6:
             self._dask_backend_summary.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            dask_backend_layout.addWidget(self._dask_backend_summary)
-            dask_backend_button_row = QHBoxLayout()
-            apply_row_spacing(dask_backend_button_row)
-            dask_backend_button_row.addStretch(1)
             self._dask_backend_button = QPushButton("Edit Dask Backend")
-            dask_backend_button_row.addWidget(self._dask_backend_button)
-            dask_backend_layout.addLayout(dask_backend_button_row)
+            self._dask_backend_button.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Fixed,
+            )
+            dask_backend_layout.addWidget(
+                self._dask_backend_summary,
+                0,
+                0,
+                alignment=Qt.AlignmentFlag.AlignTop,
+            )
+            dask_backend_layout.addWidget(
+                self._dask_backend_button,
+                0,
+                1,
+                alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+            )
+            dask_backend_layout.setColumnStretch(0, 1)
             root.addWidget(dask_backend_group)
+
+            footer_frame = QFrame()
+            footer_frame.setObjectName("setupFooterCard")
+            footer_frame.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Fixed,
+            )
+            footer_root = QVBoxLayout(footer_frame)
+            footer_root.setContentsMargins(0, 0, 0, 0)
+            footer_root.setSpacing(0)
 
             footer = QHBoxLayout()
             apply_footer_row_spacing(footer)
@@ -5229,6 +5271,7 @@ if HAS_PYQT6:
             apply_help_stack_spacing(footer_status)
             self._status_label = QLabel("Ready")
             self._status_label.setObjectName("statusLabel")
+            self._status_label.setWordWrap(True)
             footer_status.addWidget(self._status_label)
             self._rebuild_store_checkbox = QCheckBox("Rebuild Canonical Store")
             self._rebuild_store_checkbox.setObjectName("statusLabel")
@@ -5243,7 +5286,8 @@ if HAS_PYQT6:
             footer.addLayout(footer_status, 1)
             footer.addWidget(self._cancel_button)
             footer.addWidget(self._next_button)
-            root.addLayout(footer)
+            footer_root.addLayout(footer)
+            outer_root.addWidget(footer_frame)
 
             self._load_experiment_button.clicked.connect(self._on_load_experiment)
             self._create_experiment_list_button.clicked.connect(
@@ -5824,12 +5868,13 @@ if HAS_PYQT6:
                     state_suffix = " (modified)" if self._experiment_list_dirty else ""
                     source_text = f"{self._experiment_list_file_path}{state_suffix}"
                 text = (
-                    f"{count} {item_text} loaded. "
-                    f"Current: {current_text}. "
+                    f"{count} {item_text} loaded. \n"
+                    f"Current: {current_text}. \n"
                     f"List source: {source_text}."
                 )
             self._experiment_list_status_label.setText(text)
             self._experiment_list_status_label.setToolTip(text)
+            self._experiment_list_status_label.setWordWrap(True)
 
         def _reset_metadata_labels(self) -> None:
             """Reset metadata display labels to their empty state.
@@ -6854,7 +6899,7 @@ if HAS_PYQT6:
                 experiment_path=loaded_path,
                 target_store=self._loaded_target_store_path,
             )
-            self._set_status(f"Metadata loaded. Target store: {target_store}")
+            self._set_status(f"Metadata loaded. \nTarget store: {target_store}")
 
         def _prompt_for_source_data_directory(
             self,
@@ -8093,6 +8138,7 @@ if HAS_PYQT6:
 
             self._operation_panel_stack: Optional[QStackedWidget] = None
             self._operation_panel_scroll: Optional[QScrollArea] = None
+            self._analysis_tabs: Optional[QTabWidget] = None
             self._parameter_help_label: Optional[QLabel] = None
             self._store_label: Optional[QLabel] = None
             self._decon_measured_section: Optional[QFrame] = None
@@ -8526,7 +8572,56 @@ if HAS_PYQT6:
             payload["spatial_calibration_explicit"] = bool(
                 self._base_config.spatial_calibration_explicit
             )
+            analysis_selected_tab = self._current_analysis_tab_name()
+            if analysis_selected_tab:
+                payload["analysis_selected_tab"] = analysis_selected_tab
             return payload
+
+        def _current_analysis_tab_name(self) -> str:
+            """Return the visible Analysis Methods tab label.
+
+            Parameters
+            ----------
+            None
+
+            Returns
+            -------
+            str
+                Current tab label, or ``""`` when the widget is unavailable.
+            """
+            if self._analysis_tabs is None:
+                return ""
+            current_index = int(self._analysis_tabs.currentIndex())
+            if current_index < 0:
+                return ""
+            return str(self._analysis_tabs.tabText(current_index) or "").strip()
+
+        def _restore_analysis_tab(self, tab_name: str) -> None:
+            """Restore the selected Analysis Methods tab by label.
+
+            Parameters
+            ----------
+            tab_name : str
+                Previously persisted tab label.
+
+            Returns
+            -------
+            None
+                The tab widget selection is updated in-place when the label
+                matches an existing tab.
+            """
+            if self._analysis_tabs is None:
+                return
+            normalized_name = str(tab_name or "").strip().casefold()
+            if not normalized_name:
+                return
+            for tab_index in range(self._analysis_tabs.count()):
+                current_name = (
+                    str(self._analysis_tabs.tabText(tab_index) or "").strip().casefold()
+                )
+                if current_name == normalized_name:
+                    self._analysis_tabs.setCurrentIndex(tab_index)
+                    return
 
         def _persist_analysis_gui_state_for_target(
             self,
@@ -8667,6 +8762,35 @@ if HAS_PYQT6:
                 source_text = "Persistence is unavailable for this data source."
 
             self._hydrate(restored_workflow)
+            restored_tab_name = ""
+            if (
+                prefer_saved_gui_state
+                and saved_gui_state is not None
+                and isinstance(saved_gui_state.get("workflow"), Mapping)
+            ):
+                restored_tab_name = str(
+                    saved_gui_state["workflow"].get("analysis_selected_tab", "") or ""
+                ).strip()
+            elif latest_completed_state is not None and isinstance(
+                latest_completed_state.get("workflow"), Mapping
+            ):
+                restored_tab_name = str(
+                    latest_completed_state["workflow"].get(
+                        "analysis_selected_tab",
+                        "",
+                    )
+                    or ""
+                ).strip()
+                if (
+                    not restored_tab_name
+                    and saved_gui_state is not None
+                    and isinstance(saved_gui_state.get("workflow"), Mapping)
+                ):
+                    restored_tab_name = str(
+                        saved_gui_state["workflow"].get("analysis_selected_tab", "")
+                        or ""
+                    ).strip()
+            self._restore_analysis_tab(restored_tab_name)
             self._base_config.analysis_parameters = (
                 normalize_analysis_operation_parameters(
                     restored_workflow.analysis_parameters
@@ -8773,8 +8897,21 @@ if HAS_PYQT6:
                 Widgets are created and connected in-place.
             """
             outer_root = QVBoxLayout(self)
-            outer_root.setContentsMargins(0, 0, 0, 0)
-            outer_root.setSpacing(0)
+            apply_window_root_spacing(outer_root)
+
+            header = QFrame()
+            header.setObjectName("headerCard")
+            header_layout = QVBoxLayout(header)
+            apply_stack_spacing(header_layout)
+            header_image = _create_scaled_branding_label(
+                filename=_GUI_HEADER_IMAGE,
+                max_width=920,
+                max_height=80,
+                object_name="brandHeaderImage",
+            )
+            if header_image is not None:
+                header_layout.addWidget(header_image)
+            outer_root.addWidget(header)
 
             content_scroll = QScrollArea(self)
             content_scroll.setObjectName("analysisDialogScroll")
@@ -8790,21 +8927,7 @@ if HAS_PYQT6:
             content_scroll.setWidget(content_widget)
 
             root = QVBoxLayout(content_widget)
-            apply_window_root_spacing(root)
-
-            header = QFrame()
-            header.setObjectName("headerCard")
-            header_layout = QVBoxLayout(header)
-            apply_stack_spacing(header_layout)
-            header_image = _create_scaled_branding_label(
-                filename=_GUI_HEADER_IMAGE,
-                max_width=920,
-                max_height=160,
-                object_name="brandHeaderImage",
-            )
-            if header_image is not None:
-                header_layout.addWidget(header_image)
-            root.addWidget(header)
+            apply_stack_spacing(root)
 
             root.addWidget(self._build_analysis_scope_panel())
 
@@ -8840,9 +8963,9 @@ if HAS_PYQT6:
             store_row.addWidget(self._store_label, 1)
             left_column.addLayout(store_row)
 
-            analysis_tabs = QTabWidget()
-            analysis_tabs.setObjectName("analysisTabs")
-            analysis_tabs.setMinimumWidth(500)
+            self._analysis_tabs = QTabWidget()
+            self._analysis_tabs.setObjectName("analysisTabs")
+            self._analysis_tabs.setMinimumWidth(500)
             for tab_name, tab_operations in self._OPERATION_TABS:
                 tab_widget = QWidget()
                 tab_layout = QVBoxLayout(tab_widget)
@@ -8858,7 +8981,7 @@ if HAS_PYQT6:
                     )
                 operations_layout.addStretch(1)
                 tab_layout.addWidget(operations_group, 1)
-                analysis_tabs.addTab(tab_widget, tab_name)
+                self._analysis_tabs.addTab(tab_widget, tab_name)
 
             analysis_hint = QLabel(
                 "Use Configure to edit one operation at a time. "
@@ -8869,7 +8992,7 @@ if HAS_PYQT6:
             analysis_hint.setMinimumHeight(
                 max(28, int(analysis_hint.fontMetrics().height()) + 10)
             )
-            left_column.addWidget(analysis_tabs, 1)
+            left_column.addWidget(self._analysis_tabs, 1)
             left_column.addWidget(analysis_hint)
             content_row.addLayout(left_column, 1)
 
@@ -8914,6 +9037,16 @@ if HAS_PYQT6:
             parameters_layout.addWidget(help_card)
 
             content_row.addWidget(parameters_group, 1)
+
+            footer_frame = QFrame()
+            footer_frame.setObjectName("analysisFooterCard")
+            footer_frame.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Fixed,
+            )
+            footer_root = QVBoxLayout(footer_frame)
+            footer_root.setContentsMargins(0, 0, 0, 0)
+            footer_root.setSpacing(0)
 
             footer = QHBoxLayout()
             apply_footer_row_spacing(footer)
@@ -8962,7 +9095,8 @@ if HAS_PYQT6:
             footer.addWidget(self._dask_dashboard_button)
             footer.addWidget(self._cancel_button)
             footer.addWidget(self._run_button)
-            root.addLayout(footer)
+            footer_root.addLayout(footer)
+            outer_root.addWidget(footer_frame)
 
             self._dask_backend_button.clicked.connect(self._on_edit_dask_backend)
             self._dask_dashboard_button.clicked.connect(self._on_open_dask_dashboard)
@@ -17116,6 +17250,8 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
 
 def _analysis_gui_state_payload_from_workflow(
     workflow: WorkflowConfig,
+    *,
+    analysis_selected_tab: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Serialize analysis-dialog state directly from a workflow config.
 
@@ -17123,6 +17259,8 @@ def _analysis_gui_state_payload_from_workflow(
     ----------
     workflow : WorkflowConfig
         Workflow whose analysis GUI state should be serialized.
+    analysis_selected_tab : str, optional
+        Persisted Analysis Methods tab label to preserve across GUI resets.
 
     Returns
     -------
@@ -17148,6 +17286,9 @@ def _analysis_gui_state_payload_from_workflow(
     payload["spatial_calibration_explicit"] = bool(
         workflow.spatial_calibration_explicit
     )
+    selected_tab = str(analysis_selected_tab or "").strip()
+    if selected_tab:
+        payload["analysis_selected_tab"] = selected_tab
     return payload
 
 
@@ -17169,10 +17310,29 @@ def _persist_reset_analysis_gui_state_for_workflow(workflow: WorkflowConfig) -> 
         store_path = str(scoped_workflow.file or "").strip()
         if not store_path or not is_zarr_store_path(store_path):
             continue
+        analysis_selected_tab = ""
+        try:
+            existing_state = load_latest_analysis_gui_state(store_path)
+        except Exception:
+            existing_state = None
+            logger.exception(
+                "Failed to load existing analysis GUI state for %s while preserving "
+                "the selected tab.",
+                store_path,
+            )
+        if existing_state is not None and isinstance(
+            existing_state.get("workflow"), Mapping
+        ):
+            analysis_selected_tab = str(
+                existing_state["workflow"].get("analysis_selected_tab", "") or ""
+            ).strip()
         try:
             persist_latest_analysis_gui_state(
                 store_path,
-                _analysis_gui_state_payload_from_workflow(scoped_workflow),
+                _analysis_gui_state_payload_from_workflow(
+                    scoped_workflow,
+                    analysis_selected_tab=analysis_selected_tab,
+                ),
                 source="analysis_dialog_success_reset",
             )
         except Exception:

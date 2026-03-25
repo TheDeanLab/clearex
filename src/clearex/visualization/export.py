@@ -153,6 +153,31 @@ def _resize_filter(resize_xy: Optional[Sequence[int]]) -> Optional[str]:
     return f"scale={width}:{height}:flags=lanczos"
 
 
+def _resolve_output_pixel_format(
+    pixel_format: Optional[str],
+    *,
+    default: str,
+) -> str:
+    """Resolve one optional ffmpeg pixel format with a safe default.
+
+    Parameters
+    ----------
+    pixel_format : str, optional
+        Requested ffmpeg pixel format.
+    default : str
+        Format used when ``pixel_format`` is missing or blank.
+
+    Returns
+    -------
+    str
+        Explicit ffmpeg pixel format value.
+    """
+    normalized_value = str(pixel_format or "").strip()
+    if not normalized_value or normalized_value.casefold() in {"none", "null"}:
+        return str(default).strip()
+    return normalized_value
+
+
 def compile_png_frames_to_mp4(
     *,
     frames_directory: Union[str, Path],
@@ -216,7 +241,7 @@ def compile_png_frames_to_mp4(
             "-preset",
             str(preset).strip() or "slow",
             "-pix_fmt",
-            str(pixel_format).strip() or "yuv420p",
+            _resolve_output_pixel_format(pixel_format, default="yuv420p"),
             "-movflags",
             "+faststart",
             str(output),
@@ -284,7 +309,7 @@ def compile_png_frames_to_prores(
             "-profile:v",
             str(max(0, min(5, int(profile)))),
             "-pix_fmt",
-            str(pixel_format).strip() or "yuv422p10le",
+            _resolve_output_pixel_format(pixel_format, default="yuv422p10le"),
             str(output),
         ]
     )

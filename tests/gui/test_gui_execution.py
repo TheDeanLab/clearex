@@ -321,6 +321,83 @@ def test_setup_dialog_keeps_experiment_controls_visible_on_short_screens(
     dialog.close()
 
 
+def test_setup_dialog_keeps_header_and_footer_pinned_while_body_scrolls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    dialog.show()
+    app.processEvents()
+
+    scroll = dialog.findChild(app_module.QScrollArea, "setupDialogScroll")
+    header = dialog.findChild(app_module.QFrame, "headerCard")
+    footer = dialog.findChild(app_module.QFrame, "setupFooterCard")
+
+    assert scroll is not None
+    assert header is not None
+    assert footer is not None
+    assert scroll.verticalScrollBar().maximum() > 0
+    assert header.geometry().bottom() <= scroll.geometry().top()
+    assert footer.geometry().top() >= scroll.geometry().bottom()
+    assert dialog._next_button.geometry().height() > 0
+    next_top = dialog._next_button.mapTo(dialog, app_module.QPoint(0, 0)).y()
+    assert next_top >= footer.geometry().top()
+
+    dialog.close()
+
+
+def test_setup_dialog_places_compact_edit_buttons_at_top_right_of_summary_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (1200, 900)
+    )
+
+    dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    dialog.show()
+    app.processEvents()
+
+    assert (
+        dialog._zarr_config_button.geometry().x()
+        > dialog._zarr_config_summary.geometry().x()
+    )
+    assert dialog._zarr_config_button.geometry().top() <= (
+        dialog._zarr_config_summary.geometry().top() + 8
+    )
+    assert dialog._spatial_calibration_button.geometry().x() > (
+        dialog._spatial_calibration_summary.geometry().x()
+    )
+    assert dialog._spatial_calibration_button.geometry().top() <= (
+        dialog._spatial_calibration_summary.geometry().top() + 8
+    )
+    assert (
+        dialog._dask_backend_button.geometry().x()
+        > dialog._dask_backend_summary.geometry().x()
+    )
+    assert dialog._dask_backend_button.geometry().top() <= (
+        dialog._dask_backend_summary.geometry().top() + 8
+    )
+
+    dialog.close()
+
+
 def test_analysis_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     if not app_module.HAS_PYQT6:
         return
@@ -360,6 +437,48 @@ def test_analysis_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     dialog.close()
 
 
+def test_analysis_dialog_keeps_header_and_footer_pinned_while_body_scrolls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
+
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(file="/tmp/test/data_store.fake")
+    )
+    dialog.show()
+    app.processEvents()
+
+    scroll = dialog.findChild(app_module.QScrollArea, "analysisDialogScroll")
+    header = dialog.findChild(app_module.QFrame, "headerCard")
+    footer = dialog.findChild(app_module.QFrame, "analysisFooterCard")
+
+    assert scroll is not None
+    assert header is not None
+    assert footer is not None
+    assert scroll.verticalScrollBar().maximum() > 0
+    assert header.geometry().bottom() <= scroll.geometry().top()
+    assert footer.geometry().top() >= scroll.geometry().bottom()
+    assert dialog._run_button is not None
+    assert dialog._dask_backend_button is not None
+    run_top = dialog._run_button.mapTo(dialog, app_module.QPoint(0, 0)).y()
+    dask_button_top = dialog._dask_backend_button.mapTo(
+        dialog, app_module.QPoint(0, 0)
+    ).y()
+    assert run_top >= footer.geometry().top()
+    assert dask_button_top >= footer.geometry().top()
+
+    dialog.close()
+
+
 def test_registration_operation_moves_to_preprocessing_tab() -> None:
     if not hasattr(app_module, "AnalysisSelectionDialog"):
         return
@@ -371,6 +490,65 @@ def test_registration_operation_moves_to_preprocessing_tab() -> None:
     assert "registration" not in tab_map.get("Postprocessing", ())
     assert "render_movie" in tab_map["Visualization"]
     assert "compile_movie" in tab_map["Visualization"]
+
+
+def test_analysis_dialog_payload_records_selected_analysis_tab(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    store_path = _create_gui_analysis_store(tmp_path)
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(file=str(store_path))
+    )
+    assert dialog._analysis_tabs is not None
+    visualization_index = next(
+        index
+        for index in range(dialog._analysis_tabs.count())
+        if dialog._analysis_tabs.tabText(index) == "Visualization"
+    )
+    dialog._analysis_tabs.setCurrentIndex(visualization_index)
+
+    payload = dialog._analysis_gui_state_payload_from_current_widgets()
+
+    assert payload["analysis_selected_tab"] == "Visualization"
+    dialog.close()
+
+
+def test_analysis_dialog_restores_saved_analysis_tab(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    store_path = _create_gui_analysis_store(tmp_path)
+    zarr.open_group(str(store_path), mode="a").require_group("clearex").require_group(
+        "provenance"
+    )
+    initial_workflow = app_module.WorkflowConfig(file=str(store_path))
+    app_module.persist_latest_analysis_gui_state(
+        str(store_path),
+        app_module._analysis_gui_state_payload_from_workflow(
+            initial_workflow,
+            analysis_selected_tab="Visualization",
+        ),
+    )
+
+    dialog = app_module.AnalysisSelectionDialog(initial=initial_workflow)
+
+    assert dialog._analysis_tabs is not None
+    current_index = dialog._analysis_tabs.currentIndex()
+    assert dialog._analysis_tabs.tabText(current_index) == "Visualization"
+    dialog.close()
 
 
 def test_analysis_dialog_persists_registration_parameters(
@@ -865,6 +1043,13 @@ def test_persist_reset_analysis_gui_state_for_workflow_clears_saved_flags(
     store_path = _create_gui_analysis_store(tmp_path)
     root = zarr.open_group(str(store_path), mode="a")
     root.require_group("clearex").require_group("provenance")
+    app_module.persist_latest_analysis_gui_state(
+        str(store_path),
+        {
+            "analysis_selected_tab": "Visualization",
+            "analysis_parameters": {},
+        },
+    )
     workflow = app_module.WorkflowConfig(
         file=str(store_path),
         analysis_selected_experiment_path="/tmp/cell_001/experiment.yml",
@@ -888,6 +1073,7 @@ def test_persist_reset_analysis_gui_state_for_workflow_clears_saved_flags(
     assert workflow_payload["flatfield"] is False
     assert workflow_payload["registration"] is False
     assert workflow_payload["fusion"] is False
+    assert workflow_payload["analysis_selected_tab"] == "Visualization"
     assert workflow_payload["analysis_parameters"]["flatfield"]["force_rerun"] is False
     assert (
         workflow_payload["analysis_parameters"]["registration"]["force_rerun"] is False

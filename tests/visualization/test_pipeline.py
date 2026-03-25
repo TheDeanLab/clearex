@@ -15,6 +15,7 @@ import pytest
 import zarr
 
 # Local Imports
+import clearex.visualization.export as visualization_export
 import clearex.visualization.pipeline as visualization_pipeline
 from clearex.visualization.pipeline import (
     run_display_pyramid_analysis,
@@ -3015,3 +3016,59 @@ def test_run_compile_movie_analysis_writes_selected_outputs(
     assert len(summary.compiled_files) == 2
     assert all(Path(path).exists() for path in summary.compiled_files)
     assert len(created_outputs) == 2
+
+
+def test_compile_png_frames_to_mp4_uses_default_pixel_format_for_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    frames_dir = tmp_path / "frames_mp4"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    frame = np.zeros((16, 16, 4), dtype=np.uint8)
+    frame[..., 3] = 255
+    visualization_pipeline.Image.fromarray(frame, mode="RGBA").save(
+        frames_dir / "frame_000000.png"
+    )
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run_ffmpeg(command: list[str]) -> None:
+        captured["command"] = list(command)
+
+    monkeypatch.setattr(visualization_export, "_run_ffmpeg", _fake_run_ffmpeg)
+
+    visualization_export.compile_png_frames_to_mp4(
+        frames_directory=frames_dir,
+        output_path=tmp_path / "movie.mp4",
+        fps=24,
+        pixel_format=None,
+    )
+
+    command = captured["command"]
+    assert command[command.index("-pix_fmt") + 1] == "yuv420p"
+
+
+def test_compile_png_frames_to_prores_uses_default_pixel_format_for_blank_values(
+    tmp_path: Path, monkeypatch
+) -> None:
+    frames_dir = tmp_path / "frames_prores"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    frame = np.zeros((16, 16, 4), dtype=np.uint8)
+    frame[..., 3] = 255
+    visualization_pipeline.Image.fromarray(frame, mode="RGBA").save(
+        frames_dir / "frame_000000.png"
+    )
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run_ffmpeg(command: list[str]) -> None:
+        captured["command"] = list(command)
+
+    monkeypatch.setattr(visualization_export, "_run_ffmpeg", _fake_run_ffmpeg)
+
+    visualization_export.compile_png_frames_to_prores(
+        frames_directory=frames_dir,
+        output_path=tmp_path / "movie.mov",
+        fps=24,
+        pixel_format="None",
+    )
+
+    command = captured["command"]
+    assert command[command.index("-pix_fmt") + 1] == "yuv422p10le"
