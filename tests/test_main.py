@@ -437,6 +437,60 @@ def test_run_workflow_visualization_only_skips_analysis_dask_startup(
     assert workloads == []
 
 
+def test_run_workflow_render_movie_only_skips_analysis_dask_startup(
+    monkeypatch,
+) -> None:
+    workloads: list[str] = []
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack
+        workloads.append(str(workload))
+        return object()
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+
+    workflow = WorkflowConfig(
+        file=None,
+        prefer_dask=True,
+        render_movie=True,
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.render_movie"),
+    )
+
+    assert workloads == []
+
+
+def test_run_workflow_compile_movie_only_skips_analysis_dask_startup(
+    monkeypatch,
+) -> None:
+    workloads: list[str] = []
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack
+        workloads.append(str(workload))
+        return object()
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+
+    workflow = WorkflowConfig(
+        file=None,
+        prefer_dask=True,
+        compile_movie=True,
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.compile_movie"),
+    )
+
+    assert workloads == []
+
+
 def test_run_workflow_particle_detection_starts_analysis_dask_startup(
     monkeypatch,
 ) -> None:
@@ -886,6 +940,115 @@ def test_run_workflow_chains_registration_output_to_visualization(
 
     assert (
         captured["input_source"] == "clearex/runtime_cache/results/fusion/latest/data"
+    )
+
+
+def test_run_workflow_chains_visualization_output_to_render_and_compile_movie(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_movie_chain.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    (
+        root.require_group("clearex")
+        .require_group("results")
+        .require_group("visualization")
+        .require_group("latest")
+    ).attrs.update({"source_component": "data"})
+
+    workloads: list[str] = []
+
+    def _fake_configure_dask_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack
+        workloads.append(str(workload))
+        return object()
+
+    captured: dict[str, object] = {}
+
+    def _fake_render_movie(*, zarr_path, parameters, progress_callback):
+        del progress_callback
+        captured["render_input_source"] = str(parameters["input_source"])
+        fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
+        (
+            fake_root.require_group("clearex")
+            .require_group("results")
+            .require_group("render_movie")
+            .require_group("latest")
+        ).attrs.update(
+            {
+                "render_manifest_path": "/tmp/render_manifest.json",
+                "output_directory": "/tmp/render_movie/latest",
+            }
+        )
+        return SimpleNamespace(
+            component=main_module.analysis_auxiliary_root("render_movie"),
+            visualization_component=main_module.analysis_auxiliary_root(
+                "visualization"
+            ),
+            keyframe_manifest_path="/tmp/keyframes.json",
+            render_manifest_path="/tmp/render_manifest.json",
+            output_directory="/tmp/render_movie/latest",
+            rendered_levels=(0,),
+            frame_count=5,
+            fps=24,
+        )
+
+    def _fake_compile_movie(*, zarr_path, parameters, progress_callback):
+        del zarr_path, progress_callback
+        captured["compile_input_source"] = str(parameters["input_source"])
+        return SimpleNamespace(
+            component=main_module.analysis_auxiliary_root("compile_movie"),
+            render_component=main_module.analysis_auxiliary_root("render_movie"),
+            render_manifest_path="/tmp/render_manifest.json",
+            output_directory="/tmp/compile_movie/latest",
+            rendered_level=0,
+            output_format="mp4",
+            compiled_files=("/tmp/compile_movie/latest/movie.mp4",),
+            fps=24,
+        )
+
+    monkeypatch.setattr(
+        main_module,
+        "_configure_dask_backend",
+        _fake_configure_dask_backend,
+    )
+    monkeypatch.setattr(main_module, "run_render_movie_analysis", _fake_render_movie)
+    monkeypatch.setattr(main_module, "run_compile_movie_analysis", _fake_compile_movie)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=True,
+        render_movie=True,
+        compile_movie=True,
+        analysis_parameters={
+            "render_movie": {
+                "execution_order": 1,
+                "input_source": "visualization",
+            },
+            "compile_movie": {
+                "execution_order": 2,
+                "input_source": "render_movie",
+            },
+        },
+    )
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.movie_chain"),
+    )
+
+    assert workloads == []
+    assert captured["render_input_source"] == main_module.analysis_auxiliary_root(
+        "visualization"
+    )
+    assert captured["compile_input_source"] == main_module.analysis_auxiliary_root(
+        "render_movie"
     )
 
 

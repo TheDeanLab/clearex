@@ -221,6 +221,22 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     input_args.add_argument(
+        "--render-movie",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Render PNG movie frames from captured napari keyframes",
+    )
+
+    input_args.add_argument(
+        "--compile-movie",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Compile rendered PNG movie frames into ffmpeg movie outputs",
+    )
+
+    input_args.add_argument(
         "--mip-export",
         required=False,
         default=False,

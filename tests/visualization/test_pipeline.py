@@ -2065,11 +2065,13 @@ def test_launch_napari_viewer_keyframe_hotkeys_write_manifest(
     viewer.bound_keys["k"](viewer)
     viewer.bound_keys["k"](viewer)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["viewer_type"] == "3d"
     assert payload["selected_positions"] == [0]
     assert payload["keyframe_layer_overrides"] == []
     assert len(payload["keyframes"]) == 2
+    assert payload["keyframes"][0]["id"] == "keyframe_0000"
+    assert payload["keyframes"][0]["order_index"] == 0
     assert payload["keyframes"][0]["camera"]["angles"] == [11.0, 22.0, 33.0]
     assert payload["keyframes"][0]["dims"]["axis_labels"] == ["t", "c", "z", "y", "x"]
     assert payload["keyframes"][0]["viewer"]["selected_layers"] == []
@@ -2080,3 +2082,397 @@ def test_launch_napari_viewer_keyframe_hotkeys_write_manifest(
     viewer.bound_keys["Shift-K"](viewer)
     payload_after_pop = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert len(payload_after_pop["keyframes"]) == 1
+
+
+def test_run_render_movie_analysis_writes_frames_and_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_movie.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.require_group(_VISUALIZATION_COMPONENT).attrs.update(
+        {
+            "source_component": "data",
+            "source_components": ["data", "data_pyramid/level_1"],
+            "position_index": 0,
+            "selected_positions": [0],
+            "show_all_positions": False,
+            "overlay_points_count": 0,
+            "viewer_ndisplay_effective": 3,
+            "parameters": {
+                "input_source": "data",
+                "position_index": 0,
+                "show_all_positions": False,
+                "use_multiscale": True,
+                "use_3d_view": True,
+                "overlay_particle_detections": False,
+                "volume_layers": [
+                    {
+                        "component": "data",
+                        "name": "",
+                        "layer_type": "image",
+                        "channels": [],
+                        "visible": None,
+                        "opacity": None,
+                        "blending": "",
+                        "colormap": "",
+                        "rendering": "",
+                        "multiscale_policy": "inherit",
+                    }
+                ],
+            },
+        }
+    )
+    keyframe_manifest_path = tmp_path / "keyframes.json"
+    keyframe_manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "captured_overlay_layers": [
+                    {
+                        "name": "Manual Points",
+                        "type": "Points",
+                        "data": [[0, 0, 1, 2, 3]],
+                        "properties": {"track_id": [1]},
+                        "visible": True,
+                        "opacity": 0.7,
+                        "blending": "translucent",
+                        "size": [6.0],
+                    },
+                    {
+                        "name": "Manual Tracks",
+                        "type": "Tracks",
+                        "data": [[0, 0, 1, 2], [1, 0, 1.5, 2.5]],
+                        "visible": True,
+                        "opacity": 0.8,
+                        "blending": "translucent",
+                        "tail_length": 10.0,
+                    },
+                ],
+                "keyframes": [
+                    {
+                        "id": "keyframe_0000",
+                        "index": 0,
+                        "order_index": 0,
+                        "camera": {
+                            "angles": [0.0, 0.0, 0.0],
+                            "zoom": 1.0,
+                            "center": [0.0, 0.0, 0.0],
+                            "perspective": 0.0,
+                            "field_of_view": 0.0,
+                        },
+                        "dims": {
+                            "current_step": [0, 0, 0, 0, 0],
+                            "ndisplay": 3,
+                            "order": [0, 1, 2, 3, 4],
+                        },
+                        "layers": [
+                            {
+                                "name": "Volume",
+                                "visible": True,
+                                "opacity": 1.0,
+                                "blending": "opaque",
+                                "rendering": "attenuated_mip",
+                                "contrast_limits": [0.0, 1.0],
+                                "scale": [1, 1, 1, 1, 1],
+                            },
+                            {
+                                "name": "Manual Points",
+                                "visible": True,
+                                "opacity": 0.7,
+                                "blending": "translucent",
+                                "size": [6.0],
+                            },
+                            {
+                                "name": "Manual Tracks",
+                                "visible": True,
+                                "opacity": 0.8,
+                                "blending": "translucent",
+                                "tail_length": 10.0,
+                            },
+                        ],
+                    },
+                    {
+                        "id": "keyframe_0001",
+                        "index": 1,
+                        "order_index": 1,
+                        "camera": {
+                            "angles": [30.0, 40.0, 50.0],
+                            "zoom": 2.0,
+                            "center": [1.0, 2.0, 3.0],
+                            "perspective": 5.0,
+                            "field_of_view": 45.0,
+                        },
+                        "dims": {
+                            "current_step": [0, 0, 1, 1, 1],
+                            "ndisplay": 3,
+                            "order": [0, 1, 2, 3, 4],
+                        },
+                        "layers": [
+                            {
+                                "name": "Volume",
+                                "visible": True,
+                                "opacity": 0.5,
+                                "blending": "opaque",
+                                "rendering": "attenuated_mip",
+                                "contrast_limits": [0.0, 1.0],
+                                "scale": [1, 1, 1, 1, 1],
+                                "annotation": "End frame",
+                            },
+                            {
+                                "name": "Manual Points",
+                                "visible": True,
+                                "opacity": 0.4,
+                                "blending": "translucent",
+                                "size": [8.0],
+                            },
+                            {
+                                "name": "Manual Tracks",
+                                "visible": True,
+                                "opacity": 0.6,
+                                "blending": "translucent",
+                                "tail_length": 16.0,
+                            },
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_scene = visualization_pipeline.PreparedVisualizationScene(
+        normalized_parameters={},
+        volume_layers=_single_image_volume_layers(),
+        selected_positions=(0,),
+        reference_position_index=0,
+        points_by_position={},
+        point_properties_by_position={},
+        total_overlay_points=0,
+        source_component="data",
+        source_components=("data", "data_pyramid/level_1"),
+        viewer_ndisplay_requested=3,
+        viewer_ndisplay_effective=3,
+        display_mode_fallback_reason=None,
+        napari_payload=visualization_pipeline.NapariLayerPayload(
+            axis_labels_tczyx=("t", "c", "z", "y", "x"),
+            scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+            image_metadata={},
+            points_metadata={},
+        ),
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        spatial_calibration=visualization_pipeline.SpatialCalibrationConfig(),
+    )
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.current_step = (0, 0, 0, 0, 0)
+            self.order = (0, 1, 2, 3, 4)
+            self.ndisplay = 3
+
+    class _FakeCamera:
+        def __init__(self) -> None:
+            self.angles = (0.0, 0.0, 0.0)
+            self.zoom = 1.0
+            self.center = (0.0, 0.0, 0.0)
+            self.perspective = 0.0
+            self.fov = 0.0
+
+    class _FakeLayer:
+        def __init__(self, name: str = "Volume") -> None:
+            self.name = name
+            self.visible = True
+            self.opacity = 1.0
+            self.blending = "opaque"
+            self.rendering = "attenuated_mip"
+            self.contrast_limits = (0.0, 1.0)
+            self.scale = (1.0, 1.0, 1.0, 1.0, 1.0)
+            self.size = (6.0,)
+            self.tail_length = 0.0
+
+    class _FakeViewer:
+        def __init__(self) -> None:
+            self.dims = _FakeDims()
+            self.camera = _FakeCamera()
+            self.layers = [_FakeLayer()]
+
+        def screenshot(self, *, canvas_only: bool, flash: bool, size):
+            del canvas_only, flash
+            width, height = size
+            image = np.zeros((int(height), int(width), 4), dtype=np.uint8)
+            image[..., 3] = 255
+            return image
+
+        def close(self) -> None:
+            return None
+
+        def add_points(self, data, **kwargs):
+            del data
+            layer = _FakeLayer(name=str(kwargs.get("name", "Points")))
+            layer.opacity = float(kwargs.get("opacity", 1.0))
+            layer.blending = str(kwargs.get("blending", "translucent"))
+            if "size" in kwargs:
+                layer.size = tuple(np.asarray(kwargs["size"]).tolist())
+            self.layers.append(layer)
+            return layer
+
+        def add_tracks(self, data, **kwargs):
+            del data
+            layer = _FakeLayer(name=str(kwargs.get("name", "Tracks")))
+            layer.opacity = float(kwargs.get("opacity", 1.0))
+            layer.blending = str(kwargs.get("blending", "translucent"))
+            layer.tail_length = float(kwargs.get("tail_length", 0.0))
+            self.layers.append(layer)
+            return layer
+
+    built_viewers: list[_FakeViewer] = []
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_prepare_visualization_scene",
+        lambda **kwargs: fake_scene,
+    )
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_process_pending_qt_events",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_build_napari_viewer_scene",
+        lambda **kwargs: (
+            built_viewers.append(_FakeViewer())
+            or visualization_pipeline.BuiltNapariScene(
+                viewer=built_viewers[-1],
+                renderer_info={},
+                manifest_path=None,
+                primary_source_component="data",
+                primary_source_components=("data", "data_pyramid/level_1"),
+                serialized_volume_layers=[],
+                axis_labels_tczyx=("t", "c", "z", "y", "x"),
+                scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+            )
+        ),
+    )
+
+    summary = visualization_pipeline.run_render_movie_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": _VISUALIZATION_COMPONENT,
+            "keyframe_manifest_path": str(keyframe_manifest_path),
+            "resolution_levels": [0, 1],
+            "render_size_xy": [96, 64],
+            "fps": 12,
+            "default_transition_frames": 2,
+            "hold_frames": 0,
+            "overlay_frame_text_mode": "frame_number",
+        },
+    )
+
+    assert summary.component == "clearex/results/render_movie/latest"
+    assert summary.rendered_levels == (0, 1)
+    assert summary.frame_count == 4
+    manifest = json.loads(
+        Path(summary.render_manifest_path).read_text(encoding="utf-8")
+    )
+    assert manifest["rendered_levels"] == [0, 1]
+    assert manifest["frame_count"] == 4
+    assert len(built_viewers) == 2
+    for viewer in built_viewers:
+        layer_names = [str(layer.name) for layer in viewer.layers]
+        assert "Manual Points" in layer_names
+        assert "Manual Tracks" in layer_names
+    for level_index in (0, 1):
+        frame_dir = Path(summary.output_directory) / f"level_{level_index:02d}_frames"
+        assert frame_dir.exists()
+        assert len(sorted(frame_dir.glob("frame_*.png"))) == 4
+
+
+def test_run_compile_movie_analysis_writes_selected_outputs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_compile.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    for frame_index in range(2):
+        image = np.zeros((16, 16, 4), dtype=np.uint8)
+        image[..., 3] = 255
+        visualization_pipeline.Image.fromarray(image, mode="RGBA").save(
+            frames_dir / f"frame_{frame_index:06d}.png"
+        )
+    render_manifest_path = tmp_path / "render_manifest.json"
+    render_manifest_path.write_text(
+        json.dumps(
+            {
+                "fps": 18,
+                "levels": [
+                    {
+                        "requested_level": 1,
+                        "frame_directory": str(frames_dir),
+                        "frame_count": 2,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (
+        root.require_group("clearex")
+        .require_group("results")
+        .require_group("render_movie")
+        .require_group("latest")
+    ).attrs.update({"render_manifest_path": str(render_manifest_path)})
+
+    created_outputs: list[str] = []
+
+    def _fake_mp4(**kwargs):
+        output = Path(kwargs["output_path"])
+        output.write_text("mp4", encoding="utf-8")
+        created_outputs.append(str(output))
+        return str(output)
+
+    def _fake_prores(**kwargs):
+        output = Path(kwargs["output_path"])
+        output.write_text("mov", encoding="utf-8")
+        created_outputs.append(str(output))
+        return str(output)
+
+    monkeypatch.setattr(visualization_pipeline, "compile_png_frames_to_mp4", _fake_mp4)
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "compile_png_frames_to_prores",
+        _fake_prores,
+    )
+
+    summary = visualization_pipeline.run_compile_movie_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "clearex/results/render_movie/latest",
+            "render_manifest_path": str(render_manifest_path),
+            "rendered_level": 1,
+            "output_format": "both",
+            "fps": 24,
+            "output_stem": "publication_movie",
+        },
+    )
+
+    assert summary.component == "clearex/results/compile_movie/latest"
+    assert summary.rendered_level == 1
+    assert summary.output_format == "both"
+    assert len(summary.compiled_files) == 2
+    assert all(Path(path).exists() for path in summary.compiled_files)
+    assert len(created_outputs) == 2

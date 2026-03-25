@@ -369,6 +369,8 @@ def test_registration_operation_moves_to_preprocessing_tab() -> None:
     assert "display_pyramid" in tab_map["Preprocessing"]
     assert "registration" in tab_map["Preprocessing"]
     assert "registration" not in tab_map.get("Postprocessing", ())
+    assert "render_movie" in tab_map["Visualization"]
+    assert "compile_movie" in tab_map["Visualization"]
 
 
 def test_analysis_dialog_persists_registration_parameters(
@@ -1881,6 +1883,78 @@ def test_build_input_source_options_includes_scheduled_upstream_outputs() -> Non
     ) in options
 
 
+def test_build_input_source_options_allows_visualization_for_render_movie() -> None:
+    options = app_module._build_input_source_options(
+        operation_name="render_movie",
+        selected_order=["visualization", "render_movie"],
+        operation_key_order=(
+            "flatfield",
+            "deconvolution",
+            "shear_transform",
+            "registration",
+            "fusion",
+            "display_pyramid",
+            "particle_detection",
+            "usegment3d",
+            "visualization",
+            "render_movie",
+            "compile_movie",
+            "mip_export",
+        ),
+        operation_labels={
+            "visualization": "Napari",
+            "render_movie": "Render Movie",
+        },
+        operation_output_components={
+            "visualization": "clearex/results/visualization/latest",
+            "render_movie": "clearex/results/render_movie/latest",
+        },
+        available_store_output_components={},
+    )
+
+    assert ("data", "Raw data (data)") not in options
+    assert (
+        "visualization",
+        "Napari output (clearex/results/visualization/latest) [scheduled]",
+    ) in options
+
+
+def test_build_input_source_options_allows_render_movie_for_compile_movie() -> None:
+    options = app_module._build_input_source_options(
+        operation_name="compile_movie",
+        selected_order=["render_movie", "compile_movie"],
+        operation_key_order=(
+            "flatfield",
+            "deconvolution",
+            "shear_transform",
+            "registration",
+            "fusion",
+            "display_pyramid",
+            "particle_detection",
+            "usegment3d",
+            "visualization",
+            "render_movie",
+            "compile_movie",
+            "mip_export",
+        ),
+        operation_labels={
+            "render_movie": "Render Movie",
+            "compile_movie": "Compile Movie",
+        },
+        operation_output_components={
+            "render_movie": "clearex/results/render_movie/latest",
+            "compile_movie": "clearex/results/compile_movie/latest",
+        },
+        available_store_output_components={},
+    )
+
+    assert ("data", "Raw data (data)") not in options
+    assert (
+        "render_movie",
+        "Render Movie output (clearex/results/render_movie/latest) [scheduled]",
+    ) in options
+
+
 def test_build_input_source_options_allows_registration_for_fusion() -> None:
     options = app_module._build_input_source_options(
         operation_name="fusion",
@@ -2336,6 +2410,8 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
 
     dialog_cls = app_module.AnalysisSelectionDialog
     assert dialog_cls._OPERATION_LABELS["visualization"] == "Napari"
+    assert dialog_cls._OPERATION_LABELS["render_movie"] == "Render Movie"
+    assert dialog_cls._OPERATION_LABELS["compile_movie"] == "Compile Movie"
     assert dialog_cls._OPERATION_LABELS["display_pyramid"] == "Pyramidal Downsampling"
     assert (
         "Preprocessing",
@@ -2347,6 +2423,10 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
             "fusion",
             "display_pyramid",
         ),
+    ) in dialog_cls._OPERATION_TABS
+    assert (
+        "Visualization",
+        ("visualization", "render_movie", "compile_movie", "mip_export"),
     ) in dialog_cls._OPERATION_TABS
 
 

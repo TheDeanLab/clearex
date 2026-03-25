@@ -246,8 +246,36 @@ class TestWorkflowConfig:
                 "multiscale_policy": "inherit",
             }
         ]
+        assert "render_movie" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["render_movie"]["execution_order"] == 10
+        assert (
+            cfg.analysis_parameters["render_movie"]["input_source"] == "visualization"
+        )
+        assert cfg.analysis_parameters["render_movie"]["resolution_levels"] == [0]
+        assert cfg.analysis_parameters["render_movie"]["render_size_xy"] == [
+            1920,
+            1080,
+        ]
+        assert cfg.analysis_parameters["render_movie"]["fps"] == 24
+        assert (
+            cfg.analysis_parameters["render_movie"]["default_transition_frames"] == 48
+        )
+        assert cfg.analysis_parameters["render_movie"]["transition_frames_by_gap"] == []
+        assert cfg.analysis_parameters["render_movie"]["hold_frames"] == 12
+        assert (
+            cfg.analysis_parameters["render_movie"]["interpolation_mode"]
+            == "ease_in_out"
+        )
+        assert cfg.analysis_parameters["render_movie"]["camera_effect"] == "none"
+        assert "compile_movie" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["compile_movie"]["execution_order"] == 11
+        assert (
+            cfg.analysis_parameters["compile_movie"]["input_source"] == "render_movie"
+        )
+        assert cfg.analysis_parameters["compile_movie"]["rendered_level"] == 0
+        assert cfg.analysis_parameters["compile_movie"]["output_format"] == "mp4"
         assert "mip_export" in cfg.analysis_parameters
-        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 10
+        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 12
         assert (
             cfg.analysis_parameters["mip_export"]["position_mode"] == "multi_position"
         )
@@ -1014,7 +1042,12 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     assert normalized["visualization"]["capture_keyframes"] is True
     assert normalized["visualization"]["keyframe_layer_overrides"] == []
     assert normalized["visualization"]["volume_layers"] == []
-    assert normalized["mip_export"]["execution_order"] == 10
+    assert normalized["render_movie"]["execution_order"] == 10
+    assert normalized["render_movie"]["input_source"] == "visualization"
+    assert normalized["render_movie"]["resolution_levels"] == [0]
+    assert normalized["compile_movie"]["execution_order"] == 11
+    assert normalized["compile_movie"]["input_source"] == "render_movie"
+    assert normalized["mip_export"]["execution_order"] == 12
     assert normalized["mip_export"]["position_mode"] == "multi_position"
     assert normalized["mip_export"]["export_format"] == "ome-tiff"
 
@@ -1030,6 +1063,8 @@ def test_resolve_analysis_execution_sequence_uses_execution_order():
         fusion=False,
         display_pyramid=False,
         visualization=False,
+        render_movie=False,
+        compile_movie=False,
         mip_export=False,
         analysis_parameters={
             "flatfield": {"execution_order": 4},
@@ -1059,10 +1094,18 @@ def test_resolve_analysis_execution_sequence_includes_mip_export_last_by_default
         fusion=False,
         display_pyramid=True,
         visualization=True,
+        render_movie=True,
+        compile_movie=True,
         mip_export=True,
         analysis_parameters=None,
     )
-    assert sequence == ("display_pyramid", "visualization", "mip_export")
+    assert sequence == (
+        "display_pyramid",
+        "visualization",
+        "render_movie",
+        "compile_movie",
+        "mip_export",
+    )
 
 
 def test_analysis_operation_order_contains_expected_keys():
@@ -1076,6 +1119,8 @@ def test_analysis_operation_order_contains_expected_keys():
         "particle_detection",
         "usegment3d",
         "visualization",
+        "render_movie",
+        "compile_movie",
         "mip_export",
     )
 

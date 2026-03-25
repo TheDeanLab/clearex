@@ -29,7 +29,7 @@
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence
 import argparse
 import json
 import logging
@@ -82,96 +82,14 @@ from clearex.flatfield.pipeline import (
     run_flatfield_analysis,
 )
 from clearex.visualization.pipeline import (
+    run_compile_movie_analysis,
     run_display_pyramid_analysis,
+    run_render_movie_analysis,
     run_visualization_analysis,
 )
 from clearex.mip_export.pipeline import (
     run_mip_export_analysis,
 )
-
-try:
-    from clearex.registration.pipeline import (
-        run_fusion_analysis,
-        run_registration_analysis,
-    )
-except ImportError:
-
-    def run_registration_analysis(*, zarr_path, parameters, client, progress_callback):
-        """Fallback when the optional registration runtime module is unavailable.
-
-        Parameters
-        ----------
-        zarr_path : str
-            Canonical analysis-store path.
-        parameters : dict[str, Any]
-            Runtime parameter mapping.
-        client : Any
-            Dask client handle.
-        progress_callback : callable
-            Progress callback.
-
-        Returns
-        -------
-        None
-            This fallback always raises before returning.
-
-        Raises
-        ------
-        RuntimeError
-            Always raised to indicate missing registration implementation.
-        """
-        del zarr_path, parameters, client, progress_callback
-        raise RuntimeError(
-            "registration analysis is unavailable: "
-            "could not import clearex.registration.pipeline."
-        )
-
-    def run_fusion_analysis(*, zarr_path, parameters, client, progress_callback):
-        """Fallback when the optional registration runtime module is unavailable."""
-        del zarr_path, parameters, client, progress_callback
-        raise RuntimeError(
-            "fusion analysis is unavailable: "
-            "could not import clearex.registration.pipeline."
-        )
-
-
-try:
-    from clearex.usegment3d.pipeline import (
-        run_usegment3d_analysis,
-    )
-except ImportError:
-
-    def run_usegment3d_analysis(*, zarr_path, parameters, client, progress_callback):
-        """Fallback when the optional usegment3d runtime module is unavailable.
-
-        Parameters
-        ----------
-        zarr_path : str
-            Canonical analysis-store path.
-        parameters : dict[str, Any]
-            Runtime parameter mapping.
-        client : Any
-            Dask client handle.
-        progress_callback : callable
-            Progress callback.
-
-        Returns
-        -------
-        None
-            This fallback always raises before returning.
-
-        Raises
-        ------
-        RuntimeError
-            Always raised to indicate missing usegment3d implementation.
-        """
-        del zarr_path, parameters, client, progress_callback
-        raise RuntimeError(
-            "usegment3d analysis is unavailable: "
-            "could not import clearex.usegment3d.pipeline."
-        )
-
-
 from clearex.workflow import (
     ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS,
     ANALYSIS_KNOWN_OUTPUT_COMPONENTS,
@@ -201,6 +119,89 @@ from clearex.workflow import (
     format_zarr_pyramid_ptczyx,
     parse_chunks,
 )
+
+ProgressCallback = Callable[[int, str], None]
+
+
+class AnalysisRunner(Protocol):
+    """Callable interface for one analysis runtime entrypoint."""
+
+    def __call__(
+        self,
+        *,
+        zarr_path: str | Path,
+        parameters: Mapping[str, Any],
+        client: Any,
+        progress_callback: ProgressCallback | None,
+    ) -> object: ...
+
+
+def _missing_optional_analysis_runner(
+    *,
+    operation_name: str,
+    module_name: str,
+) -> AnalysisRunner:
+    """Build a fallback runner for optional analysis modules.
+
+    Parameters
+    ----------
+    operation_name : str
+        User-facing analysis operation name.
+    module_name : str
+        Import path that should have provided the runtime implementation.
+
+    Returns
+    -------
+    AnalysisRunner
+        Callable that always raises a descriptive ``RuntimeError`` when invoked.
+    """
+
+    def _runner(
+        *,
+        zarr_path: str | Path,
+        parameters: Mapping[str, Any],
+        client: Any,
+        progress_callback: ProgressCallback | None,
+    ) -> object:
+        del zarr_path, parameters, client, progress_callback
+        raise RuntimeError(
+            f"{operation_name} analysis is unavailable: "
+            f"could not import {module_name}."
+        )
+
+    return _runner
+
+
+try:
+    from clearex.registration.pipeline import (
+        run_fusion_analysis as _run_fusion_analysis,
+        run_registration_analysis as _run_registration_analysis,
+    )
+except ImportError:
+    _run_registration_analysis = _missing_optional_analysis_runner(
+        operation_name="registration",
+        module_name="clearex.registration.pipeline",
+    )
+    _run_fusion_analysis = _missing_optional_analysis_runner(
+        operation_name="fusion",
+        module_name="clearex.registration.pipeline",
+    )
+
+run_registration_analysis: AnalysisRunner = _run_registration_analysis
+run_fusion_analysis: AnalysisRunner = _run_fusion_analysis
+
+
+try:
+    from clearex.usegment3d.pipeline import (
+        run_usegment3d_analysis as _run_usegment3d_analysis,
+    )
+except ImportError:
+    _run_usegment3d_analysis = _missing_optional_analysis_runner(
+        operation_name="usegment3d",
+        module_name="clearex.usegment3d.pipeline",
+    )
+
+run_usegment3d_analysis: AnalysisRunner = _run_usegment3d_analysis
 
 _CLEAREX_SETTINGS_DIR_NAME = ".clearex"
 _CLEAREX_DASK_BACKEND_SETTINGS_FILE = "dask_backend_settings.json"
@@ -253,6 +254,8 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
         analysis_auxiliary_root("fusion"),
     ),
     "display_pyramid": (analysis_auxiliary_root("display_pyramid"),),
+    "render_movie": (analysis_auxiliary_root("render_movie"),),
+    "compile_movie": (analysis_auxiliary_root("compile_movie"),),
     "mip_export": (analysis_auxiliary_root("mip_export"),),
 }
 _DISTRIBUTED_TEARDOWN_NOISE_LOGGERS = ("distributed.batched",)
@@ -707,6 +710,8 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         fusion=bool(getattr(args, "fusion", False)),
         display_pyramid=bool(getattr(args, "display_pyramid", False)),
         visualization=args.visualization,
+        render_movie=bool(getattr(args, "render_movie", False)),
+        compile_movie=bool(getattr(args, "compile_movie", False)),
         mip_export=args.mip_export,
         spatial_calibration=spatial_calibration,
         spatial_calibration_explicit=spatial_calibration_explicit,
@@ -1450,6 +1455,8 @@ def _run_workflow(
             fusion=workflow.fusion,
             display_pyramid=workflow.display_pyramid,
             visualization=workflow.visualization,
+            render_movie=workflow.render_movie,
+            compile_movie=workflow.compile_movie,
             mip_export=workflow.mip_export,
             analysis_parameters=runtime_analysis_parameters,
         )
@@ -1470,19 +1477,21 @@ def _run_workflow(
         current_requested_source = "data"
         current_resolved_source = "data"
         current_operation_parameters: Dict[str, Any] = {}
-        references = collect_analysis_input_references(
-            execution_sequence=execution_sequence,
-            analysis_parameters=runtime_analysis_parameters,
-        )
-        available_components = _collect_available_analysis_components(
-            provenance_store_path,
-            references,
-        )
-        dependency_issues = validate_analysis_input_references(
-            execution_sequence=execution_sequence,
-            analysis_parameters=runtime_analysis_parameters,
-            available_components=available_components,
-        )
+        dependency_issues = []
+        if provenance_store_path and is_zarr_store_path(provenance_store_path):
+            references = collect_analysis_input_references(
+                execution_sequence=execution_sequence,
+                analysis_parameters=runtime_analysis_parameters,
+            )
+            available_components = _collect_available_analysis_components(
+                provenance_store_path,
+                references,
+            )
+            dependency_issues = validate_analysis_input_references(
+                execution_sequence=execution_sequence,
+                analysis_parameters=runtime_analysis_parameters,
+                available_components=available_components,
+            )
         if dependency_issues:
             first_issue = dependency_issues[0]
             run_status = "failed"
@@ -2984,6 +2993,184 @@ def _run_workflow(
                         )
                     continue
 
+                if operation_name == "render_movie":
+                    render_movie_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
+
+                        def _render_movie_progress(
+                            percent: int,
+                            message: str,
+                        ) -> None:
+                            """Map render-movie progress into workflow-scale progress."""
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            logger.info(f"[render_movie] {int(percent)}% - {message}")
+                            _emit_analysis_progress(
+                                mapped,
+                                f"render_movie: {message}",
+                            )
+
+                        summary = run_render_movie_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=render_movie_parameters,
+                            progress_callback=_render_movie_progress,
+                        )
+                        output_records["render_movie"] = {
+                            "component": summary.component,
+                            "visualization_component": summary.visualization_component,
+                            "keyframe_manifest_path": summary.keyframe_manifest_path,
+                            "render_manifest_path": summary.render_manifest_path,
+                            "output_directory": summary.output_directory,
+                            "rendered_levels": list(summary.rendered_levels),
+                            "frame_count": summary.frame_count,
+                            "fps": summary.fps,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Render movie completed: "
+                            f"component={summary.component}, "
+                            f"visualization_component={summary.visualization_component}, "
+                            f"levels={summary.rendered_levels}, "
+                            f"frame_count={summary.frame_count}, "
+                            f"render_manifest={summary.render_manifest_path}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "render_movie",
+                                "parameters": {
+                                    **render_movie_parameters,
+                                    "component": summary.component,
+                                    "visualization_component": (
+                                        summary.visualization_component
+                                    ),
+                                    "keyframe_manifest_path": (
+                                        summary.keyframe_manifest_path
+                                    ),
+                                    "render_manifest_path": (
+                                        summary.render_manifest_path
+                                    ),
+                                    "output_directory": summary.output_directory,
+                                    "rendered_levels": list(summary.rendered_levels),
+                                    "frame_count": summary.frame_count,
+                                    "fps": summary.fps,
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Render movie workflow complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "Render movie requires a canonical OME-Zarr store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "render_movie",
+                                "parameters": {
+                                    **render_movie_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Render movie skipped (no Zarr/N5 store).",
+                        )
+                    continue
+
+                if operation_name == "compile_movie":
+                    compile_movie_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
+
+                        def _compile_movie_progress(
+                            percent: int,
+                            message: str,
+                        ) -> None:
+                            """Map compile-movie progress into workflow-scale progress."""
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            logger.info(f"[compile_movie] {int(percent)}% - {message}")
+                            _emit_analysis_progress(
+                                mapped,
+                                f"compile_movie: {message}",
+                            )
+
+                        summary = run_compile_movie_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=compile_movie_parameters,
+                            progress_callback=_compile_movie_progress,
+                        )
+                        output_records["compile_movie"] = {
+                            "component": summary.component,
+                            "render_component": summary.render_component,
+                            "render_manifest_path": summary.render_manifest_path,
+                            "output_directory": summary.output_directory,
+                            "rendered_level": summary.rendered_level,
+                            "output_format": summary.output_format,
+                            "compiled_files": list(summary.compiled_files),
+                            "fps": summary.fps,
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Compile movie completed: "
+                            f"component={summary.component}, "
+                            f"render_component={summary.render_component}, "
+                            f"rendered_level={summary.rendered_level}, "
+                            f"output_format={summary.output_format}, "
+                            f"compiled_files={summary.compiled_files}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "compile_movie",
+                                "parameters": {
+                                    **compile_movie_parameters,
+                                    "component": summary.component,
+                                    "render_component": summary.render_component,
+                                    "render_manifest_path": (
+                                        summary.render_manifest_path
+                                    ),
+                                    "output_directory": summary.output_directory,
+                                    "rendered_level": summary.rendered_level,
+                                    "output_format": summary.output_format,
+                                    "compiled_files": list(summary.compiled_files),
+                                    "fps": summary.fps,
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Compile movie workflow complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "Compile movie requires a canonical OME-Zarr store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "compile_movie",
+                                "parameters": {
+                                    **compile_movie_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Compile movie skipped (no Zarr/N5 store).",
+                        )
+                    continue
+
                 if operation_name == "mip_export":
                     mip_parameters = dict(operation_parameters)
                     if provenance_store_path and is_zarr_store_path(
@@ -3154,6 +3341,8 @@ def _run_workflow(
             fusion=workflow.fusion,
             display_pyramid=workflow.display_pyramid,
             visualization=workflow.visualization,
+            render_movie=workflow.render_movie,
+            compile_movie=workflow.compile_movie,
             mip_export=workflow.mip_export,
             zarr_save=workflow.zarr_save,
             spatial_calibration=runtime_spatial_calibration,

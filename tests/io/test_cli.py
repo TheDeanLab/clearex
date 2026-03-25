@@ -52,6 +52,8 @@ def test_analysis_flags_are_parsed():
             "--registration",
             "--display-pyramid",
             "--visualization",
+            "--render-movie",
+            "--compile-movie",
             "--mip-export",
             "--headless",
             "--no-dask",
@@ -65,6 +67,8 @@ def test_analysis_flags_are_parsed():
     assert args.registration is True
     assert args.display_pyramid is True
     assert args.visualization is True
+    assert args.render_movie is True
+    assert args.compile_movie is True
     assert args.mip_export is True
     assert args.headless is True
     assert args.dask is False

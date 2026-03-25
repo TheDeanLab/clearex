@@ -29,9 +29,13 @@
 from typing import Any
 
 __all__ = [
+    "CompileMovieSummary",
     "DisplayPyramidSummary",
+    "RenderMovieSummary",
     "VisualizationSummary",
+    "run_compile_movie_analysis",
     "run_display_pyramid_analysis",
+    "run_render_movie_analysis",
     "run_visualization_analysis",
 ]
 
@@ -55,9 +59,13 @@ def __getattr__(name: str) -> Any:
         If the attribute is not a supported visualization export.
     """
     if name in {
+        "CompileMovieSummary",
         "DisplayPyramidSummary",
+        "RenderMovieSummary",
         "VisualizationSummary",
+        "run_compile_movie_analysis",
         "run_display_pyramid_analysis",
+        "run_render_movie_analysis",
         "run_visualization_analysis",
     }:
         from . import pipeline

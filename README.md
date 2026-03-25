@@ -26,6 +26,8 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
   - particle detection (`clearex/results/particle_detection/latest`)
   - display-pyramid metadata (`clearex/results/display_pyramid/latest`)
   - visualization metadata (`clearex/results/visualization/latest`) with napari launch
+  - render-movie metadata (`clearex/results/render_movie/latest`) with external PNG frame sets
+  - compile-movie metadata (`clearex/results/compile_movie/latest`) with external MP4 / ProRes files
   - MIP export metadata (`clearex/results/mip_export/latest`) with external OME-TIFF / OME-Zarr files
 - FAIR-style provenance records are persisted in `clearex/provenance/runs` with append-only run history and hash chaining.
 
@@ -164,7 +166,8 @@ usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
                [--usegment3d] [--channel-indices CHANNEL_INDICES]
                [--input-resolution-level INPUT_RESOLUTION_LEVEL]
                [--shear-transform] [-r] [--fusion] [--display-pyramid] [-v]
-               [--mip-export] [-f FILE] [--migrate-store MIGRATE_STORE]
+               [--render-movie] [--compile-movie] [--mip-export] [-f FILE]
+               [--migrate-store MIGRATE_STORE]
                [--migrate-output MIGRATE_OUTPUT] [--migrate-overwrite]
                [--dask | --no-dask] [--chunks CHUNKS]
                [--stage-axis-map STAGE_AXIS_MAP] [--gui | --no-gui]
@@ -184,6 +187,8 @@ usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
 - `--fusion`: Run stitched-volume fusion from the latest registration result.
 - `--display-pyramid`: Prepare reusable display pyramids for visualization.
 - `-v, --visualization`: Run visualization workflow.
+- `--render-movie`: Render PNG movie frames from captured visualization keyframes.
+- `--compile-movie`: Compile rendered PNG frames into MP4 and/or ProRes movies.
 - `--mip-export`: Export XY/XZ/YZ maximum-intensity projections as OME-TIFF or standalone OME-Zarr.
 - `--migrate-store`: Convert one legacy ClearEx `.zarr` / `.n5` store into canonical OME-Zarr v3.
 - `--migrate-output`: Optional destination path for `--migrate-store`.
@@ -256,6 +261,26 @@ Disable Dask lazy loading:
 clearex --headless --no-dask --file /path/to/data_store.ome.zarr --particle-detection
 ```
 
+Run the movie workflow in separate passes against an existing canonical store:
+
+```bash
+clearex --headless \
+  --file /path/to/data_store.ome.zarr \
+  --visualization
+
+clearex --headless \
+  --file /path/to/data_store.ome.zarr \
+  --render-movie
+
+clearex --headless \
+  --file /path/to/data_store.ome.zarr \
+  --compile-movie
+```
+
+Detailed movie timing, overlay, and codec parameters are currently configured
+through the GUI or programmatic `WorkflowConfig.analysis_parameters`; the CLI
+currently exposes the movie operations as top-level flags.
+
 Migrate one legacy ClearEx store into canonical OME-Zarr v3:
 
 ```bash
@@ -277,6 +302,15 @@ clearex --migrate-store /path/to/legacy_store.zarr
 - Visualization supports multi-volume overlays using logical sources and/or public OME image collections (for example source data plus `results/usegment3d/latest`) with per-layer image/labels display controls.
 - Multiposition visualization placement now resolves world `z/y/x` translations from the store-level spatial calibration. Bindings support `X`, `Y`, `Z`, and Navigate focus axis `F` with sign inversion or `none`; `THETA` remains a rotation of the `z/y` plane about world `x`.
 - Visualization now probes napari OpenGL renderer info (`vendor`/`renderer`/`version`) and can fail fast when software rendering is detected or GPU rendering cannot be confirmed (`require_gpu_rendering=True`).
+- `render_movie` consumes visualization keyframes and writes latest metadata to
+  `clearex/results/render_movie/latest` plus external PNG frame sets under
+  `<analysis_store>_render_movie/latest/level_<nn>_frames`.
+- `compile_movie` consumes the latest render manifest and writes latest metadata
+  to `clearex/results/compile_movie/latest` plus external movie files under
+  `<analysis_store>_compile_movie/latest`.
+- Offline movie rendering rebuilds captured `Points` and `Tracks` layers from
+  the keyframe manifest so particle and track overlays can survive beyond the
+  live napari session.
 - MIP export writes TIFF outputs as OME-TIFF (`.tif`) with projection-aware physical pixel calibration (`PhysicalSizeX/Y`) derived from source `voxel_size_um_zyx`.
 - `mip_export export_format=zarr` writes standalone OME-Zarr v3 image stores (`.ome.zarr`) with axis metadata and physical scale, so the outputs can be opened directly in OME-aware viewers such as napari.
 - uSegment3D runs per `(t, p, selected channel)` volume task and publishes the latest result as `results/usegment3d/latest`.
@@ -305,9 +339,9 @@ clearex --migrate-store /path/to/legacy_store.zarr
   - Visualization multiscale gate is configurable per volume layer:
     - `inherit`: follow global multiscale toggle and use existing pyramids when available.
     - `require`: fail if no pyramid exists for that layer.
-    - `auto_build`: generate a visualization pyramid cache for that layer when missing.
     - `off`: force single-scale rendering for that layer.
-  - Auto-generated visualization pyramids are written under `results/visualization_cache/pyramids/...` and reused on subsequent runs.
+  - Display pyramids are prepared explicitly through the `display_pyramid`
+    operation and recorded under `clearex/results/display_pyramid/latest`.
   - Chunk-wise `map_overlap` stitching across labels is not yet enabled by default because label continuity/relabeling across chunk seams requires additional global reconciliation.
 - GUI setup accepts Navigate `experiment.yml`/`experiment.yaml` files and
   managed experiment lists (`.clearex-experiment-list.json`).
@@ -356,13 +390,31 @@ clearex --migrate-store /path/to/legacy_store.zarr
   - camera (angles, zoom, center, perspective),
   - dims (`current_step`, axis labels, order, and 2D/3D display mode),
   - layer order and selected/active layers,
-  - per-layer display state (visibility, LUT/colormap, rendering mode, blending, opacity, contrast, and transforms when available).
+  - per-layer display state (visibility, LUT/colormap, rendering mode, blending, opacity, contrast, and transforms when available),
+  - reconstructable `Points` and `Tracks` overlay layers.
 - The GUI exposes a popup table (`Layer/View Table...`) to define optional per-layer overrides and `Annotation` labels that are embedded in the keyframe manifest.
 - The GUI also exposes a popup table (`Volume Layers...`) to configure overlay rows with:
   - component path,
   - layer type (`image` or `labels`),
   - channels, visibility, opacity, blending, colormap, rendering, and multiscale policy.
 - Visualization parameters include `require_gpu_rendering` (enabled by default). Disable only when running intentionally without a GPU-backed OpenGL context.
+
+### Movie Rendering and Compilation
+- `render_movie` renders offline PNG frame sets from the captured keyframes.
+- `compile_movie` encodes one selected frame set into MP4, ProRes MOV, or both.
+- Recommended workflow:
+  - capture keyframes in `visualization`,
+  - render a preview pass from a coarser level (`resolution_levels=[1]` or `[2]`),
+  - iterate on timing and codec settings with `compile_movie`,
+  - re-render at level `0` and the final output size for publication delivery.
+- Practical parameter ranges:
+  - `default_transition_frames`: `12` to `96` (`48` is a good default),
+  - `hold_frames`: `0` to `24`,
+  - `orbit_degrees`: `10` to `90`,
+  - `flythrough_distance_factor`: `0.02` to `0.20`,
+  - `zoom_effect_factor`: `0.05` to `0.25`,
+  - `mp4_crf`: `16` to `24`,
+  - `render_size_xy`: preview `1280x720` or `1600x900`; final `1920x1080` to `3840x2160`.
 
 ## Output Layout (Canonical Store)
 - Public OME source image collection:
@@ -379,6 +431,8 @@ clearex --migrate-store /path/to/legacy_store.zarr
   - `clearex/provenance/latest_outputs/<analysis>`
   - `clearex/gui_state`
   - `clearex/results/registration/latest`
+  - `clearex/results/render_movie/latest`
+  - `clearex/results/compile_movie/latest`
   - `clearex/runtime_cache/source/data`
   - `clearex/runtime_cache/source/data_pyramid/level_*`
   - `clearex/runtime_cache/results/<analysis>/latest/data`
@@ -387,6 +441,10 @@ clearex --migrate-store /path/to/legacy_store.zarr
 - External latest-only projection exports:
   - `<output_directory>/mip_<projection>_... .tif`
   - `<output_directory>/mip_<projection>_... .ome.zarr`
+- External latest-only movie exports:
+  - `<analysis_store>_render_movie/latest/level_<nn>_frames/frame_000000.png`
+  - `<analysis_store>_compile_movie/latest/*.mp4`
+  - `<analysis_store>_compile_movie/latest/*.mov`
 - Migration-only legacy layouts:
   - root `data`
   - root `data_pyramid`

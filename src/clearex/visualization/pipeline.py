@@ -37,6 +37,7 @@ import logging
 import math
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -47,6 +48,8 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 import dask.array as da
 from dask.callbacks import Callback
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from scipy.spatial.transform import Rotation, Slerp
 import zarr
 
 # Local Imports
@@ -57,6 +60,11 @@ from clearex.io.ome_store import (
     resolve_voxel_size_um_zyx_with_source,
 )
 from clearex.io.provenance import register_latest_output_reference
+from clearex.visualization.export import (
+    compile_png_frames_to_mp4,
+    compile_png_frames_to_prores,
+    verify_png_frame_directory,
+)
 from clearex.workflow import (
     SpatialCalibrationConfig,
     format_spatial_calibration,
@@ -89,6 +97,7 @@ _DISPLAY_CONTRAST_LEVEL_SOURCE_ATTR = "display_contrast_source_component"
 _DISPLAY_CONTRAST_SAMPLE_TARGET_VOXELS = 2_000_000
 _DISPLAY_PYRAMID_BUILD_PROGRESS_TASK_STEP = 1_024
 _DISPLAY_PYRAMID_BUILD_PROGRESS_MIN_INTERVAL_SECONDS = 1.5
+_MAX_CAPTURED_OVERLAY_LAYER_ELEMENTS = 500_000
 _SOFTWARE_RENDERER_HINTS = (
     "llvmpipe",
     "softpipe",
@@ -166,6 +175,34 @@ class VisualizationSummary:
     viewer_ndisplay_requested: int = 3
     viewer_ndisplay_effective: int = 3
     display_mode_fallback_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RenderMovieSummary:
+    """Summary metadata for one render-movie run."""
+
+    component: str
+    visualization_component: str
+    keyframe_manifest_path: str
+    render_manifest_path: str
+    output_directory: str
+    rendered_levels: tuple[int, ...]
+    frame_count: int
+    fps: int
+
+
+@dataclass(frozen=True)
+class CompileMovieSummary:
+    """Summary metadata for one compile-movie run."""
+
+    component: str
+    render_component: str
+    render_manifest_path: str
+    output_directory: str
+    rendered_level: int
+    output_format: str
+    compiled_files: tuple[str, ...]
+    fps: int
 
 
 @dataclass(frozen=True)
@@ -265,6 +302,41 @@ class ResolvedVolumeLayer:
     name: str
     multiscale_policy: str
     multiscale_status: str
+
+
+@dataclass(frozen=True)
+class PreparedVisualizationScene:
+    """Prepared visualization context reusable across viewer entrypoints."""
+
+    normalized_parameters: Dict[str, Any]
+    volume_layers: tuple[ResolvedVolumeLayer, ...]
+    selected_positions: tuple[int, ...]
+    reference_position_index: int
+    points_by_position: Dict[int, np.ndarray]
+    point_properties_by_position: Dict[int, Dict[str, np.ndarray]]
+    total_overlay_points: int
+    source_component: str
+    source_components: tuple[str, ...]
+    viewer_ndisplay_requested: int
+    viewer_ndisplay_effective: int
+    display_mode_fallback_reason: Optional[str]
+    napari_payload: NapariLayerPayload
+    position_affines_tczyx: Dict[int, np.ndarray]
+    spatial_calibration: SpatialCalibrationConfig
+
+
+@dataclass(frozen=True)
+class BuiltNapariScene:
+    """Live napari viewer scene returned by the shared scene builder."""
+
+    viewer: Any
+    renderer_info: Dict[str, Any]
+    manifest_path: Optional[Path]
+    primary_source_component: str
+    primary_source_components: tuple[str, ...]
+    serialized_volume_layers: list[Dict[str, Any]]
+    axis_labels_tczyx: tuple[str, ...]
+    scale_tczyx: tuple[float, ...]
 
 
 def _decode_gl_string(value: Any) -> str:
@@ -479,6 +551,17 @@ def _first_positive_float(candidates: Sequence[Any]) -> Optional[float]:
         if np.isfinite(value) and value > 0:
             return float(value)
     return None
+
+
+def _close_zarr_store(container: Any) -> None:
+    """Close a Zarr store handle when the backing store supports it."""
+    store = getattr(container, "store", None)
+    close_method = getattr(store, "close", None)
+    if callable(close_method):
+        try:
+            close_method()
+        except Exception:
+            return
 
 
 def _extract_scale_tczyx_from_attrs(
@@ -1109,6 +1192,186 @@ def _normalize_visualization_parameters(
     return normalized
 
 
+def _normalize_render_movie_parameters(
+    parameters: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Normalize render-movie runtime parameters.
+
+    Parameters
+    ----------
+    parameters : mapping[str, Any]
+        Candidate render-movie parameter mapping.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized render-movie parameters.
+
+    Raises
+    ------
+    ValueError
+        If timing, output-size, camera-effect, or overlay values are invalid.
+    """
+    normalized = dict(parameters)
+    normalized["input_source"] = (
+        str(normalized.get("input_source", "visualization")).strip() or "visualization"
+    )
+    normalized["execution_order"] = max(1, int(normalized.get("execution_order", 1)))
+    normalized["keyframe_manifest_path"] = str(
+        normalized.get("keyframe_manifest_path", "")
+    ).strip()
+    raw_levels = normalized.get("resolution_levels", [0])
+    if not isinstance(raw_levels, (tuple, list)):
+        raw_levels = [raw_levels]
+    levels = sorted(
+        set(max(0, int(value)) for value in raw_levels if str(value).strip() != "")
+    )
+    normalized["resolution_levels"] = levels or [0]
+    render_size_xy = normalized.get("render_size_xy", [1920, 1080])
+    if not isinstance(render_size_xy, (tuple, list)) or len(render_size_xy) != 2:
+        raise ValueError(
+            "render_movie render_size_xy must define two integers in (x, y) order."
+        )
+    normalized["render_size_xy"] = [
+        max(1, int(render_size_xy[0])),
+        max(1, int(render_size_xy[1])),
+    ]
+    normalized["fps"] = max(1, int(normalized.get("fps", 24)))
+    normalized["default_transition_frames"] = max(
+        0, int(normalized.get("default_transition_frames", 48))
+    )
+    raw_transition_frames = normalized.get("transition_frames_by_gap", [])
+    if not isinstance(raw_transition_frames, (tuple, list)):
+        raw_transition_frames = [raw_transition_frames]
+    normalized["transition_frames_by_gap"] = [
+        max(0, int(value))
+        for value in raw_transition_frames
+        if str(value).strip() != ""
+    ]
+    normalized["hold_frames"] = max(0, int(normalized.get("hold_frames", 12)))
+    interpolation_mode = (
+        str(normalized.get("interpolation_mode", "ease_in_out")).strip().lower()
+        or "ease_in_out"
+    )
+    if interpolation_mode not in {"linear", "ease_in_out"}:
+        raise ValueError(
+            "render_movie interpolation_mode must be one of linear, ease_in_out."
+        )
+    normalized["interpolation_mode"] = interpolation_mode
+    camera_effect = (
+        str(normalized.get("camera_effect", "none")).strip().lower() or "none"
+    )
+    if camera_effect not in {"none", "orbit", "flythrough", "zoom_fx"}:
+        raise ValueError(
+            "render_movie camera_effect must be one of none, orbit, flythrough, zoom_fx."
+        )
+    normalized["camera_effect"] = camera_effect
+    normalized["orbit_degrees"] = max(0.0, float(normalized.get("orbit_degrees", 45.0)))
+    normalized["flythrough_distance_factor"] = max(
+        0.0, float(normalized.get("flythrough_distance_factor", 0.10))
+    )
+    normalized["zoom_effect_factor"] = max(
+        0.0, float(normalized.get("zoom_effect_factor", 0.15))
+    )
+    normalized["overlay_title"] = str(normalized.get("overlay_title", "")).strip()
+    normalized["overlay_subtitle"] = str(normalized.get("overlay_subtitle", "")).strip()
+    frame_text_mode = (
+        str(normalized.get("overlay_frame_text_mode", "none")).strip().lower() or "none"
+    )
+    if frame_text_mode not in {"none", "frame_number", "keyframe_annotations"}:
+        raise ValueError(
+            "render_movie overlay_frame_text_mode must be one of none, "
+            "frame_number, keyframe_annotations."
+        )
+    normalized["overlay_frame_text_mode"] = frame_text_mode
+    normalized["overlay_scalebar"] = bool(normalized.get("overlay_scalebar", False))
+    normalized["overlay_scalebar_length_um"] = max(
+        np.finfo(np.float32).eps,
+        float(normalized.get("overlay_scalebar_length_um", 50.0)),
+    )
+    scalebar_position = (
+        str(normalized.get("overlay_scalebar_position", "bottom_left")).strip().lower()
+        or "bottom_left"
+    )
+    if scalebar_position not in {
+        "bottom_left",
+        "bottom_right",
+        "top_left",
+        "top_right",
+    }:
+        raise ValueError(
+            "render_movie overlay_scalebar_position must be one of "
+            "bottom_left, bottom_right, top_left, top_right."
+        )
+    normalized["overlay_scalebar_position"] = scalebar_position
+    normalized["output_directory"] = str(normalized.get("output_directory", "")).strip()
+    return normalized
+
+
+def _normalize_compile_movie_parameters(
+    parameters: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Normalize compile-movie runtime parameters.
+
+    Parameters
+    ----------
+    parameters : mapping[str, Any]
+        Candidate compile-movie parameter mapping.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized compile-movie parameters.
+
+    Raises
+    ------
+    ValueError
+        If codec, FPS, level-selection, or resize values are invalid.
+    """
+    normalized = dict(parameters)
+    normalized["input_source"] = (
+        str(normalized.get("input_source", "render_movie")).strip() or "render_movie"
+    )
+    normalized["execution_order"] = max(1, int(normalized.get("execution_order", 1)))
+    normalized["render_manifest_path"] = str(
+        normalized.get("render_manifest_path", "")
+    ).strip()
+    normalized["rendered_level"] = max(0, int(normalized.get("rendered_level", 0)))
+    output_format = str(normalized.get("output_format", "mp4")).strip().lower() or "mp4"
+    if output_format not in {"mp4", "prores", "both"}:
+        raise ValueError(
+            "compile_movie output_format must be one of mp4, prores, both."
+        )
+    normalized["output_format"] = output_format
+    normalized["fps"] = max(1, int(normalized.get("fps", 24)))
+    mp4_crf = int(normalized.get("mp4_crf", 18))
+    if mp4_crf < 0 or mp4_crf > 51:
+        raise ValueError("compile_movie mp4_crf must be in [0, 51].")
+    normalized["mp4_crf"] = mp4_crf
+    normalized["mp4_preset"] = (
+        str(normalized.get("mp4_preset", "slow")).strip().lower() or "slow"
+    )
+    normalized["prores_profile"] = max(
+        0, min(5, int(normalized.get("prores_profile", 3)))
+    )
+    normalized["pixel_format"] = str(normalized.get("pixel_format", "")).strip()
+    resize_xy = normalized.get("resize_xy", [])
+    if resize_xy in (None, "", [], ()):
+        normalized["resize_xy"] = []
+    else:
+        if not isinstance(resize_xy, (tuple, list)) or len(resize_xy) != 2:
+            raise ValueError(
+                "compile_movie resize_xy must define two integers in (x, y) order."
+            )
+        normalized["resize_xy"] = [
+            max(1, int(resize_xy[0])),
+            max(1, int(resize_xy[1])),
+        ]
+    normalized["output_directory"] = str(normalized.get("output_directory", "")).strip()
+    normalized["output_stem"] = str(normalized.get("output_stem", "")).strip()
+    return normalized
+
+
 def _resolve_effective_launch_mode(requested_mode: str) -> str:
     """Resolve effective viewer launch mode for current runtime context.
 
@@ -1557,6 +1820,9 @@ def _serialize_layer_configuration(
         "iso_threshold",
         "edge_width",
         "border_width",
+        "tail_length",
+        "head_length",
+        "tail_width",
     ):
         if hasattr(layer, attr_name):
             payload[attr_name] = float(
@@ -1590,6 +1856,54 @@ def _serialize_layer_configuration(
             payload["affine_matrix"] = _serialize_layer_attribute(affine_matrix)
         else:
             payload["affine"] = _serialize_layer_attribute(affine_value)
+    return payload
+
+
+def _serialize_reconstructable_overlay_layer(layer: Any) -> Optional[Dict[str, Any]]:
+    """Serialize a non-image napari overlay layer that can be rebuilt later.
+
+    Parameters
+    ----------
+    layer : Any
+        Live napari layer instance.
+
+    Returns
+    -------
+    dict[str, Any], optional
+        Serializable overlay payload for supported layer types, otherwise
+        ``None``.
+    """
+    layer_type = str(type(layer).__name__).strip().lower()
+    if layer_type not in {"points", "tracks"}:
+        return None
+    data = np.asarray(getattr(layer, "data", np.empty((0,), dtype=np.float32)))
+    if int(data.size) > _MAX_CAPTURED_OVERLAY_LAYER_ELEMENTS:
+        return None
+
+    payload = _serialize_layer_configuration(
+        layer,
+        order_index=0,
+        selected_layer_names=set(),
+        active_layer_name=None,
+        override_by_layer_name={},
+    )
+    payload["data"] = _sanitize_metadata_value(data)
+
+    metadata = getattr(layer, "metadata", None)
+    if isinstance(metadata, Mapping):
+        payload["metadata"] = {
+            str(key): _sanitize_metadata_value(value) for key, value in metadata.items()
+        }
+    properties = getattr(layer, "properties", None)
+    if isinstance(properties, Mapping):
+        payload["properties"] = {
+            str(key): _sanitize_metadata_value(value)
+            for key, value in properties.items()
+        }
+    if layer_type == "tracks":
+        graph = getattr(layer, "graph", None)
+        if graph is not None:
+            payload["graph"] = _sanitize_metadata_value(graph)
     return payload
 
 
@@ -1655,7 +1969,9 @@ def _capture_viewer_keyframe(
             override_by_layer_name[name] = row
 
     keyframe: Dict[str, Any] = {
+        "id": f"keyframe_{int(max(0, keyframe_index)):04d}",
         "index": int(max(0, keyframe_index)),
+        "order_index": int(max(0, keyframe_index)),
         "captured_at_utc": datetime.now(timezone.utc)
         .replace(microsecond=0)
         .isoformat()
@@ -1735,6 +2051,305 @@ def _write_keyframe_manifest(
         json.dumps(_sanitize_metadata_value(dict(payload)), indent=2),
         encoding="utf-8",
     )
+
+
+def _read_json_mapping(path: Union[str, Path]) -> Dict[str, Any]:
+    """Read a JSON object from disk.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Source JSON path.
+
+    Returns
+    -------
+    dict[str, Any]
+        Parsed mapping payload.
+
+    Raises
+    ------
+    ValueError
+        If the JSON document is not an object.
+    """
+    payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object at {path}.")
+    return {str(key): value for key, value in payload.items()}
+
+
+def _write_json_mapping(path: Union[str, Path], payload: Mapping[str, Any]) -> None:
+    """Write one JSON object to disk.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Destination JSON path.
+    payload : mapping[str, Any]
+        Mapping payload to serialize.
+
+    Returns
+    -------
+    None
+        Writes the JSON file for its side effects only.
+    """
+    output_path = Path(path).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(_sanitize_metadata_value(dict(payload)), indent=2),
+        encoding="utf-8",
+    )
+
+
+def _resolve_movie_output_base_directory(
+    *,
+    zarr_path: Union[str, Path],
+    output_directory: str,
+    suffix: str,
+) -> Path:
+    """Resolve a movie-render or movie-compile output base directory.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    output_directory : str
+        Optional explicit output directory.
+    suffix : str
+        Auto-generated directory suffix when ``output_directory`` is empty.
+
+    Returns
+    -------
+    pathlib.Path
+        Resolved output base directory.
+    """
+    store_path = Path(zarr_path).expanduser().resolve()
+    candidate = str(output_directory).strip()
+    if candidate:
+        resolved = Path(candidate).expanduser()
+        if not resolved.is_absolute():
+            resolved = (store_path.parent / resolved).resolve()
+        return resolved
+    return (store_path.parent / f"{store_path.name}_{suffix}").resolve()
+
+
+def _prepare_movie_output_directory(base_directory: Path) -> Path:
+    """Create a clean ``latest`` movie-output directory.
+
+    Parameters
+    ----------
+    base_directory : pathlib.Path
+        Parent movie-output directory.
+
+    Returns
+    -------
+    pathlib.Path
+        Prepared ``latest`` directory path.
+    """
+    latest_directory = (base_directory / "latest").resolve()
+    if latest_directory.exists():
+        shutil.rmtree(latest_directory)
+    latest_directory.mkdir(parents=True, exist_ok=True)
+    return latest_directory
+
+
+def _ease_fraction(alpha: float, mode: str) -> float:
+    """Map linear interpolation fractions through an easing curve."""
+    fraction = max(0.0, min(1.0, float(alpha)))
+    if str(mode).strip().lower() == "linear":
+        return fraction
+    return float(fraction * fraction * (3.0 - (2.0 * fraction)))
+
+
+def _interpolate_scalar(start: float, end: float, alpha: float) -> float:
+    """Linearly interpolate one scalar."""
+    return float((1.0 - float(alpha)) * float(start) + float(alpha) * float(end))
+
+
+def _interpolate_vector(
+    start: Sequence[float],
+    end: Sequence[float],
+    alpha: float,
+) -> tuple[float, ...]:
+    """Linearly interpolate one numeric vector."""
+    return tuple(
+        _interpolate_scalar(float(a), float(b), float(alpha))
+        for a, b in zip(tuple(start), tuple(end), strict=False)
+    )
+
+
+def _slerp_camera_angles(
+    start_angles: Sequence[float],
+    end_angles: Sequence[float],
+    fractions: Sequence[float],
+) -> tuple[tuple[float, float, float], ...]:
+    """Interpolate napari camera angles using quaternion SLERP."""
+    if len(tuple(fractions)) <= 0:
+        return tuple()
+    start_rotation = Rotation.from_euler("yzx", tuple(start_angles), degrees=True)
+    end_rotation = Rotation.from_euler("yzx", tuple(end_angles), degrees=True)
+    slerp = Slerp(
+        np.asarray([0.0, 1.0], dtype=np.float64),
+        Rotation.concatenate((start_rotation, end_rotation)),
+    )
+    interpolated = slerp(np.asarray([float(v) for v in fractions], dtype=np.float64))
+    angle_rows = interpolated.as_euler("yzx", degrees=True)
+    return tuple(
+        (
+            float(row[0]),
+            float(row[1]),
+            float(row[2]),
+        )
+        for row in np.asarray(angle_rows, dtype=np.float64)
+    )
+
+
+def _ensure_rgba_frame(frame: np.ndarray) -> np.ndarray:
+    """Coerce screenshot data into RGBA uint8."""
+    rgba = np.asarray(frame)
+    if rgba.dtype != np.uint8:
+        if rgba.size > 0 and float(np.nanmax(rgba)) <= 1.0:
+            rgba = (np.clip(rgba, 0.0, 1.0) * 255.0).astype(np.uint8)
+        else:
+            rgba = np.clip(rgba, 0.0, 255.0).astype(np.uint8)
+    if rgba.ndim == 2:
+        rgba = np.stack([rgba, rgba, rgba], axis=-1)
+    if rgba.shape[-1] == 3:
+        alpha = np.full(rgba.shape[:2] + (1,), 255, dtype=np.uint8)
+        rgba = np.concatenate([rgba, alpha], axis=-1)
+    if rgba.shape[-1] != 4:
+        raise ValueError(f"Unexpected screenshot shape: {rgba.shape}")
+    return rgba
+
+
+def _load_overlay_font(size: int) -> ImageFont.ImageFont:
+    """Load a font suitable for movie overlays."""
+    for candidate in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ):
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _movie_overlay_rgba(
+    frame_rgba_u8: np.ndarray,
+    *,
+    title: str,
+    subtitle: str,
+    frame_text: str,
+    scalebar_enabled: bool,
+    scalebar_length_um: float,
+    scalebar_position: str,
+    pixel_size_x_um: Optional[float],
+) -> np.ndarray:
+    """Draw title/subtitle/frame-text/scalebar overlays on one frame."""
+    rgba = _ensure_rgba_frame(frame_rgba_u8)
+    base = Image.fromarray(rgba, mode="RGBA")
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    width_px = int(rgba.shape[1])
+    height_px = int(rgba.shape[0])
+    margin = max(18, min(width_px, height_px) // 40)
+    title_font = _load_overlay_font(max(20, height_px // 28))
+    subtitle_font = _load_overlay_font(max(16, height_px // 38))
+    meta_font = _load_overlay_font(max(14, height_px // 48))
+
+    title_text = str(title).strip()
+    subtitle_text = str(subtitle).strip()
+    frame_meta_text = str(frame_text).strip()
+    if title_text or subtitle_text:
+        text_lines = [text for text in (title_text, subtitle_text) if text]
+        line_boxes = [
+            draw.textbbox(
+                (0, 0), text, font=(title_font if idx == 0 else subtitle_font)
+            )
+            for idx, text in enumerate(text_lines)
+        ]
+        box_width = max(max(0, bbox[2] - bbox[0]) for bbox in line_boxes)
+        box_height = sum(max(0, bbox[3] - bbox[1]) for bbox in line_boxes) + (
+            max(0, len(text_lines) - 1) * max(6, height_px // 180)
+        )
+        draw.rounded_rectangle(
+            (
+                margin - 10,
+                margin - 10,
+                margin + box_width + 10,
+                margin + box_height + 10,
+            ),
+            radius=12,
+            fill=(0, 0, 0, 150),
+        )
+        cursor_y = margin
+        for idx, text in enumerate(text_lines):
+            font = title_font if idx == 0 else subtitle_font
+            fill = (255, 255, 255, 255) if idx == 0 else (220, 230, 255, 255)
+            draw.text((margin, cursor_y), text, font=font, fill=fill)
+            bbox = draw.textbbox((margin, cursor_y), text, font=font)
+            cursor_y = int(bbox[3]) + max(6, height_px // 180)
+
+    if frame_meta_text:
+        bbox = draw.textbbox((0, 0), frame_meta_text, font=meta_font)
+        text_width = max(0, bbox[2] - bbox[0])
+        text_height = max(0, bbox[3] - bbox[1])
+        x0 = width_px - margin - text_width - 10
+        y0 = margin
+        draw.rounded_rectangle(
+            (x0, y0, x0 + text_width + 20, y0 + text_height + 16),
+            radius=10,
+            fill=(0, 0, 0, 140),
+        )
+        draw.text(
+            (x0 + 10, y0 + 8),
+            frame_meta_text,
+            font=meta_font,
+            fill=(255, 255, 255, 255),
+        )
+
+    if scalebar_enabled and pixel_size_x_um is not None and pixel_size_x_um > 0:
+        bar_width = max(
+            8, int(round(float(scalebar_length_um) / float(pixel_size_x_um)))
+        )
+        bar_width = min(bar_width, max(8, width_px - (2 * margin)))
+        bar_height = max(4, height_px // 180)
+        label = f"{float(scalebar_length_um):g} um"
+        label_bbox = draw.textbbox((0, 0), label, font=meta_font)
+        label_width = max(0, label_bbox[2] - label_bbox[0])
+        label_height = max(0, label_bbox[3] - label_bbox[1])
+        total_width = max(bar_width, label_width)
+        total_height = bar_height + label_height + 10
+        if scalebar_position == "bottom_right":
+            x0 = width_px - margin - total_width
+            y0 = height_px - margin - total_height
+        elif scalebar_position == "top_left":
+            x0 = margin
+            y0 = margin
+        elif scalebar_position == "top_right":
+            x0 = width_px - margin - total_width
+            y0 = margin
+        else:
+            x0 = margin
+            y0 = height_px - margin - total_height
+        draw.rounded_rectangle(
+            (x0 - 10, y0 - 8, x0 + total_width + 10, y0 + total_height + 8),
+            radius=10,
+            fill=(0, 0, 0, 140),
+        )
+        draw.rectangle(
+            (
+                x0,
+                y0 + label_height + 10,
+                x0 + bar_width,
+                y0 + label_height + 10 + bar_height,
+            ),
+            fill=(255, 255, 255, 255),
+        )
+        draw.text((x0, y0), label, font=meta_font, fill=(255, 255, 255, 255))
+
+    base.alpha_composite(overlay)
+    return np.asarray(base)
 
 
 def _coerce_level_factors_level_major(
@@ -2862,6 +3477,58 @@ def _serialize_resolved_volume_layers(
     ]
 
 
+def _deserialize_resolved_volume_layers(
+    payload: Any,
+) -> tuple[ResolvedVolumeLayer, ...]:
+    """Deserialize metadata payloads into resolved volume layers."""
+    if not isinstance(payload, (tuple, list)):
+        return tuple()
+    resolved: list[ResolvedVolumeLayer] = []
+    for row in payload:
+        if not isinstance(row, Mapping):
+            continue
+        component = str(row.get("component", "")).strip()
+        source_components_raw = row.get("source_components", [])
+        source_components = (
+            tuple(
+                str(item).strip() for item in source_components_raw if str(item).strip()
+            )
+            if isinstance(source_components_raw, (tuple, list))
+            else tuple()
+        )
+        if not component:
+            continue
+        if not source_components:
+            source_components = (component,)
+        resolved.append(
+            ResolvedVolumeLayer(
+                component=component,
+                source_components=tuple(source_components),
+                layer_type=str(row.get("layer_type", "image")).strip().lower()
+                or "image",
+                channels=tuple(
+                    int(index)
+                    for index in _normalize_visualization_channels(row.get("channels"))
+                ),
+                visible=_coerce_optional_bool(row.get("visible")),
+                opacity=_coerce_optional_unit_interval_float(row.get("opacity")),
+                blending=str(row.get("blending", "")).strip().lower(),
+                colormap=str(row.get("colormap", "")).strip(),
+                rendering=str(row.get("rendering", "")).strip().lower(),
+                name=str(row.get("name", "")).strip(),
+                multiscale_policy=(
+                    str(row.get("multiscale_policy", "inherit")).strip().lower()
+                    or "inherit"
+                ),
+                multiscale_status=(
+                    str(row.get("multiscale_status", "single_scale")).strip().lower()
+                    or "single_scale"
+                ),
+            )
+        )
+    return tuple(resolved)
+
+
 def _coerce_contrast_limit_pair(value: Any) -> Optional[tuple[float, float]]:
     """Parse one contrast-limit pair into finite ascending floats."""
     if not isinstance(value, (tuple, list)) or len(value) < 2:
@@ -3486,7 +4153,7 @@ def _launch_napari_subprocess(
     return int(process.pid)
 
 
-def _launch_napari_viewer(
+def _build_napari_viewer_scene(
     *,
     zarr_path: Union[str, Path],
     volume_layers: Sequence[ResolvedVolumeLayer],
@@ -3501,105 +4168,26 @@ def _launch_napari_viewer(
     require_gpu_rendering: bool,
     capture_keyframes: bool,
     keyframe_manifest_path: Optional[Union[str, Path]],
-    keyframe_layer_overrides: Sequence[Mapping[str, Any]],
-) -> Dict[str, Any]:
-    """Open a napari viewer and render image/labels + optional overlays.
-
-    Parameters
-    ----------
-    zarr_path : str or pathlib.Path
-        Zarr analysis-store path.
-    volume_layers : sequence[ResolvedVolumeLayer]
-        Resolved source layers to render in order.
-    selected_positions : sequence of int
-        Position indices selected from the ``p`` axis.
-    points_by_position : mapping[int, numpy.ndarray]
-        Overlay points keyed by position index in ``(t, c, z, y, x)`` order.
-    point_properties_by_position : mapping[int, mapping[str, numpy.ndarray]]
-        Optional point-property mappings keyed by position index.
-    position_affines_tczyx : mapping[int, numpy.ndarray]
-        Per-position affine matrices in homogeneous ``(6, 6)`` form.
-    axis_labels : sequence of str
-        Axis labels in ``(t, c, z, y, x)`` order.
-    scale_tczyx : sequence of float
-        Layer scale values in ``(t, c, z, y, x)`` order.
-    image_metadata : mapping[str, Any]
-        Metadata payload attached to the image layer.
-    points_metadata : mapping[str, Any]
-        Metadata payload attached to the points layer.
-    require_gpu_rendering : bool
-        Whether to fail when napari does not report a GPU-backed OpenGL
-        renderer.
-    capture_keyframes : bool
-        Whether interactive keyframe capture hotkeys are enabled.
-    keyframe_manifest_path : str or pathlib.Path, optional
-        Destination JSON path used for writing keyframe selections.
-    keyframe_layer_overrides : sequence of mapping[str, Any]
-        Optional per-layer override rows, including annotation text.
-
-    Returns
-    -------
-    dict[str, Any]
-        Viewer-capture summary with ``keyframe_manifest_path`` and
-        ``keyframe_count`` entries.
-
-    Raises
-    ------
-    ImportError
-        If napari is unavailable.
-    RuntimeError
-        If ``require_gpu_rendering`` is enabled and the active OpenGL
-        renderer is not confirmed as GPU-backed.
-    """
+    movie_level_index: Optional[int] = None,
+    show: bool = True,
+) -> BuiltNapariScene:
+    """Build a live napari viewer scene for interactive or scripted use."""
     import napari
 
     def _channel_colormap_cycle(channel_count: int) -> tuple[str, ...]:
-        """Return deterministic channel colormaps for visualization layers.
-
-        Parameters
-        ----------
-        channel_count : int
-            Number of channels to color.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Colormap names, one per channel.
-        """
         if channel_count <= 0:
             return tuple()
         base = ("green", "magenta", "bop orange")
-        extras = (
-            "cyan",
-            "yellow",
-            "blue",
-            "red",
-            "gray",
-            "turquoise",
-            "hotpink",
-        )
+        extras = ("cyan", "yellow", "blue", "red", "gray", "turquoise", "hotpink")
         palette: list[str] = []
         for index in range(channel_count):
             if index < len(base):
                 palette.append(base[index])
             else:
-                extra_index = (index - len(base)) % len(extras)
-                palette.append(extras[extra_index])
+                palette.append(extras[(index - len(base)) % len(extras)])
         return tuple(palette)
 
     def _default_channel_opacity(channel_count: int) -> float:
-        """Return default per-layer opacity based on channel count.
-
-        Parameters
-        ----------
-        channel_count : int
-            Number of channels being rendered.
-
-        Returns
-        -------
-        float
-            Layer opacity in ``[0.55, 1.0]``.
-        """
         if channel_count <= 1:
             return 1.0
         return float(max(0.55, 1.0 - (0.1 * (channel_count - 1))))
@@ -3625,7 +4213,6 @@ def _launch_napari_viewer(
     def _resolve_layer_scale_tczyx(
         component: str,
     ) -> tuple[float, float, float, float, float]:
-        """Resolve per-layer ``(t, c, z, y, x)`` scale for napari rendering."""
         key = str(component).strip() or "data"
         cached = layer_scale_cache.get(key)
         if cached is not None:
@@ -3633,7 +4220,6 @@ def _launch_napari_viewer(
         if scale_root is None:
             layer_scale_cache[key] = scale
             return scale
-
         source_attrs: Dict[str, Any]
         source_shape: Optional[tuple[int, int, int, int, int, int]]
         try:
@@ -3673,8 +4259,6 @@ def _launch_napari_viewer(
                 if key == "data" or component_specific:
                     resolved_scale = resolver_scale
                 else:
-                    # Root/store-level voxel metadata describes base spacing.
-                    # Non-base components still need shape-ratio upscaling.
                     resolver_base_scale_hint = resolver_scale
         if resolved_scale is None and key == "data":
             resolved_scale = _extract_scale_tczyx_from_attrs(
@@ -3685,7 +4269,6 @@ def _launch_napari_viewer(
             resolved_scale = _extract_scale_tczyx_from_navigate_raw(
                 scale_source_experiment_raw
             )
-
         if resolved_scale is None:
             base_scale = (
                 resolver_base_scale_hint
@@ -3709,7 +4292,6 @@ def _launch_napari_viewer(
                 )
             except Exception:
                 base_shape = None
-
             if (
                 base_shape is not None
                 and source_shape is not None
@@ -3729,10 +4311,11 @@ def _launch_napari_viewer(
                         continue
                     ratio = float(base_dim) / float(source_dim)
                     rounded = int(round(ratio))
-                    if rounded >= 1 and abs(ratio - float(rounded)) <= 1e-6:
-                        factors.append(float(rounded))
-                    else:
-                        factors.append(1.0)
+                    factors.append(
+                        float(rounded)
+                        if rounded >= 1 and abs(ratio - float(rounded)) <= 1e-6
+                        else 1.0
+                    )
                 resolved_scale = (
                     float(base_scale[0]),
                     float(base_scale[1]),
@@ -3740,7 +4323,6 @@ def _launch_napari_viewer(
                     float(base_scale[3]) * float(factors[1]),
                     float(base_scale[4]) * float(factors[2]),
                 )
-
         if resolved_scale is None:
             resolved_scale = scale
         normalized = _normalize_scale_tczyx(
@@ -3754,7 +4336,6 @@ def _launch_napari_viewer(
         channel_count: int,
         dtype: Any,
     ) -> tuple[tuple[float, float], ...]:
-        """Resolve display contrast metadata without viewer-time reductions."""
         key = str(component).strip() or "data"
         cached = layer_display_contrast_cache.get(key)
         if cached is None:
@@ -3804,7 +4385,7 @@ def _launch_napari_viewer(
     )
     viewer = napari.Viewer(
         ndisplay=(3 if int(effective_ndisplay) >= 3 else 2),
-        show=True,
+        show=bool(show),
     )
     axis_labels_tuple = tuple(str(label) for label in axis_labels)
     axis_labels_applied = False
@@ -3848,10 +4429,7 @@ def _launch_napari_viewer(
                 zarr_path=zarr_path,
                 parameters={"capture_keyframes": True},
             )
-    keyframes: list[Dict[str, Any]] = []
-    normalized_layer_overrides = _normalize_keyframe_layer_overrides(
-        keyframe_layer_overrides
-    )
+
     if len(volume_layers) <= 0:
         raise ValueError("Visualization requires at least one resolved volume layer.")
     primary_layer = volume_layers[0]
@@ -3870,11 +4448,22 @@ def _launch_napari_viewer(
         )
         for layer in volume_layers:
             layer_scale = _resolve_layer_scale_tczyx(str(layer.component))
-            rendered_source_components = (
-                tuple(str(item) for item in layer.source_components)
-                if int(effective_ndisplay) < 3
-                else (str(layer.component),)
-            )
+            if movie_level_index is None:
+                rendered_source_components = (
+                    tuple(str(item) for item in layer.source_components)
+                    if int(effective_ndisplay) < 3
+                    else (str(layer.component),)
+                )
+            else:
+                available_levels = tuple(str(item) for item in layer.source_components)
+                level_component = available_levels[
+                    min(
+                        max(0, int(movie_level_index)),
+                        max(0, len(available_levels) - 1),
+                    )
+                ]
+                rendered_source_components = (str(level_component),)
+
             level_arrays = [
                 da.from_zarr(str(zarr_path), component=str(component))[
                     :, position_index, :, :, :, :
@@ -3887,10 +4476,10 @@ def _launch_napari_viewer(
             display_scale = tuple(float(value) for value in layer_scale)
             display_factors_zyx = (1.0, 1.0, 1.0)
             display_strategy = "none"
-            if not display_level_arrays:
-                continue
             is_multiscale = (
-                int(effective_ndisplay) < 3 and len(display_level_arrays) > 1
+                movie_level_index is None
+                and int(effective_ndisplay) < 3
+                and len(display_level_arrays) > 1
             )
             channel_count = max(1, int(display_level_arrays[0].shape[1]))
             requested_channels = tuple(
@@ -3925,7 +4514,6 @@ def _launch_napari_viewer(
                 display_level_arrays[0].dtype,
             )
             for channel_index in channel_indices:
-                layer_data: Any
                 if is_multiscale:
                     layer_data = [
                         level[:, channel_index : channel_index + 1, :, :, :]
@@ -3935,7 +4523,6 @@ def _launch_napari_viewer(
                     layer_data = display_level_arrays[0][
                         :, channel_index : channel_index + 1, :, :, :
                     ]
-
                 layer_affine = np.asarray(affine_base, dtype=np.float64).copy()
                 layer_name = (
                     f"{base_name} (p={position_index}, c={channel_index})"
@@ -4022,15 +4609,11 @@ def _launch_napari_viewer(
                         pass
 
         points = np.asarray(
-            points_by_position.get(
-                position_index,
-                np.empty((0, 5), dtype=np.float32),
-            ),
+            points_by_position.get(position_index, np.empty((0, 5), dtype=np.float32)),
             dtype=np.float32,
         )
         if points.shape[0] <= 0:
             continue
-
         point_properties = point_properties_by_position.get(position_index, {})
         points_layer_metadata = dict(points_metadata)
         points_layer_metadata["position_index"] = int(position_index)
@@ -4053,6 +4636,120 @@ def _launch_napari_viewer(
             border_width=0.2,
             blending="translucent",
         )
+
+    return BuiltNapariScene(
+        viewer=viewer,
+        renderer_info=dict(renderer_info),
+        manifest_path=manifest_path,
+        primary_source_component=str(primary_source_component),
+        primary_source_components=tuple(
+            str(item) for item in primary_source_components
+        ),
+        serialized_volume_layers=list(serialized_volume_layers),
+        axis_labels_tczyx=tuple(axis_labels_tuple),
+        scale_tczyx=tuple(float(value) for value in scale),
+    )
+
+
+def _launch_napari_viewer(
+    *,
+    zarr_path: Union[str, Path],
+    volume_layers: Sequence[ResolvedVolumeLayer],
+    selected_positions: Sequence[int],
+    points_by_position: Mapping[int, np.ndarray],
+    point_properties_by_position: Mapping[int, Mapping[str, np.ndarray]],
+    position_affines_tczyx: Mapping[int, np.ndarray],
+    axis_labels: Sequence[str],
+    scale_tczyx: Sequence[float],
+    image_metadata: Mapping[str, Any],
+    points_metadata: Mapping[str, Any],
+    require_gpu_rendering: bool,
+    capture_keyframes: bool,
+    keyframe_manifest_path: Optional[Union[str, Path]],
+    keyframe_layer_overrides: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Open a napari viewer and render image/labels + optional overlays.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Zarr analysis-store path.
+    volume_layers : sequence[ResolvedVolumeLayer]
+        Resolved source layers to render in order.
+    selected_positions : sequence of int
+        Position indices selected from the ``p`` axis.
+    points_by_position : mapping[int, numpy.ndarray]
+        Overlay points keyed by position index in ``(t, c, z, y, x)`` order.
+    point_properties_by_position : mapping[int, mapping[str, numpy.ndarray]]
+        Optional point-property mappings keyed by position index.
+    position_affines_tczyx : mapping[int, numpy.ndarray]
+        Per-position affine matrices in homogeneous ``(6, 6)`` form.
+    axis_labels : sequence of str
+        Axis labels in ``(t, c, z, y, x)`` order.
+    scale_tczyx : sequence of float
+        Layer scale values in ``(t, c, z, y, x)`` order.
+    image_metadata : mapping[str, Any]
+        Metadata payload attached to the image layer.
+    points_metadata : mapping[str, Any]
+        Metadata payload attached to the points layer.
+    require_gpu_rendering : bool
+        Whether to fail when napari does not report a GPU-backed OpenGL
+        renderer.
+    capture_keyframes : bool
+        Whether interactive keyframe capture hotkeys are enabled.
+    keyframe_manifest_path : str or pathlib.Path, optional
+        Destination JSON path used for writing keyframe selections.
+    keyframe_layer_overrides : sequence of mapping[str, Any]
+        Optional per-layer override rows, including annotation text.
+
+    Returns
+    -------
+    dict[str, Any]
+        Viewer-capture summary with ``keyframe_manifest_path`` and
+        ``keyframe_count`` entries.
+
+    Raises
+    ------
+    ImportError
+        If napari is unavailable.
+    RuntimeError
+        If ``require_gpu_rendering`` is enabled and the active OpenGL
+        renderer is not confirmed as GPU-backed.
+    """
+    import napari
+
+    built_scene = _build_napari_viewer_scene(
+        zarr_path=zarr_path,
+        volume_layers=volume_layers,
+        selected_positions=selected_positions,
+        points_by_position=points_by_position,
+        point_properties_by_position=point_properties_by_position,
+        position_affines_tczyx=position_affines_tczyx,
+        axis_labels=axis_labels,
+        scale_tczyx=scale_tczyx,
+        image_metadata=image_metadata,
+        points_metadata=points_metadata,
+        require_gpu_rendering=require_gpu_rendering,
+        capture_keyframes=capture_keyframes,
+        keyframe_manifest_path=keyframe_manifest_path,
+        movie_level_index=None,
+        show=True,
+    )
+    viewer = built_scene.viewer
+    renderer_info = dict(built_scene.renderer_info)
+    manifest_path = built_scene.manifest_path
+    primary_source_component = str(built_scene.primary_source_component)
+    primary_source_components = tuple(
+        str(item) for item in built_scene.primary_source_components
+    )
+    serialized_volume_layers = list(built_scene.serialized_volume_layers)
+    axis_labels_tuple = tuple(str(label) for label in built_scene.axis_labels_tczyx)
+    scale = tuple(float(value) for value in built_scene.scale_tczyx)
+    keyframes: list[Dict[str, Any]] = []
+    normalized_layer_overrides = _normalize_keyframe_layer_overrides(
+        keyframe_layer_overrides
+    )
+    selected = tuple(int(index) for index in selected_positions)
 
     def _notify(message: str) -> None:
         """Emit a keyframe-status message in logs and the napari UI.
@@ -4104,12 +4801,20 @@ def _launch_napari_viewer(
         """
         if manifest_path is None:
             return
+        layers = tuple(getattr(viewer, "layers", tuple()))
         payload: Dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "zarr_path": str(Path(zarr_path).expanduser().resolve()),
             "source_component": str(primary_source_component),
             "source_components": [str(item) for item in primary_source_components],
             "volume_layers": serialized_volume_layers,
+            "captured_overlay_layers": [
+                overlay_payload
+                for overlay_payload in (
+                    _serialize_reconstructable_overlay_layer(layer) for layer in layers
+                )
+                if overlay_payload is not None
+            ],
             "renderer": dict(renderer_info),
             "selected_positions": [int(value) for value in selected],
             "axis_labels_tczyx": [str(label) for label in axis_labels_tuple],
@@ -4574,36 +5279,13 @@ def _save_visualization_metadata(
     return component
 
 
-def run_visualization_analysis(
+def _prepare_visualization_scene(
     *,
     zarr_path: Union[str, Path],
     parameters: Mapping[str, Any],
     progress_callback: Optional[ProgressCallback] = None,
-    run_id: Optional[str] = None,
-) -> VisualizationSummary:
-    """Run napari visualization on canonical ClearEx analysis data.
-
-    Parameters
-    ----------
-    zarr_path : str or pathlib.Path
-        Path to canonical analysis-store Zarr object.
-    parameters : mapping[str, Any]
-        Visualization parameters.
-    progress_callback : callable, optional
-        Progress callback invoked as ``callback(percent, message)``.
-    run_id : str, optional
-        Optional provenance run identifier.
-
-    Returns
-    -------
-    VisualizationSummary
-        Summary including source selection and viewer-launch metadata.
-
-    Raises
-    ------
-    ValueError
-        If source component is missing or selected position is out of bounds.
-    """
+) -> PreparedVisualizationScene:
+    """Prepare shared visualization scene inputs without launching napari."""
 
     def _emit(percent: int, message: str) -> None:
         if progress_callback is None:
@@ -4611,111 +5293,122 @@ def run_visualization_analysis(
         progress_callback(int(percent), str(message))
 
     normalized = _normalize_visualization_parameters(parameters)
-    root = zarr.open_group(str(zarr_path), mode="a")
-    volume_layers = _resolve_volume_layers(
-        root=root,
-        parameters=normalized,
-    )
-    if len(volume_layers) <= 0:
-        raise ValueError("Visualization requires at least one valid volume layer.")
-
-    source_component = str(volume_layers[0].component)
-    source_array = root[source_component]
-    source_shape = tuple(int(value) for value in source_array.shape)
-    position_count = int(source_shape[1])
-    show_all_positions = bool(normalized.get("show_all_positions", False))
-    if show_all_positions:
-        selected_positions: tuple[int, ...] = tuple(range(position_count))
-    else:
-        position_index = int(normalized["position_index"])
-        if position_index >= position_count:
-            raise ValueError(
-                f"visualization position_index={position_index} is out of bounds "
-                f"for position axis size {source_shape[1]}."
-            )
-        selected_positions = (position_index,)
-    reference_position_index = int(selected_positions[0])
-
-    points_by_position: Dict[int, np.ndarray] = {}
-    point_properties_by_position: Dict[int, Dict[str, np.ndarray]] = {}
-    if bool(normalized.get("overlay_particle_detections", True)):
-        for position_index in selected_positions:
-            overlay_points, overlay_properties = _load_particle_overlay_points(
+    root = zarr.open_group(str(zarr_path), mode="r")
+    try:
+        volume_layers = tuple(
+            _resolve_volume_layers(
                 root=root,
-                detection_component=str(normalized["particle_detection_component"]),
-                position_index=int(position_index),
+                parameters=normalized,
             )
-            points_by_position[int(position_index)] = overlay_points
-            point_properties_by_position[int(position_index)] = overlay_properties
-    total_overlay_points = int(
-        sum(int(np.asarray(points).shape[0]) for points in points_by_position.values())
-    )
-    point_property_names = tuple(
-        sorted(
-            {
-                str(name)
-                for properties in point_properties_by_position.values()
-                for name in properties.keys()
-            }
         )
-    )
+        if len(volume_layers) <= 0:
+            raise ValueError("Visualization requires at least one valid volume layer.")
 
-    viewer_ndisplay_requested = 3 if bool(normalized.get("use_3d_view", True)) else 2
-    viewer_ndisplay_effective, display_mode_fallback_reason = (
-        _resolve_effective_viewer_ndisplay(
+        source_component = str(volume_layers[0].component)
+        source_array = root[source_component]
+        source_shape = tuple(int(value) for value in source_array.shape)
+        position_count = int(source_shape[1])
+        show_all_positions = bool(normalized.get("show_all_positions", False))
+        if show_all_positions:
+            selected_positions: tuple[int, ...] = tuple(range(position_count))
+        else:
+            position_index = int(normalized["position_index"])
+            if position_index >= position_count:
+                raise ValueError(
+                    f"visualization position_index={position_index} is out of bounds "
+                    f"for position axis size {source_shape[1]}."
+                )
+            selected_positions = (position_index,)
+        reference_position_index = int(selected_positions[0])
+
+        points_by_position: Dict[int, np.ndarray] = {}
+        point_properties_by_position: Dict[int, Dict[str, np.ndarray]] = {}
+        if bool(normalized.get("overlay_particle_detections", True)):
+            for position_index in selected_positions:
+                overlay_points, overlay_properties = _load_particle_overlay_points(
+                    root=root,
+                    detection_component=str(normalized["particle_detection_component"]),
+                    position_index=int(position_index),
+                )
+                points_by_position[int(position_index)] = overlay_points
+                point_properties_by_position[int(position_index)] = overlay_properties
+        total_overlay_points = int(
+            sum(
+                int(np.asarray(points).shape[0])
+                for points in points_by_position.values()
+            )
+        )
+        point_property_names = tuple(
+            sorted(
+                {
+                    str(name)
+                    for properties in point_properties_by_position.values()
+                    for name in properties.keys()
+                }
+            )
+        )
+
+        viewer_ndisplay_requested = (
+            3 if bool(normalized.get("use_3d_view", True)) else 2
+        )
+        viewer_ndisplay_effective, display_mode_fallback_reason = (
+            _resolve_effective_viewer_ndisplay(
+                root=root,
+                volume_layers=volume_layers,
+                requested_ndisplay=viewer_ndisplay_requested,
+            )
+        )
+        if display_mode_fallback_reason is not None:
+            _emit(15, display_mode_fallback_reason)
+
+        launch_volume_layers: list[ResolvedVolumeLayer] = []
+        for layer in volume_layers:
+            rendered_source_components = (
+                tuple(str(item) for item in layer.source_components)
+                if int(viewer_ndisplay_effective) < 3
+                else (str(layer.component),)
+            )
+            launch_volume_layers.append(
+                ResolvedVolumeLayer(
+                    component=str(layer.component),
+                    source_components=rendered_source_components,
+                    layer_type=str(layer.layer_type),
+                    channels=tuple(int(value) for value in layer.channels),
+                    visible=layer.visible,
+                    opacity=layer.opacity,
+                    blending=str(layer.blending),
+                    colormap=str(layer.colormap),
+                    rendering=str(layer.rendering),
+                    name=str(layer.name),
+                    multiscale_policy=str(layer.multiscale_policy),
+                    multiscale_status=str(layer.multiscale_status),
+                )
+            )
+        primary_layer = launch_volume_layers[0]
+        source_components = tuple(str(item) for item in primary_layer.source_components)
+
+        napari_payload = _build_napari_layer_payload(
+            zarr_path=zarr_path,
             root=root,
-            volume_layers=volume_layers,
-            requested_ndisplay=viewer_ndisplay_requested,
+            volume_layers=launch_volume_layers,
+            position_index=reference_position_index,
+            parameters=normalized,
+            overlay_points_count=total_overlay_points,
+            point_property_names=point_property_names,
         )
-    )
-    if display_mode_fallback_reason is not None:
-        _emit(15, display_mode_fallback_reason)
+        (
+            position_affines_tczyx,
+            stage_rows,
+            spatial_calibration,
+        ) = _resolve_position_affines_tczyx(
+            root_attrs=dict(root.attrs),
+            store_metadata=load_store_metadata(root),
+            selected_positions=selected_positions,
+            scale_tczyx=napari_payload.scale_tczyx,
+        )
+    finally:
+        _close_zarr_store(root)
 
-    launch_volume_layers: list[ResolvedVolumeLayer] = []
-    for layer in volume_layers:
-        rendered_source_components = (
-            tuple(str(item) for item in layer.source_components)
-            if int(viewer_ndisplay_effective) < 3
-            else (str(layer.component),)
-        )
-        launch_volume_layers.append(
-            ResolvedVolumeLayer(
-                component=str(layer.component),
-                source_components=rendered_source_components,
-                layer_type=str(layer.layer_type),
-                channels=tuple(int(value) for value in layer.channels),
-                visible=layer.visible,
-                opacity=layer.opacity,
-                blending=str(layer.blending),
-                colormap=str(layer.colormap),
-                rendering=str(layer.rendering),
-                name=str(layer.name),
-                multiscale_policy=str(layer.multiscale_policy),
-                multiscale_status=str(layer.multiscale_status),
-            )
-        )
-    primary_layer = launch_volume_layers[0]
-    source_components = tuple(str(item) for item in primary_layer.source_components)
-
-    napari_payload = _build_napari_layer_payload(
-        zarr_path=zarr_path,
-        root=root,
-        volume_layers=launch_volume_layers,
-        position_index=reference_position_index,
-        parameters=normalized,
-        overlay_points_count=total_overlay_points,
-        point_property_names=point_property_names,
-    )
-    (
-        position_affines_tczyx,
-        stage_rows,
-        spatial_calibration,
-    ) = _resolve_position_affines_tczyx(
-        root_attrs=dict(root.attrs),
-        store_metadata=load_store_metadata(root),
-        selected_positions=selected_positions,
-        scale_tczyx=napari_payload.scale_tczyx,
-    )
     napari_payload.image_metadata["position_index"] = int(reference_position_index)
     napari_payload.image_metadata["selected_positions"] = [
         int(value) for value in selected_positions
@@ -4769,6 +5462,94 @@ def run_visualization_analysis(
         napari_payload.points_metadata["display_mode_fallback_reason"] = str(
             display_mode_fallback_reason
         )
+
+    return PreparedVisualizationScene(
+        normalized_parameters={str(key): value for key, value in normalized.items()},
+        volume_layers=tuple(launch_volume_layers),
+        selected_positions=tuple(int(value) for value in selected_positions),
+        reference_position_index=int(reference_position_index),
+        points_by_position=dict(points_by_position),
+        point_properties_by_position={
+            int(key): dict(value) for key, value in point_properties_by_position.items()
+        },
+        total_overlay_points=int(total_overlay_points),
+        source_component=str(source_component),
+        source_components=tuple(str(item) for item in source_components),
+        viewer_ndisplay_requested=int(viewer_ndisplay_requested),
+        viewer_ndisplay_effective=int(viewer_ndisplay_effective),
+        display_mode_fallback_reason=display_mode_fallback_reason,
+        napari_payload=napari_payload,
+        position_affines_tczyx={
+            int(key): np.asarray(value, dtype=np.float64)
+            for key, value in position_affines_tczyx.items()
+        },
+        spatial_calibration=spatial_calibration,
+    )
+
+
+def run_visualization_analysis(
+    *,
+    zarr_path: Union[str, Path],
+    parameters: Mapping[str, Any],
+    progress_callback: Optional[ProgressCallback] = None,
+    run_id: Optional[str] = None,
+) -> VisualizationSummary:
+    """Run napari visualization on canonical ClearEx analysis data.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Path to canonical analysis-store Zarr object.
+    parameters : mapping[str, Any]
+        Visualization parameters.
+    progress_callback : callable, optional
+        Progress callback invoked as ``callback(percent, message)``.
+    run_id : str, optional
+        Optional provenance run identifier.
+
+    Returns
+    -------
+    VisualizationSummary
+        Summary including source selection and viewer-launch metadata.
+
+    Raises
+    ------
+    ValueError
+        If source component is missing or selected position is out of bounds.
+    """
+
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
+    scene = _prepare_visualization_scene(
+        zarr_path=zarr_path,
+        parameters=parameters,
+        progress_callback=progress_callback,
+    )
+    normalized = dict(scene.normalized_parameters)
+    source_component = str(scene.source_component)
+    source_components = tuple(str(item) for item in scene.source_components)
+    reference_position_index = int(scene.reference_position_index)
+    selected_positions = tuple(int(value) for value in scene.selected_positions)
+    show_all_positions = bool(normalized.get("show_all_positions", False))
+    total_overlay_points = int(scene.total_overlay_points)
+    viewer_ndisplay_requested = int(scene.viewer_ndisplay_requested)
+    viewer_ndisplay_effective = int(scene.viewer_ndisplay_effective)
+    display_mode_fallback_reason = scene.display_mode_fallback_reason
+    launch_volume_layers = tuple(scene.volume_layers)
+    napari_payload = scene.napari_payload
+    points_by_position = dict(scene.points_by_position)
+    point_properties_by_position = {
+        int(key): dict(value)
+        for key, value in scene.point_properties_by_position.items()
+    }
+    position_affines_tczyx = {
+        int(key): np.asarray(value, dtype=np.float64)
+        for key, value in scene.position_affines_tczyx.items()
+    }
+    spatial_calibration = scene.spatial_calibration
 
     _emit(20, "Preparing napari visualization layers")
     effective_launch_mode = _resolve_effective_launch_mode(
@@ -4873,6 +5654,1488 @@ def run_visualization_analysis(
         viewer_ndisplay_requested=int(viewer_ndisplay_requested),
         viewer_ndisplay_effective=int(viewer_ndisplay_effective),
         display_mode_fallback_reason=display_mode_fallback_reason,
+    )
+
+
+def _read_latest_analysis_metadata(
+    *,
+    zarr_path: Union[str, Path],
+    component: str,
+    operation_name: str,
+) -> Dict[str, Any]:
+    """Read one latest-analysis metadata group as a plain dict.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    component : str
+        Latest metadata component path.
+    operation_name : str
+        Operation name used in error messages.
+
+    Returns
+    -------
+    dict[str, Any]
+        Latest metadata attributes as a plain mapping.
+
+    Raises
+    ------
+    ValueError
+        If the requested component is missing.
+    """
+    root = zarr.open_group(str(zarr_path), mode="r")
+    try:
+        group = root[str(component)]
+    except Exception as exc:
+        raise ValueError(
+            f"{operation_name} requires metadata component '{component}', "
+            "but it was not found."
+        ) from exc
+    return {str(key): value for key, value in dict(group.attrs).items()}
+
+
+def _normalize_captured_keyframes(value: Any) -> tuple[Dict[str, Any], ...]:
+    """Normalize keyframe payloads loaded from disk.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate keyframe sequence loaded from JSON.
+
+    Returns
+    -------
+    tuple[dict[str, Any], ...]
+        Normalized keyframes sorted by capture order.
+    """
+    if not isinstance(value, (tuple, list)):
+        return tuple()
+    normalized: list[Dict[str, Any]] = []
+    for order_index, row in enumerate(value):
+        if not isinstance(row, Mapping):
+            continue
+        keyframe = {str(key): val for key, val in dict(row).items()}
+        keyframe_index = int(
+            max(0, int(keyframe.get("index", keyframe.get("order_index", order_index))))
+        )
+        keyframe["index"] = int(keyframe_index)
+        keyframe["order_index"] = int(
+            max(0, int(keyframe.get("order_index", keyframe_index)))
+        )
+        keyframe_id = str(keyframe.get("id", "")).strip()
+        if not keyframe_id:
+            keyframe_id = f"keyframe_{int(keyframe_index):04d}"
+        keyframe["id"] = keyframe_id
+        normalized.append(keyframe)
+    normalized.sort(key=lambda item: (int(item["order_index"]), int(item["index"])))
+    return tuple(normalized)
+
+
+def _resolve_transition_frame_counts(
+    *,
+    keyframe_count: int,
+    default_transition_frames: int,
+    transition_frames_by_gap: Sequence[int],
+) -> tuple[int, ...]:
+    """Resolve one transition-frame count per gap between captured keyframes.
+
+    Parameters
+    ----------
+    keyframe_count : int
+        Number of captured keyframes.
+    default_transition_frames : int
+        Fallback transition count for gaps without explicit overrides.
+    transition_frames_by_gap : sequence of int
+        Optional per-gap transition counts.
+
+    Returns
+    -------
+    tuple[int, ...]
+        One non-negative transition count per gap.
+    """
+    gap_count = max(0, int(keyframe_count) - 1)
+    resolved: list[int] = []
+    for gap_index in range(gap_count):
+        if gap_index < len(transition_frames_by_gap):
+            resolved.append(max(0, int(transition_frames_by_gap[gap_index])))
+        else:
+            resolved.append(max(0, int(default_transition_frames)))
+    return tuple(resolved)
+
+
+def _build_movie_frame_specs(
+    *,
+    keyframes: Sequence[Mapping[str, Any]],
+    hold_frames: int,
+    transition_frames_by_gap: Sequence[int],
+) -> tuple[Dict[str, Any], ...]:
+    """Build ordered per-frame render specifications from captured keyframes.
+
+    Parameters
+    ----------
+    keyframes : sequence of mapping[str, Any]
+        Ordered captured keyframes.
+    hold_frames : int
+        Number of duplicate still frames to emit at each keyframe.
+    transition_frames_by_gap : sequence of int
+        Interpolated frame count for each inter-keyframe gap.
+
+    Returns
+    -------
+    tuple[dict[str, Any], ...]
+        Ordered render specifications spanning keyframes, holds, and
+        transitions.
+    """
+    specs: list[Dict[str, Any]] = []
+    for keyframe_index in range(len(keyframes)):
+        specs.append(
+            {
+                "kind": "keyframe",
+                "keyframe_index": int(keyframe_index),
+            }
+        )
+        for hold_index in range(max(0, int(hold_frames))):
+            specs.append(
+                {
+                    "kind": "hold",
+                    "keyframe_index": int(keyframe_index),
+                    "hold_index": int(hold_index),
+                }
+            )
+        if keyframe_index >= len(keyframes) - 1:
+            continue
+        gap_frame_count = int(transition_frames_by_gap[keyframe_index])
+        for gap_frame_index in range(gap_frame_count):
+            specs.append(
+                {
+                    "kind": "transition",
+                    "gap_index": int(keyframe_index),
+                    "start_index": int(keyframe_index),
+                    "end_index": int(keyframe_index + 1),
+                    "alpha": float(gap_frame_index + 1) / float(gap_frame_count + 1),
+                }
+            )
+    return tuple(specs)
+
+
+def _collect_keyframe_annotations(keyframe: Mapping[str, Any]) -> str:
+    """Collect unique layer annotation strings from one captured keyframe."""
+    layers = keyframe.get("layers", [])
+    if not isinstance(layers, (tuple, list)):
+        return ""
+    annotations: list[str] = []
+    for row in layers:
+        if not isinstance(row, Mapping):
+            continue
+        text = str(row.get("annotation", "")).strip()
+        if text and text not in annotations:
+            annotations.append(text)
+    return " | ".join(annotations)
+
+
+def _frame_text_for_movie_spec(
+    *,
+    spec: Mapping[str, Any],
+    keyframes: Sequence[Mapping[str, Any]],
+    mode: str,
+    frame_index: int,
+    total_frames: int,
+) -> str:
+    """Resolve per-frame overlay text for one rendered movie frame."""
+    frame_mode = str(mode).strip().lower() or "none"
+    if frame_mode == "frame_number":
+        return f"Frame {int(frame_index) + 1}/{int(total_frames)}"
+    if frame_mode != "keyframe_annotations":
+        return ""
+    kind = str(spec.get("kind", "")).strip().lower()
+    if kind == "transition":
+        alpha = float(spec.get("alpha", 0.0))
+        keyframe_index = (
+            int(spec.get("end_index", 0))
+            if alpha >= 0.5
+            else int(spec.get("start_index", 0))
+        )
+    else:
+        keyframe_index = int(spec.get("keyframe_index", 0))
+    if keyframe_index < 0 or keyframe_index >= len(keyframes):
+        return ""
+    return _collect_keyframe_annotations(keyframes[keyframe_index])
+
+
+def _payload_numeric_sequence(value: Any) -> Optional[tuple[float, ...]]:
+    """Parse a small numeric sequence payload."""
+    if isinstance(value, Mapping):
+        return None
+    if not isinstance(value, (tuple, list, np.ndarray)):
+        return None
+    parsed: list[float] = []
+    for item in value:
+        try:
+            parsed.append(float(item))
+        except (TypeError, ValueError):
+            return None
+    return tuple(parsed)
+
+
+def _payload_contrast_limits(
+    payload: Mapping[str, Any],
+) -> Optional[tuple[float, float]]:
+    """Parse contrast-limit payloads from a captured layer row."""
+    value = payload.get("contrast_limits")
+    if value is None:
+        return None
+    sequence = _payload_numeric_sequence(value)
+    if sequence is None or len(sequence) < 2:
+        return None
+    low = float(sequence[0])
+    high = float(sequence[1])
+    if not np.isfinite(low) or not np.isfinite(high):
+        return None
+    if high <= low:
+        high = low + 1.0
+    return (float(low), float(high))
+
+
+def _restore_overlay_layer_properties(value: Any) -> Dict[str, np.ndarray]:
+    """Normalize serialized napari property mappings back into numpy arrays.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate serialized property mapping.
+
+    Returns
+    -------
+    dict[str, numpy.ndarray]
+        Properties ready for napari layer construction.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): np.asarray(item) for key, item in value.items()}
+
+
+def _apply_layer_snapshot(layer: Any, payload: Mapping[str, Any]) -> None:
+    """Apply one captured layer payload to a live napari layer."""
+    visible_value = payload.get("visible_override", payload.get("visible"))
+    if visible_value is not None and hasattr(layer, "visible"):
+        try:
+            layer.visible = bool(visible_value)
+        except Exception:
+            pass
+    if "opacity" in payload and hasattr(layer, "opacity"):
+        try:
+            layer.opacity = float(_safe_float(payload.get("opacity"), default=1.0))
+        except Exception:
+            pass
+    contrast_limits = _payload_contrast_limits(payload)
+    if contrast_limits is not None and hasattr(layer, "contrast_limits"):
+        try:
+            layer.contrast_limits = contrast_limits
+        except Exception:
+            pass
+    for attr_name in (
+        "gamma",
+        "attenuation",
+        "iso_threshold",
+        "edge_width",
+        "border_width",
+        "tail_length",
+        "head_length",
+        "tail_width",
+    ):
+        if attr_name in payload and hasattr(layer, attr_name):
+            try:
+                setattr(
+                    layer,
+                    attr_name,
+                    float(_safe_float(payload.get(attr_name), default=0.0)),
+                )
+            except Exception:
+                pass
+    for attr_name in ("scale", "translate", "rotate", "shear", "size"):
+        if attr_name not in payload or not hasattr(layer, attr_name):
+            continue
+        value = payload.get(attr_name)
+        if isinstance(value, Mapping):
+            continue
+        try:
+            setattr(layer, attr_name, _sanitize_metadata_value(value))
+        except Exception:
+            pass
+    for attr_name in (
+        "blending",
+        "depiction",
+        "interpolation",
+        "interpolation2d",
+        "interpolation3d",
+        "symbol",
+        "face_color",
+        "edge_color",
+        "border_color",
+    ):
+        value = payload.get(attr_name)
+        if value in (None, "") or not hasattr(layer, attr_name):
+            continue
+        try:
+            setattr(layer, attr_name, _sanitize_metadata_value(value))
+        except Exception:
+            pass
+    rendering_value = str(
+        payload.get("rendering_override", payload.get("rendering", ""))
+    ).strip()
+    if rendering_value and hasattr(layer, "rendering"):
+        try:
+            layer.rendering = rendering_value
+        except Exception:
+            pass
+    colormap_value = payload.get("colormap_override", "")
+    if not colormap_value:
+        colormap_payload = payload.get("colormap")
+        if isinstance(colormap_payload, Mapping):
+            colormap_value = str(colormap_payload.get("name", "")).strip()
+        elif colormap_payload not in (None, ""):
+            colormap_value = str(colormap_payload).strip()
+    if colormap_value and hasattr(layer, "colormap"):
+        try:
+            layer.colormap = str(colormap_value)
+        except Exception:
+            pass
+
+
+def _apply_interpolated_layer_state(
+    *,
+    layer: Any,
+    start_payload: Optional[Mapping[str, Any]],
+    end_payload: Optional[Mapping[str, Any]],
+    alpha: float,
+) -> None:
+    """Apply interpolated layer state between two captured keyframes."""
+    if start_payload is None and end_payload is None:
+        return
+    if start_payload is None:
+        _apply_layer_snapshot(layer, end_payload or {})
+        return
+    if end_payload is None:
+        _apply_layer_snapshot(layer, start_payload)
+        return
+
+    snap_to_end = float(alpha) >= 0.5
+    interpolated_payload: Dict[str, Any] = {}
+
+    for attr_name in ("opacity", "gamma", "attenuation", "iso_threshold"):
+        if attr_name in start_payload and attr_name in end_payload:
+            interpolated_payload[attr_name] = _interpolate_scalar(
+                _safe_float(start_payload.get(attr_name), default=0.0),
+                _safe_float(end_payload.get(attr_name), default=0.0),
+                alpha,
+            )
+        elif attr_name in start_payload or attr_name in end_payload:
+            source = end_payload if snap_to_end else start_payload
+            if attr_name in source:
+                interpolated_payload[attr_name] = source.get(attr_name)
+    for attr_name in ("tail_length", "head_length", "tail_width"):
+        if attr_name in start_payload and attr_name in end_payload:
+            interpolated_payload[attr_name] = _interpolate_scalar(
+                _safe_float(start_payload.get(attr_name), default=0.0),
+                _safe_float(end_payload.get(attr_name), default=0.0),
+                alpha,
+            )
+        else:
+            source = end_payload if snap_to_end else start_payload
+            if attr_name in source:
+                interpolated_payload[attr_name] = source.get(attr_name)
+
+    for attr_name in ("scale", "translate", "rotate", "shear", "size"):
+        start_vector = _payload_numeric_sequence(start_payload.get(attr_name))
+        end_vector = _payload_numeric_sequence(end_payload.get(attr_name))
+        if (
+            start_vector is not None
+            and end_vector is not None
+            and len(start_vector) == len(end_vector)
+        ):
+            interpolated_payload[attr_name] = list(
+                _interpolate_vector(start_vector, end_vector, alpha)
+            )
+        else:
+            source = end_payload if snap_to_end else start_payload
+            if attr_name in source:
+                interpolated_payload[attr_name] = source.get(attr_name)
+
+    start_limits = _payload_contrast_limits(start_payload)
+    end_limits = _payload_contrast_limits(end_payload)
+    if start_limits is not None and end_limits is not None:
+        interpolated_payload["contrast_limits"] = list(
+            _interpolate_vector(start_limits, end_limits, alpha)
+        )
+    else:
+        source = end_payload if snap_to_end else start_payload
+        if "contrast_limits" in source:
+            interpolated_payload["contrast_limits"] = source.get("contrast_limits")
+
+    for attr_name in (
+        "visible",
+        "visible_override",
+        "blending",
+        "rendering",
+        "rendering_override",
+        "depiction",
+        "interpolation",
+        "interpolation2d",
+        "interpolation3d",
+        "symbol",
+        "face_color",
+        "edge_color",
+        "border_color",
+        "colormap",
+        "colormap_override",
+    ):
+        source = end_payload if snap_to_end else start_payload
+        if attr_name in source:
+            interpolated_payload[attr_name] = source.get(attr_name)
+
+    _apply_layer_snapshot(layer, interpolated_payload)
+
+
+def _process_pending_qt_events() -> None:
+    """Flush pending Qt events between scripted viewer updates."""
+    try:
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+    except Exception:
+        pass
+    time.sleep(0.01)
+
+
+def _restore_captured_overlay_layers(
+    viewer: Any,
+    captured_layers: Any,
+) -> None:
+    """Rebuild serialized overlay layers before scripted movie rendering.
+
+    Parameters
+    ----------
+    viewer : Any
+        Live napari viewer instance.
+    captured_layers : Any
+        Serialized overlay-layer payloads from the keyframe manifest.
+
+    Returns
+    -------
+    None
+        Adds restorable overlay layers to the viewer for side effects only.
+    """
+    if not isinstance(captured_layers, (tuple, list)):
+        return
+
+    existing_names = {
+        str(getattr(layer, "name", "")).strip()
+        for layer in tuple(getattr(viewer, "layers", tuple()))
+        if str(getattr(layer, "name", "")).strip()
+    }
+    for row in captured_layers:
+        if not isinstance(row, Mapping):
+            continue
+        layer_name = str(row.get("name", "")).strip()
+        if not layer_name or layer_name in existing_names:
+            continue
+        layer_type = str(row.get("type", "")).strip().lower()
+        layer_data = np.asarray(row.get("data", []))
+        metadata = (
+            {
+                str(key): _sanitize_metadata_value(value)
+                for key, value in row.get("metadata", {}).items()
+            }
+            if isinstance(row.get("metadata"), Mapping)
+            else {}
+        )
+        properties = _restore_overlay_layer_properties(row.get("properties"))
+        try:
+            if layer_type == "points":
+                layer = viewer.add_points(
+                    layer_data,
+                    name=layer_name,
+                    metadata=metadata,
+                    properties=properties,
+                )
+            elif layer_type == "tracks":
+                kwargs: Dict[str, Any] = {
+                    "name": layer_name,
+                    "metadata": metadata,
+                    "properties": properties,
+                }
+                if "graph" in row:
+                    kwargs["graph"] = _sanitize_metadata_value(row.get("graph"))
+                layer = viewer.add_tracks(layer_data, **kwargs)
+            else:
+                continue
+        except Exception:
+            continue
+        _apply_layer_snapshot(layer, row)
+        existing_names.add(layer_name)
+
+
+def _apply_viewer_snapshot(viewer: Any, keyframe: Mapping[str, Any]) -> None:
+    """Apply one captured keyframe exactly to a live napari viewer."""
+    dims_payload = keyframe.get("dims", {})
+    if isinstance(dims_payload, Mapping):
+        requested_ndisplay = int(
+            max(2, int(_safe_float(dims_payload.get("ndisplay", 3), default=3.0)))
+        )
+        try:
+            viewer.dims.ndisplay = 3 if requested_ndisplay >= 3 else 2
+        except Exception:
+            pass
+        current_step_value = dims_payload.get("current_step")
+        current_step = _payload_numeric_sequence(current_step_value)
+        if current_step is not None:
+            existing = tuple(getattr(viewer.dims, "current_step", tuple()))
+            padded = list(int(round(value)) for value in existing)
+            for index, value in enumerate(current_step[: len(padded)]):
+                padded[index] = int(round(float(value)))
+            try:
+                viewer.dims.current_step = tuple(padded)
+            except Exception:
+                pass
+        dims_order = _payload_numeric_sequence(dims_payload.get("order"))
+        if dims_order is not None:
+            try:
+                viewer.dims.order = tuple(int(round(value)) for value in dims_order)
+            except Exception:
+                pass
+
+    camera_payload = keyframe.get("camera", {})
+    if isinstance(camera_payload, Mapping):
+        angles = _payload_numeric_sequence(camera_payload.get("angles"))
+        if angles is not None and len(angles) >= 3 and hasattr(viewer.camera, "angles"):
+            try:
+                viewer.camera.angles = tuple(float(value) for value in angles[:3])
+            except Exception:
+                pass
+        center = _payload_numeric_sequence(camera_payload.get("center"))
+        if center is not None and len(center) >= 3 and hasattr(viewer.camera, "center"):
+            try:
+                viewer.camera.center = tuple(float(value) for value in center[:3])
+            except Exception:
+                pass
+        if "zoom" in camera_payload and hasattr(viewer.camera, "zoom"):
+            try:
+                viewer.camera.zoom = float(
+                    _safe_float(camera_payload.get("zoom"), default=1.0)
+                )
+            except Exception:
+                pass
+        if "perspective" in camera_payload and hasattr(viewer.camera, "perspective"):
+            try:
+                viewer.camera.perspective = float(
+                    _safe_float(camera_payload.get("perspective"), default=0.0)
+                )
+            except Exception:
+                pass
+        field_of_view = camera_payload.get(
+            "field_of_view",
+            camera_payload.get("fov"),
+        )
+        if field_of_view is not None and hasattr(viewer.camera, "fov"):
+            try:
+                viewer.camera.fov = float(_safe_float(field_of_view, default=0.0))
+            except Exception:
+                pass
+
+    layer_map = {
+        str(getattr(layer, "name", "")): layer
+        for layer in tuple(getattr(viewer, "layers", tuple()))
+    }
+    layers_payload = keyframe.get("layers", [])
+    if isinstance(layers_payload, (tuple, list)):
+        for payload in layers_payload:
+            if not isinstance(payload, Mapping):
+                continue
+            layer_name = str(payload.get("name", "")).strip()
+            if not layer_name:
+                continue
+            layer = layer_map.get(layer_name)
+            if layer is None:
+                continue
+            _apply_layer_snapshot(layer, payload)
+
+
+def _apply_viewer_interpolated_state(
+    *,
+    viewer: Any,
+    start_keyframe: Mapping[str, Any],
+    end_keyframe: Mapping[str, Any],
+    alpha: float,
+    parameters: Mapping[str, Any],
+) -> None:
+    """Apply interpolated viewer state between two captured keyframes."""
+    start_dims = start_keyframe.get("dims", {})
+    end_dims = end_keyframe.get("dims", {})
+    start_ndisplay = (
+        int(max(2, int(_safe_float(start_dims.get("ndisplay", 3), default=3.0))))
+        if isinstance(start_dims, Mapping)
+        else 3
+    )
+    end_ndisplay = (
+        int(max(2, int(_safe_float(end_dims.get("ndisplay", 3), default=3.0))))
+        if isinstance(end_dims, Mapping)
+        else start_ndisplay
+    )
+    target_ndisplay = (
+        end_ndisplay
+        if float(alpha) >= 0.5 and end_ndisplay != start_ndisplay
+        else start_ndisplay
+    )
+    try:
+        viewer.dims.ndisplay = 3 if target_ndisplay >= 3 else 2
+    except Exception:
+        pass
+
+    if isinstance(start_dims, Mapping) and isinstance(end_dims, Mapping):
+        start_step = _payload_numeric_sequence(start_dims.get("current_step"))
+        end_step = _payload_numeric_sequence(end_dims.get("current_step"))
+        existing = list(tuple(getattr(viewer.dims, "current_step", tuple())))
+        if (
+            start_step is not None
+            and end_step is not None
+            and len(start_step) == len(end_step)
+            and len(existing) >= len(start_step)
+        ):
+            current_step = list(existing)
+            for index, value in enumerate(
+                _interpolate_vector(start_step, end_step, alpha)
+            ):
+                current_step[index] = int(round(float(value)))
+            try:
+                viewer.dims.current_step = tuple(current_step)
+            except Exception:
+                pass
+        else:
+            source = end_dims if float(alpha) >= 0.5 else start_dims
+            source_step = _payload_numeric_sequence(source.get("current_step"))
+            if source_step is not None and len(existing) >= len(source_step):
+                current_step = list(existing)
+                for index, value in enumerate(source_step):
+                    current_step[index] = int(round(float(value)))
+                try:
+                    viewer.dims.current_step = tuple(current_step)
+                except Exception:
+                    pass
+        dims_order = (
+            _payload_numeric_sequence(end_dims.get("order"))
+            if float(alpha) >= 0.5
+            else _payload_numeric_sequence(start_dims.get("order"))
+        )
+        if dims_order is not None:
+            try:
+                viewer.dims.order = tuple(int(round(value)) for value in dims_order)
+            except Exception:
+                pass
+
+    start_camera = start_keyframe.get("camera", {})
+    end_camera = end_keyframe.get("camera", {})
+    if isinstance(start_camera, Mapping) and isinstance(end_camera, Mapping):
+        start_angles = _payload_numeric_sequence(start_camera.get("angles"))
+        end_angles = _payload_numeric_sequence(end_camera.get("angles"))
+        if (
+            target_ndisplay >= 3
+            and start_ndisplay >= 3
+            and end_ndisplay >= 3
+            and start_angles is not None
+            and end_angles is not None
+            and len(start_angles) >= 3
+            and len(end_angles) >= 3
+        ):
+            angles = _slerp_camera_angles(
+                start_angles[:3],
+                end_angles[:3],
+                [float(alpha)],
+            )[0]
+        else:
+            source_angles = end_angles if float(alpha) >= 0.5 else start_angles
+            if source_angles is None:
+                source_angles = start_angles or end_angles
+            angles = tuple(float(value) for value in tuple(source_angles or ())[:3])
+        if len(angles) >= 3:
+            if str(parameters.get("camera_effect", "none")).strip().lower() == "orbit":
+                angles = (
+                    float(angles[0]),
+                    float(angles[1])
+                    + (
+                        float(parameters.get("orbit_degrees", 45.0))
+                        * (float(alpha) - 0.5)
+                    ),
+                    float(angles[2]),
+                )
+            try:
+                viewer.camera.angles = tuple(float(value) for value in angles[:3])
+            except Exception:
+                pass
+
+        start_center = _payload_numeric_sequence(start_camera.get("center"))
+        end_center = _payload_numeric_sequence(end_camera.get("center"))
+        if (
+            start_center is not None
+            and end_center is not None
+            and len(start_center) >= 3
+            and len(end_center) >= 3
+        ):
+            center = np.asarray(
+                _interpolate_vector(start_center[:3], end_center[:3], alpha),
+                dtype=np.float64,
+            )
+            if (
+                str(parameters.get("camera_effect", "none")).strip().lower()
+                == "flythrough"
+            ):
+                delta = np.asarray(end_center[:3], dtype=np.float64) - np.asarray(
+                    start_center[:3],
+                    dtype=np.float64,
+                )
+                norm = float(np.linalg.norm(delta))
+                if norm > 0.0:
+                    center = center + (
+                        (delta / norm)
+                        * norm
+                        * float(parameters.get("flythrough_distance_factor", 0.10))
+                        * math.sin(math.pi * float(alpha))
+                    )
+            try:
+                viewer.camera.center = tuple(float(value) for value in center[:3])
+            except Exception:
+                pass
+
+        start_zoom = float(_safe_float(start_camera.get("zoom"), default=1.0))
+        end_zoom = float(_safe_float(end_camera.get("zoom"), default=start_zoom))
+        zoom = _interpolate_scalar(start_zoom, end_zoom, alpha)
+        if str(parameters.get("camera_effect", "none")).strip().lower() == "zoom_fx":
+            zoom = float(
+                zoom
+                * (
+                    1.0
+                    + (
+                        float(parameters.get("zoom_effect_factor", 0.15))
+                        * math.sin(math.pi * float(alpha))
+                    )
+                )
+            )
+        try:
+            viewer.camera.zoom = float(zoom)
+        except Exception:
+            pass
+
+        for attr_name, camera_key in (
+            ("perspective", "perspective"),
+            ("fov", "field_of_view"),
+        ):
+            if not hasattr(viewer.camera, attr_name):
+                continue
+            start_value = float(_safe_float(start_camera.get(camera_key), default=0.0))
+            end_value = float(
+                _safe_float(end_camera.get(camera_key), default=start_value)
+            )
+            try:
+                setattr(
+                    viewer.camera,
+                    attr_name,
+                    _interpolate_scalar(start_value, end_value, alpha),
+                )
+            except Exception:
+                pass
+
+    start_layers_raw = start_keyframe.get("layers", [])
+    end_layers_raw = end_keyframe.get("layers", [])
+    start_layers = {
+        str(row.get("name", "")).strip(): row
+        for row in start_layers_raw
+        if isinstance(row, Mapping) and str(row.get("name", "")).strip()
+    }
+    end_layers = {
+        str(row.get("name", "")).strip(): row
+        for row in end_layers_raw
+        if isinstance(row, Mapping) and str(row.get("name", "")).strip()
+    }
+    for layer in tuple(getattr(viewer, "layers", tuple())):
+        layer_name = str(getattr(layer, "name", "")).strip()
+        if not layer_name:
+            continue
+        _apply_interpolated_layer_state(
+            layer=layer,
+            start_payload=start_layers.get(layer_name),
+            end_payload=end_layers.get(layer_name),
+            alpha=float(alpha),
+        )
+
+
+def _apply_movie_frame_state(
+    *,
+    viewer: Any,
+    spec: Mapping[str, Any],
+    keyframes: Sequence[Mapping[str, Any]],
+    parameters: Mapping[str, Any],
+) -> None:
+    """Apply one movie-frame specification to a scripted napari viewer."""
+    kind = str(spec.get("kind", "")).strip().lower()
+    if kind in {"keyframe", "hold"}:
+        keyframe_index = int(spec.get("keyframe_index", 0))
+        if 0 <= keyframe_index < len(keyframes):
+            _apply_viewer_snapshot(viewer, keyframes[keyframe_index])
+        return
+    if kind != "transition":
+        raise ValueError(f"Unsupported movie frame kind: {kind}")
+    start_index = int(spec.get("start_index", 0))
+    end_index = int(spec.get("end_index", 0))
+    if start_index < 0 or end_index < 0:
+        return
+    if start_index >= len(keyframes) or end_index >= len(keyframes):
+        return
+    alpha = _ease_fraction(
+        float(spec.get("alpha", 0.0)),
+        str(parameters.get("interpolation_mode", "ease_in_out")),
+    )
+    _apply_viewer_interpolated_state(
+        viewer=viewer,
+        start_keyframe=keyframes[start_index],
+        end_keyframe=keyframes[end_index],
+        alpha=float(alpha),
+        parameters=parameters,
+    )
+
+
+def _viewer_pixel_size_x_um(viewer: Any) -> Optional[float]:
+    """Estimate the current rendered x-axis pixel size from live layer scale.
+
+    Parameters
+    ----------
+    viewer : Any
+        Live napari viewer instance.
+
+    Returns
+    -------
+    float, optional
+        Rendered x-axis pixel size in microns when available.
+    """
+    for layer in tuple(getattr(viewer, "layers", tuple())):
+        scale_value = _payload_numeric_sequence(getattr(layer, "scale", None))
+        if scale_value is None or len(scale_value) <= 0:
+            continue
+        return float(scale_value[-1])
+    return None
+
+
+def _resolve_default_movie_stem(zarr_path: Union[str, Path]) -> str:
+    """Resolve a stable movie filename stem from the current store name.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+
+    Returns
+    -------
+    str
+        Default movie filename stem.
+    """
+    store_name = Path(zarr_path).expanduser().resolve().name
+    if store_name.endswith(".ome.zarr"):
+        store_name = store_name[: -len(".ome.zarr")]
+    elif store_name.endswith(".zarr"):
+        store_name = store_name[: -len(".zarr")]
+    return str(store_name).strip() or "clearex_movie"
+
+
+def _save_render_movie_metadata(
+    *,
+    zarr_path: Union[str, Path],
+    visualization_component: str,
+    keyframe_manifest_path: str,
+    render_manifest_path: str,
+    output_directory: str,
+    rendered_levels: Sequence[int],
+    frame_count: int,
+    fps: int,
+    frame_directories_by_level: Mapping[str, str],
+    parameters: Mapping[str, Any],
+    source_component: str,
+    source_components: Sequence[str],
+    run_id: Optional[str] = None,
+) -> str:
+    """Persist render-movie metadata in ``clearex/results/render_movie/latest``."""
+    root = zarr.open_group(str(zarr_path), mode="a")
+    component = analysis_auxiliary_root("render_movie")
+    if component in root:
+        del root[component]
+    latest_group = root.require_group(component)
+    payload: Dict[str, Any] = {
+        "visualization_component": str(visualization_component),
+        "keyframe_manifest_path": str(keyframe_manifest_path),
+        "render_manifest_path": str(render_manifest_path),
+        "output_directory": str(output_directory),
+        "rendered_levels": [int(value) for value in rendered_levels],
+        "frame_count": int(max(0, frame_count)),
+        "fps": int(max(1, fps)),
+        "frame_directories_by_level": {
+            str(key): str(value) for key, value in frame_directories_by_level.items()
+        },
+        "parameters": {str(key): value for key, value in dict(parameters).items()},
+        "source_component": str(source_component),
+        "source_components": [str(item) for item in source_components],
+        "storage_policy": "latest_only",
+        "run_id": run_id,
+    }
+    latest_group.attrs.update(_sanitize_metadata_value(payload))
+    register_latest_output_reference(
+        zarr_path=zarr_path,
+        analysis_name="render_movie",
+        component=component,
+        run_id=run_id,
+        metadata=payload,
+    )
+    return component
+
+
+def _save_compile_movie_metadata(
+    *,
+    zarr_path: Union[str, Path],
+    render_component: str,
+    render_manifest_path: str,
+    output_directory: str,
+    rendered_level: int,
+    output_format: str,
+    compiled_files: Sequence[str],
+    fps: int,
+    parameters: Mapping[str, Any],
+    run_id: Optional[str] = None,
+) -> str:
+    """Persist compile-movie metadata in ``clearex/results/compile_movie/latest``."""
+    root = zarr.open_group(str(zarr_path), mode="a")
+    component = analysis_auxiliary_root("compile_movie")
+    if component in root:
+        del root[component]
+    latest_group = root.require_group(component)
+    payload: Dict[str, Any] = {
+        "render_component": str(render_component),
+        "render_manifest_path": str(render_manifest_path),
+        "output_directory": str(output_directory),
+        "rendered_level": int(max(0, rendered_level)),
+        "output_format": str(output_format),
+        "compiled_files": [str(path) for path in compiled_files],
+        "fps": int(max(1, fps)),
+        "parameters": {str(key): value for key, value in dict(parameters).items()},
+        "storage_policy": "latest_only",
+        "run_id": run_id,
+    }
+    latest_group.attrs.update(_sanitize_metadata_value(payload))
+    register_latest_output_reference(
+        zarr_path=zarr_path,
+        analysis_name="compile_movie",
+        component=component,
+        run_id=run_id,
+        metadata=payload,
+    )
+    return component
+
+
+def run_render_movie_analysis(
+    *,
+    zarr_path: Union[str, Path],
+    parameters: Mapping[str, Any],
+    progress_callback: Optional[ProgressCallback] = None,
+    run_id: Optional[str] = None,
+) -> RenderMovieSummary:
+    """Render smooth frame sequences from captured napari keyframes.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    parameters : mapping[str, Any]
+        Render-movie parameter mapping.
+    progress_callback : callable, optional
+        Optional callback receiving ``(percent, message)`` progress updates.
+    run_id : str, optional
+        Provenance run identifier when available.
+
+    Returns
+    -------
+    RenderMovieSummary
+        Summary of rendered frame sets and latest metadata paths.
+
+    Raises
+    ------
+    ValueError
+        If required visualization metadata or keyframes are missing.
+    """
+
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
+    normalized = _normalize_render_movie_parameters(parameters)
+    visualization_component = str(
+        normalized.get("input_source", analysis_auxiliary_root("visualization"))
+    ).strip() or analysis_auxiliary_root("visualization")
+    visualization_metadata = _read_latest_analysis_metadata(
+        zarr_path=zarr_path,
+        component=visualization_component,
+        operation_name="render_movie",
+    )
+    visualization_parameters = visualization_metadata.get("parameters", {})
+    if not isinstance(visualization_parameters, Mapping):
+        visualization_parameters = {}
+
+    keyframe_manifest_candidate = str(
+        normalized.get(
+            "keyframe_manifest_path",
+            visualization_metadata.get("keyframe_manifest_path", ""),
+        )
+    ).strip()
+    if not keyframe_manifest_candidate:
+        raise ValueError(
+            "render_movie requires a keyframe manifest path. Capture keyframes "
+            "in visualization first or provide keyframe_manifest_path explicitly."
+        )
+    keyframe_manifest_path = str(
+        Path(keyframe_manifest_candidate).expanduser().resolve()
+    )
+    keyframe_manifest = _read_json_mapping(keyframe_manifest_path)
+    keyframes = _normalize_captured_keyframes(keyframe_manifest.get("keyframes", []))
+    if len(keyframes) <= 0:
+        raise ValueError(
+            f"render_movie found no keyframes in '{keyframe_manifest_path}'."
+        )
+
+    scene_parameters: Dict[str, Any] = dict(visualization_parameters)
+    if not scene_parameters:
+        scene_parameters = {
+            "input_source": str(
+                visualization_metadata.get(
+                    "source_component",
+                    keyframe_manifest.get("source_component", "data"),
+                )
+            ).strip()
+            or "data",
+            "volume_layers": keyframe_manifest.get(
+                "volume_layers",
+                visualization_metadata.get("volume_layers", []),
+            ),
+            "position_index": int(visualization_metadata.get("position_index", 0)),
+            "show_all_positions": bool(
+                visualization_metadata.get("show_all_positions", False)
+            ),
+            "use_multiscale": True,
+            "use_3d_view": bool(
+                int(visualization_metadata.get("viewer_ndisplay_effective", 3)) >= 3
+            ),
+            "overlay_particle_detections": bool(
+                int(visualization_metadata.get("overlay_points_count", 0)) > 0
+            ),
+        }
+    scene_parameters["capture_keyframes"] = False
+    scene_parameters["require_gpu_rendering"] = False
+    scene_parameters["launch_mode"] = "in_process"
+
+    _emit(5, "Preparing render-movie source scene")
+    scene = _prepare_visualization_scene(
+        zarr_path=zarr_path,
+        parameters=scene_parameters,
+        progress_callback=None,
+    )
+
+    transition_frames = _resolve_transition_frame_counts(
+        keyframe_count=len(keyframes),
+        default_transition_frames=int(normalized.get("default_transition_frames", 48)),
+        transition_frames_by_gap=tuple(
+            int(value) for value in normalized.get("transition_frames_by_gap", [])
+        ),
+    )
+    frame_specs = _build_movie_frame_specs(
+        keyframes=keyframes,
+        hold_frames=int(normalized.get("hold_frames", 12)),
+        transition_frames_by_gap=transition_frames,
+    )
+    if len(frame_specs) <= 0:
+        raise ValueError("render_movie did not produce any frame specifications.")
+
+    output_base_directory = _resolve_movie_output_base_directory(
+        zarr_path=zarr_path,
+        output_directory=str(normalized.get("output_directory", "")),
+        suffix="render_movie",
+    )
+    output_directory = _prepare_movie_output_directory(output_base_directory)
+    render_manifest_path = (output_directory / "render_manifest.json").resolve()
+
+    rendered_levels = tuple(
+        int(value) for value in normalized.get("resolution_levels", [0])
+    )
+    render_size_xy = tuple(
+        int(value) for value in normalized.get("render_size_xy", [1920, 1080])
+    )
+    frame_directories_by_level: Dict[str, str] = {}
+    level_manifest_rows: list[Dict[str, Any]] = []
+    total_levels = max(1, len(rendered_levels))
+    total_frames = max(1, len(frame_specs))
+
+    for level_offset, level_index in enumerate(rendered_levels):
+        level_progress_start = 10 + int(
+            (float(level_offset) / float(total_levels)) * 75.0
+        )
+        level_progress_end = 10 + int(
+            (float(level_offset + 1) / float(total_levels)) * 75.0
+        )
+        frames_directory = (
+            output_directory / f"level_{int(level_index):02d}_frames"
+        ).resolve()
+        frames_directory.mkdir(parents=True, exist_ok=True)
+        frame_directories_by_level[str(level_index)] = str(frames_directory)
+
+        _emit(
+            level_progress_start,
+            f"Rendering movie frames for resolution level {int(level_index)}",
+        )
+        built_scene = _build_napari_viewer_scene(
+            zarr_path=zarr_path,
+            volume_layers=scene.volume_layers,
+            selected_positions=scene.selected_positions,
+            points_by_position=scene.points_by_position,
+            point_properties_by_position=scene.point_properties_by_position,
+            position_affines_tczyx=scene.position_affines_tczyx,
+            axis_labels=scene.napari_payload.axis_labels_tczyx,
+            scale_tczyx=scene.napari_payload.scale_tczyx,
+            image_metadata=scene.napari_payload.image_metadata,
+            points_metadata=scene.napari_payload.points_metadata,
+            require_gpu_rendering=False,
+            capture_keyframes=False,
+            keyframe_manifest_path=None,
+            movie_level_index=int(level_index),
+            show=False,
+        )
+        viewer = built_scene.viewer
+        _restore_captured_overlay_layers(
+            viewer,
+            keyframe_manifest.get("captured_overlay_layers", []),
+        )
+        try:
+            for frame_index, spec in enumerate(frame_specs):
+                _apply_movie_frame_state(
+                    viewer=viewer,
+                    spec=spec,
+                    keyframes=keyframes,
+                    parameters=normalized,
+                )
+                _process_pending_qt_events()
+                screenshot = viewer.screenshot(
+                    canvas_only=True,
+                    flash=False,
+                    size=render_size_xy,
+                )
+                frame_text = _frame_text_for_movie_spec(
+                    spec=spec,
+                    keyframes=keyframes,
+                    mode=str(normalized.get("overlay_frame_text_mode", "none")),
+                    frame_index=int(frame_index),
+                    total_frames=int(total_frames),
+                )
+                rgba = _movie_overlay_rgba(
+                    _ensure_rgba_frame(np.asarray(screenshot)),
+                    title=str(normalized.get("overlay_title", "")),
+                    subtitle=str(normalized.get("overlay_subtitle", "")),
+                    frame_text=frame_text,
+                    scalebar_enabled=bool(normalized.get("overlay_scalebar", False)),
+                    scalebar_length_um=float(
+                        normalized.get("overlay_scalebar_length_um", 50.0)
+                    ),
+                    scalebar_position=str(
+                        normalized.get("overlay_scalebar_position", "bottom_left")
+                    ),
+                    pixel_size_x_um=_viewer_pixel_size_x_um(viewer),
+                )
+                frame_path = frames_directory / f"frame_{int(frame_index):06d}.png"
+                Image.fromarray(rgba, mode="RGBA").save(frame_path)
+                mapped = level_progress_start + int(
+                    (
+                        (float(frame_index + 1) / float(total_frames))
+                        * max(
+                            1,
+                            level_progress_end - level_progress_start,
+                        )
+                    )
+                )
+                _emit(
+                    mapped,
+                    f"Rendered frame {int(frame_index) + 1}/{int(total_frames)} "
+                    f"for level {int(level_index)}",
+                )
+        finally:
+            try:
+                viewer.close()
+            except Exception:
+                pass
+            _process_pending_qt_events()
+
+        level_manifest_rows.append(
+            {
+                "requested_level": int(level_index),
+                "frame_directory": str(frames_directory),
+                "frame_pattern": "frame_%06d.png",
+                "frame_count": int(total_frames),
+                "render_size_xy": [int(render_size_xy[0]), int(render_size_xy[1])],
+            }
+        )
+
+    render_manifest_payload: Dict[str, Any] = {
+        "schema_version": 1,
+        "zarr_path": str(Path(zarr_path).expanduser().resolve()),
+        "visualization_component": str(visualization_component),
+        "keyframe_manifest_path": str(keyframe_manifest_path),
+        "source_component": str(scene.source_component),
+        "source_components": [str(item) for item in scene.source_components],
+        "selected_positions": [int(value) for value in scene.selected_positions],
+        "fps": int(normalized.get("fps", 24)),
+        "render_size_xy": [int(render_size_xy[0]), int(render_size_xy[1])],
+        "rendered_levels": [int(value) for value in rendered_levels],
+        "default_transition_frames": int(
+            normalized.get("default_transition_frames", 48)
+        ),
+        "transition_frames_by_gap": [int(value) for value in transition_frames],
+        "hold_frames": int(normalized.get("hold_frames", 12)),
+        "interpolation_mode": str(normalized.get("interpolation_mode", "ease_in_out")),
+        "camera_effect": str(normalized.get("camera_effect", "none")),
+        "camera_effect_parameters": {
+            "orbit_degrees": float(normalized.get("orbit_degrees", 45.0)),
+            "flythrough_distance_factor": float(
+                normalized.get("flythrough_distance_factor", 0.10)
+            ),
+            "zoom_effect_factor": float(normalized.get("zoom_effect_factor", 0.15)),
+        },
+        "overlay": {
+            "title": str(normalized.get("overlay_title", "")),
+            "subtitle": str(normalized.get("overlay_subtitle", "")),
+            "frame_text_mode": str(normalized.get("overlay_frame_text_mode", "none")),
+            "scalebar_enabled": bool(normalized.get("overlay_scalebar", False)),
+            "scalebar_length_um": float(
+                normalized.get("overlay_scalebar_length_um", 50.0)
+            ),
+            "scalebar_position": str(
+                normalized.get("overlay_scalebar_position", "bottom_left")
+            ),
+        },
+        "frame_count": int(total_frames),
+        "keyframe_ids": [str(keyframe.get("id", "")) for keyframe in keyframes],
+        "levels": level_manifest_rows,
+        "parameters": {str(key): value for key, value in normalized.items()},
+    }
+    _write_json_mapping(render_manifest_path, render_manifest_payload)
+
+    component = _save_render_movie_metadata(
+        zarr_path=zarr_path,
+        visualization_component=visualization_component,
+        keyframe_manifest_path=keyframe_manifest_path,
+        render_manifest_path=str(render_manifest_path),
+        output_directory=str(output_directory),
+        rendered_levels=rendered_levels,
+        frame_count=int(total_frames),
+        fps=int(normalized.get("fps", 24)),
+        frame_directories_by_level=frame_directories_by_level,
+        parameters=normalized,
+        source_component=str(scene.source_component),
+        source_components=tuple(str(item) for item in scene.source_components),
+        run_id=run_id,
+    )
+    _emit(100, "Render-movie workflow complete")
+    return RenderMovieSummary(
+        component=component,
+        visualization_component=str(visualization_component),
+        keyframe_manifest_path=str(keyframe_manifest_path),
+        render_manifest_path=str(render_manifest_path),
+        output_directory=str(output_directory),
+        rendered_levels=tuple(int(value) for value in rendered_levels),
+        frame_count=int(total_frames),
+        fps=int(normalized.get("fps", 24)),
+    )
+
+
+def run_compile_movie_analysis(
+    *,
+    zarr_path: Union[str, Path],
+    parameters: Mapping[str, Any],
+    progress_callback: Optional[ProgressCallback] = None,
+    run_id: Optional[str] = None,
+) -> CompileMovieSummary:
+    """Compile rendered PNG frames into movie files with ffmpeg.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    parameters : mapping[str, Any]
+        Compile-movie parameter mapping.
+    progress_callback : callable, optional
+        Optional callback receiving ``(percent, message)`` progress updates.
+    run_id : str, optional
+        Provenance run identifier when available.
+
+    Returns
+    -------
+    CompileMovieSummary
+        Summary of encoded movie outputs and latest metadata paths.
+
+    Raises
+    ------
+    ValueError
+        If the render manifest or selected frame set is missing or invalid.
+    RuntimeError
+        If ``ffmpeg`` fails through the compile helpers.
+    """
+
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
+    normalized = _normalize_compile_movie_parameters(parameters)
+    render_component = str(
+        normalized.get("input_source", analysis_auxiliary_root("render_movie"))
+    ).strip() or analysis_auxiliary_root("render_movie")
+    render_metadata = _read_latest_analysis_metadata(
+        zarr_path=zarr_path,
+        component=render_component,
+        operation_name="compile_movie",
+    )
+    render_manifest_candidate = str(
+        normalized.get(
+            "render_manifest_path",
+            render_metadata.get("render_manifest_path", ""),
+        )
+    ).strip()
+    if not render_manifest_candidate:
+        raise ValueError(
+            "compile_movie requires a render manifest. Run render_movie first "
+            "or provide render_manifest_path explicitly."
+        )
+    render_manifest_path = str(Path(render_manifest_candidate).expanduser().resolve())
+    render_manifest = _read_json_mapping(render_manifest_path)
+    level_rows = render_manifest.get("levels", [])
+    if not isinstance(level_rows, (tuple, list)):
+        raise ValueError(
+            f"compile_movie manifest '{render_manifest_path}' is missing its levels."
+        )
+    selected_level = int(normalized.get("rendered_level", 0))
+    selected_row: Optional[Mapping[str, object]] = None
+    for row in level_rows:
+        if not isinstance(row, Mapping):
+            continue
+        requested_level_value = row.get("requested_level", -1)
+        if isinstance(requested_level_value, bool):
+            continue
+        if isinstance(requested_level_value, int):
+            requested_level = int(requested_level_value)
+        elif isinstance(requested_level_value, float):
+            if not float(requested_level_value).is_integer():
+                continue
+            requested_level = int(requested_level_value)
+        elif isinstance(requested_level_value, str):
+            try:
+                requested_level = int(requested_level_value)
+            except ValueError:
+                continue
+        else:
+            continue
+        if requested_level == selected_level:
+            selected_row = row
+            break
+    if selected_row is None:
+        raise ValueError(
+            f"compile_movie could not find rendered level {selected_level} in "
+            f"'{render_manifest_path}'."
+        )
+    frames_directory = Path(
+        str(selected_row.get("frame_directory", "")).strip()
+    ).expanduser()
+    if not frames_directory.exists():
+        raise ValueError(
+            f"compile_movie frame directory '{frames_directory}' does not exist."
+        )
+
+    _emit(10, "Validating rendered PNG frame directory")
+    verify_png_frame_directory(frames_directory)
+
+    output_base_directory = _resolve_movie_output_base_directory(
+        zarr_path=zarr_path,
+        output_directory=str(normalized.get("output_directory", "")),
+        suffix="compile_movie",
+    )
+    output_directory = _prepare_movie_output_directory(output_base_directory)
+    output_stem = str(normalized.get("output_stem", "")).strip()
+    if not output_stem:
+        output_stem = _resolve_default_movie_stem(zarr_path)
+    fps = int(normalized.get("fps", render_manifest.get("fps", 24)))
+    resize_xy = normalized.get("resize_xy", [])
+    resize = (
+        tuple(int(value) for value in resize_xy)
+        if isinstance(resize_xy, list) and len(resize_xy) == 2
+        else None
+    )
+    output_format = str(normalized.get("output_format", "mp4")).strip().lower() or "mp4"
+    pixel_format = str(normalized.get("pixel_format", "")).strip() or None
+    compiled_files: list[str] = []
+
+    if output_format in {"mp4", "both"}:
+        _emit(40, "Compiling H.264 MP4 movie")
+        mp4_path = (
+            output_directory / f"{output_stem}_level_{int(selected_level):02d}.mp4"
+        ).resolve()
+        compile_png_frames_to_mp4(
+            frames_directory=frames_directory,
+            output_path=mp4_path,
+            fps=fps,
+            crf=int(normalized.get("mp4_crf", 18)),
+            preset=str(normalized.get("mp4_preset", "slow")),
+            pixel_format=pixel_format,
+            resize_xy=resize,
+        )
+        compiled_files.append(str(mp4_path))
+
+    if output_format in {"prores", "both"}:
+        _emit(75, "Compiling ProRes MOV movie")
+        mov_path = (
+            output_directory / f"{output_stem}_level_{int(selected_level):02d}.mov"
+        ).resolve()
+        compile_png_frames_to_prores(
+            frames_directory=frames_directory,
+            output_path=mov_path,
+            fps=fps,
+            profile=int(normalized.get("prores_profile", 3)),
+            pixel_format=pixel_format,
+            resize_xy=resize,
+        )
+        compiled_files.append(str(mov_path))
+
+    component = _save_compile_movie_metadata(
+        zarr_path=zarr_path,
+        render_component=str(render_component),
+        render_manifest_path=str(render_manifest_path),
+        output_directory=str(output_directory),
+        rendered_level=int(selected_level),
+        output_format=str(output_format),
+        compiled_files=tuple(str(path) for path in compiled_files),
+        fps=int(fps),
+        parameters=normalized,
+        run_id=run_id,
+    )
+    _emit(100, "Compile-movie workflow complete")
+    return CompileMovieSummary(
+        component=component,
+        render_component=str(render_component),
+        render_manifest_path=str(render_manifest_path),
+        output_directory=str(output_directory),
+        rendered_level=int(selected_level),
+        output_format=str(output_format),
+        compiled_files=tuple(str(path) for path in compiled_files),
+        fps=int(fps),
     )
 
 

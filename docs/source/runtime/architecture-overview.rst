@@ -35,7 +35,8 @@ ClearEx is intentionally split into layers that can evolve independently:
    ``clearex.io.provenance``.
 5. Analysis layer:
    analysis routines (flatfield, deconvolution, shear transform, registration,
-   particle detection, uSegment3D, visualization, MIP export) via
+   fusion, display pyramid, particle detection, uSegment3D, visualization,
+   render_movie, compile_movie, and MIP export) via
    ``clearex.<analysis>.pipeline``.
 
 End-to-End Execution Flow

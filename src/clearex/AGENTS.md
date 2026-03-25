@@ -212,6 +212,31 @@ This directory contains the runtime orchestration surface for ClearEx.
   projections remain directly viewable in OME-aware tools outside the main
   ClearEx store.
 
+## Recent Runtime Updates (2026-03-25)
+
+- Visualization now includes a two-stage movie workflow:
+  - `render_movie` consumes captured napari keyframes, reconstructs the
+    visualization scene, interpolates camera/layer state, and exports PNG
+    frames at one or more selected resolution levels.
+  - `compile_movie` consumes a rendered frame set and encodes MP4 and/or
+    ProRes movies through `ffmpeg` without rerendering napari screenshots.
+- The movie workflow writes latest metadata under:
+  - `clearex/results/render_movie/latest`
+  - `clearex/results/compile_movie/latest`
+- External latest-only outputs are written beside the store under:
+  - `<analysis_store>_render_movie/latest/...`
+  - `<analysis_store>_compile_movie/latest/...`
+- Visualization keyframe manifests (`schema_version=2`) now persist stable
+  keyframe ids/order indices and enough overlay metadata to rebuild captured
+  `Points` and `Tracks` layers during offline movie rendering.
+- 3D movie camera interpolation now uses quaternion SLERP for orientation
+  changes rather than naive Euler-angle interpolation. This is the intended
+  path for avoiding the nonlinear jump seen in older notebook-based movie
+  workflows.
+- `render_movie` and `compile_movie` are metadata/export analyses only. They do
+  not publish public OME image collections and they do not become chainable
+  scientific image sources for downstream analysis.
+
 ## Recent Runtime Updates (2026-03-22)
 
 - Registration pipeline (`pipeline.py`) performance optimizations:

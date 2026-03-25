@@ -96,10 +96,11 @@ The following operations are wired into ``clearex.main``:
      - ``clearex.detect.pipeline``
      - Integrated and executable; writes metadata/table outputs under
        ``clearex/results``.
-   * - Display pyramid / visualization
-     - ``clearex.visualization.pipeline``
+   * - Display pyramid / visualization / movie rendering
+     - ``clearex.visualization.pipeline``, ``clearex.visualization.export``
      - Integrated and executable; prepares internal display pyramids,
-       launches napari, and persists visualization metadata.
+       launches napari, captures keyframes, renders offline movie frame sets,
+       and compiles MP4 / ProRes deliverables.
    * - MIP export
      - ``clearex.mip_export.pipeline``
      - Integrated and executable; exports OME-TIFF or standalone OME-Zarr

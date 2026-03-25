@@ -65,6 +65,8 @@ ANALYSIS_OPERATION_ORDER = (
     "particle_detection",
     "usegment3d",
     "visualization",
+    "render_movie",
+    "compile_movie",
     "mip_export",
 )
 
@@ -87,6 +89,8 @@ ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
     "fusion": "clearex/runtime_cache/results/fusion/latest/data",
     "display_pyramid": "clearex/results/display_pyramid/latest",
     "visualization": "clearex/results/visualization/latest",
+    "render_movie": "clearex/results/render_movie/latest",
+    "compile_movie": "clearex/results/compile_movie/latest",
     "mip_export": "clearex/results/mip_export/latest",
 }
 _OUTPUT_COMPONENT_TO_OPERATION: Dict[str, str] = {
@@ -401,9 +405,21 @@ def _validate_analysis_input_reference(
             and producer_operation == "registration"
             and field_name == "input_source"
         )
+        allow_non_chainable_visualization = (
+            str(reference.consumer_operation).strip() == "render_movie"
+            and producer_operation == "visualization"
+            and field_name == "input_source"
+        )
+        allow_non_chainable_render_movie = (
+            str(reference.consumer_operation).strip() == "compile_movie"
+            and producer_operation == "render_movie"
+            and field_name == "input_source"
+        )
         if (
             producer_operation not in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS
             and not allow_non_chainable_registration
+            and not allow_non_chainable_visualization
+            and not allow_non_chainable_render_movie
         ):
             return AnalysisInputDependencyIssue(
                 consumer_operation=reference.consumer_operation,
@@ -775,8 +791,58 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "keyframe_layer_overrides": [],
         "volume_layers": [],
     },
-    "mip_export": {
+    "render_movie": {
         "execution_order": 10,
+        "input_source": "visualization",
+        "force_rerun": False,
+        "chunk_basis": "2d",
+        "detect_2d_per_slice": True,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 1.0,
+        "keyframe_manifest_path": "",
+        "resolution_levels": [0],
+        "render_size_xy": [1920, 1080],
+        "fps": 24,
+        "default_transition_frames": 48,
+        "transition_frames_by_gap": [],
+        "hold_frames": 12,
+        "interpolation_mode": "ease_in_out",
+        "camera_effect": "none",
+        "orbit_degrees": 45.0,
+        "flythrough_distance_factor": 0.10,
+        "zoom_effect_factor": 0.15,
+        "overlay_title": "",
+        "overlay_subtitle": "",
+        "overlay_frame_text_mode": "none",
+        "overlay_scalebar": False,
+        "overlay_scalebar_length_um": 50.0,
+        "overlay_scalebar_position": "bottom_left",
+        "output_directory": "",
+    },
+    "compile_movie": {
+        "execution_order": 11,
+        "input_source": "render_movie",
+        "force_rerun": False,
+        "chunk_basis": "2d",
+        "detect_2d_per_slice": True,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 1.0,
+        "render_manifest_path": "",
+        "rendered_level": 0,
+        "output_format": "mp4",
+        "fps": 24,
+        "mp4_crf": 18,
+        "mp4_preset": "slow",
+        "prores_profile": 3,
+        "pixel_format": "",
+        "resize_xy": [],
+        "output_directory": "",
+        "output_stem": "",
+    },
+    "mip_export": {
+        "execution_order": 12,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -2369,6 +2435,308 @@ def _normalize_visualization_parameters(
     return normalized
 
 
+def _normalize_nonnegative_int_list(
+    value: Any,
+    *,
+    field_name: str,
+    allow_empty: bool = True,
+) -> list[int]:
+    """Normalize a value into a list of non-negative integers.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate scalar, sequence, or comma-delimited string.
+    field_name : str
+        Human-readable field label used in validation errors.
+    allow_empty : bool, default=True
+        Whether empty inputs normalize to ``[]``.
+
+    Returns
+    -------
+    list[int]
+        Parsed non-negative integers.
+
+    Raises
+    ------
+    ValueError
+        If any item cannot be parsed as a non-negative integer.
+    """
+    if value is None:
+        return [] if allow_empty else [0]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return [] if allow_empty else [0]
+        raw_items = [part.strip() for part in text.split(",") if part.strip()]
+    elif isinstance(value, (tuple, list)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+
+    if not raw_items and allow_empty:
+        return []
+    normalized: list[int] = []
+    for item in raw_items:
+        try:
+            parsed = int(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must contain integers.") from exc
+        if parsed < 0:
+            raise ValueError(f"{field_name} values must be non-negative.")
+        normalized.append(int(parsed))
+    return normalized
+
+
+def _normalize_xy_pair(
+    value: Any,
+    *,
+    field_name: str,
+    allow_empty: bool = False,
+) -> list[int]:
+    """Normalize an ``(x, y)`` integer pair.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate scalar, sequence, or comma-delimited string.
+    field_name : str
+        Human-readable field label used in validation errors.
+    allow_empty : bool, default=False
+        Whether empty inputs normalize to ``[]``.
+
+    Returns
+    -------
+    list[int]
+        Parsed ``[x, y]`` pair, or ``[]`` when ``allow_empty=True`` and the
+        input is empty.
+
+    Raises
+    ------
+    ValueError
+        If the parsed value does not contain exactly two positive integers.
+    """
+    normalized = _normalize_nonnegative_int_list(
+        value,
+        field_name=field_name,
+        allow_empty=allow_empty,
+    )
+    if allow_empty and not normalized:
+        return []
+    if len(normalized) != 2:
+        raise ValueError(f"{field_name} must define exactly two integers (x, y).")
+    if any(int(item) <= 0 for item in normalized):
+        raise ValueError(f"{field_name} values must be greater than zero.")
+    return [int(normalized[0]), int(normalized[1])]
+
+
+def _normalize_render_movie_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize render-movie runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate render-movie parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized render-movie parameters.
+
+    Raises
+    ------
+    ValueError
+        If render timing, level selection, overlay, or camera-effect values
+        are invalid.
+    """
+    normalized = _normalize_common_operation_parameters("render_movie", params)
+    normalized["input_source"] = (
+        str(normalized.get("input_source", "visualization")).strip() or "visualization"
+    )
+    normalized["chunk_basis"] = "2d"
+    normalized["detect_2d_per_slice"] = True
+    normalized["use_map_overlap"] = False
+    normalized["overlap_zyx"] = [0, 0, 0]
+    normalized["keyframe_manifest_path"] = str(
+        normalized.get("keyframe_manifest_path", "")
+    ).strip()
+    resolution_levels = _normalize_nonnegative_int_list(
+        normalized.get("resolution_levels", [0]),
+        field_name="render_movie resolution_levels",
+        allow_empty=False,
+    )
+    normalized["resolution_levels"] = sorted(set(int(v) for v in resolution_levels))
+    normalized["render_size_xy"] = _normalize_xy_pair(
+        normalized.get("render_size_xy", [1920, 1080]),
+        field_name="render_movie render_size_xy",
+    )
+    fps = int(normalized.get("fps", 24))
+    if fps <= 0:
+        raise ValueError("render_movie fps must be greater than zero.")
+    normalized["fps"] = fps
+    default_transition_frames = int(normalized.get("default_transition_frames", 48))
+    if default_transition_frames < 0:
+        raise ValueError("render_movie default_transition_frames must be non-negative.")
+    normalized["default_transition_frames"] = default_transition_frames
+    normalized["transition_frames_by_gap"] = _normalize_nonnegative_int_list(
+        normalized.get("transition_frames_by_gap", []),
+        field_name="render_movie transition_frames_by_gap",
+        allow_empty=True,
+    )
+    hold_frames = int(normalized.get("hold_frames", 12))
+    if hold_frames < 0:
+        raise ValueError("render_movie hold_frames must be non-negative.")
+    normalized["hold_frames"] = hold_frames
+    interpolation_mode = (
+        str(normalized.get("interpolation_mode", "ease_in_out")).strip().lower()
+        or "ease_in_out"
+    )
+    if interpolation_mode not in {"linear", "ease_in_out"}:
+        raise ValueError(
+            "render_movie interpolation_mode must be one of: linear, ease_in_out."
+        )
+    normalized["interpolation_mode"] = interpolation_mode
+    camera_effect = (
+        str(normalized.get("camera_effect", "none")).strip().lower() or "none"
+    )
+    if camera_effect not in {"none", "orbit", "flythrough", "zoom_fx"}:
+        raise ValueError(
+            "render_movie camera_effect must be one of: none, orbit, flythrough, zoom_fx."
+        )
+    normalized["camera_effect"] = camera_effect
+    orbit_degrees = float(normalized.get("orbit_degrees", 45.0))
+    if not math.isfinite(orbit_degrees) or orbit_degrees < 0:
+        raise ValueError("render_movie orbit_degrees must be a finite value >= 0.")
+    normalized["orbit_degrees"] = orbit_degrees
+    flythrough_distance_factor = float(
+        normalized.get("flythrough_distance_factor", 0.10)
+    )
+    if not math.isfinite(flythrough_distance_factor) or flythrough_distance_factor < 0:
+        raise ValueError(
+            "render_movie flythrough_distance_factor must be a finite value >= 0."
+        )
+    normalized["flythrough_distance_factor"] = flythrough_distance_factor
+    zoom_effect_factor = float(normalized.get("zoom_effect_factor", 0.15))
+    if not math.isfinite(zoom_effect_factor) or zoom_effect_factor < 0:
+        raise ValueError("render_movie zoom_effect_factor must be a finite value >= 0.")
+    normalized["zoom_effect_factor"] = zoom_effect_factor
+    normalized["overlay_title"] = str(normalized.get("overlay_title", "")).strip()
+    normalized["overlay_subtitle"] = str(normalized.get("overlay_subtitle", "")).strip()
+    frame_text_mode = (
+        str(normalized.get("overlay_frame_text_mode", "none")).strip().lower() or "none"
+    )
+    if frame_text_mode not in {"none", "frame_number", "keyframe_annotations"}:
+        raise ValueError(
+            "render_movie overlay_frame_text_mode must be one of: "
+            "none, frame_number, keyframe_annotations."
+        )
+    normalized["overlay_frame_text_mode"] = frame_text_mode
+    normalized["overlay_scalebar"] = bool(normalized.get("overlay_scalebar", False))
+    scalebar_length_um = float(normalized.get("overlay_scalebar_length_um", 50.0))
+    if not math.isfinite(scalebar_length_um) or scalebar_length_um <= 0:
+        raise ValueError(
+            "render_movie overlay_scalebar_length_um must be greater than zero."
+        )
+    normalized["overlay_scalebar_length_um"] = scalebar_length_um
+    scalebar_position = (
+        str(normalized.get("overlay_scalebar_position", "bottom_left")).strip().lower()
+        or "bottom_left"
+    )
+    if scalebar_position not in {
+        "bottom_left",
+        "bottom_right",
+        "top_left",
+        "top_right",
+    }:
+        raise ValueError(
+            "render_movie overlay_scalebar_position must be one of: "
+            "bottom_left, bottom_right, top_left, top_right."
+        )
+    normalized["overlay_scalebar_position"] = scalebar_position
+    normalized["output_directory"] = str(normalized.get("output_directory", "")).strip()
+    return normalized
+
+
+def _normalize_compile_movie_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize compile-movie runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate compile-movie parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized compile-movie parameters.
+
+    Raises
+    ------
+    ValueError
+        If codec, level-selection, FPS, or resize values are invalid.
+    """
+    normalized = _normalize_common_operation_parameters("compile_movie", params)
+    normalized["input_source"] = (
+        str(normalized.get("input_source", "render_movie")).strip() or "render_movie"
+    )
+    normalized["chunk_basis"] = "2d"
+    normalized["detect_2d_per_slice"] = True
+    normalized["use_map_overlap"] = False
+    normalized["overlap_zyx"] = [0, 0, 0]
+    normalized["render_manifest_path"] = str(
+        normalized.get("render_manifest_path", "")
+    ).strip()
+    rendered_level = int(normalized.get("rendered_level", 0))
+    if rendered_level < 0:
+        raise ValueError("compile_movie rendered_level must be non-negative.")
+    normalized["rendered_level"] = rendered_level
+    output_format = str(normalized.get("output_format", "mp4")).strip().lower() or "mp4"
+    if output_format not in {"mp4", "prores", "both"}:
+        raise ValueError(
+            "compile_movie output_format must be one of: mp4, prores, both."
+        )
+    normalized["output_format"] = output_format
+    fps = int(normalized.get("fps", 24))
+    if fps <= 0:
+        raise ValueError("compile_movie fps must be greater than zero.")
+    normalized["fps"] = fps
+    mp4_crf = int(normalized.get("mp4_crf", 18))
+    if mp4_crf < 0 or mp4_crf > 51:
+        raise ValueError("compile_movie mp4_crf must be in [0, 51].")
+    normalized["mp4_crf"] = mp4_crf
+    mp4_preset = str(normalized.get("mp4_preset", "slow")).strip().lower() or "slow"
+    if mp4_preset not in {
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+    }:
+        raise ValueError("compile_movie mp4_preset must be a valid x264 preset name.")
+    normalized["mp4_preset"] = mp4_preset
+    prores_profile = int(normalized.get("prores_profile", 3))
+    if prores_profile < 0 or prores_profile > 5:
+        raise ValueError("compile_movie prores_profile must be in [0, 5].")
+    normalized["prores_profile"] = prores_profile
+    normalized["pixel_format"] = str(normalized.get("pixel_format", "")).strip()
+    normalized["resize_xy"] = _normalize_xy_pair(
+        normalized.get("resize_xy", []),
+        field_name="compile_movie resize_xy",
+        allow_empty=True,
+    )
+    normalized["output_directory"] = str(normalized.get("output_directory", "")).strip()
+    normalized["output_stem"] = str(normalized.get("output_stem", "")).strip()
+    return normalized
+
+
 def _normalize_mip_export_parameters(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -2550,6 +2918,14 @@ def normalize_analysis_operation_parameters(
             merged[operation_name] = _normalize_visualization_parameters(
                 merged[operation_name]
             )
+        elif operation_name == "render_movie":
+            merged[operation_name] = _normalize_render_movie_parameters(
+                merged[operation_name]
+            )
+        elif operation_name == "compile_movie":
+            merged[operation_name] = _normalize_compile_movie_parameters(
+                merged[operation_name]
+            )
         elif operation_name == "mip_export":
             merged[operation_name] = _normalize_mip_export_parameters(
                 merged[operation_name]
@@ -2573,6 +2949,8 @@ def selected_analysis_operations(
     registration: bool,
     display_pyramid: bool,
     visualization: bool,
+    render_movie: bool,
+    compile_movie: bool,
     mip_export: bool,
 ) -> Tuple[str, ...]:
     """Collect enabled analysis operation names.
@@ -2597,6 +2975,10 @@ def selected_analysis_operations(
         Whether display-pyramid preparation is enabled.
     visualization : bool
         Whether visualization is enabled.
+    render_movie : bool
+        Whether movie rendering is enabled.
+    compile_movie : bool
+        Whether movie compilation is enabled.
     mip_export : bool
         Whether MIP export is enabled.
 
@@ -2624,6 +3006,10 @@ def selected_analysis_operations(
         selected.append("usegment3d")
     if visualization:
         selected.append("visualization")
+    if render_movie:
+        selected.append("render_movie")
+    if compile_movie:
+        selected.append("compile_movie")
     if mip_export:
         selected.append("mip_export")
     return tuple(selected)
@@ -2640,6 +3026,8 @@ def resolve_analysis_execution_sequence(
     registration: bool,
     display_pyramid: bool,
     visualization: bool,
+    render_movie: bool,
+    compile_movie: bool,
     mip_export: bool,
     analysis_parameters: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[str, ...]:
@@ -2665,6 +3053,10 @@ def resolve_analysis_execution_sequence(
         Whether display-pyramid preparation is enabled.
     visualization : bool
         Whether visualization is enabled.
+    render_movie : bool
+        Whether movie rendering is enabled.
+    compile_movie : bool
+        Whether movie compilation is enabled.
     mip_export : bool
         Whether MIP export is enabled.
     analysis_parameters : dict[str, dict[str, Any]], optional
@@ -2688,6 +3080,8 @@ def resolve_analysis_execution_sequence(
         registration=registration,
         display_pyramid=display_pyramid,
         visualization=visualization,
+        render_movie=render_movie,
+        compile_movie=compile_movie,
         mip_export=mip_export,
     )
     index_map = {name: idx for idx, name in enumerate(ANALYSIS_OPERATION_ORDER)}
@@ -4850,6 +5244,10 @@ class WorkflowConfig:
         Flag indicating whether display-pyramid preparation should run.
     visualization : bool
         Flag indicating whether visualization workflow should run.
+    render_movie : bool
+        Flag indicating whether movie-render workflow should run.
+    compile_movie : bool
+        Flag indicating whether movie-compile workflow should run.
     mip_export : bool
         Flag indicating whether MIP-export workflow should run.
     zarr_save : ZarrSaveConfig
@@ -4880,6 +5278,8 @@ class WorkflowConfig:
     fusion: bool = False
     display_pyramid: bool = False
     visualization: bool = False
+    render_movie: bool = False
+    compile_movie: bool = False
     mip_export: bool = False
     zarr_save: ZarrSaveConfig = field(default_factory=ZarrSaveConfig)
     spatial_calibration: SpatialCalibrationConfig = field(
@@ -5004,6 +5404,8 @@ class WorkflowConfig:
                 self.fusion,
                 self.display_pyramid,
                 self.visualization,
+                self.render_movie,
+                self.compile_movie,
                 self.mip_export,
             )
         )

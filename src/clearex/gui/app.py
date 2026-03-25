@@ -1570,8 +1570,12 @@ def _build_input_source_options(
     list[tuple[str, str]]
         Ordered ``(value, label)`` options used by source-selection combo boxes.
     """
-    options: list[tuple[str, str]] = [("data", "Raw data (data)")]
-    option_values = {"data"}
+    if operation_name in {"render_movie", "compile_movie"}:
+        options = []
+        option_values: set[str] = set()
+    else:
+        options = [("data", "Raw data (data)")]
+        option_values = {"data"}
     available = available_store_output_components or {}
 
     for upstream_name in selected_order:
@@ -1580,12 +1584,13 @@ def _build_input_source_options(
         if upstream_name in option_values:
             continue
         component = analysis_chainable_output_component(upstream_name)
-        if (
-            operation_name == "fusion"
-            and upstream_name == "registration"
-            and component is None
-        ):
-            component = operation_output_components.get("registration")
+        allow_non_chainable = (
+            (operation_name == "fusion" and upstream_name == "registration")
+            or (operation_name == "render_movie" and upstream_name == "visualization")
+            or (operation_name == "compile_movie" and upstream_name == "render_movie")
+        )
+        if allow_non_chainable and component is None:
+            component = operation_output_components.get(upstream_name)
         if component is None or upstream_name == "data":
             continue
         label = operation_labels.get(
@@ -1600,8 +1605,14 @@ def _build_input_source_options(
         component = str(available.get(upstream_name, "")).strip()
         if not component:
             continue
-        if analysis_chainable_output_component(upstream_name) is None and not (
-            operation_name == "fusion" and upstream_name == "registration"
+        allow_non_chainable = (
+            (operation_name == "fusion" and upstream_name == "registration")
+            or (operation_name == "render_movie" and upstream_name == "visualization")
+            or (operation_name == "compile_movie" and upstream_name == "render_movie")
+        )
+        if (
+            analysis_chainable_output_component(upstream_name) is None
+            and not allow_non_chainable
         ):
             continue
         label = operation_labels.get(
@@ -7347,6 +7358,8 @@ if HAS_PYQT6:
             "particle_detection",
             "usegment3d",
             "visualization",
+            "render_movie",
+            "compile_movie",
             "mip_export",
         )
         _PROVENANCE_HISTORY_OPERATIONS: tuple[str, ...] = (
@@ -7358,6 +7371,8 @@ if HAS_PYQT6:
             "registration",
             "fusion",
             "display_pyramid",
+            "render_movie",
+            "compile_movie",
             "mip_export",
         )
         _OPERATION_LABELS: Dict[str, str] = {
@@ -7370,6 +7385,8 @@ if HAS_PYQT6:
             "fusion": "Fusion",
             "display_pyramid": "Pyramidal Downsampling",
             "visualization": "Napari",
+            "render_movie": "Render Movie",
+            "compile_movie": "Compile Movie",
             "mip_export": "MIP Export",
         }
         _OPERATION_TABS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -7385,7 +7402,10 @@ if HAS_PYQT6:
                 ),
             ),
             ("Segmentation", ("particle_detection", "usegment3d")),
-            ("Visualization", ("visualization", "mip_export")),
+            (
+                "Visualization",
+                ("visualization", "render_movie", "compile_movie", "mip_export"),
+            ),
         )
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
             "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
@@ -7395,6 +7415,9 @@ if HAS_PYQT6:
             "registration": "clearex/results/registration/latest",
             "fusion": "clearex/runtime_cache/results/fusion/latest/data",
             "display_pyramid": "clearex/results/display_pyramid/latest",
+            "visualization": "clearex/results/visualization/latest",
+            "render_movie": "clearex/results/render_movie/latest",
+            "compile_movie": "clearex/results/compile_movie/latest",
             "mip_export": "clearex/results/mip_export/latest",
         }
         _PARTICLE_DETECTION_OVERLAY_COMPONENT = (
@@ -7893,6 +7916,73 @@ if HAS_PYQT6:
                 "Optional export directory path. Leave empty to write under an "
                 "auto-generated sibling directory next to the analysis store."
             ),
+            "render_movie_keyframe_manifest_path": (
+                "Optional explicit keyframe manifest JSON. Leave empty to use the "
+                "latest keyframes captured by the selected visualization result."
+            ),
+            "render_movie_resolution_levels": (
+                "Comma-separated pyramid levels to render as frame sets. "
+                "Use 0 for full resolution; higher integers select coarser levels."
+            ),
+            "render_movie_render_size_xy": (
+                "Output screenshot size in pixels as width and height. "
+                "Higher values improve exported frame detail but increase render time."
+            ),
+            "render_movie_default_transition_frames": (
+                "Default number of interpolated frames inserted between consecutive "
+                "keyframes when no per-gap override is provided."
+            ),
+            "render_movie_transition_frames_by_gap": (
+                "Optional comma-separated per-gap transition counts. "
+                "Gap 1 controls keyframe 1 to 2, Gap 2 controls 2 to 3, and so on."
+            ),
+            "render_movie_hold_frames": (
+                "Extra still frames duplicated at each captured keyframe before "
+                "the next transition begins."
+            ),
+            "render_movie_interpolation_mode": (
+                "Camera and layer interpolation curve. Linear uses constant speed; "
+                "Ease in/out slows at keyframes and accelerates mid-transition."
+            ),
+            "render_movie_camera_effect": (
+                "Optional cinematic camera modifier layered on top of the keyframe "
+                "path: orbit, flythrough, or zoom effect."
+            ),
+            "render_movie_overlay_text": (
+                "Movie-only title/subtitle and frame text burned into rendered PNG "
+                "frames without changing the interactive napari scene."
+            ),
+            "render_movie_overlay_scalebar": (
+                "Draw a scalebar during movie rendering using the current rendered "
+                "pixel size. Useful for publication-facing exports."
+            ),
+            "render_movie_output_directory": (
+                "Optional frame-output directory. Leave empty to use a sibling "
+                "render_movie/latest directory next to the analysis store."
+            ),
+            "compile_movie_render_manifest_path": (
+                "Optional explicit render manifest JSON. Leave empty to compile the "
+                "latest render_movie result for this store."
+            ),
+            "compile_movie_rendered_level": (
+                "Rendered pyramid level to encode. This must match one of the frame "
+                "sets produced by render_movie."
+            ),
+            "compile_movie_output_format": (
+                "Choose review-friendly MP4, publication-friendly ProRes MOV, "
+                "or both in one run."
+            ),
+            "compile_movie_resize_xy": (
+                "Optional encode-time resize in pixels as width and height. "
+                "Leave empty to preserve the rendered frame size."
+            ),
+            "compile_movie_output_directory": (
+                "Optional movie-output directory. Leave empty to use a sibling "
+                "compile_movie/latest directory next to the analysis store."
+            ),
+            "compile_movie_output_stem": (
+                "Base filename stem used for encoded movie files."
+            ),
         }
 
         def __init__(self, initial: WorkflowConfig) -> None:
@@ -7978,6 +8068,12 @@ if HAS_PYQT6:
                 self._normalize_visualization_layer_overrides(
                     self._visualization_defaults.get("keyframe_layer_overrides", [])
                 )
+            )
+            self._render_movie_defaults = dict(
+                self._operation_defaults.get("render_movie", {})
+            )
+            self._compile_movie_defaults = dict(
+                self._operation_defaults.get("compile_movie", {})
             )
             self._mip_export_defaults = dict(
                 self._operation_defaults.get("mip_export", {})
@@ -9107,6 +9203,10 @@ if HAS_PYQT6:
                 self._build_fusion_parameter_rows(form)
             elif operation_name == "visualization":
                 self._build_visualization_parameter_rows(form)
+            elif operation_name == "render_movie":
+                self._build_render_movie_parameter_rows(form)
+            elif operation_name == "compile_movie":
+                self._build_compile_movie_parameter_rows(form)
             elif operation_name == "mip_export":
                 self._build_mip_export_parameter_rows(form)
             else:
@@ -10643,6 +10743,367 @@ if HAS_PYQT6:
             self._visualization_layer_table_summary_label.setWordWrap(True)
             form.addRow("", self._visualization_layer_table_summary_label)
             self._refresh_visualization_layer_override_summary()
+
+        def _build_render_movie_parameter_rows(self, form: QFormLayout) -> None:
+            """Add render-movie parameter controls to a form."""
+            self._render_movie_keyframe_manifest_input = QLineEdit()
+            self._render_movie_keyframe_manifest_input.setPlaceholderText(
+                "Latest visualization keyframes"
+            )
+            form.addRow(
+                "Keyframe manifest",
+                self._render_movie_keyframe_manifest_input,
+            )
+            self._register_parameter_hint(
+                self._render_movie_keyframe_manifest_input,
+                self._PARAMETER_HINTS["render_movie_keyframe_manifest_path"],
+            )
+
+            self._render_movie_resolution_levels_input = QLineEdit()
+            self._render_movie_resolution_levels_input.setPlaceholderText("0")
+            form.addRow(
+                "Resolution levels",
+                self._render_movie_resolution_levels_input,
+            )
+            self._register_parameter_hint(
+                self._render_movie_resolution_levels_input,
+                self._PARAMETER_HINTS["render_movie_resolution_levels"],
+            )
+
+            render_size_widget = QWidget()
+            render_size_layout = QHBoxLayout(render_size_widget)
+            render_size_layout.setContentsMargins(0, 0, 0, 0)
+            render_size_layout.setSpacing(8)
+            self._render_movie_width_spin = QSpinBox()
+            self._render_movie_width_spin.setRange(64, 16384)
+            self._render_movie_height_spin = QSpinBox()
+            self._render_movie_height_spin.setRange(64, 16384)
+            render_size_layout.addWidget(self._render_movie_width_spin)
+            render_size_layout.addWidget(QLabel("x"))
+            render_size_layout.addWidget(self._render_movie_height_spin)
+            form.addRow("Render size", render_size_widget)
+            self._register_parameter_hint(
+                self._render_movie_width_spin,
+                self._PARAMETER_HINTS["render_movie_render_size_xy"],
+            )
+            self._register_parameter_hint(
+                self._render_movie_height_spin,
+                self._PARAMETER_HINTS["render_movie_render_size_xy"],
+            )
+
+            self._render_movie_fps_spin = QSpinBox()
+            self._render_movie_fps_spin.setRange(1, 240)
+            form.addRow("FPS", self._render_movie_fps_spin)
+            self._register_parameter_hint(
+                self._render_movie_fps_spin,
+                self._PARAMETER_HINTS["render_movie_default_transition_frames"],
+            )
+
+            self._render_movie_default_transition_frames_spin = QSpinBox()
+            self._render_movie_default_transition_frames_spin.setRange(0, 10000)
+            form.addRow(
+                "Default gap frames",
+                self._render_movie_default_transition_frames_spin,
+            )
+            self._register_parameter_hint(
+                self._render_movie_default_transition_frames_spin,
+                self._PARAMETER_HINTS["render_movie_default_transition_frames"],
+            )
+
+            self._render_movie_transition_frames_input = QLineEdit()
+            self._render_movie_transition_frames_input.setPlaceholderText(
+                "Per-gap overrides, for example 48,72,36"
+            )
+            form.addRow(
+                "Per-gap frames",
+                self._render_movie_transition_frames_input,
+            )
+            self._register_parameter_hint(
+                self._render_movie_transition_frames_input,
+                self._PARAMETER_HINTS["render_movie_transition_frames_by_gap"],
+            )
+
+            self._render_movie_hold_frames_spin = QSpinBox()
+            self._render_movie_hold_frames_spin.setRange(0, 10000)
+            form.addRow("Hold frames", self._render_movie_hold_frames_spin)
+            self._register_parameter_hint(
+                self._render_movie_hold_frames_spin,
+                self._PARAMETER_HINTS["render_movie_hold_frames"],
+            )
+
+            self._render_movie_interpolation_combo = QComboBox()
+            self._render_movie_interpolation_combo.addItem("Ease in/out", "ease_in_out")
+            self._render_movie_interpolation_combo.addItem("Linear", "linear")
+            form.addRow("Interpolation", self._render_movie_interpolation_combo)
+            self._register_parameter_hint(
+                self._render_movie_interpolation_combo,
+                self._PARAMETER_HINTS["render_movie_interpolation_mode"],
+            )
+
+            self._render_movie_camera_effect_combo = QComboBox()
+            self._render_movie_camera_effect_combo.addItem("None", "none")
+            self._render_movie_camera_effect_combo.addItem("Orbit", "orbit")
+            self._render_movie_camera_effect_combo.addItem("Flythrough", "flythrough")
+            self._render_movie_camera_effect_combo.addItem("Zoom FX", "zoom_fx")
+            self._render_movie_camera_effect_combo.currentIndexChanged.connect(
+                self._set_render_movie_parameter_enabled_state
+            )
+            form.addRow("Camera effect", self._render_movie_camera_effect_combo)
+            self._register_parameter_hint(
+                self._render_movie_camera_effect_combo,
+                self._PARAMETER_HINTS["render_movie_camera_effect"],
+            )
+
+            self._render_movie_orbit_degrees_spin = QDoubleSpinBox()
+            self._render_movie_orbit_degrees_spin.setRange(0.0, 1080.0)
+            self._render_movie_orbit_degrees_spin.setDecimals(2)
+            form.addRow("Orbit degrees", self._render_movie_orbit_degrees_spin)
+            self._register_parameter_hint(
+                self._render_movie_orbit_degrees_spin,
+                self._PARAMETER_HINTS["render_movie_camera_effect"],
+            )
+
+            self._render_movie_flythrough_distance_spin = QDoubleSpinBox()
+            self._render_movie_flythrough_distance_spin.setRange(0.0, 10.0)
+            self._render_movie_flythrough_distance_spin.setDecimals(3)
+            self._render_movie_flythrough_distance_spin.setSingleStep(0.01)
+            form.addRow(
+                "Flythrough factor",
+                self._render_movie_flythrough_distance_spin,
+            )
+            self._register_parameter_hint(
+                self._render_movie_flythrough_distance_spin,
+                self._PARAMETER_HINTS["render_movie_camera_effect"],
+            )
+
+            self._render_movie_zoom_effect_spin = QDoubleSpinBox()
+            self._render_movie_zoom_effect_spin.setRange(0.0, 10.0)
+            self._render_movie_zoom_effect_spin.setDecimals(3)
+            self._render_movie_zoom_effect_spin.setSingleStep(0.01)
+            form.addRow("Zoom factor", self._render_movie_zoom_effect_spin)
+            self._register_parameter_hint(
+                self._render_movie_zoom_effect_spin,
+                self._PARAMETER_HINTS["render_movie_camera_effect"],
+            )
+
+            self._render_movie_overlay_title_input = QLineEdit()
+            form.addRow("Title", self._render_movie_overlay_title_input)
+            self._register_parameter_hint(
+                self._render_movie_overlay_title_input,
+                self._PARAMETER_HINTS["render_movie_overlay_text"],
+            )
+
+            self._render_movie_overlay_subtitle_input = QLineEdit()
+            form.addRow("Subtitle", self._render_movie_overlay_subtitle_input)
+            self._register_parameter_hint(
+                self._render_movie_overlay_subtitle_input,
+                self._PARAMETER_HINTS["render_movie_overlay_text"],
+            )
+
+            self._render_movie_overlay_frame_text_combo = QComboBox()
+            self._render_movie_overlay_frame_text_combo.addItem("None", "none")
+            self._render_movie_overlay_frame_text_combo.addItem(
+                "Frame number",
+                "frame_number",
+            )
+            self._render_movie_overlay_frame_text_combo.addItem(
+                "Keyframe annotations",
+                "keyframe_annotations",
+            )
+            form.addRow(
+                "Frame text",
+                self._render_movie_overlay_frame_text_combo,
+            )
+            self._register_parameter_hint(
+                self._render_movie_overlay_frame_text_combo,
+                self._PARAMETER_HINTS["render_movie_overlay_text"],
+            )
+
+            self._render_movie_overlay_scalebar_checkbox = QCheckBox("Draw scalebar")
+            self._render_movie_overlay_scalebar_checkbox.stateChanged.connect(
+                self._set_render_movie_parameter_enabled_state
+            )
+            form.addRow("Scalebar", self._render_movie_overlay_scalebar_checkbox)
+            self._register_parameter_hint(
+                self._render_movie_overlay_scalebar_checkbox,
+                self._PARAMETER_HINTS["render_movie_overlay_scalebar"],
+            )
+
+            self._render_movie_overlay_scalebar_length_spin = QDoubleSpinBox()
+            self._render_movie_overlay_scalebar_length_spin.setRange(0.001, 100000.0)
+            self._render_movie_overlay_scalebar_length_spin.setDecimals(3)
+            form.addRow(
+                "Scalebar length (um)",
+                self._render_movie_overlay_scalebar_length_spin,
+            )
+            self._register_parameter_hint(
+                self._render_movie_overlay_scalebar_length_spin,
+                self._PARAMETER_HINTS["render_movie_overlay_scalebar"],
+            )
+
+            self._render_movie_overlay_scalebar_position_combo = QComboBox()
+            self._render_movie_overlay_scalebar_position_combo.addItem(
+                "Bottom left",
+                "bottom_left",
+            )
+            self._render_movie_overlay_scalebar_position_combo.addItem(
+                "Bottom right",
+                "bottom_right",
+            )
+            self._render_movie_overlay_scalebar_position_combo.addItem(
+                "Top left",
+                "top_left",
+            )
+            self._render_movie_overlay_scalebar_position_combo.addItem(
+                "Top right",
+                "top_right",
+            )
+            form.addRow(
+                "Scalebar position",
+                self._render_movie_overlay_scalebar_position_combo,
+            )
+            self._register_parameter_hint(
+                self._render_movie_overlay_scalebar_position_combo,
+                self._PARAMETER_HINTS["render_movie_overlay_scalebar"],
+            )
+
+            self._render_movie_output_directory_input = QLineEdit()
+            self._render_movie_output_directory_input.setPlaceholderText("Auto")
+            form.addRow("Output directory", self._render_movie_output_directory_input)
+            self._register_parameter_hint(
+                self._render_movie_output_directory_input,
+                self._PARAMETER_HINTS["render_movie_output_directory"],
+            )
+
+        def _build_compile_movie_parameter_rows(self, form: QFormLayout) -> None:
+            """Add compile-movie parameter controls to a form."""
+            self._compile_movie_render_manifest_input = QLineEdit()
+            self._compile_movie_render_manifest_input.setPlaceholderText(
+                "Latest render manifest"
+            )
+            form.addRow(
+                "Render manifest",
+                self._compile_movie_render_manifest_input,
+            )
+            self._register_parameter_hint(
+                self._compile_movie_render_manifest_input,
+                self._PARAMETER_HINTS["compile_movie_render_manifest_path"],
+            )
+
+            self._compile_movie_rendered_level_spin = QSpinBox()
+            self._compile_movie_rendered_level_spin.setRange(0, 64)
+            form.addRow("Rendered level", self._compile_movie_rendered_level_spin)
+            self._register_parameter_hint(
+                self._compile_movie_rendered_level_spin,
+                self._PARAMETER_HINTS["compile_movie_rendered_level"],
+            )
+
+            self._compile_movie_output_format_combo = QComboBox()
+            self._compile_movie_output_format_combo.addItem("MP4", "mp4")
+            self._compile_movie_output_format_combo.addItem("ProRes MOV", "prores")
+            self._compile_movie_output_format_combo.addItem("Both", "both")
+            self._compile_movie_output_format_combo.currentIndexChanged.connect(
+                self._set_compile_movie_parameter_enabled_state
+            )
+            form.addRow("Output format", self._compile_movie_output_format_combo)
+            self._register_parameter_hint(
+                self._compile_movie_output_format_combo,
+                self._PARAMETER_HINTS["compile_movie_output_format"],
+            )
+
+            self._compile_movie_fps_spin = QSpinBox()
+            self._compile_movie_fps_spin.setRange(1, 240)
+            form.addRow("FPS", self._compile_movie_fps_spin)
+            self._register_parameter_hint(
+                self._compile_movie_fps_spin,
+                self._PARAMETER_HINTS["compile_movie_output_format"],
+            )
+
+            self._compile_movie_mp4_crf_spin = QSpinBox()
+            self._compile_movie_mp4_crf_spin.setRange(0, 51)
+            form.addRow("MP4 CRF", self._compile_movie_mp4_crf_spin)
+            self._register_parameter_hint(
+                self._compile_movie_mp4_crf_spin,
+                self._PARAMETER_HINTS["compile_movie_output_format"],
+            )
+
+            self._compile_movie_mp4_preset_combo = QComboBox()
+            for preset in (
+                "ultrafast",
+                "superfast",
+                "veryfast",
+                "faster",
+                "fast",
+                "medium",
+                "slow",
+                "slower",
+                "veryslow",
+            ):
+                self._compile_movie_mp4_preset_combo.addItem(preset, preset)
+            form.addRow("MP4 preset", self._compile_movie_mp4_preset_combo)
+            self._register_parameter_hint(
+                self._compile_movie_mp4_preset_combo,
+                self._PARAMETER_HINTS["compile_movie_output_format"],
+            )
+
+            self._compile_movie_prores_profile_spin = QSpinBox()
+            self._compile_movie_prores_profile_spin.setRange(0, 5)
+            form.addRow(
+                "ProRes profile",
+                self._compile_movie_prores_profile_spin,
+            )
+            self._register_parameter_hint(
+                self._compile_movie_prores_profile_spin,
+                self._PARAMETER_HINTS["compile_movie_output_format"],
+            )
+
+            self._compile_movie_pixel_format_input = QLineEdit()
+            self._compile_movie_pixel_format_input.setPlaceholderText("Auto")
+            form.addRow("Pixel format", self._compile_movie_pixel_format_input)
+            self._register_parameter_hint(
+                self._compile_movie_pixel_format_input,
+                self._PARAMETER_HINTS["compile_movie_output_format"],
+            )
+
+            resize_widget = QWidget()
+            resize_layout = QHBoxLayout(resize_widget)
+            resize_layout.setContentsMargins(0, 0, 0, 0)
+            resize_layout.setSpacing(8)
+            self._compile_movie_resize_width_spin = QSpinBox()
+            self._compile_movie_resize_width_spin.setRange(0, 16384)
+            self._compile_movie_resize_height_spin = QSpinBox()
+            self._compile_movie_resize_height_spin.setRange(0, 16384)
+            resize_layout.addWidget(self._compile_movie_resize_width_spin)
+            resize_layout.addWidget(QLabel("x"))
+            resize_layout.addWidget(self._compile_movie_resize_height_spin)
+            form.addRow("Resize", resize_widget)
+            self._register_parameter_hint(
+                self._compile_movie_resize_width_spin,
+                self._PARAMETER_HINTS["compile_movie_resize_xy"],
+            )
+            self._register_parameter_hint(
+                self._compile_movie_resize_height_spin,
+                self._PARAMETER_HINTS["compile_movie_resize_xy"],
+            )
+
+            self._compile_movie_output_directory_input = QLineEdit()
+            self._compile_movie_output_directory_input.setPlaceholderText("Auto")
+            form.addRow(
+                "Output directory",
+                self._compile_movie_output_directory_input,
+            )
+            self._register_parameter_hint(
+                self._compile_movie_output_directory_input,
+                self._PARAMETER_HINTS["compile_movie_output_directory"],
+            )
+
+            self._compile_movie_output_stem_input = QLineEdit()
+            self._compile_movie_output_stem_input.setPlaceholderText("Auto")
+            form.addRow("Output stem", self._compile_movie_output_stem_input)
+            self._register_parameter_hint(
+                self._compile_movie_output_stem_input,
+                self._PARAMETER_HINTS["compile_movie_output_stem"],
+            )
 
         def _coerce_optional_bool(self, value: Any) -> Optional[bool]:
             """Coerce a value into ``True``/``False``/``None``.
@@ -12421,10 +12882,8 @@ if HAS_PYQT6:
                 operation_output_components={
                     **{
                         operation_name: component
-                        for operation_name, component in ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS.items()
-                        if operation_name != "data"
+                        for operation_name, component in self._OPERATION_OUTPUT_COMPONENTS.items()
                     },
-                    "registration": self._OPERATION_OUTPUT_COMPONENTS["registration"],
                 },
             )
 
@@ -13291,6 +13750,8 @@ if HAS_PYQT6:
             self._set_registration_parameter_enabled_state()
             self._set_fusion_parameter_enabled_state()
             self._set_visualization_parameter_enabled_state()
+            self._set_render_movie_parameter_enabled_state()
+            self._set_compile_movie_parameter_enabled_state()
             self._set_mip_export_parameter_enabled_state()
 
             if (
@@ -13330,6 +13791,8 @@ if HAS_PYQT6:
             """
             self._refresh_input_source_options()
             self._set_visualization_parameter_enabled_state()
+            self._set_render_movie_parameter_enabled_state()
+            self._set_compile_movie_parameter_enabled_state()
             sequence = self._selected_operations_in_sequence()
             if sequence:
                 sequence_text = " -> ".join(
@@ -13926,6 +14389,82 @@ if HAS_PYQT6:
             self._visualization_position_label.setVisible(not show_all_positions)
             self._visualization_position_spin.setVisible(not show_all_positions)
 
+        def _set_render_movie_parameter_enabled_state(self) -> None:
+            """Enable/disable render-movie widgets based on selection and mode."""
+            render_enabled = self._operation_checkboxes["render_movie"].isChecked()
+            widgets = (
+                self._render_movie_keyframe_manifest_input,
+                self._render_movie_resolution_levels_input,
+                self._render_movie_width_spin,
+                self._render_movie_height_spin,
+                self._render_movie_fps_spin,
+                self._render_movie_default_transition_frames_spin,
+                self._render_movie_transition_frames_input,
+                self._render_movie_hold_frames_spin,
+                self._render_movie_interpolation_combo,
+                self._render_movie_camera_effect_combo,
+                self._render_movie_overlay_title_input,
+                self._render_movie_overlay_subtitle_input,
+                self._render_movie_overlay_frame_text_combo,
+                self._render_movie_overlay_scalebar_checkbox,
+                self._render_movie_output_directory_input,
+            )
+            for widget in widgets:
+                widget.setEnabled(render_enabled)
+
+            camera_effect = (
+                str(self._render_movie_camera_effect_combo.currentData() or "none")
+                .strip()
+                .lower()
+                or "none"
+            )
+            self._render_movie_orbit_degrees_spin.setEnabled(
+                render_enabled and camera_effect == "orbit"
+            )
+            self._render_movie_flythrough_distance_spin.setEnabled(
+                render_enabled and camera_effect == "flythrough"
+            )
+            self._render_movie_zoom_effect_spin.setEnabled(
+                render_enabled and camera_effect == "zoom_fx"
+            )
+
+            scalebar_enabled = render_enabled and bool(
+                self._render_movie_overlay_scalebar_checkbox.isChecked()
+            )
+            self._render_movie_overlay_scalebar_length_spin.setEnabled(scalebar_enabled)
+            self._render_movie_overlay_scalebar_position_combo.setEnabled(
+                scalebar_enabled
+            )
+
+        def _set_compile_movie_parameter_enabled_state(self) -> None:
+            """Enable/disable compile-movie widgets based on selection and format."""
+            compile_enabled = self._operation_checkboxes["compile_movie"].isChecked()
+            widgets = (
+                self._compile_movie_render_manifest_input,
+                self._compile_movie_rendered_level_spin,
+                self._compile_movie_output_format_combo,
+                self._compile_movie_fps_spin,
+                self._compile_movie_pixel_format_input,
+                self._compile_movie_resize_width_spin,
+                self._compile_movie_resize_height_spin,
+                self._compile_movie_output_directory_input,
+                self._compile_movie_output_stem_input,
+            )
+            for widget in widgets:
+                widget.setEnabled(compile_enabled)
+
+            output_format = (
+                str(self._compile_movie_output_format_combo.currentData() or "mp4")
+                .strip()
+                .lower()
+                or "mp4"
+            )
+            mp4_enabled = compile_enabled and output_format in {"mp4", "both"}
+            prores_enabled = compile_enabled and output_format in {"prores", "both"}
+            self._compile_movie_mp4_crf_spin.setEnabled(mp4_enabled)
+            self._compile_movie_mp4_preset_combo.setEnabled(mp4_enabled)
+            self._compile_movie_prores_profile_spin.setEnabled(prores_enabled)
+
         def _set_mip_export_parameter_enabled_state(self) -> None:
             """Enable/disable MIP-export widgets based on operation selection.
 
@@ -13987,6 +14526,15 @@ if HAS_PYQT6:
             visualization_params = dict(
                 normalized_parameters.get("visualization", self._visualization_defaults)
             )
+            render_movie_params = dict(
+                normalized_parameters.get("render_movie", self._render_movie_defaults)
+            )
+            compile_movie_params = dict(
+                normalized_parameters.get(
+                    "compile_movie",
+                    self._compile_movie_defaults,
+                )
+            )
             mip_export_params = dict(
                 normalized_parameters.get("mip_export", self._mip_export_defaults)
             )
@@ -14004,6 +14552,8 @@ if HAS_PYQT6:
                 "fusion": bool(getattr(initial, "fusion", False)),
                 "display_pyramid": bool(getattr(initial, "display_pyramid", False)),
                 "visualization": bool(initial.visualization),
+                "render_movie": bool(getattr(initial, "render_movie", False)),
+                "compile_movie": bool(getattr(initial, "compile_movie", False)),
                 "mip_export": bool(initial.mip_export),
             }
 
@@ -14869,6 +15419,183 @@ if HAS_PYQT6:
             )
             self._refresh_visualization_layer_override_summary()
             self._set_visualization_position_selector_state()
+
+            self._render_movie_keyframe_manifest_input.setText(
+                str(render_movie_params.get("keyframe_manifest_path", "") or "").strip()
+            )
+            self._render_movie_resolution_levels_input.setText(
+                ",".join(
+                    str(int(value))
+                    for value in render_movie_params.get("resolution_levels", [0])
+                )
+            )
+            render_size_xy = render_movie_params.get("render_size_xy", [1920, 1080])
+            if (
+                not isinstance(render_size_xy, (tuple, list))
+                or len(render_size_xy) != 2
+            ):
+                render_size_xy = [1920, 1080]
+            self._render_movie_width_spin.setValue(max(64, int(render_size_xy[0])))
+            self._render_movie_height_spin.setValue(max(64, int(render_size_xy[1])))
+            self._render_movie_fps_spin.setValue(
+                max(1, int(render_movie_params.get("fps", 24)))
+            )
+            self._render_movie_default_transition_frames_spin.setValue(
+                max(0, int(render_movie_params.get("default_transition_frames", 48)))
+            )
+            self._render_movie_transition_frames_input.setText(
+                ",".join(
+                    str(int(value))
+                    for value in render_movie_params.get(
+                        "transition_frames_by_gap",
+                        [],
+                    )
+                )
+            )
+            self._render_movie_hold_frames_spin.setValue(
+                max(0, int(render_movie_params.get("hold_frames", 12)))
+            )
+            interpolation_mode = (
+                str(render_movie_params.get("interpolation_mode", "ease_in_out"))
+                .strip()
+                .lower()
+                or "ease_in_out"
+            )
+            interpolation_index = self._render_movie_interpolation_combo.findData(
+                interpolation_mode
+            )
+            if interpolation_index < 0:
+                interpolation_index = 0
+            self._render_movie_interpolation_combo.setCurrentIndex(interpolation_index)
+            camera_effect = (
+                str(render_movie_params.get("camera_effect", "none")).strip().lower()
+                or "none"
+            )
+            camera_effect_index = self._render_movie_camera_effect_combo.findData(
+                camera_effect
+            )
+            if camera_effect_index < 0:
+                camera_effect_index = 0
+            self._render_movie_camera_effect_combo.setCurrentIndex(camera_effect_index)
+            self._render_movie_orbit_degrees_spin.setValue(
+                max(0.0, float(render_movie_params.get("orbit_degrees", 45.0)))
+            )
+            self._render_movie_flythrough_distance_spin.setValue(
+                max(
+                    0.0,
+                    float(render_movie_params.get("flythrough_distance_factor", 0.10)),
+                )
+            )
+            self._render_movie_zoom_effect_spin.setValue(
+                max(0.0, float(render_movie_params.get("zoom_effect_factor", 0.15)))
+            )
+            self._render_movie_overlay_title_input.setText(
+                str(render_movie_params.get("overlay_title", "") or "").strip()
+            )
+            self._render_movie_overlay_subtitle_input.setText(
+                str(render_movie_params.get("overlay_subtitle", "") or "").strip()
+            )
+            frame_text_mode = (
+                str(render_movie_params.get("overlay_frame_text_mode", "none"))
+                .strip()
+                .lower()
+                or "none"
+            )
+            frame_text_index = self._render_movie_overlay_frame_text_combo.findData(
+                frame_text_mode
+            )
+            if frame_text_index < 0:
+                frame_text_index = 0
+            self._render_movie_overlay_frame_text_combo.setCurrentIndex(
+                frame_text_index
+            )
+            self._render_movie_overlay_scalebar_checkbox.setChecked(
+                bool(render_movie_params.get("overlay_scalebar", False))
+            )
+            self._render_movie_overlay_scalebar_length_spin.setValue(
+                max(
+                    0.001,
+                    float(render_movie_params.get("overlay_scalebar_length_um", 50.0)),
+                )
+            )
+            scalebar_position = (
+                str(render_movie_params.get("overlay_scalebar_position", "bottom_left"))
+                .strip()
+                .lower()
+                or "bottom_left"
+            )
+            scalebar_position_index = (
+                self._render_movie_overlay_scalebar_position_combo.findData(
+                    scalebar_position
+                )
+            )
+            if scalebar_position_index < 0:
+                scalebar_position_index = 0
+            self._render_movie_overlay_scalebar_position_combo.setCurrentIndex(
+                scalebar_position_index
+            )
+            self._render_movie_output_directory_input.setText(
+                str(render_movie_params.get("output_directory", "") or "").strip()
+            )
+
+            self._compile_movie_render_manifest_input.setText(
+                str(compile_movie_params.get("render_manifest_path", "") or "").strip()
+            )
+            self._compile_movie_rendered_level_spin.setValue(
+                max(0, int(compile_movie_params.get("rendered_level", 0)))
+            )
+            compile_output_format = (
+                str(compile_movie_params.get("output_format", "mp4")).strip().lower()
+                or "mp4"
+            )
+            compile_output_format_index = (
+                self._compile_movie_output_format_combo.findData(compile_output_format)
+            )
+            if compile_output_format_index < 0:
+                compile_output_format_index = 0
+            self._compile_movie_output_format_combo.setCurrentIndex(
+                compile_output_format_index
+            )
+            self._compile_movie_fps_spin.setValue(
+                max(1, int(compile_movie_params.get("fps", 24)))
+            )
+            self._compile_movie_mp4_crf_spin.setValue(
+                max(0, min(51, int(compile_movie_params.get("mp4_crf", 18))))
+            )
+            compile_mp4_preset = (
+                str(compile_movie_params.get("mp4_preset", "slow")).strip().lower()
+                or "slow"
+            )
+            compile_mp4_preset_index = self._compile_movie_mp4_preset_combo.findData(
+                compile_mp4_preset
+            )
+            if compile_mp4_preset_index < 0:
+                compile_mp4_preset_index = (
+                    self._compile_movie_mp4_preset_combo.findData("slow")
+                )
+            if compile_mp4_preset_index < 0:
+                compile_mp4_preset_index = 0
+            self._compile_movie_mp4_preset_combo.setCurrentIndex(
+                compile_mp4_preset_index
+            )
+            self._compile_movie_prores_profile_spin.setValue(
+                max(0, min(5, int(compile_movie_params.get("prores_profile", 3))))
+            )
+            self._compile_movie_pixel_format_input.setText(
+                str(compile_movie_params.get("pixel_format", "") or "").strip()
+            )
+            resize_xy = compile_movie_params.get("resize_xy", [])
+            if not isinstance(resize_xy, (tuple, list)) or len(resize_xy) != 2:
+                resize_xy = [0, 0]
+            self._compile_movie_resize_width_spin.setValue(max(0, int(resize_xy[0])))
+            self._compile_movie_resize_height_spin.setValue(max(0, int(resize_xy[1])))
+            self._compile_movie_output_directory_input.setText(
+                str(compile_movie_params.get("output_directory", "") or "").strip()
+            )
+            self._compile_movie_output_stem_input.setText(
+                str(compile_movie_params.get("output_stem", "") or "").strip()
+            )
+
             mip_mode = (
                 str(mip_export_params.get("position_mode", "multi_position")).strip()
                 or "multi_position"
@@ -15820,6 +16547,121 @@ if HAS_PYQT6:
                 "volume_layers": list(volume_layers),
             }
 
+        def _collect_render_movie_parameters(self) -> Dict[str, Any]:
+            """Collect render-movie parameter values from widgets."""
+            resolution_levels = [
+                int(token)
+                for token in self._split_csv_values(
+                    self._render_movie_resolution_levels_input.text()
+                )
+            ]
+            transition_frames = [
+                int(token)
+                for token in self._split_csv_values(
+                    self._render_movie_transition_frames_input.text()
+                )
+            ]
+            return {
+                "chunk_basis": "2d",
+                "detect_2d_per_slice": True,
+                "use_map_overlap": False,
+                "overlap_zyx": [0, 0, 0],
+                "memory_overhead_factor": float(
+                    self._render_movie_defaults.get("memory_overhead_factor", 1.0)
+                ),
+                "keyframe_manifest_path": str(
+                    self._render_movie_keyframe_manifest_input.text()
+                ).strip(),
+                "resolution_levels": resolution_levels
+                or list(self._render_movie_defaults.get("resolution_levels", [0])),
+                "render_size_xy": [
+                    int(self._render_movie_width_spin.value()),
+                    int(self._render_movie_height_spin.value()),
+                ],
+                "fps": int(self._render_movie_fps_spin.value()),
+                "default_transition_frames": int(
+                    self._render_movie_default_transition_frames_spin.value()
+                ),
+                "transition_frames_by_gap": list(transition_frames),
+                "hold_frames": int(self._render_movie_hold_frames_spin.value()),
+                "interpolation_mode": str(
+                    self._render_movie_interpolation_combo.currentData()
+                    or "ease_in_out"
+                ).strip(),
+                "camera_effect": str(
+                    self._render_movie_camera_effect_combo.currentData() or "none"
+                ).strip(),
+                "orbit_degrees": float(self._render_movie_orbit_degrees_spin.value()),
+                "flythrough_distance_factor": float(
+                    self._render_movie_flythrough_distance_spin.value()
+                ),
+                "zoom_effect_factor": float(
+                    self._render_movie_zoom_effect_spin.value()
+                ),
+                "overlay_title": str(
+                    self._render_movie_overlay_title_input.text()
+                ).strip(),
+                "overlay_subtitle": str(
+                    self._render_movie_overlay_subtitle_input.text()
+                ).strip(),
+                "overlay_frame_text_mode": str(
+                    self._render_movie_overlay_frame_text_combo.currentData() or "none"
+                ).strip(),
+                "overlay_scalebar": bool(
+                    self._render_movie_overlay_scalebar_checkbox.isChecked()
+                ),
+                "overlay_scalebar_length_um": float(
+                    self._render_movie_overlay_scalebar_length_spin.value()
+                ),
+                "overlay_scalebar_position": str(
+                    self._render_movie_overlay_scalebar_position_combo.currentData()
+                    or "bottom_left"
+                ).strip(),
+                "output_directory": str(
+                    self._render_movie_output_directory_input.text()
+                ).strip(),
+            }
+
+        def _collect_compile_movie_parameters(self) -> Dict[str, Any]:
+            """Collect compile-movie parameter values from widgets."""
+            resize_xy: list[int] = []
+            resize_width = int(self._compile_movie_resize_width_spin.value())
+            resize_height = int(self._compile_movie_resize_height_spin.value())
+            if resize_width > 0 and resize_height > 0:
+                resize_xy = [resize_width, resize_height]
+            return {
+                "chunk_basis": "2d",
+                "detect_2d_per_slice": True,
+                "use_map_overlap": False,
+                "overlap_zyx": [0, 0, 0],
+                "memory_overhead_factor": float(
+                    self._compile_movie_defaults.get("memory_overhead_factor", 1.0)
+                ),
+                "render_manifest_path": str(
+                    self._compile_movie_render_manifest_input.text()
+                ).strip(),
+                "rendered_level": int(self._compile_movie_rendered_level_spin.value()),
+                "output_format": str(
+                    self._compile_movie_output_format_combo.currentData() or "mp4"
+                ).strip(),
+                "fps": int(self._compile_movie_fps_spin.value()),
+                "mp4_crf": int(self._compile_movie_mp4_crf_spin.value()),
+                "mp4_preset": str(
+                    self._compile_movie_mp4_preset_combo.currentData() or "slow"
+                ).strip(),
+                "prores_profile": int(self._compile_movie_prores_profile_spin.value()),
+                "pixel_format": str(
+                    self._compile_movie_pixel_format_input.text()
+                ).strip(),
+                "resize_xy": resize_xy,
+                "output_directory": str(
+                    self._compile_movie_output_directory_input.text()
+                ).strip(),
+                "output_stem": str(
+                    self._compile_movie_output_stem_input.text()
+                ).strip(),
+            }
+
         def _collect_mip_export_parameters(self) -> Dict[str, Any]:
             """Collect MIP-export parameter values from widgets.
 
@@ -15896,6 +16738,10 @@ if HAS_PYQT6:
                 defaults.update(self._collect_fusion_parameters())
             elif operation_name == "visualization":
                 defaults.update(self._collect_visualization_parameters())
+            elif operation_name == "render_movie":
+                defaults.update(self._collect_render_movie_parameters())
+            elif operation_name == "compile_movie":
+                defaults.update(self._collect_compile_movie_parameters())
             elif operation_name == "mip_export":
                 defaults.update(self._collect_mip_export_parameters())
             return defaults
@@ -16048,6 +16894,8 @@ if HAS_PYQT6:
                 "fusion": selected_flags["fusion"],
                 "display_pyramid": selected_flags["display_pyramid"],
                 "visualization": selected_flags["visualization"],
+                "render_movie": selected_flags["render_movie"],
+                "compile_movie": selected_flags["compile_movie"],
                 "mip_export": selected_flags["mip_export"],
                 "zarr_save": self._base_config.zarr_save,
                 "spatial_calibration": self._base_config.spatial_calibration,

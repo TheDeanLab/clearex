@@ -19,6 +19,8 @@ Current primary arguments are:
 - ``--fusion``
 - ``--display-pyramid``
 - ``--visualization``
+- ``--render-movie``
+- ``--compile-movie``
 - ``--mip-export``
 - ``--file``
 - ``--migrate-store``
@@ -115,6 +117,17 @@ Examples
 
 .. code-block:: bash
 
+   # Headless movie workflow against an existing canonical OME-Zarr store
+   clearex --headless \
+     --file /path/to/data_store.ome.zarr \
+     --render-movie
+
+   clearex --headless \
+     --file /path/to/data_store.ome.zarr \
+     --compile-movie
+
+.. code-block:: bash
+
    # Headless Navigate run with explicit stage-to-world placement mapping
    clearex --headless \
      --file /path/to/experiment.yml \
@@ -179,6 +192,12 @@ Runtime source aliases currently include:
 - ``usegment3d`` -> ``clearex/runtime_cache/results/usegment3d/latest/data``
 - ``registration`` -> ``clearex/results/registration/latest`` (metadata-only;
   consumed by ``fusion``)
+- ``visualization`` -> ``clearex/results/visualization/latest`` (metadata-only;
+  consumed by ``render_movie``)
+- ``render_movie`` -> ``clearex/results/render_movie/latest`` (metadata-only;
+  consumed by ``compile_movie``)
+- ``compile_movie`` -> ``clearex/results/compile_movie/latest`` (metadata-only;
+  terminal export metadata)
 
 Public OME image collections at the root and under ``results/<analysis>/latest``
 exist for interoperability and visualization. Analysis kernels should not write
@@ -232,3 +251,46 @@ The GUI provides a popup editor (``Layer/View Table...``) for optional
 per-layer overrides with columns:
 
 - ``Layer``, ``Visible``, ``LUT/Colormap``, ``Rendering``, ``Annotation``.
+
+Movie Rendering and Compilation
+-------------------------------
+
+ClearEx now separates movie generation into two explicit operations:
+
+- ``render_movie``:
+  reconstructs the visualization scene from the keyframe manifest and renders
+  PNG frames for one or more selected resolution levels.
+- ``compile_movie``:
+  validates one rendered frame set and encodes it through ``ffmpeg`` into MP4,
+  ProRes MOV, or both.
+
+Runtime storage:
+
+- ``render_movie`` latest metadata:
+  - ``clearex/results/render_movie/latest``
+- ``compile_movie`` latest metadata:
+  - ``clearex/results/compile_movie/latest``
+- External outputs:
+  - ``<analysis_store>_render_movie/latest/level_<nn>_frames/frame_000000.png``
+  - ``<analysis_store>_compile_movie/latest/*.mp4``
+  - ``<analysis_store>_compile_movie/latest/*.mov``
+
+Practical guidance:
+
+- Use coarse levels such as ``[1]`` or ``[2]`` plus moderate frame sizes for
+  preview renders.
+- Use level ``0`` and the final frame size for publication renders.
+- `default_transition_frames` around ``48`` is a good default for smooth
+  motion.
+- ``mp4_crf`` in the ``16`` to ``24`` range is a reasonable review/final
+  quality band, with lower values trading size for quality.
+- Rebuild timing and codec settings with ``compile_movie`` first, because it is
+  much faster than rerendering napari screenshots.
+
+Captured napari ``Points`` and ``Tracks`` layers are serialized into the
+keyframe manifest and rebuilt during ``render_movie`` so common particle/track
+overlays can survive beyond the interactive session.
+
+The CLI currently exposes ``--render-movie`` and ``--compile-movie`` as
+operation flags. Detailed movie parameter editing is currently done through the
+GUI or a programmatic ``WorkflowConfig.analysis_parameters`` payload.
