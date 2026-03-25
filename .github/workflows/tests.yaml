@@ -34,7 +34,7 @@ jobs:
 
       - name: Run Tests
         run: |
-          uv run pytest --cov=./ --cov-report=xml
+          uv run pytest -m "not biohpc" --cov=./ --cov-report=xml
 
       - name: Upload Coverage Reports
         uses: codecov/codecov-action@v5

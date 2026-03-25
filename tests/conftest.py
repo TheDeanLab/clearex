@@ -26,6 +26,55 @@ if sys.platform == "darwin":
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register repository-local pytest markers.
+
+    Parameters
+    ----------
+    config : pytest.Config
+        Active pytest configuration object.
+
+    Returns
+    -------
+    None
+        Marker registration has side effects only.
+    """
+    config.addinivalue_line(
+        "markers",
+        "biohpc: local-only integration tests that require the BioHPC archive "
+        "fixture bundle.",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    """Skip BioHPC-only tests automatically on GitHub Actions.
+
+    Parameters
+    ----------
+    config : pytest.Config
+        Active pytest configuration object.
+    items : list[pytest.Item]
+        Collected tests for the current run.
+
+    Returns
+    -------
+    None
+        Items are modified in place when CI exclusion applies.
+    """
+    del config
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
+        return
+    skip_marker = pytest.mark.skip(
+        reason="biohpc tests are local-only and are not run on GitHub Actions."
+    )
+    for item in items:
+        if "biohpc" in item.keywords:
+            item.add_marker(skip_marker)
+
+
 def _normalize_legacy_zarr_compressor(value):
     """Translate legacy numcodecs compressors into Zarr 3 codecs when needed."""
     if _NumcodecsBlosc is not None and BloscCodec is not None:
