@@ -57,6 +57,7 @@ from clearex.io.ome_store import (
     analysis_cache_data_component,
     analysis_cache_root,
     public_analysis_root,
+    resolve_voxel_size_um_zyx_with_source,
 )
 from clearex.io.provenance import register_latest_output_reference
 from clearex.workflow import (
@@ -363,43 +364,29 @@ def _summarize_client_worker_state(client: "Client") -> str:
 
 def _extract_base_voxel_size_um_zyx(
     root: zarr.hierarchy.Group,
+    *,
+    source_component: Optional[str] = None,
 ) -> tuple[float, float, float]:
-    """Extract base-level physical voxel size from Zarr metadata.
+    """Extract base-level physical voxel size from canonical store metadata.
 
     Parameters
     ----------
     root : zarr.hierarchy.Group
         Root Zarr group.
+    source_component : str, optional
+        Preferred source component used to follow source-component provenance
+        back to the full-resolution voxel-size metadata.
 
     Returns
     -------
     tuple[float, float, float]
         Base voxel size in ``(z, y, x)`` microns.
     """
-    root_voxel = root.attrs.get("voxel_size_um_zyx")
-    if isinstance(root_voxel, (tuple, list)) and len(root_voxel) >= 3:
-        try:
-            zyx = (
-                float(root_voxel[0]),
-                float(root_voxel[1]),
-                float(root_voxel[2]),
-            )
-            if all(value > 0 for value in zyx):
-                return zyx
-        except Exception:
-            pass
-
-    navigate = root.attrs.get("navigate_experiment")
-    if isinstance(navigate, Mapping):
-        try:
-            xy_um = float(navigate.get("xy_pixel_size_um", 1.0))
-            z_um = float(navigate.get("z_step_um", 1.0))
-            if xy_um > 0 and z_um > 0:
-                return (z_um, xy_um, xy_um)
-        except Exception:
-            pass
-
-    return (1.0, 1.0, 1.0)
+    resolved, _ = resolve_voxel_size_um_zyx_with_source(
+        root,
+        source_component=source_component,
+    )
+    return tuple(float(value) for value in resolved)
 
 
 def _pyramid_factor_zyx_for_level(
@@ -1371,7 +1358,10 @@ def run_usegment3d_analysis(
     normalized["all_channels"] = bool(all_channels)
     channel_index = int(channel_indices[0])
 
-    base_voxel_size_um_zyx = _extract_base_voxel_size_um_zyx(root)
+    base_voxel_size_um_zyx = _extract_base_voxel_size_um_zyx(
+        root,
+        source_component=source_component,
+    )
     source_factor_zyx = _pyramid_factor_zyx_for_level(
         root,
         level=effective_resolution_level,

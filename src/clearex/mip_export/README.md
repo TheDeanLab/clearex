@@ -22,7 +22,9 @@ ClearEx OME-Zarr stores.
 - `export_format`:
   - `ome-tiff` (or legacy alias `tiff`): output stored as `uint16` with OME
     physical pixel-size metadata (`PhysicalSizeX/Y`).
-  - `zarr`: output dtype follows source/projection dtype.
+  - `zarr`: compatibility alias that writes standalone OME-Zarr v3
+    (`.ome.zarr`) image stores. Output dtype follows source/projection dtype
+    and metadata includes axes plus physical scale.
 
 ## Execution Model
 
@@ -31,7 +33,8 @@ ClearEx OME-Zarr stores.
 - Local mode (`client=None`) uses delayed tasks with local scheduler.
 - Distributed mode plans output tiles and submits `_run_export_tile_task` for
   each tile to the provided Dask client with bounded in-flight work.
-- Driver process streams completed tiles into final output files (TIFF/Zarr)
+- Driver process streams completed tiles into final output files (OME-TIFF /
+  standalone OME-Zarr)
   incrementally; this increases parallel work beyond one-future-per-output.
 
 ## Performance-Sensitive Rule
@@ -56,8 +59,8 @@ ClearEx OME-Zarr stores.
 - Read budget is controlled by `_MAX_REDUCTION_READ_BYTES` in `pipeline.py`.
 - Projection outputs are written incrementally:
   - OME-TIFF uses `tifffile.memmap(..., ome=True, metadata=...)`.
-  - Zarr writes into a pre-created dataset by tile via reopened group handles
-    to avoid excessive simultaneously open files.
+  - OME-Zarr writes into pre-created dataset `0` by tile via reopened group
+    handles to avoid excessive simultaneously open files.
 - This design prevents `np.asarray(source_array[..., :, :, :])` style
   allocations that can trigger worker deaths on large volumes.
 - Zarr stores should be closed explicitly after read/write operations where
@@ -68,6 +71,9 @@ ClearEx OME-Zarr stores.
 - Latest analysis metadata path: `clearex/results/mip_export/latest`.
 - Large projection files are stored outside the analysis store in a `latest`
   output directory (configured or auto-generated).
+- Standalone OME-Zarr exports are written as `.ome.zarr` image stores with root
+  OME multiscale metadata and array `0`, so they remain directly openable in
+  OME-aware tools such as napari.
 - `register_latest_output_reference(...)` must be called with analysis key
   `mip_export` and component `clearex/results/mip_export/latest`.
 - MIP export is metadata-only inside the OME-Zarr store; it does not publish a

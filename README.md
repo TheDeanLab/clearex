@@ -9,7 +9,7 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
 ## Current Functionality
 - GUI-first entrypoint with headless fallback.
 - Headless CLI for scripted runs.
-- Input support for TIFF/OME-TIFF, generic Zarr, HDF5 (`.h5/.hdf5/.hdf`), NumPy (`.npy/.npz`), and Navigate BDV N5 acquisitions through `experiment.yml`.
+- Input support for TIFF/OME-TIFF, generic Zarr / OME-Zarr, HDF5 (`.h5/.hdf5/.hdf`), NumPy (`.npy/.npz`), and Navigate BDV N5 acquisitions through `experiment.yml`.
 - Navigate experiment ingestion from `experiment.yml` / `experiment.yaml`.
 - Canonical persisted store format is OME-Zarr v3 (`*.ome.zarr`).
 - Legacy `.n5` remains a source-only input format. Navigate BDV N5 materialization requires companion `*.xml` metadata and now reads `setup*/timepoint*/s0` datasets through TensorStore so Dask ingestion stays parallelized on `zarr>=3`.
@@ -20,18 +20,21 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
   - flatfield (`results/flatfield/latest`)
   - deconvolution (`results/deconvolution/latest`)
   - shear transform (`results/shear_transform/latest`)
-  - registration (`results/registration/latest`)
+  - registration metadata (`clearex/results/registration/latest`)
+  - fusion (`results/fusion/latest`)
   - uSegment3D segmentation (`results/usegment3d/latest`)
   - particle detection (`clearex/results/particle_detection/latest`)
   - display-pyramid metadata (`clearex/results/display_pyramid/latest`)
   - visualization metadata (`clearex/results/visualization/latest`) with napari launch
-  - MIP export metadata (`clearex/results/mip_export/latest`)
+  - MIP export metadata (`clearex/results/mip_export/latest`) with external OME-TIFF / OME-Zarr files
 - FAIR-style provenance records are persisted in `clearex/provenance/runs` with append-only run history and hash chaining.
 
 ## Canonical Store Contract
 - `data_store.ome.zarr` is the canonical materialized store beside `experiment.yml`.
 - The public source image collection is a synthetic single-well HCS layout at the store root: `A/1/<field>/<level>`.
 - Public image-producing analysis outputs are sibling HCS collections under `results/<analysis>/latest`.
+- `registration` is metadata-only under `clearex/results/registration/latest`; `fusion` owns the stitched image output under `results/fusion/latest`.
+- Standalone projection exports from `mip_export` are written outside the store as OME-TIFF (`.tif`) or standalone OME-Zarr (`.ome.zarr`) files.
 - ClearEx internal execution data lives under:
   - `clearex/runtime_cache/source/...`
   - `clearex/runtime_cache/results/<analysis>/latest/...`
@@ -160,7 +163,7 @@ Current CLI usage:
 usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
                [--usegment3d] [--channel-indices CHANNEL_INDICES]
                [--input-resolution-level INPUT_RESOLUTION_LEVEL]
-               [--shear-transform] [-r] [--display-pyramid] [-v]
+               [--shear-transform] [-r] [--fusion] [--display-pyramid] [-v]
                [--mip-export] [-f FILE] [--migrate-store MIGRATE_STORE]
                [--migrate-output MIGRATE_OUTPUT] [--migrate-overwrite]
                [--dask | --no-dask] [--chunks CHUNKS]
@@ -177,10 +180,11 @@ usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
 - `--channel-indices`: uSegment3D channels to process (`0,1,2` or `all`).
 - `--input-resolution-level`: uSegment3D input pyramid level (`0`, `1`, ...).
 - `--shear-transform`: Run shear-transform workflow.
-- `-r, --registration`: Run registration workflow hook.
+- `-r, --registration`: Run metadata-only registration workflow.
+- `--fusion`: Run stitched-volume fusion from the latest registration result.
 - `--display-pyramid`: Prepare reusable display pyramids for visualization.
 - `-v, --visualization`: Run visualization workflow.
-- `--mip-export`: Export XY/XZ/YZ maximum-intensity projections.
+- `--mip-export`: Export XY/XZ/YZ maximum-intensity projections as OME-TIFF or standalone OME-Zarr.
 - `--migrate-store`: Convert one legacy ClearEx `.zarr` / `.n5` store into canonical OME-Zarr v3.
 - `--migrate-output`: Optional destination path for `--migrate-store`.
 - `--migrate-overwrite`: Overwrite the migration destination.
@@ -204,6 +208,19 @@ Run headless on a Navigate experiment:
 clearex --headless \
   --file /path/to/experiment.yml \
   --deconvolution --usegment3d --particle-detection
+```
+
+Run registration and fusion as separate headless passes so each phase can use a
+different Dask worker profile:
+
+```bash
+clearex --headless \
+  --file /path/to/experiment.yml \
+  --registration
+
+clearex --headless \
+  --file /path/to/data_store.ome.zarr \
+  --fusion
 ```
 
 Run headless with an explicit stage-to-world axis mapping for Navigate multiposition placement:
@@ -247,18 +264,21 @@ clearex --migrate-store /path/to/legacy_store.zarr
 
 ## Runtime Behavior Notes
 - If `--file` points to Navigate `experiment.yml`, ClearEx resolves acquisition data and materializes a canonical store first.
-- Existing canonical OME-Zarr stores are reused in place.
-- Non-canonical acquisition inputs, including TIFF/OME-TIFF, HDF5, NumPy, generic Zarr, Navigate BDV N5 sources, and other Navigate source layouts, materialize to `data_store.ome.zarr` beside `experiment.yml`.
+- Existing canonical OME-Zarr stores are reused in place only when they already match the ClearEx canonical layout.
+- Non-canonical acquisition inputs, including TIFF/OME-TIFF, HDF5, NumPy, generic Zarr, generic source OME-Zarr, Navigate BDV N5 sources, and other Navigate source layouts, materialize to `data_store.ome.zarr` beside `experiment.yml`.
 - Bare direct source `.n5` runtime input is not a supported phase-1 workflow. For N5 acquisitions, point `--file` at Navigate `experiment.yml` so ClearEx can resolve BDV XML metadata and materialize canonical `.ome.zarr`.
 - Legacy ClearEx `.zarr` / `.n5` stores are not treated as canonical runtime inputs. Migrate them first with `clearex --migrate-store`.
+- Generic Zarr-like source selection now prefers validated public OME arrays when metadata is present and falls back to largest-array discovery only when necessary.
 - Canonical stores persist `spatial_calibration = {schema, stage_axis_map_zyx, theta_mode}` inside `clearex/metadata`. Missing metadata resolves to the identity mapping `z=+z,y=+y,x=+x`.
 - In the setup window, `Spatial Calibration` is configured per listed experiment. Draft mappings are tracked per experiment while the dialog is open, existing stores prefill the control, and `Next` writes the resolved mapping to every reused or newly prepared store before analysis selection opens.
 - In headless mode, `--stage-axis-map` writes the supplied mapping to materialized experiment stores and existing canonical OME-Zarr stores before analysis starts. If the flag is omitted, existing store calibration is preserved.
-- Deconvolution, particle detection, uSegment3D, and visualization operations run against canonical OME-Zarr stores.
+- Deconvolution, particle detection, uSegment3D, fusion, and visualization operations run against canonical OME-Zarr stores.
+- Registration and fusion can be run in separate executions. `registration` writes transform/layout metadata only, while `fusion` consumes that metadata and writes the stitched image result.
 - Visualization supports multi-volume overlays using logical sources and/or public OME image collections (for example source data plus `results/usegment3d/latest`) with per-layer image/labels display controls.
 - Multiposition visualization placement now resolves world `z/y/x` translations from the store-level spatial calibration. Bindings support `X`, `Y`, `Z`, and Navigate focus axis `F` with sign inversion or `none`; `THETA` remains a rotation of the `z/y` plane about world `x`.
 - Visualization now probes napari OpenGL renderer info (`vendor`/`renderer`/`version`) and can fail fast when software rendering is detected or GPU rendering cannot be confirmed (`require_gpu_rendering=True`).
 - MIP export writes TIFF outputs as OME-TIFF (`.tif`) with projection-aware physical pixel calibration (`PhysicalSizeX/Y`) derived from source `voxel_size_um_zyx`.
+- `mip_export export_format=zarr` writes standalone OME-Zarr v3 image stores (`.ome.zarr`) with axis metadata and physical scale, so the outputs can be opened directly in OME-aware viewers such as napari.
 - uSegment3D runs per `(t, p, selected channel)` volume task and publishes the latest result as `results/usegment3d/latest`.
   - GUI channel checkboxes now support selecting multiple channels in one run (`channel_indices`).
   - With GPU-aware `LocalCluster`, separate channel tasks can execute concurrently across GPUs.
@@ -351,18 +371,22 @@ clearex --migrate-store /path/to/legacy_store.zarr
   - `results/flatfield/latest/A/1/<field>/<level>`
   - `results/deconvolution/latest/A/1/<field>/<level>`
   - `results/shear_transform/latest/A/1/<field>/<level>`
-  - `results/registration/latest/A/1/<field>/<level>`
+  - `results/fusion/latest/A/1/<field>/<level>`
   - `results/usegment3d/latest/A/1/<field>/<level>`
 - ClearEx metadata and runtime namespaces:
   - `clearex/metadata`
   - `clearex/provenance/runs/<run_id>`
   - `clearex/provenance/latest_outputs/<analysis>`
   - `clearex/gui_state`
+  - `clearex/results/registration/latest`
   - `clearex/runtime_cache/source/data`
   - `clearex/runtime_cache/source/data_pyramid/level_*`
   - `clearex/runtime_cache/results/<analysis>/latest/data`
   - `clearex/runtime_cache/results/<analysis>/latest/data_pyramid/level_*`
   - `clearex/results/<analysis>/latest`
+- External latest-only projection exports:
+  - `<output_directory>/mip_<projection>_... .tif`
+  - `<output_directory>/mip_<projection>_... .ome.zarr`
 - Migration-only legacy layouts:
   - root `data`
   - root `data_pyramid`

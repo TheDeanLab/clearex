@@ -16,6 +16,9 @@ This folder owns the PyQt6 UX in `app.py`.
     - for Navigate BDV ``file_type: N5``, source metadata must come from the
       Navigate experiment context plus TensorStore-backed BDV source summary,
       not from sending the raw ``.n5`` path through the generic Zarr reader
+    - for canonical stores, shape/voxel-size/pyramid introspection must come
+      from ``clearex/runtime_cache/source/data`` plus ``source_component``
+      ancestry, not from legacy root ``data`` / root-attr assumptions
   - Setup metadata/source-resolution contexts are cached per experiment path to
     avoid repeated recursive TIFF candidate scans and source re-opens when
     reselecting experiments in the same session; cache entries are invalidated
@@ -97,13 +100,15 @@ This folder owns the PyQt6 UX in `app.py`.
   point users to `experiment.yml` materialization, not direct raw `.n5`
   runtime opening.
 - Present logical analysis inputs (`data`, `flatfield`, `deconvolution`,
-  `shear_transform`, `usegment3d`, `registration`) instead of raw internal
-  component paths wherever possible.
+  `shear_transform`, `usegment3d`, `fusion`, and metadata-only
+  `registration`) instead of raw internal component paths wherever possible.
 - If the UI shows store structure for debugging, distinguish:
   - public OME image collections at the root and under `results/<analysis>/latest`
   - internal ClearEx execution/artifact paths under `clearex/...`
 - Do not teach users that root `data`, root `data_pyramid`, or
   `results/<analysis>/latest/data` are the canonical public contract.
+- Label standalone MIP projection exports as OME-Zarr when `export_format=zarr`
+  is selected, because those files are written as `.ome.zarr`.
 
 ## Branding Assets and Layout
 

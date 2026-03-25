@@ -46,18 +46,21 @@ def _make_navigate_experiment(path: Path) -> NavigateExperiment:
 
 def _create_gui_analysis_store(tmp_path: Path) -> Path:
     """Create a minimal analysis store for GUI parameter-selection tests."""
-    store_path = tmp_path / "analysis_store.zarr"
+    store_path = tmp_path / "analysis_store.ome.zarr"
     root = zarr.open_group(str(store_path), mode="w")
     data_shape = (1, 1, 2, 1, 4, 4)
     data_chunks = (1, 1, 2, 1, 4, 4)
     root.create_dataset(
-        name="data",
+        name="clearex/runtime_cache/source/data",
         shape=data_shape,
         chunks=data_chunks,
         dtype="uint16",
         overwrite=True,
     )
-    data_pyramid = root.require_group("data_pyramid")
+    root.require_group("clearex").require_group("metadata").attrs[
+        "voxel_size_um_zyx"
+    ] = [0.45, 0.12, 0.12]
+    data_pyramid = root.require_group("clearex/runtime_cache/source/data_pyramid")
     data_pyramid.create_dataset(
         name="level_1",
         shape=(1, 1, 2, 1, 2, 2),
@@ -65,11 +68,17 @@ def _create_gui_analysis_store(tmp_path: Path) -> Path:
         dtype="uint16",
         overwrite=True,
     )
-    root.attrs["data_pyramid_levels"] = ["data", "data_pyramid/level_1"]
-    root.attrs["data_pyramid_factors_tpczyx"] = [
+    root["clearex/runtime_cache/source/data"].attrs["pyramid_levels"] = [
+        "clearex/runtime_cache/source/data",
+        "clearex/runtime_cache/source/data_pyramid/level_1",
+    ]
+    root["clearex/runtime_cache/source/data"].attrs["pyramid_factors_tpczyx"] = [
         [1, 1, 1, 1, 1, 1],
         [1, 1, 1, 2, 2, 2],
     ]
+    root["clearex/runtime_cache/source/data_pyramid/level_1"].attrs[
+        "source_component"
+    ] = "clearex/runtime_cache/source/data"
     shear_latest = (
         root.require_group("clearex")
         .require_group("runtime_cache")
@@ -201,6 +210,27 @@ def test_summarize_image_info_extracts_pixel_size_from_voxel_size_metadata() -> 
     summary = app_module.summarize_image_info(info)
 
     assert summary["pixel_size"] == "z=0.2, y=0.166992, x=0.166992"
+
+
+def test_analysis_store_runtime_source_helpers_prefer_canonical_component(
+    tmp_path: Path,
+) -> None:
+    store_path = _create_gui_analysis_store(tmp_path)
+    root = zarr.open_group(str(store_path), mode="r")
+
+    assert (
+        app_module._analysis_store_runtime_source_component(root)
+        == "clearex/runtime_cache/source/data"
+    )
+    assert app_module._analysis_store_runtime_source_shape_tpczyx(root) == (
+        1,
+        1,
+        2,
+        1,
+        4,
+        4,
+    )
+    assert app_module._analysis_store_runtime_source_dtype_itemsize(root) == 2
 
 
 def test_discover_navigate_experiment_files_recurses_and_sorts(tmp_path) -> None:

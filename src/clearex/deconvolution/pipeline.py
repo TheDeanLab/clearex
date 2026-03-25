@@ -1533,7 +1533,7 @@ def run_deconvolution_analysis(
             voxel_xy_um=float(voxel_xy_um),
             voxel_z_um=float(voxel_z_um),
         )
-        _emit(14, "Stored synthetic PSFs and previews in data_store.zarr")
+        _emit(14, "Stored synthetic PSFs and previews in data_store.ome.zarr")
 
     tasks = [
         delayed(_run_deconvolution_for_volume)(

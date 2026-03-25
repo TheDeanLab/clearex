@@ -28,11 +28,13 @@
 from contextlib import ExitStack
 from pathlib import Path
 import json
+import struct
 
 # Third Party Imports
 import dask.array as da
 import h5py
 import numpy as np
+from numcodecs import blosc as numcodecs_blosc
 import pytest
 import tifffile
 import zarr
@@ -193,6 +195,50 @@ def _write_real_n5_dataset(
     }
     dataset = ts.open(spec).result()
     dataset[...] = data_xyz
+
+
+def _write_legacy_singleton_chunk_n5_dataset(
+    root_path: Path,
+    *,
+    component: str,
+    data_xyz: np.ndarray,
+) -> None:
+    """Create a legacy Navigate-style N5 dataset with 2D plane chunk headers."""
+    payload = np.asarray(data_xyz)
+    if payload.ndim != 3:
+        raise ValueError("Legacy singleton-chunk N5 helper expects 3D XYZ data.")
+
+    component_path = root_path / component
+    component_path.mkdir(parents=True, exist_ok=True)
+    (component_path / "attributes.json").write_text(
+        json.dumps(
+            {
+                "blockSize": [int(payload.shape[0]), int(payload.shape[1]), 1],
+                "compression": {
+                    "type": "blosc",
+                    "cname": "lz4",
+                    "clevel": 5,
+                    "shuffle": 1,
+                    "blocksize": 0,
+                },
+                "dataType": np.dtype(payload.dtype).name,
+                "dimensions": [int(value) for value in payload.shape],
+            }
+        )
+    )
+    for z_index in range(int(payload.shape[2])):
+        plane = np.asarray(payload[:, :, z_index], dtype=payload.dtype)
+        compressed = numcodecs_blosc.compress(
+            plane.tobytes(order="C"),
+            b"lz4",
+            5,
+            numcodecs_blosc.SHUFFLE,
+            0,
+        )
+        header = struct.pack(">HHII", 0, 2, int(plane.shape[0]), int(plane.shape[1]))
+        chunk_path = component_path / "0" / "0" / str(z_index)
+        chunk_path.parent.mkdir(parents=True, exist_ok=True)
+        chunk_path.write_bytes(header + compressed)
 
 
 def _strip_n5_component_payload_files(root_path: Path, *, component: str) -> None:
@@ -932,7 +978,9 @@ def test_materialize_experiment_data_store_handles_multibatch_base_and_pyramid(
     )
 
 
-def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: Path):
+def test_materialize_experiment_data_store_materializes_generic_ome_zarr_source(
+    tmp_path: Path,
+):
     experiment_path = tmp_path / "experiment.yml"
     _write_minimal_experiment(
         experiment_path, save_directory=tmp_path, file_type="OME-ZARR"
@@ -954,8 +1002,9 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
         pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
     )
 
-    assert materialized.store_path == source_store.resolve()
-    root = zarr.open_group(str(source_store), mode="r")
+    expected_store = (experiment_path.parent / "data_store.ome.zarr").resolve()
+    assert materialized.store_path == expected_store
+    root = zarr.open_group(str(expected_store), mode="r")
     metadata = root["clearex/metadata"].attrs
     assert SOURCE_CACHE_COMPONENT in root
     assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 1, 1, 2, 3, 4)
@@ -975,7 +1024,33 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
         2,
         2,
     )
-    assert not (experiment_path.parent / "data_store.ome.zarr").exists()
+    source_root_reopened = zarr.open_group(str(source_store), mode="r")
+    assert SOURCE_CACHE_COMPONENT not in source_root_reopened
+
+
+def test_resolve_data_store_path_reuses_existing_canonical_ome_store(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path, save_directory=tmp_path, file_type="OME-ZARR"
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_store = tmp_path / "canonical.ome.zarr"
+    root = zarr.open_group(str(source_store), mode="w")
+    root.create_dataset(
+        SOURCE_CACHE_COMPONENT,
+        shape=(1, 1, 1, 2, 3, 4),
+        chunks=(1, 1, 1, 2, 3, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root[SOURCE_CACHE_COMPONENT].attrs["axes"] = ["t", "p", "c", "z", "y", "x"]
+
+    resolved = resolve_data_store_path(experiment, source_store)
+
+    assert resolved == source_store.resolve()
 
 
 def test_has_canonical_data_component_detects_ready_store(tmp_path: Path):
@@ -1428,6 +1503,88 @@ def test_materialize_experiment_data_store_stacks_bdv_n5_setups(
             )
 
 
+def test_materialize_experiment_data_store_accepts_single_setup_bdv_n5(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="N5",
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.n5"
+    expected = np.arange(2 * 3 * 4, dtype=np.uint16).reshape((2, 3, 4))
+    _write_real_n5_dataset(
+        source_path,
+        component="setup0/timepoint0/s0",
+        data_xyz=np.transpose(expected, (2, 1, 0)),
+        block_size_xyz=(4, 3, 1),
+    )
+    _write_bdv_xml(
+        tmp_path / "CH00_000000.xml",
+        loader_format="bdv.n5",
+        data_file_name=source_path.name,
+        setup_channel_tile={0: (0, 0)},
+    )
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    metadata = root["clearex/metadata"].attrs
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 1, 1, 2, 3, 4)
+    assert metadata["source_data_component"] == "setup0/timepoint0/s0"
+    assert np.array_equal(
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]), expected
+    )
+
+
+def test_materialize_experiment_data_store_accepts_legacy_singleton_chunk_bdv_n5(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="N5",
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.n5"
+    expected = np.arange(4 * 3 * 2, dtype=np.uint16).reshape((4, 3, 2))
+    _write_legacy_singleton_chunk_n5_dataset(
+        source_path,
+        component="setup0/timepoint0/s0",
+        data_xyz=expected,
+    )
+    _write_bdv_xml(
+        tmp_path / "CH00_000000.xml",
+        loader_format="bdv.n5",
+        data_file_name=source_path.name,
+        setup_channel_tile={0: (0, 0)},
+    )
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 1, 1, 2, 3, 4)
+    assert np.array_equal(
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]),
+        np.transpose(expected, (2, 1, 0)),
+    )
+
+
 def test_materialize_experiment_data_store_skips_n5_setups_without_persisted_chunks(
     tmp_path: Path,
 ) -> None:
@@ -1613,6 +1770,53 @@ def test_open_source_as_dask_tiff_falls_back_when_store_is_unsupported(
     assert np.array_equal(source_array.compute(), expected)
     assert tuple(source_axes or ()) == ("z", "y", "x")
     assert source_meta["source_path"] == str(source_path)
+
+
+def test_open_source_as_dask_prefers_public_ome_zarr_array(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source.ome.zarr"
+    root = zarr.open_group(str(source_path), mode="w")
+    expected = np.arange(2 * 3 * 4, dtype=np.uint16).reshape((2, 3, 4))
+    root.create_dataset(
+        "0",
+        data=expected,
+        chunks=(1, 3, 4),
+        overwrite=True,
+    )
+    root.create_dataset(
+        "junk",
+        data=np.zeros((4, 5, 6, 7), dtype=np.uint16),
+        chunks=(1, 5, 6, 7),
+        overwrite=True,
+    )
+    root.attrs["ome"] = {
+        "version": "0.5",
+        "multiscales": [
+            {
+                "axes": [
+                    {"name": "z", "type": "space", "unit": "micrometer"},
+                    {"name": "y", "type": "space", "unit": "micrometer"},
+                    {"name": "x", "type": "space", "unit": "micrometer"},
+                ],
+                "datasets": [{"path": "0"}],
+            }
+        ],
+    }
+
+    with ExitStack() as exit_stack:
+        source_array, source_axes, source_meta = experiment_module._open_source_as_dask(
+            source_path,
+            exit_stack=exit_stack,
+        )
+
+    assert isinstance(source_array, da.Array)
+    assert tuple(source_array.shape) == expected.shape
+    assert np.array_equal(source_array.compute(), expected)
+    assert tuple(source_axes or ()) == ("z", "y", "x")
+    assert source_meta["source_component"] == "0"
+    assert source_meta["selected_array_path"] == "0"
+    assert source_meta["ome_selected"] is True
 
 
 def test_materialize_experiment_data_store_stacks_bdv_ome_zarr_setups(

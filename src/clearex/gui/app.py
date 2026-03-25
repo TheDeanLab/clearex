@@ -53,6 +53,11 @@ from .spacing import (
     apply_stack_spacing,
     apply_window_root_spacing,
 )
+from clearex.io.ome_store import (
+    analysis_auxiliary_root,
+    resolve_voxel_size_um_zyx_with_source,
+    source_cache_component,
+)
 from clearex.io.experiment import (
     ExperimentDataResolutionError,
     NavigateExperiment,
@@ -1283,6 +1288,46 @@ def _parse_source_component_level(
     if parsed < 0:
         return None
     return parsed
+
+
+def _analysis_store_runtime_source_component(root: Any) -> Optional[str]:
+    """Return the canonical 6D runtime-source component when available."""
+    for candidate in (source_cache_component(), "data"):
+        if _zarr_component_exists_in_root(root, candidate):
+            return str(candidate)
+    return None
+
+
+def _analysis_store_runtime_source_shape_tpczyx(
+    root: Any,
+) -> Optional[Tuple[int, int, int, int, int, int]]:
+    """Return canonical runtime-source shape in ``(t, p, c, z, y, x)`` order."""
+    component = _analysis_store_runtime_source_component(root)
+    if component is None:
+        return None
+    try:
+        shape = tuple(getattr(root[component], "shape", ()))
+    except Exception:
+        return None
+    if len(shape) != 6:
+        return None
+    try:
+        return tuple(int(value) for value in shape)  # type: ignore[return-value]
+    except Exception:
+        return None
+
+
+def _analysis_store_runtime_source_dtype_itemsize(root: Any) -> Optional[int]:
+    """Return bytes-per-voxel for the canonical runtime-source component."""
+    component = _analysis_store_runtime_source_component(root)
+    if component is None:
+        return None
+    try:
+        dtype = getattr(root[component], "dtype", None)
+        itemsize = int(getattr(dtype, "itemsize"))
+    except Exception:
+        return None
+    return max(1, itemsize)
 
 
 def _full_resolution_source_component(source_component: str) -> str:
@@ -4543,7 +4588,7 @@ if HAS_PYQT6:
 
         def __init__(
             self,
-            title_text: str = "Building `data_store.zarr`",
+            title_text: str = "Building `data_store.ome.zarr`",
             initial_message: str = "Starting materialization...",
             parent: Optional[QDialog] = None,
         ) -> None:
@@ -7601,7 +7646,7 @@ if HAS_PYQT6:
             ),
             "fill_value": ("Fill value for non-overlapping output regions."),
             "output_dtype": (
-                "Output dtype used for results/shear_transform/latest/data."
+                "Output dtype used for the shear_transform runtime-cache output."
             ),
             "roi_padding_zyx": (
                 "Extra source-ROI padding in (z, y, x) voxels per output tile."
@@ -7727,7 +7772,7 @@ if HAS_PYQT6:
             ),
             "usegment3d_save_native_labels": (
                 "When segmenting from a downsampled level and writing level-0 labels, "
-                "also save native-level labels to results/usegment3d/latest/data_native."
+                "also save native-level labels as a ClearEx-owned auxiliary artifact."
             ),
             "usegment3d_gpu": ("Enable GPU-accelerated components when available."),
             "usegment3d_require_gpu": (
@@ -7840,8 +7885,9 @@ if HAS_PYQT6:
             ),
             "mip_export_format": (
                 "Choose export file format. OME-TIFF outputs are written as uint16 and "
-                "include physical pixel-size calibration metadata; Zarr exports keep "
-                "projection dtype."
+                "include physical pixel-size calibration metadata; OME-Zarr exports "
+                "keep projection dtype and write standalone .ome.zarr outputs with "
+                "axes/scale metadata."
             ),
             "mip_output_directory": (
                 "Optional export directory path. Leave empty to write under an "
@@ -12123,7 +12169,7 @@ if HAS_PYQT6:
                 "OME-TIFF (uint16 + calibration)",
                 "ome-tiff",
             )
-            self._mip_export_format_combo.addItem("Zarr", "zarr")
+            self._mip_export_format_combo.addItem("OME-Zarr", "zarr")
             form.addRow("Export format", self._mip_export_format_combo)
             self._register_parameter_hint(
                 self._mip_export_format_combo,
@@ -12294,10 +12340,10 @@ if HAS_PYQT6:
             if operation_name == "particle_detection":
                 return self._PARTICLE_DETECTION_OVERLAY_COMPONENT
             if operation_name == "visualization":
-                return "results/visualization/latest"
+                return analysis_auxiliary_root("visualization")
             return self._OPERATION_OUTPUT_COMPONENTS.get(
                 operation_name,
-                f"results/{operation_name}/latest/data",
+                f"clearex/runtime_cache/results/{operation_name}/latest/data",
             )
 
         def _selected_operations_in_sequence(self) -> list[str]:
@@ -12902,12 +12948,10 @@ if HAS_PYQT6:
                 return None
             try:
                 root = zarr.open_group(store_path, mode="r")
-                if "data" not in root:
-                    return None
-                shape = tuple(getattr(root["data"], "shape", ()))
+                shape = _analysis_store_runtime_source_shape_tpczyx(root)
             except Exception:
                 return None
-            if len(shape) != 6:
+            if shape is None or len(shape) != 6:
                 return None
             try:
                 return (
@@ -12943,11 +12987,7 @@ if HAS_PYQT6:
                 return None
             try:
                 root = zarr.open_group(store_path, mode="r")
-                if "data" not in root:
-                    return None
-                dtype = getattr(root["data"], "dtype", None)
-                itemsize = int(getattr(dtype, "itemsize"))
-                return max(1, itemsize)
+                return _analysis_store_runtime_source_dtype_itemsize(root)
             except Exception:
                 return None
 
@@ -14018,52 +14058,25 @@ if HAS_PYQT6:
             if initial.file and is_zarr_store_path(initial.file):
                 try:
                     root = zarr.open_group(str(initial.file), mode="r")
-                    if "data" in root and len(tuple(root["data"].shape)) == 6:
-                        position_count = max(1, int(root["data"].shape[1]))
-                        channel_count = max(1, int(root["data"].shape[2]))
-                        voxel_size = root["data"].attrs.get("voxel_size_um_zyx")
-                        if (
-                            isinstance(voxel_size, (list, tuple))
-                            and len(voxel_size) >= 3
-                        ):
-                            store_z_um = float(voxel_size[0])
-                            store_xy_um = float(voxel_size[2])
-                    if store_xy_um is None or store_z_um is None:
-                        root_voxel_size = root.attrs.get("voxel_size_um_zyx")
-                        if (
-                            isinstance(root_voxel_size, (list, tuple))
-                            and len(root_voxel_size) >= 3
-                        ):
-                            store_z_um = float(root_voxel_size[0])
-                            store_xy_um = float(root_voxel_size[2])
-                    if store_xy_um is None or store_z_um is None:
-                        navigate = root.attrs.get("navigate_experiment")
-                        if isinstance(navigate, dict):
-                            xy_value = navigate.get("xy_pixel_size_um")
-                            z_value = navigate.get("z_step_um")
-                            if xy_value is not None and z_value is not None:
-                                store_xy_um = float(xy_value)
-                                store_z_um = float(z_value)
-                    if "data_pyramid" in root:
-                        data_pyramid_group = root["data_pyramid"]
-                        for key in data_pyramid_group.group_keys():
-                            token = str(key).strip().lower()
-                            if not token.startswith("level_"):
-                                continue
-                            try:
-                                parsed_level = int(token.split("_", maxsplit=1)[1])
-                            except Exception:
-                                continue
-                            max_usegment3d_resolution_level = max(
-                                max_usegment3d_resolution_level,
-                                max(0, int(parsed_level)),
-                            )
-                    factors = root.attrs.get("data_pyramid_factors_tpczyx")
-                    if isinstance(factors, (tuple, list)):
-                        max_usegment3d_resolution_level = max(
-                            max_usegment3d_resolution_level,
-                            max(0, int(len(factors) - 1)),
+                    source_component = _analysis_store_runtime_source_component(root)
+                    shape = _analysis_store_runtime_source_shape_tpczyx(root)
+                    if source_component is not None and shape is not None:
+                        position_count = max(1, int(shape[1]))
+                        channel_count = max(1, int(shape[2]))
+                        voxel_size_um_zyx, _ = resolve_voxel_size_um_zyx_with_source(
+                            root,
+                            source_component=source_component,
                         )
+                        store_z_um = float(voxel_size_um_zyx[0])
+                        store_xy_um = float(voxel_size_um_zyx[2])
+                        available_levels = _discover_component_resolution_levels(
+                            root=root,
+                            source_component=source_component,
+                        )
+                        if available_levels:
+                            max_usegment3d_resolution_level = max(
+                                max(0, int(level)) for level in available_levels
+                            )
                 except Exception:
                     position_count = 1
                     channel_count = 1

@@ -453,9 +453,11 @@ class TiffReader(Reader):
 class ZarrReader(Reader):
     """Reader for Zarr and N5 storage formats.
 
-    This reader handles Zarr stores and N5 format
-    directories. It automatically selects the largest array (by number of elements)
-    from the store and can extract axis information and metadata from Zarr attributes.
+    This reader handles Zarr stores and N5 format directories. When public OME
+    metadata is present, it prefers the primary published OME array. Otherwise
+    it falls back to selecting the largest array (by number of elements) from
+    the store and can extract axis information and metadata from Zarr
+    attributes.
 
     Attributes
     ----------
@@ -641,8 +643,9 @@ class ZarrReader(Reader):
         - `multiscales[0]['axes']` (OME-Zarr format)
         - `axes` attribute (custom metadata)
 
-        If multiple arrays exist in the store hierarchy, the array with the
-        largest number of elements (np.prod(shape)) is selected. This includes
+        If the store exposes public OME-Zarr metadata, the primary public image
+        array is selected first. Otherwise, the array with the largest number
+        of elements (np.prod(shape)) is selected as a fallback. This includes
         arrays nested under child groups (for example, common N5 layouts).
 
         Examples

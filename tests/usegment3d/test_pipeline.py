@@ -642,6 +642,40 @@ def test_run_usegment3d_analysis_segments_pyramid_level_and_upscales_to_level0(
     assert metadata.get("output_voxel_size_um_zyx") == [0.2, 0.1, 0.1]
 
 
+def test_extract_base_voxel_size_uses_namespaced_metadata_source_chain(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store_usegment3d_voxel_chain.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.require_group("clearex").require_group("metadata").attrs[
+        "voxel_size_um_zyx"
+    ] = [0.6, 0.3, 0.3]
+    root.create_dataset(
+        name="clearex/runtime_cache/source/data",
+        shape=(1, 1, 1, 4, 4, 4),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root.create_dataset(
+        name="clearex/runtime_cache/source/data_pyramid/level_1",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root["clearex/runtime_cache/source/data_pyramid/level_1"].attrs[
+        "source_component"
+    ] = "clearex/runtime_cache/source/data"
+
+    observed = usegment_pipeline._extract_base_voxel_size_um_zyx(
+        root,
+        source_component="clearex/runtime_cache/source/data_pyramid/level_1",
+    )
+
+    assert observed == (0.6, 0.3, 0.3)
+
+
 def test_run_usegment3d_analysis_rejects_missing_requested_resolution_level(
     tmp_path: Path,
 ) -> None:

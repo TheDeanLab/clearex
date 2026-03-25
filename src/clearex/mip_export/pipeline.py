@@ -57,6 +57,7 @@ ProgressCallback = Callable[[int, str], None]
 _PROJECTIONS = ("xy", "xz", "yz")
 _MAX_REDUCTION_READ_BYTES = 128 * 1024 * 1024
 _MAX_INTERPOLATION_BLOCK_BYTES = 64 * 1024 * 1024
+_OME_ZARR_DATASET_NAME = "0"
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -633,6 +634,104 @@ def _ome_metadata_for_projection_output(
         "PhysicalSizeYUnit": "µm",
         "SignificantBits": 16,
     }
+
+
+def _ome_zarr_axis_metadata(axis: str) -> dict[str, Any]:
+    """Return one OME-Zarr axis metadata mapping."""
+    token = str(axis).strip().lower()
+    if token == "t":
+        return {"name": "t", "type": "time"}
+    if token == "c":
+        return {"name": "c", "type": "channel"}
+    if token in {"z", "y", "x"}:
+        return {"name": token, "type": "space", "unit": "micrometer"}
+    return {"name": str(axis).strip() or token or "axis"}
+
+
+def _ome_zarr_scale_for_projection_output(
+    *,
+    axes: tuple[str, ...],
+    voxel_size_um_zyx: tuple[float, float, float],
+) -> list[float]:
+    """Return per-axis OME-Zarr scale values for one projection output."""
+    z_um, y_um, x_um = (float(value) for value in voxel_size_um_zyx)
+    axis_to_scale = {"z": z_um, "y": y_um, "x": x_um}
+    return [float(axis_to_scale.get(str(axis).strip().lower(), 1.0)) for axis in axes]
+
+
+def _ome_zarr_metadata_for_projection_output(
+    *,
+    axes: tuple[str, ...],
+    voxel_size_um_zyx: tuple[float, float, float],
+    image_name: str,
+) -> dict[str, Any]:
+    """Build standalone OME-Zarr image metadata for one projection output."""
+    multiscales = [
+        {
+            "name": str(image_name),
+            "axes": [_ome_zarr_axis_metadata(axis) for axis in axes],
+            "datasets": [
+                {
+                    "path": _OME_ZARR_DATASET_NAME,
+                    "coordinateTransformations": [
+                        {
+                            "type": "scale",
+                            "scale": _ome_zarr_scale_for_projection_output(
+                                axes=axes,
+                                voxel_size_um_zyx=voxel_size_um_zyx,
+                            ),
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    return {"version": "0.5", "multiscales": multiscales}
+
+
+def _initialize_projection_ome_zarr(
+    *,
+    output_path: Path,
+    output_shape: tuple[int, ...],
+    chunks: tuple[int, ...],
+    dtype: np.dtype[Any],
+    axes: tuple[str, ...],
+    voxel_size_um_zyx: tuple[float, float, float],
+) -> tuple[zarr.Group, Any]:
+    """Create one standalone OME-Zarr output and return its writable dataset."""
+    if output_path.exists():
+        try:
+            shutil.rmtree(output_path)
+        except Exception:
+            output_path.unlink()
+    root = zarr.open_group(str(output_path), mode="w")
+    metadata = _ome_zarr_metadata_for_projection_output(
+        axes=tuple(str(axis) for axis in axes),
+        voxel_size_um_zyx=tuple(float(value) for value in voxel_size_um_zyx),
+        image_name=str(output_path.stem).replace(".ome", ""),
+    )
+    root.attrs.update(
+        {
+            "ome": metadata,
+            "multiscales": metadata["multiscales"],
+            "axes": [str(axis) for axis in axes],
+        }
+    )
+    target = root.create_array(
+        name=_OME_ZARR_DATASET_NAME,
+        shape=tuple(int(value) for value in output_shape),
+        chunks=tuple(int(value) for value in chunks),
+        dtype=np.dtype(dtype),
+        overwrite=True,
+        dimension_names=tuple(str(axis) for axis in axes),
+    )
+    target.attrs.update(
+        {
+            "axes": [str(axis) for axis in axes],
+            "_ARRAY_DIMENSIONS": [str(axis) for axis in axes],
+        }
+    )
+    return root, target
 
 
 def _estimate_worker_thread_capacity(client: "Client") -> int:
@@ -1643,7 +1742,7 @@ def _build_output_path(
     pathlib.Path
         Output file path.
     """
-    suffix = ".tif" if _is_tiff_export_format(str(export_format)) else ".zarr"
+    suffix = ".tif" if _is_tiff_export_format(str(export_format)) else ".ome.zarr"
     if task.p_index is None:
         filename = (
             f"mip_{task.projection}_t{int(task.t_index):04d}_c{int(task.c_index):04d}"
@@ -1705,17 +1804,19 @@ def _write_projection_output(
 
     if output_path.exists():
         shutil.rmtree(output_path)
-    root = zarr.open_group(str(output_path), mode="w")
+    root, target = _initialize_projection_ome_zarr(
+        output_path=output_path,
+        output_shape=tuple(int(v) for v in np.asarray(projection).shape),
+        chunks=_default_projection_chunks(
+            tuple(int(v) for v in np.asarray(projection).shape)
+        ),
+        dtype=np.asarray(projection).dtype,
+        axes=tuple(str(axis) for axis in axes),
+        voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+    )
     try:
         payload = np.asarray(projection)
-        root.create_array(
-            name="data",
-            data=payload,
-            chunks=_default_projection_chunks(tuple(int(v) for v in payload.shape)),
-            overwrite=True,
-        )
-        root["data"].attrs.update({"axes": [str(axis) for axis in axes]})
-        root.attrs.update({"axes": [str(axis) for axis in axes]})
+        target[...] = payload
         return str(payload.dtype)
     finally:
         _close_zarr_store(root)
@@ -1829,18 +1930,14 @@ def _run_export_task(
                 ),
             )
         else:
-            if output_path.exists():
-                shutil.rmtree(output_path)
-            output_root = zarr.open_group(str(output_path), mode="w")
-            output_target = output_root.create_dataset(
-                name="data",
-                shape=tuple(int(v) for v in output_shape),
+            output_root, output_target = _initialize_projection_ome_zarr(
+                output_path=output_path,
+                output_shape=tuple(int(v) for v in output_shape),
                 chunks=_default_projection_chunks(tuple(int(v) for v in output_shape)),
                 dtype=np.dtype(getattr(source_array, "dtype")),
-                overwrite=True,
+                axes=tuple(str(axis) for axis in axes),
+                voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
             )
-            output_root["data"].attrs.update({"axes": [str(axis) for axis in axes]})
-            output_root.attrs.update({"axes": [str(axis) for axis in axes]})
 
         for output_slices in output_tiles:
             tile_preserved_shape = tuple(
@@ -1899,14 +1996,10 @@ def _run_export_task(
             )
             effective_voxel_size_um_zyx = tuple(float(v) for v in voxel_size_um_zyx)
 
-        if _is_tiff_export_format(export_format):
-            physical_size_y_um, physical_size_x_um = _projection_pixel_size_um(
-                axes=tuple(str(axis) for axis in axes),
-                voxel_size_um_zyx=tuple(float(v) for v in effective_voxel_size_um_zyx),
-            )
-        else:
-            physical_size_y_um = 1.0
-            physical_size_x_um = 1.0
+        physical_size_y_um, physical_size_x_um = _projection_pixel_size_um(
+            axes=tuple(str(axis) for axis in axes),
+            voxel_size_um_zyx=tuple(float(v) for v in effective_voxel_size_um_zyx),
+        )
         return {
             "path": str(output_path),
             "projection": str(task.projection),
@@ -2067,29 +2160,20 @@ def run_mip_export_analysis(
                     )
                     stored_dtypes[int(planned.task_index)] = str(np.dtype(np.uint16))
                 else:
-                    if planned.output_path.exists():
-                        shutil.rmtree(planned.output_path)
-                    output_root = zarr.open_group(str(planned.output_path), mode="w")
-                    try:
-                        zarr_chunks = tuple(
+                    output_root, output_target = _initialize_projection_ome_zarr(
+                        output_path=planned.output_path,
+                        output_shape=tuple(int(v) for v in planned.output_shape),
+                        chunks=tuple(
                             max(1, min(int(length), int(chunk)))
                             for length, chunk in zip(
                                 planned.output_shape, planned.tile_shape
                             )
-                        )
-                        output_target = output_root.create_dataset(
-                            name="data",
-                            shape=tuple(int(v) for v in planned.output_shape),
-                            chunks=zarr_chunks,
-                            dtype=np.dtype(getattr(source_array, "dtype")),
-                            overwrite=True,
-                        )
-                        output_root["data"].attrs.update(
-                            {"axes": [str(axis) for axis in planned.axes]}
-                        )
-                        output_root.attrs.update(
-                            {"axes": [str(axis) for axis in planned.axes]}
-                        )
+                        ),
+                        dtype=np.dtype(getattr(source_array, "dtype")),
+                        axes=tuple(str(axis) for axis in planned.axes),
+                        voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+                    )
+                    try:
                         stored_dtypes[int(planned.task_index)] = str(
                             np.dtype(
                                 getattr(output_target, "dtype", source_array.dtype)
@@ -2153,7 +2237,7 @@ def run_mip_export_analysis(
                     planned = planned_outputs[int(result_task_index)]
                     output_root = zarr.open_group(str(planned.output_path), mode="a")
                     try:
-                        output_root["data"][tile_slices] = tile_payload
+                        output_root[_OME_ZARR_DATASET_NAME][tile_slices] = tile_payload
                     finally:
                         _close_zarr_store(output_root)
                 pending_count -= 1
@@ -2179,7 +2263,7 @@ def run_mip_export_analysis(
                     planned = planned_outputs[int(result_task_index)]
                     output_root = zarr.open_group(str(planned.output_path), mode="a")
                     try:
-                        output_root["data"][tile_slices] = tile_payload
+                        output_root[_OME_ZARR_DATASET_NAME][tile_slices] = tile_payload
                     finally:
                         _close_zarr_store(output_root)
                 completed_tiles += 1
@@ -2210,8 +2294,12 @@ def run_mip_export_analysis(
                         ),
                     )
                 else:
-                    physical_size_y_um = 1.0
-                    physical_size_x_um = 1.0
+                    physical_size_y_um, physical_size_x_um = _projection_pixel_size_um(
+                        axes=tuple(str(axis) for axis in planned.axes),
+                        voxel_size_um_zyx=tuple(
+                            float(v) for v in effective_voxel_size_um_zyx
+                        ),
+                    )
                 task_results.append(
                     {
                         "path": str(planned.output_path),

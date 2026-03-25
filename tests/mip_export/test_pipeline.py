@@ -11,6 +11,7 @@ import pytest
 import tifffile
 import zarr
 
+from clearex.io.read import ImageOpener
 from clearex.mip_export import pipeline
 from clearex.mip_export.pipeline import run_mip_export_analysis
 
@@ -155,9 +156,9 @@ def test_run_mip_export_analysis_writes_uint16_ome_tiff_outputs_with_calibration
     assert yz_pixels["PhysicalSizeY"] == "2.0"
 
     latest_attrs = dict(
-        zarr.open_group(str(store_path), mode="r")["clearex"]["results"][
-            "mip_export"
-        ]["latest"].attrs
+        zarr.open_group(str(store_path), mode="r")["clearex"]["results"]["mip_export"][
+            "latest"
+        ].attrs
     )
     assert latest_attrs["exported_files"] == 6
     assert latest_attrs["export_format"] == "ome-tiff"
@@ -201,20 +202,61 @@ def test_run_mip_export_analysis_writes_multi_position_zarr_outputs(
     output_directory = Path(summary.output_directory)
     assert output_directory.is_dir()
 
-    xy_path = output_directory / "mip_xy_t0001_c0001.zarr"
-    yz_path = output_directory / "mip_yz_t0000_c0000.zarr"
+    xy_path = output_directory / "mip_xy_t0001_c0001.ome.zarr"
+    yz_path = output_directory / "mip_yz_t0000_c0000.ome.zarr"
     assert xy_path.exists()
     assert yz_path.exists()
 
     xy_root = zarr.open_group(str(xy_path), mode="r")
-    xy = np.asarray(xy_root["data"])
+    xy = np.asarray(xy_root["0"])
     assert tuple(xy.shape) == (3, 3, 5)
-    assert list(xy_root["data"].attrs["axes"]) == ["p", "y", "x"]
+    assert list(xy_root["0"].attrs["axes"]) == ["p", "y", "x"]
+    assert list(xy_root["0"].attrs["_ARRAY_DIMENSIONS"]) == ["p", "y", "x"]
+    assert xy_root.attrs["ome"]["multiscales"][0]["datasets"][0]["path"] == "0"
 
     yz_root = zarr.open_group(str(yz_path), mode="r")
-    yz = np.asarray(yz_root["data"])
+    yz = np.asarray(yz_root["0"])
     assert tuple(yz.shape) == (3, 4, 3)
-    assert list(yz_root["data"].attrs["axes"]) == ["p", "z", "y"]
+    assert list(yz_root["0"].attrs["axes"]) == ["p", "z", "y"]
+    yz_scale = yz_root.attrs["ome"]["multiscales"][0]["datasets"][0][
+        "coordinateTransformations"
+    ][0]["scale"]
+    assert yz_scale == [1.0, 1.0, 1.0]
+
+
+def test_mip_export_ome_zarr_output_is_readable_by_ome_aware_reader(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "mip_reader_roundtrip_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 3 * 4 * 5, dtype=np.uint16).reshape((1, 1, 1, 3, 4, 5))
+    root.create_array(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 3, 4, 5),
+        overwrite=True,
+    )
+    root["data"].attrs["voxel_size_um_zyx"] = [2.5, 1.5, 0.5]
+
+    summary = run_mip_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "position_mode": "per_position",
+            "export_format": "zarr",
+            "output_directory": str(tmp_path / "mip_reader_roundtrip_outputs"),
+        },
+        client=None,
+    )
+
+    xy_path = Path(summary.output_directory) / "mip_xy_p0000_t0000_c0000.ome.zarr"
+    opened, info = ImageOpener().open(xy_path, prefer_dask=False)
+
+    assert tuple(info.shape) == (4, 5)
+    assert tuple(info.axes or ()) == ("y", "x")
+    assert info.metadata.get("selected_array_path") == "0"
+    assert info.metadata.get("ome_selected") is True
+    np.testing.assert_array_equal(np.asarray(opened), np.max(data[0, 0, 0], axis=0))
 
 
 def test_run_mip_export_analysis_writes_multi_position_tiff_outputs_with_resampled_z(
@@ -413,17 +455,24 @@ def test_run_mip_export_analysis_distributed_writes_expected_outputs(
     assert summary.exported_files == 6
 
     output_directory = Path(summary.output_directory)
-    xy_path = output_directory / "mip_xy_p0001_t0000_c0000.zarr"
-    xz_path = output_directory / "mip_xz_p0001_t0000_c0000.zarr"
-    yz_path = output_directory / "mip_yz_p0001_t0000_c0000.zarr"
+    xy_path = output_directory / "mip_xy_p0001_t0000_c0000.ome.zarr"
+    xz_path = output_directory / "mip_xz_p0001_t0000_c0000.ome.zarr"
+    yz_path = output_directory / "mip_yz_p0001_t0000_c0000.ome.zarr"
     assert xy_path.exists()
     assert xz_path.exists()
     assert yz_path.exists()
 
     expected_source = data[0, 1, 0, :, :, :]
-    xy = np.asarray(zarr.open_group(str(xy_path), mode="r")["data"])
-    xz = np.asarray(zarr.open_group(str(xz_path), mode="r")["data"])
-    yz = np.asarray(zarr.open_group(str(yz_path), mode="r")["data"])
+    xy_root = zarr.open_group(str(xy_path), mode="r")
+    xz_root = zarr.open_group(str(xz_path), mode="r")
+    yz_root = zarr.open_group(str(yz_path), mode="r")
+    xy = np.asarray(xy_root["0"])
+    xz = np.asarray(xz_root["0"])
+    yz = np.asarray(yz_root["0"])
     np.testing.assert_array_equal(xy, np.max(expected_source, axis=0))
     np.testing.assert_array_equal(xz, np.max(expected_source, axis=1))
     np.testing.assert_array_equal(yz, np.max(expected_source, axis=2))
+    assert xy_root.attrs["ome"]["multiscales"][0]["axes"] == [
+        {"name": "y", "type": "space", "unit": "micrometer"},
+        {"name": "x", "type": "space", "unit": "micrometer"},
+    ]

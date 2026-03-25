@@ -16,8 +16,8 @@ This folder contains ingestion, CLI, logging, and provenance logic.
 - For non-canonical sources: create `data_store.ome.zarr` beside
   `experiment.yml`.
 - Reuse an input store in place only when it is already a canonical OME-Zarr
-  store. Generic Zarr inputs and legacy `.n5` inputs are source formats, not
-  canonical outputs.
+  store. Generic Zarr inputs, generic source `.ome.zarr` inputs, and legacy
+  `.n5` inputs are source formats, not canonical outputs.
 - Legacy `.n5` is source-only. First-class `.n5` support currently means
   Navigate BDV acquisition input routed through `experiment.yml`, not bare
   direct `.n5` runtime input.
@@ -57,11 +57,16 @@ This folder contains ingestion, CLI, logging, and provenance logic.
   `setup*/timepoint*/s0` datasets so ingestion stays compatible with
   `zarr>=3` and remains Dask-parallel. Do not use `zarr.open_group(...)` or
   `da.from_zarr(...)` on raw `.n5` paths.
+- Generic Zarr-like source readers should prefer validated/public OME arrays
+  when OME metadata is present and fall back to largest-array discovery only
+  when no OME image contract is available.
 - Navigate BDV storage layout uses setup-major indexing
   `setup = channel * positions + position`; loader fallback should respect this
   rule when XML metadata is unavailable.
 - Navigate BDV `.n5` setup discovery must ignore placeholder setup datasets
   that only contain `attributes.json` and no persisted chunk payload files.
+- Navigate BDV `.n5` ingestion must handle both single-setup sources and legacy
+  singleton-chunk plane encodings emitted by older Navigate exports.
 - Legacy ClearEx groups such as `data`, `data_pyramid`, `results`, and
   `provenance` inside source `.n5` trees are stale source-side artifacts and
   must be ignored for source discovery/materialization.
@@ -139,6 +144,9 @@ This folder contains ingestion, CLI, logging, and provenance logic.
 
 - Runtime logs should initialize in the canonical store directory context.
 - Keep failure messages explicit (source path, component, reason).
+- GUI/runtime metadata introspection should resolve dataset shape, voxel size,
+  and pyramid levels from `clearex/runtime_cache/source/data` plus
+  `source_component` ancestry, not from legacy root arrays.
 
 ## Validation
 

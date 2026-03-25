@@ -81,8 +81,13 @@ The following operations are wired into ``clearex.main``:
      - Integrated and executable with runtime-cache output publication.
    * - Registration
      - ``clearex.registration.pipeline``
-     - Integrated and executable; writes fused runtime-cache outputs, publishes
-       public OME results, and stores auxiliary transforms in ``clearex/results``.
+     - Integrated and executable; writes transform/layout metadata under
+       ``clearex/results/registration/latest`` for downstream fusion.
+   * - Fusion
+     - ``clearex.registration.pipeline``
+     - Integrated and executable; consumes the latest registration result,
+       writes stitched runtime-cache outputs, and publishes public OME fusion
+       results.
    * - uSegment3D
      - ``clearex.usegment3d.pipeline``
      - Integrated and executable with runtime-cache image outputs and public
@@ -97,8 +102,8 @@ The following operations are wired into ``clearex.main``:
        launches napari, and persists visualization metadata.
    * - MIP export
      - ``clearex.mip_export.pipeline``
-     - Integrated and executable; exports files outside the store and records
-       metadata in ``clearex/results``.
+     - Integrated and executable; exports OME-TIFF or standalone OME-Zarr
+       files outside the store and records metadata in ``clearex/results``.
 
 Supporting Algorithm Packages
 -----------------------------

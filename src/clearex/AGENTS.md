@@ -176,6 +176,15 @@ This directory contains the runtime orchestration surface for ClearEx.
 
 ## Recent Runtime Updates (2026-03-24)
 
+- Generic Zarr / OME-Zarr ingestion and canonical-store reuse rules were tightened:
+  - only canonical ClearEx OME-Zarr stores are reused in place,
+  - generic source ``.ome.zarr`` inputs are materialized into a fresh
+    ``data_store.ome.zarr`` beside ``experiment.yml``,
+  - reader selection prefers validated/public OME arrays and falls back to
+    largest-array discovery only when no public OME contract is available.
+- GUI/store metadata discovery and uSegment3D voxel-size resolution now follow
+  the canonical runtime source component plus ``source_component`` ancestry
+  instead of assuming root ``data`` arrays or root voxel attrs.
 - Registration and fusion are now separate analysis operations:
   - `registration` is metadata-only and writes transforms/layout artifacts
     under `clearex/results/registration/latest`,
@@ -198,6 +207,10 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Blend-weight storage now persists separable 1D profiles plus blend metadata
   under `clearex/results/fusion/latest/blend_weights` instead of assuming a
   materialized 3D volume.
+- ``mip_export export_format=zarr`` now writes standalone OME-Zarr v3 image
+  stores (``.ome.zarr``) with axes and physical-scale metadata so the exported
+  projections remain directly viewable in OME-aware tools outside the main
+  ClearEx store.
 
 ## Recent Runtime Updates (2026-03-22)
 

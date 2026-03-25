@@ -34,6 +34,7 @@ Materialization supports:
 - H5/HDF5/HDF,
 - NumPy ``.npy`` and ``.npz``,
 - generic Zarr stores,
+- generic source OME-Zarr stores,
 - Navigate BDV N5 acquisitions routed through ``experiment.yml``,
 - canonical OME-Zarr stores.
 
@@ -43,6 +44,10 @@ Special collection logic is implemented for:
   dimensions),
 - Navigate BDV H5/N5 setup collections (mapped with companion XML metadata).
 
+For generic Zarr-like inputs, reader selection prefers validated public OME
+arrays when OME metadata is present and falls back to largest-array discovery
+only when no public OME image contract is available.
+
 Navigate BDV N5 sources are source-only and are not opened through Zarr APIs.
 ClearEx reads ``setup*/timepoint*/s0`` datasets through TensorStore so Dask
 ingestion remains parallelized on ``zarr>=3``. Standalone bare ``.n5`` runtime
@@ -50,6 +55,8 @@ input remains unsupported in this phase; use ``experiment.yml`` materialization
 to convert the source into canonical ``*.ome.zarr``.
 If stale legacy ClearEx groups such as ``data`` or ``results`` exist inside the
 source ``.n5`` tree, they are ignored for source selection.
+Single-setup BDV N5 sources and older singleton-chunk plane encodings must also
+remain ingestible through this TensorStore-backed path.
 
 Materialization Execution Model
 -------------------------------
@@ -78,6 +85,8 @@ Canonical Store Path Policy
 ``resolve_data_store_path`` follows this policy:
 
 - Existing canonical OME-Zarr store: reuse the ``*.ome.zarr`` path in place.
+- Generic source OME-Zarr store: materialize a fresh ``data_store.ome.zarr``
+  beside ``experiment.yml`` instead of reusing the source store in place.
 - Non-canonical source input: materialize ``data_store.ome.zarr`` beside
   ``experiment.yml``.
 - Legacy ClearEx canonical stores (root ``data`` / ``data_pyramid`` layout):

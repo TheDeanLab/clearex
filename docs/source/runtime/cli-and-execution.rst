@@ -16,6 +16,7 @@ Current primary arguments are:
 - ``--input-resolution-level``
 - ``--shear-transform``
 - ``--registration``
+- ``--fusion``
 - ``--display-pyramid``
 - ``--visualization``
 - ``--mip-export``
@@ -160,6 +161,10 @@ In orchestration, routines are composed from normalized
 
 This allows operators to rerun one stage, swap stage order, or run partial
 chains without changing the code path in ``main.py``.
+
+``registration`` and ``fusion`` are intentionally split so operators can run
+transform estimation and final stitched rendering in separate executions with
+different backend sizing or worker-memory limits.
 
 Input Source Resolution
 -----------------------

@@ -59,6 +59,7 @@ import dask.array as da
 import h5py
 import numpy as np
 import numpy.typing as npt
+from numcodecs import blosc as numcodecs_blosc
 import tifffile
 import zarr
 from dask.delayed import delayed
@@ -90,7 +91,7 @@ from clearex.io.ome_store import (
     source_cache_component,
     update_store_metadata,
 )
-from clearex.io.read import ImageInfo, open_tiff_as_dask
+from clearex.io.read import ImageInfo, ImageOpener, open_tiff_as_dask
 from clearex.workflow import (
     SpatialCalibrationConfig,
     spatial_calibration_to_dict,
@@ -140,6 +141,8 @@ class _TensorStoreN5ArrayAdapter:
     component: str
     shape: tuple[int, ...]
     dtype: npt.DTypeLike
+    chunks: tuple[int, ...]
+    use_legacy_chunk_reader: bool = False
 
     @property
     def ndim(self) -> int:
@@ -148,6 +151,15 @@ class _TensorStoreN5ArrayAdapter:
 
     def __getitem__(self, item: Any) -> np.ndarray[Any, Any]:
         """Read one N5 selection as a NumPy array."""
+        if self.use_legacy_chunk_reader:
+            return _read_legacy_singleton_chunk_n5_selection(
+                Path(self.source_path),
+                component=self.component,
+                shape=self.shape,
+                dtype=np.dtype(self.dtype),
+                chunks=self.chunks,
+                item=item,
+            )
         dataset = _open_tensorstore_n5_dataset(
             Path(self.source_path),
             component=self.component,
@@ -206,6 +218,202 @@ def _load_n5_attributes(source_path: Path, *, component: str) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _first_persisted_n5_chunk_path(
+    source_path: Path,
+    *,
+    component: str,
+) -> Optional[Path]:
+    """Return one persisted N5 chunk payload path for a dataset component."""
+    component_path = source_path / component
+    if not component_path.is_dir():
+        return None
+    for path in sorted(component_path.rglob("*")):
+        if path.is_file() and path.name != "attributes.json":
+            return path
+    return None
+
+
+def _read_n5_chunk_header(
+    chunk_path: Path,
+) -> Optional[tuple[int, tuple[int, ...], bytes]]:
+    """Read minimal N5 chunk-header metadata and return compressed payload."""
+    try:
+        payload = chunk_path.read_bytes()
+    except Exception:
+        return None
+    if len(payload) < 4:
+        return None
+    ndim = int.from_bytes(payload[2:4], byteorder="big", signed=False)
+    header_end = 4 + 4 * ndim
+    if ndim <= 0 or len(payload) < header_end:
+        return None
+    shape = tuple(
+        int.from_bytes(
+            payload[offset : offset + 4],
+            byteorder="big",
+            signed=False,
+        )
+        for offset in range(4, header_end, 4)
+    )
+    return ndim, shape, payload[header_end:]
+
+
+def _n5_uses_legacy_singleton_chunk_encoding(
+    source_path: Path,
+    *,
+    component: str,
+    shape: tuple[int, ...],
+    chunks: tuple[int, ...],
+) -> bool:
+    """Return whether an N5 dataset stores trailing singleton chunk dims as 2D."""
+    chunk_path = _first_persisted_n5_chunk_path(source_path, component=component)
+    if chunk_path is None:
+        return False
+    header = _read_n5_chunk_header(chunk_path)
+    if header is None:
+        return False
+    chunk_ndim, chunk_shape, _ = header
+    if chunk_ndim >= len(shape):
+        return False
+    omitted_axes = chunks[chunk_ndim:]
+    if not omitted_axes or any(int(value) != 1 for value in omitted_axes):
+        return False
+    expected_prefix = tuple(int(value) for value in chunks[:chunk_ndim])
+    return tuple(int(value) for value in chunk_shape) == expected_prefix
+
+
+def _normalize_basic_n5_selection(
+    item: Any,
+    *,
+    shape: tuple[int, ...],
+) -> tuple[tuple[slice, ...], tuple[int, ...]]:
+    """Normalize basic N5 indexing into slices plus squeeze axes."""
+    ndim = len(shape)
+    if not isinstance(item, tuple):
+        raw_items = [item]
+    else:
+        raw_items = list(item)
+    if Ellipsis in raw_items:
+        ellipsis_index = raw_items.index(Ellipsis)
+        fill = ndim - (len(raw_items) - 1)
+        raw_items = (
+            raw_items[:ellipsis_index]
+            + [slice(None)] * max(0, fill)
+            + raw_items[ellipsis_index + 1 :]
+        )
+    while len(raw_items) < ndim:
+        raw_items.append(slice(None))
+    if len(raw_items) != ndim:
+        raise IndexError(
+            f"N5 selection expected {ndim} indices, received {len(raw_items)}."
+        )
+
+    slices: list[slice] = []
+    squeeze_axes: list[int] = []
+    for axis, (selector, axis_size) in enumerate(zip(raw_items, shape, strict=False)):
+        if isinstance(selector, (int, np.integer)):
+            index = int(selector)
+            if index < 0:
+                index += int(axis_size)
+            if index < 0 or index >= int(axis_size):
+                raise IndexError(
+                    f"N5 index {index} is out of bounds for axis {axis} size {axis_size}."
+                )
+            slices.append(slice(index, index + 1, 1))
+            squeeze_axes.append(axis)
+            continue
+        if not isinstance(selector, slice):
+            raise TypeError(f"Unsupported N5 selection type: {type(selector)!r}.")
+        start, stop, step = selector.indices(int(axis_size))
+        if step != 1:
+            raise NotImplementedError("Legacy N5 fallback only supports unit steps.")
+        slices.append(slice(start, stop, 1))
+    return tuple(slices), tuple(squeeze_axes)
+
+
+def _read_legacy_singleton_chunk_n5_selection(
+    source_path: Path,
+    *,
+    component: str,
+    shape: tuple[int, ...],
+    dtype: np.dtype[Any],
+    chunks: tuple[int, ...],
+    item: Any,
+) -> np.ndarray[Any, Any]:
+    """Read one basic selection from a legacy singleton-chunk N5 dataset."""
+    selection, squeeze_axes = _normalize_basic_n5_selection(item, shape=shape)
+    output_shape = tuple(int(sel.stop) - int(sel.start) for sel in selection)
+    output = np.zeros(output_shape, dtype=dtype)
+
+    chunk_ranges: list[range] = []
+    for axis, (sel, chunk_size) in enumerate(zip(selection, chunks, strict=False)):
+        start_chunk = int(sel.start) // int(chunk_size)
+        stop_chunk = (
+            (int(sel.stop) - 1) // int(chunk_size)
+            if int(sel.stop) > int(sel.start)
+            else start_chunk
+        )
+        chunk_ranges.append(range(start_chunk, stop_chunk + 1))
+
+    for chunk_coords in product(*chunk_ranges):
+        chunk_origin = tuple(
+            int(coord) * int(chunk)
+            for coord, chunk in zip(chunk_coords, chunks, strict=False)
+        )
+        chunk_extent = tuple(
+            min(int(dim_size) - int(origin), int(chunk))
+            for dim_size, origin, chunk in zip(
+                shape, chunk_origin, chunks, strict=False
+            )
+        )
+        chunk_path = (
+            source_path / component / Path(*[str(coord) for coord in chunk_coords])
+        )
+        if chunk_path.exists():
+            header = _read_n5_chunk_header(chunk_path)
+            if header is None:
+                raise ValueError(f"Could not parse N5 chunk header: {chunk_path}")
+            _, chunk_shape_prefix, compressed = header
+            padded_shape = tuple(int(value) for value in chunk_shape_prefix) + (1,) * (
+                len(shape) - len(chunk_shape_prefix)
+            )
+            raw = numcodecs_blosc.decompress(compressed)
+            chunk = np.frombuffer(raw, dtype=dtype).reshape(padded_shape, order="C")
+        else:
+            chunk = np.zeros(chunk_extent, dtype=dtype)
+
+        source_slices: list[slice] = []
+        destination_slices: list[slice] = []
+        for axis, (sel, origin) in enumerate(
+            zip(selection, chunk_origin, strict=False)
+        ):
+            intersection_start = max(int(sel.start), int(origin))
+            intersection_stop = min(
+                int(sel.stop),
+                int(origin) + int(chunk.shape[axis]),
+            )
+            if intersection_stop <= intersection_start:
+                break
+            source_slices.append(
+                slice(
+                    int(intersection_start - int(origin)),
+                    int(intersection_stop - int(origin)),
+                )
+            )
+            destination_slices.append(
+                slice(
+                    int(intersection_start - int(sel.start)),
+                    int(intersection_stop - int(sel.start)),
+                )
+            )
+        else:
+            output[tuple(destination_slices)] = chunk[tuple(source_slices)]
+
+    if squeeze_axes:
+        output = np.squeeze(output, axis=squeeze_axes)
+    return output
 
 
 def _n5_component_has_persisted_chunks(source_path: Path, *, component: str) -> bool:
@@ -271,11 +479,19 @@ def _open_tensorstore_n5_as_dask(
     dtype = np.dtype(dataset.dtype.numpy_dtype)
     attributes = _load_n5_attributes(source_path, component=component)
     chunks = _normalize_n5_chunks(shape=shape, attributes=attributes)
+    use_legacy_chunk_reader = _n5_uses_legacy_singleton_chunk_encoding(
+        source_path,
+        component=component,
+        shape=shape,
+        chunks=chunks,
+    )
     adapter = _TensorStoreN5ArrayAdapter(
         source_path=str(source_path),
         component=component,
         shape=shape,
         dtype=dtype,
+        chunks=chunks,
+        use_legacy_chunk_reader=bool(use_legacy_chunk_reader),
     )
     array = da.from_array(
         adapter,
@@ -1016,50 +1232,43 @@ def _coerce_to_tpczyx(
     return reordered
 
 
-def _collect_largest_zarr_array(store_path: Path) -> tuple[Any, str, AxesSpec]:
-    """Open a Zarr/N5 store and select the largest contained array.
+def _open_zarr_like_source_as_dask(
+    store_path: Path,
+) -> tuple[da.Array, str, AxesSpec, dict[str, Any]]:
+    """Open a Zarr-like source and prefer public OME arrays when available.
 
     Parameters
     ----------
     store_path : pathlib.Path
-        Source Zarr or N5 store path.
+        Source Zarr-like store path.
 
     Returns
     -------
     tuple
-        ``(array, component, axes)`` where ``component`` is the selected array
-        path relative to the store root.
+        ``(source_array, component, axes, metadata)`` where ``component`` is
+        the selected array path relative to the store root.
 
     Raises
     ------
     ValueError
         If no arrays are found in the store.
     """
-    root_object = zarr.open(str(store_path), mode="r")
-    if hasattr(root_object, "shape") and not hasattr(root_object, "array_keys"):
-        axes = _extract_zarr_axes(root_object, {})
-        return root_object, "", axes
-
-    group = zarr.open_group(str(store_path), mode="r")
-    group_attrs = dict(getattr(group, "attrs", {}))
-    arrays: list[tuple[str, Any]] = []
-
-    def _walk(group_node: Any, prefix: str = "") -> None:
-        if hasattr(group_node, "array_keys") and callable(group_node.array_keys):
-            for key in sorted(group_node.array_keys()):
-                arrays.append((f"{prefix}{key}", group_node[key]))
-        if hasattr(group_node, "group_keys") and callable(group_node.group_keys):
-            for key in sorted(group_node.group_keys()):
-                _walk(group_node[key], f"{prefix}{key}/")
-
-    _walk(group)
-    if not arrays:
-        raise ValueError(f"No arrays found in Zarr/N5 store: {store_path}")
-
-    arrays.sort(key=lambda item: (-int(np.prod(item[1].shape)), item[0]))
-    component, array = arrays[0]
-    axes = _extract_zarr_axes(array, group_attrs)
-    return array, component, axes
+    opener = ImageOpener()
+    opened, info = opener.open(store_path, prefer_dask=True)
+    source_array = (
+        opened
+        if isinstance(opened, da.Array)
+        else da.from_array(opened, chunks="auto", asarray=False)
+    )
+    metadata = dict(info.metadata or {})
+    selected_component = (
+        str(
+            metadata.get("selected_array_path", metadata.get("source_component", ""))
+        ).strip()
+        or "."
+    )
+    axes = _normalize_axes_descriptor(info.axes, ndim=source_array.ndim)
+    return source_array, selected_component, axes, metadata
 
 
 def _open_source_as_dask(
@@ -1095,13 +1304,11 @@ def _open_source_as_dask(
         )
 
     if _is_zarr_like_path(source_path):
-        array, component, axes = _collect_largest_zarr_array(source_path)
-        source_array = (
-            da.from_zarr(str(source_path))
-            if not component
-            else da.from_zarr(str(source_path), component=component)
+        source_array, component, axes, zarr_meta = _open_zarr_like_source_as_dask(
+            source_path
         )
-        meta["source_component"] = component or "."
+        meta.update(zarr_meta)
+        meta["source_component"] = component
         return source_array, axes, meta
 
     if suffix in {".tif", ".tiff"}:
@@ -1478,6 +1685,7 @@ def _open_navigate_bdv_collection_as_dask(
     inferred_positions = max(1, int(experiment.multiposition_count))
 
     arrays_by_index: dict[tuple[int, int, int], da.Array] = {}
+    components_by_index: dict[tuple[int, int, int], str] = {}
     base_axes: AxesSpec = None
     base_shape: Optional[tuple[int, ...]] = None
 
@@ -1496,7 +1704,7 @@ def _open_navigate_bdv_collection_as_dask(
             entries.append((int(match.group(1)), int(match.group(2)), obj))
 
         h5_file.visititems(_collect_h5_entries)
-        if len(entries) <= 1:
+        if not entries:
             return None
 
         for time_index, setup_index, dataset in sorted(
@@ -1552,12 +1760,13 @@ def _open_navigate_bdv_collection_as_dask(
                         f"t={time_index}, setup={setup_index}."
                     )
             arrays_by_index[key] = source_array
+            components_by_index[key] = str(dataset.name)
     elif is_n5:
         entries = [
             (entry.time_index, entry.setup_index, entry.component, ("x", "y", "z"))
             for entry in _iter_navigate_bdv_n5_entries(source_path)
         ]
-        if len(entries) <= 1:
+        if not entries:
             return None
 
         for time_index, setup_index, component, source_axes in sorted(
@@ -1598,6 +1807,7 @@ def _open_navigate_bdv_collection_as_dask(
                         f"t={time_index}, setup={setup_index}."
                     )
             arrays_by_index[key] = source_array
+            components_by_index[key] = str(component)
     else:
         root = zarr.open_group(str(source_path), mode="r")
         group_attrs = dict(getattr(root, "attrs", {}))
@@ -1622,7 +1832,7 @@ def _open_navigate_bdv_collection_as_dask(
                 _walk(group_node[key], f"{prefix}{key}/")
 
         _walk(root)
-        if len(entries) <= 1:
+        if not entries:
             return None
 
         for time_index, setup_index, component, source_axes in sorted(
@@ -1664,9 +1874,25 @@ def _open_navigate_bdv_collection_as_dask(
                         f"t={time_index}, setup={setup_index}."
                     )
             arrays_by_index[key] = source_array
+            components_by_index[key] = str(component)
 
-    if len(arrays_by_index) <= 1:
+    if not arrays_by_index:
         return None
+
+    if len(arrays_by_index) == 1:
+        key, source_array = next(iter(arrays_by_index.items()))
+        metadata: dict[str, Any] = {
+            "source_path": str(source_path),
+            "source_file_count": 1,
+            "source_collection_type": (
+                "bdv_h5" if is_h5 else "bdv_n5" if is_n5 else "bdv_zarr"
+            ),
+            "source_component": str(components_by_index.get(key, "")),
+            "source_collection_time_indices": [int(key[0])],
+            "source_collection_position_indices": [int(key[1])],
+            "source_collection_channel_indices": [int(key[2])],
+        }
+        return source_array, base_axes, metadata
 
     time_indices = sorted({int(key[0]) for key in arrays_by_index})
     position_indices = sorted({int(key[1]) for key in arrays_by_index})
@@ -3845,7 +4071,8 @@ def resolve_data_store_path(
     -------
     pathlib.Path
         Destination OME-Zarr v3 store path. Existing OME-Zarr sources are
-        reused in-place; all other sources are materialized as
+        reused in-place only when they are already canonical ClearEx stores;
+        all other sources are materialized as
         ``data_store.ome.zarr`` next to ``experiment.yml``.
 
     Raises
@@ -3854,7 +4081,7 @@ def resolve_data_store_path(
         This helper does not raise custom exceptions.
     """
     source = Path(source_path).expanduser().resolve()
-    if is_ome_zarr_path(source):
+    if is_ome_zarr_path(source) and has_canonical_data_component(source):
         return source
     return default_ome_store_path(experiment.path.parent)
 
@@ -3911,11 +4138,12 @@ def materialize_experiment_data_store(
 
     Notes
     -----
-    The workflow writes canonical base data to ``data`` and then writes
-    downsampled levels under ``data_pyramid/level_<n>`` according to
-    ``pyramid_factors``. When ``source_path`` is already a Zarr/N5 store,
-    conversion is performed in the same store path rather than creating
-    a duplicate store.
+    The workflow writes canonical runtime-cache base data and then writes
+    downsampled levels under the canonical source pyramid according to
+    ``pyramid_factors``. Existing stores are only reused in place when the
+    input is already a canonical ClearEx OME-Zarr store; generic source
+    ``.ome.zarr`` inputs are treated as source formats and materialized into a
+    fresh ``data_store.ome.zarr`` beside ``experiment.yml``.
     """
 
     def _emit_progress(percent: int, message: str) -> None:
