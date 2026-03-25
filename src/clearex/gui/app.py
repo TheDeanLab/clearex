@@ -16201,6 +16201,7 @@ def launch_gui(
                 if not completed:
                     continue
                 current = _reset_analysis_selection_for_next_run(current)
+                _persist_reset_analysis_gui_state_for_workflow(current)
 
     if owns_app:
         app.quit()
@@ -16221,19 +16222,11 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         Updated workflow with all analysis flags disabled and ``force_rerun``
         reset to ``False`` for provenance-aware operations.
     """
+    operation_names = tuple(default_analysis_operation_parameters().keys())
     analysis_parameters = normalize_analysis_operation_parameters(
         workflow.analysis_parameters
     )
-    for operation_name in (
-        "flatfield",
-        "deconvolution",
-        "shear_transform",
-        "particle_detection",
-        "usegment3d",
-        "registration",
-        "display_pyramid",
-        "mip_export",
-    ):
+    for operation_name in operation_names:
         params = dict(analysis_parameters.get(operation_name, {}))
         params["force_rerun"] = False
         analysis_parameters[operation_name] = params
@@ -16248,23 +16241,84 @@ def _reset_analysis_selection_for_next_run(workflow: WorkflowConfig) -> Workflow
         "prefer_dask": workflow.prefer_dask,
         "dask_backend": workflow.dask_backend,
         "chunks": workflow.chunks,
-        "flatfield": False,
-        "deconvolution": False,
-        "shear_transform": False,
-        "particle_detection": False,
-        "registration": False,
-        "display_pyramid": False,
-        "visualization": False,
-        "mip_export": False,
         "zarr_save": workflow.zarr_save,
         "spatial_calibration": workflow.spatial_calibration,
         "spatial_calibration_explicit": workflow.spatial_calibration_explicit,
         "analysis_parameters": analysis_parameters,
     }
     dataclass_fields = getattr(WorkflowConfig, "__dataclass_fields__", {})
-    if "usegment3d" in dataclass_fields:
-        workflow_kwargs["usegment3d"] = False
+    for operation_name in operation_names:
+        if operation_name in dataclass_fields:
+            workflow_kwargs[operation_name] = False
     return WorkflowConfig(**workflow_kwargs)
+
+
+def _analysis_gui_state_payload_from_workflow(
+    workflow: WorkflowConfig,
+) -> Dict[str, Any]:
+    """Serialize analysis-dialog state directly from a workflow config.
+
+    Parameters
+    ----------
+    workflow : WorkflowConfig
+        Workflow whose analysis GUI state should be serialized.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dataset-local GUI-state payload compatible with
+        ``persist_latest_analysis_gui_state``.
+    """
+    operation_names = tuple(default_analysis_operation_parameters().keys())
+    payload: Dict[str, Any] = {
+        operation_name: bool(getattr(workflow, operation_name, False))
+        for operation_name in operation_names
+    }
+    payload["analysis_parameters"] = normalize_analysis_operation_parameters(
+        workflow.analysis_parameters
+    )
+    payload["file"] = str(workflow.file or "")
+    payload["analysis_selected_experiment_path"] = str(
+        workflow.analysis_selected_experiment_path or ""
+    )
+    payload["spatial_calibration"] = spatial_calibration_to_dict(
+        workflow.spatial_calibration
+    )
+    payload["spatial_calibration_explicit"] = bool(
+        workflow.spatial_calibration_explicit
+    )
+    return payload
+
+
+def _persist_reset_analysis_gui_state_for_workflow(workflow: WorkflowConfig) -> None:
+    """Persist a post-success reset GUI state for the workflow scope.
+
+    Parameters
+    ----------
+    workflow : WorkflowConfig
+        Reset workflow state that should become the next default GUI state.
+
+    Returns
+    -------
+    None
+        Best-effort persistence only.
+    """
+    logger = logging.getLogger(__name__)
+    for scoped_workflow in _workflows_for_selected_analysis_scope(workflow):
+        store_path = str(scoped_workflow.file or "").strip()
+        if not store_path or not is_zarr_store_path(store_path):
+            continue
+        try:
+            persist_latest_analysis_gui_state(
+                store_path,
+                _analysis_gui_state_payload_from_workflow(scoped_workflow),
+                source="analysis_dialog_success_reset",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist reset analysis GUI state for %s.",
+                store_path,
+            )
 
 
 def _analysis_target_run_label(target: Optional[AnalysisTarget]) -> str:

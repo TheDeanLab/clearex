@@ -786,6 +786,13 @@ def test_reset_analysis_selection_for_next_run_preserves_scope() -> None:
         analysis_apply_to_all=True,
         flatfield=True,
         registration=True,
+        fusion=True,
+        visualization=True,
+        analysis_parameters={
+            "flatfield": {"force_rerun": True},
+            "registration": {"force_rerun": True},
+            "fusion": {"force_rerun": True},
+        },
     )
 
     reset = app_module._reset_analysis_selection_for_next_run(workflow)
@@ -796,7 +803,12 @@ def test_reset_analysis_selection_for_next_run_preserves_scope() -> None:
     assert reset.analysis_apply_to_all is True
     assert reset.flatfield is False
     assert reset.registration is False
+    assert reset.fusion is False
     assert reset.display_pyramid is False
+    assert reset.visualization is False
+    assert reset.analysis_parameters["flatfield"]["force_rerun"] is False
+    assert reset.analysis_parameters["registration"]["force_rerun"] is False
+    assert reset.analysis_parameters["fusion"]["force_rerun"] is False
 
 
 def test_reset_analysis_selection_for_next_run_preserves_spatial_calibration() -> None:
@@ -813,6 +825,42 @@ def test_reset_analysis_selection_for_next_run_preserves_spatial_calibration() -
 
     assert reset.spatial_calibration == workflow.spatial_calibration
     assert reset.spatial_calibration_explicit is True
+
+
+def test_persist_reset_analysis_gui_state_for_workflow_clears_saved_flags(
+    tmp_path: Path,
+) -> None:
+    store_path = _create_gui_analysis_store(tmp_path)
+    root = zarr.open_group(str(store_path), mode="a")
+    root.require_group("clearex").require_group("provenance")
+    workflow = app_module.WorkflowConfig(
+        file=str(store_path),
+        analysis_selected_experiment_path="/tmp/cell_001/experiment.yml",
+        flatfield=True,
+        registration=True,
+        fusion=True,
+        analysis_parameters={
+            "flatfield": {"force_rerun": True},
+            "registration": {"force_rerun": True},
+            "fusion": {"force_rerun": True},
+        },
+    )
+
+    reset = app_module._reset_analysis_selection_for_next_run(workflow)
+    app_module._persist_reset_analysis_gui_state_for_workflow(reset)
+
+    saved_state = app_module.load_latest_analysis_gui_state(str(store_path))
+
+    assert saved_state is not None
+    workflow_payload = saved_state["workflow"]
+    assert workflow_payload["flatfield"] is False
+    assert workflow_payload["registration"] is False
+    assert workflow_payload["fusion"] is False
+    assert workflow_payload["analysis_parameters"]["flatfield"]["force_rerun"] is False
+    assert (
+        workflow_payload["analysis_parameters"]["registration"]["force_rerun"] is False
+    )
+    assert workflow_payload["analysis_parameters"]["fusion"]["force_rerun"] is False
 
 
 def test_load_experiment_list_file_rejects_invalid_format(tmp_path) -> None:
@@ -1532,6 +1580,127 @@ def test_launch_gui_applies_persisted_backend_defaults(monkeypatch, tmp_path) ->
     assert captured["setup_initial"].dask_backend == persisted_backend
     assert captured["setup_initial"].zarr_save == persisted_zarr
     assert selected is not None
+
+
+def test_launch_gui_persists_reset_state_after_successful_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store_path = _create_gui_analysis_store(tmp_path)
+    selected_workflow = app_module.WorkflowConfig(
+        file=str(store_path),
+        analysis_selected_experiment_path="/tmp/cell_001/experiment.yml",
+        flatfield=True,
+        fusion=True,
+        analysis_parameters={
+            "flatfield": {"force_rerun": True},
+            "fusion": {"force_rerun": True},
+        },
+    )
+    captured: dict[str, app_module.WorkflowConfig] = {}
+
+    class _FakeApplication:
+        _instance = None
+
+        def __init__(self, _argv) -> None:
+            type(self)._instance = self
+            self.quit_calls = 0
+
+        @classmethod
+        def instance(cls):
+            return cls._instance
+
+        def quit(self) -> None:
+            self.quit_calls += 1
+
+    class _FakeQDialog:
+        class DialogCode:
+            Accepted = 1
+            Rejected = 0
+
+    class _FakeSetupDialog:
+        def __init__(self, initial) -> None:
+            self.result_config = initial
+
+        def exec(self) -> int:
+            return _FakeQDialog.DialogCode.Accepted
+
+    class _FakeAnalysisDialog:
+        call_count = 0
+
+        def __init__(self, initial) -> None:
+            type(self).call_count += 1
+            self.result_config = selected_workflow
+            if type(self).call_count == 1:
+                captured["first_initial"] = initial
+            else:
+                captured["second_initial"] = initial
+
+        def exec(self) -> int:
+            if type(self).call_count == 1:
+                return _FakeQDialog.DialogCode.Accepted
+            self.result_config = None
+            return _FakeQDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(app_module, "HAS_PYQT6", True)
+    monkeypatch.setattr(app_module, "_display_is_available", lambda: True)
+    monkeypatch.setattr(
+        app_module,
+        "_ensure_clearex_settings_directory",
+        lambda path=None: tmp_path / ".clearex",
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_load_last_used_dask_backend_config",
+        lambda settings_path=None: None,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_load_last_used_zarr_save_config",
+        lambda settings_path=None: None,
+    )
+    monkeypatch.setattr(app_module, "_apply_application_icon", lambda _app: None)
+    monkeypatch.setattr(app_module, "_show_startup_splash", lambda _app: None)
+    monkeypatch.setattr(app_module, "QApplication", _FakeApplication, raising=False)
+    monkeypatch.setattr(app_module, "QDialog", _FakeQDialog, raising=False)
+    monkeypatch.setattr(
+        app_module,
+        "ClearExSetupDialog",
+        _FakeSetupDialog,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "AnalysisSelectionDialog",
+        _FakeAnalysisDialog,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "run_workflow_with_progress",
+        lambda workflow, run_callback: True,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_persist_reset_analysis_gui_state_for_workflow",
+        lambda workflow: captured.__setitem__("reset_workflow", workflow),
+    )
+
+    result = app_module.launch_gui(
+        initial=selected_workflow,
+        run_callback=lambda workflow, progress_callback: None,
+    )
+
+    assert result is None
+    assert captured["reset_workflow"].flatfield is False
+    assert captured["reset_workflow"].fusion is False
+    assert (
+        captured["reset_workflow"].analysis_parameters["flatfield"]["force_rerun"]
+        is False
+    )
+    assert (
+        captured["reset_workflow"].analysis_parameters["fusion"]["force_rerun"] is False
+    )
 
 
 def test_build_input_source_options_includes_existing_store_outputs() -> None:
