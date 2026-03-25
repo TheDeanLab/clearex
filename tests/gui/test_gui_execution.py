@@ -995,34 +995,40 @@ def test_setup_dialog_resolves_spatial_calibration_drafts_per_experiment() -> No
     if app is None:
         app = app_module.QApplication([])
 
+    original_branding_factory = app_module._create_scaled_branding_label
+    app_module._create_scaled_branding_label = lambda **_kwargs: None
     dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
-    first = Path("/tmp/cell_001/experiment.yml")
-    second = Path("/tmp/cell_002/experiment.yml")
-    dialog._spatial_calibration_drafts[first.resolve()] = (
-        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y"))
-    )
-    dialog._spatial_calibration_drafts[second.resolve()] = (
-        app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+f", "-y", "+x"))
-    )
+    try:
+        first = Path("/tmp/cell_001/experiment.yml")
+        second = Path("/tmp/cell_002/experiment.yml")
+        dialog._spatial_calibration_drafts[first.resolve()] = (
+            app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+x", "none", "+y"))
+        )
+        dialog._spatial_calibration_drafts[second.resolve()] = (
+            app_module.SpatialCalibrationConfig(stage_axis_map_zyx=("+f", "-y", "+x"))
+        )
 
-    dialog._set_current_spatial_calibration(experiment_path=first)
-    assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
-        "+x",
-        "none",
-        "+y",
-    )
+        dialog._set_current_spatial_calibration(experiment_path=first)
+        assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
+            "+x",
+            "none",
+            "+y",
+        )
 
-    dialog._set_current_spatial_calibration(experiment_path=second)
-    assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
-        "+f",
-        "-y",
-        "+x",
-    )
+        dialog._set_current_spatial_calibration(experiment_path=second)
+        assert dialog._current_spatial_calibration.stage_axis_map_zyx == (
+            "+f",
+            "-y",
+            "+x",
+        )
+    finally:
+        dialog.close()
+        app_module._create_scaled_branding_label = original_branding_factory
 
-    dialog.close()
 
-
-def test_setup_dialog_delete_key_removes_selected_experiment() -> None:
+def test_setup_dialog_delete_key_removes_selected_experiment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     if not app_module.HAS_PYQT6:
         return
 
@@ -1031,6 +1037,11 @@ def test_setup_dialog_delete_key_removes_selected_experiment() -> None:
         app = app_module.QApplication([])
 
     dialog = app_module.ClearExSetupDialog(initial=app_module.WorkflowConfig())
+    monkeypatch.setattr(
+        dialog,
+        "_load_metadata_for_experiment_path",
+        lambda _experiment_path, *, force_reload=False: None,
+    )
     first = Path("/tmp/cell_001/experiment.yml").resolve()
     second = Path("/tmp/cell_002/experiment.yml").resolve()
     dialog._set_experiment_list_paths((first, second), current_path=first)
@@ -1659,7 +1670,12 @@ def test_launch_gui_persists_reset_state_after_successful_run(
         "_load_last_used_zarr_save_config",
         lambda settings_path=None: None,
     )
-    monkeypatch.setattr(app_module, "_apply_application_icon", lambda _app: None)
+    monkeypatch.setattr(
+        app_module,
+        "_apply_application_icon",
+        lambda _app: None,
+        raising=False,
+    )
     monkeypatch.setattr(app_module, "_show_startup_splash", lambda _app: None)
     monkeypatch.setattr(app_module, "QApplication", _FakeApplication, raising=False)
     monkeypatch.setattr(app_module, "QDialog", _FakeQDialog, raising=False)
@@ -2152,7 +2168,7 @@ def test_collect_visualization_parameters_syncs_combo_with_primary_layer() -> No
         "launch_mode": "auto",
         "capture_keyframes": True,
         "keyframe_manifest_path": "",
-        "particle_detection_component": "results/particle_detection/latest/detections",
+        "particle_detection_component": "clearex/results/particle_detection/latest/detections",
     }
     dialog._visualization_keyframe_layer_overrides = []
     dialog._normalize_visualization_volume_layers = lambda rows: list(rows)
@@ -2297,8 +2313,9 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
             "flatfield",
             "deconvolution",
             "shear_transform",
-            "display_pyramid",
             "registration",
+            "fusion",
+            "display_pyramid",
         ),
     ) in dialog_cls._OPERATION_TABS
 
@@ -2348,7 +2365,6 @@ def test_visualization_popup_tables_use_uniform_widget_rows() -> None:
     )
     assert "table.setColumnWidth(0, 140)" in volume_layers_source
     assert 'placeholder_text="Optional name"' in volume_layers_source
-    assert 'placeholder_text="All channels"' in volume_layers_source
     assert 'placeholder_text="Auto"' in volume_layers_source
     assert "line_edit.setPlaceholderText(str(placeholder_text))" in layer_table_source
     assert "table.setColumnWidth(2, 150)" in layer_table_source

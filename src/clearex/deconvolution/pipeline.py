@@ -1082,24 +1082,24 @@ def _persist_synthetic_psf_assets(
             voxel_z_um=float(voxel_z_um),
         )
         channel_group = synthetic_group.create_group(f"ch{int(channel_index):02d}")
-        channel_group.create_dataset(
+        channel_group.create_array(
             name="combined_psf_zyx",
             data=np.asarray(artifacts.combined_psf_zyx, dtype=np.float32),
             overwrite=True,
         )
-        channel_group.create_dataset(
+        channel_group.create_array(
             name="detection_psf_zyx",
             data=np.asarray(artifacts.detection_psf_zyx, dtype=np.float32),
             overwrite=True,
         )
         if artifacts.illumination_psf_zyx is not None:
-            channel_group.create_dataset(
+            channel_group.create_array(
                 name="illumination_psf_zyx",
                 data=np.asarray(artifacts.illumination_psf_zyx, dtype=np.float32),
                 overwrite=True,
             )
         preview_bytes = np.frombuffer(artifacts.preview_png_bytes, dtype=np.uint8)
-        channel_group.create_dataset(
+        channel_group.create_array(
             name="preview_png",
             data=preview_bytes,
             overwrite=True,

@@ -83,6 +83,9 @@ OME-Zarr stores.
   - representative chunk decode probes pass (including `(p,c)` scans for
     profile datasets) to catch malformed N5 chunks.
 - `force_rerun=True` skips resume and reinitializes latest/checkpoint outputs.
+- If a would-be resumed checkpoint later proves unreadable while loading its
+  progress masks, the run falls back to a fresh checkpoint initialization
+  instead of aborting.
 
 ## Pyramid Materialization
 

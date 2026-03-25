@@ -1708,7 +1708,7 @@ def _write_projection_output(
     root = zarr.open_group(str(output_path), mode="w")
     try:
         payload = np.asarray(projection)
-        root.create_dataset(
+        root.create_array(
             name="data",
             data=payload,
             chunks=_default_projection_chunks(tuple(int(v) for v in payload.shape)),

@@ -45,6 +45,8 @@ from clearex.io.provenance import (
 from clearex.io.read import ImageInfo
 from clearex.workflow import SpatialCalibrationConfig, WorkflowConfig
 
+_PROVENANCE_ROOT = "clearex/provenance"
+
 
 def test_is_zarr_store_path():
     assert is_zarr_store_path("sample.zarr") is True
@@ -85,11 +87,11 @@ def test_persist_run_provenance_hash_chain(tmp_path: Path):
     )
 
     root = zarr.open_group(str(store_path), mode="r")
-    runs_group = root["provenance"]["runs"]
+    runs_group = root[f"{_PROVENANCE_ROOT}/runs"]
     record_1 = dict(runs_group[run_id_1].attrs["record"])
     record_2 = dict(runs_group[run_id_2].attrs["record"])
 
-    assert root["provenance"].attrs["run_count"] == 2
+    assert root[_PROVENANCE_ROOT].attrs["run_count"] == 2
     assert record_2["hash_chain"]["prev_hash"] == record_1["hash_chain"]["self_hash"]
     assert record_1["workflow"]["dask_backend_summary"].startswith("LocalCluster")
     assert record_1["workflow"]["dask_backend"]["mode"] == "local_cluster"
@@ -130,7 +132,7 @@ def test_persist_run_provenance_records_spatial_calibration(tmp_path: Path) -> N
     )
 
     root = zarr.open_group(str(store_path), mode="r")
-    record = dict(root["provenance"]["runs"][run_id].attrs["record"])
+    record = dict(root[f"{_PROVENANCE_ROOT}/runs"][run_id].attrs["record"])
 
     assert record["workflow"]["spatial_calibration"] == {
         "schema": "clearex.spatial_calibration.v1",
@@ -154,7 +156,7 @@ def test_verify_provenance_chain_detects_tampering(tmp_path: Path):
     )
 
     root = zarr.open_group(str(store_path), mode="a")
-    run_group = root["provenance"]["runs"][run_id]
+    run_group = root[f"{_PROVENANCE_ROOT}/runs"][run_id]
     record = dict(run_group.attrs["record"])
     record["status"] = "tampered"
     run_group.attrs["record"] = record
@@ -194,7 +196,7 @@ def test_store_latest_analysis_output_overwrites_previous_version(tmp_path: Path
     assert set(analysis_group.keys()) == {"latest"}
     assert np.array_equal(latest_data, second)
 
-    latest_ref = dict(root["provenance"]["latest_outputs"]["deconvolution"].attrs)
+    latest_ref = dict(root[f"{_PROVENANCE_ROOT}/latest_outputs/deconvolution"].attrs)
     assert latest_ref["component"] == "results/deconvolution/latest"
     assert latest_ref["run_id"] == "run-b"
     assert latest_ref["storage_policy"] == "latest_only"
@@ -339,7 +341,8 @@ def test_load_latest_completed_workflow_state_skips_cancelled_runs(
 
 def test_latest_analysis_gui_state_round_trip(tmp_path: Path) -> None:
     store_path = tmp_path / "analysis_gui_state.zarr"
-    zarr.open_group(str(store_path), mode="w")
+    root = zarr.open_group(str(store_path), mode="w")
+    root.require_group("clearex").require_group("provenance")
     payload = {
         "flatfield": True,
         "deconvolution": False,

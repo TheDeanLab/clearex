@@ -22,6 +22,12 @@ from clearex.visualization.pipeline import (
 )
 from clearex.workflow import spatial_calibration_to_dict
 
+_DISPLAY_PYRAMID_COMPONENT = "clearex/results/display_pyramid/latest"
+_VISUALIZATION_COMPONENT = "clearex/results/visualization/latest"
+_VISUALIZATION_LATEST_OUTPUT_COMPONENT = (
+    "clearex/provenance/latest_outputs/visualization"
+)
+
 
 def _single_image_volume_layers(
     component: str = "data",
@@ -86,11 +92,7 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
         ],
         dtype=np.float32,
     )
-    latest_group = (
-        root.require_group("results")
-        .require_group("particle_detection")
-        .require_group("latest")
-    )
+    latest_group = root.require_group("clearex/results/particle_detection/latest")
     latest_group.create_dataset(
         name="detections",
         data=detections,
@@ -157,7 +159,7 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
         },
     )
 
-    assert summary.component == "results/visualization/latest"
+    assert summary.component == _VISUALIZATION_COMPONENT
     assert summary.source_component == "data"
     assert summary.source_components == ("data", "data_pyramid/level_1")
     assert summary.position_index == 1
@@ -200,7 +202,7 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     assert points_metadata["coordinate_axes_tczyx"] == ["t", "c", "z", "y", "x"]
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    latest_attrs = dict(output_root["results"]["visualization"]["latest"].attrs)
+    latest_attrs = dict(output_root[_VISUALIZATION_COMPONENT].attrs)
     assert latest_attrs["position_index"] == 1
     assert latest_attrs["selected_positions"] == [1]
     assert latest_attrs["show_all_positions"] is False
@@ -215,8 +217,8 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     assert latest_attrs["keyframe_manifest_path"] == summary.keyframe_manifest_path
     assert latest_attrs["keyframe_layer_overrides"] == []
     assert (
-        output_root["provenance"]["latest_outputs"]["visualization"].attrs["component"]
-        == "results/visualization/latest"
+        output_root[_VISUALIZATION_LATEST_OUTPUT_COMPONENT].attrs["component"]
+        == _VISUALIZATION_COMPONENT
     )
 
 
@@ -280,7 +282,7 @@ def test_run_visualization_analysis_subprocess_launch(
     assert dict(captured["parameters"])["keyframe_layer_overrides"] == []
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    latest_attrs = dict(output_root["results"]["visualization"]["latest"].attrs)
+    latest_attrs = dict(output_root[_VISUALIZATION_COMPONENT].attrs)
     assert latest_attrs["viewer_pid"] == 43210
     assert latest_attrs["launch_mode"] == "subprocess"
     assert latest_attrs["viewer_ndisplay_requested"] == 3
@@ -445,7 +447,7 @@ def test_run_display_pyramid_analysis_materializes_levels_and_contrast_metadata(
         },
     )
 
-    assert summary.component == "results/display_pyramid/latest"
+    assert summary.component == _DISPLAY_PYRAMID_COMPONENT
     assert summary.source_component == "results/shear_transform/latest/data"
     assert len(summary.source_components) > 1
     assert summary.channel_count == 2
@@ -454,7 +456,7 @@ def test_run_display_pyramid_analysis_materializes_levels_and_contrast_metadata(
 
     output_root = zarr.open_group(str(store_path), mode="r")
     source_attrs = dict(output_root["results/shear_transform/latest/data"].attrs)
-    latest_attrs = dict(output_root["results"]["display_pyramid"]["latest"].attrs)
+    latest_attrs = dict(output_root[_DISPLAY_PYRAMID_COMPONENT].attrs)
     assert len(source_attrs["display_pyramid_levels"]) > 1
     assert all(
         str(component).startswith("results/shear_transform/latest/data_pyramid/")
@@ -636,9 +638,9 @@ def test_run_display_pyramid_analysis_rebuilds_legacy_component_layout(
     )
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    assert "results/shear_transform/latest/data_pyramid/level_1" in output_root, (
-        "Expected source-adjacent level_1 pyramid after migration."
-    )
+    assert (
+        "results/shear_transform/latest/data_pyramid/level_1" in output_root
+    ), "Expected source-adjacent level_1 pyramid after migration."
     source_attrs = dict(output_root["results/shear_transform/latest/data"].attrs)
     assert source_attrs["display_pyramid_levels"][1].startswith(
         "results/shear_transform/latest/data_pyramid/level_"
@@ -1023,9 +1025,7 @@ def test_run_visualization_analysis_show_all_positions_uses_stage_affines(
     assert image_metadata["stage_positions_xyzthetaf"][1]["f"] == 0.0
 
     latest_attrs = dict(
-        zarr.open_group(str(store_path), mode="r")["results"]["visualization"][
-            "latest"
-        ].attrs
+        zarr.open_group(str(store_path), mode="r")[_VISUALIZATION_COMPONENT].attrs
     )
     assert latest_attrs["position_index"] == 0
     assert latest_attrs["selected_positions"] == [0, 1]
@@ -1683,9 +1683,7 @@ def test_run_visualization_analysis_large_3d_request_forces_2d_and_persists_reas
     assert "display_mode_fallback_reason" in image_metadata
 
     latest_attrs = dict(
-        zarr.open_group(str(store_path), mode="r")["results"]["visualization"][
-            "latest"
-        ].attrs
+        zarr.open_group(str(store_path), mode="r")[_VISUALIZATION_COMPONENT].attrs
     )
     assert latest_attrs["viewer_ndisplay_requested"] == 3
     assert latest_attrs["viewer_ndisplay_effective"] == 2

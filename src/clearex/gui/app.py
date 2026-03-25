@@ -7343,17 +7343,17 @@ if HAS_PYQT6:
             ("Visualization", ("visualization", "mip_export")),
         )
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
-            "flatfield": "results/flatfield/latest/data",
-            "deconvolution": "results/deconvolution/latest/data",
-            "shear_transform": "results/shear_transform/latest/data",
-            "usegment3d": "results/usegment3d/latest/data",
+            "flatfield": "clearex/runtime_cache/results/flatfield/latest/data",
+            "deconvolution": "clearex/runtime_cache/results/deconvolution/latest/data",
+            "shear_transform": "clearex/runtime_cache/results/shear_transform/latest/data",
+            "usegment3d": "clearex/runtime_cache/results/usegment3d/latest/data",
             "registration": "clearex/results/registration/latest",
-            "fusion": "results/fusion/latest/data",
-            "display_pyramid": "results/display_pyramid/latest",
-            "mip_export": "results/mip_export/latest",
+            "fusion": "clearex/runtime_cache/results/fusion/latest/data",
+            "display_pyramid": "clearex/results/display_pyramid/latest",
+            "mip_export": "clearex/results/mip_export/latest",
         }
         _PARTICLE_DETECTION_OVERLAY_COMPONENT = (
-            "results/particle_detection/latest/detections"
+            "clearex/results/particle_detection/latest/detections"
         )
         _DEFAULT_USEGMENT3D_PARAMETERS: Dict[str, Any] = {
             "execution_order": 7,

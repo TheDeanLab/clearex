@@ -3198,6 +3198,18 @@ def run_flatfield_analysis(
         parameters=normalized,
         basicpy_version=basicpy_version,
     )
+
+    def _restart_from_fresh_checkpoint(reason: str) -> FlatfieldOutputLayout:
+        recovery_parameters = dict(normalized)
+        recovery_parameters["force_rerun"] = True
+        _emit(6, str(reason))
+        return _prepare_output_arrays(
+            zarr_path=zarr_path,
+            source_component=source_component,
+            parameters=recovery_parameters,
+            basicpy_version=basicpy_version,
+        )
+
     shape_tpczyx = layout.shape_tpczyx
     output_chunks = layout.output_chunks_tpczyx
     profile_pairs = [
@@ -3220,6 +3232,22 @@ def run_flatfield_analysis(
     checkpoint_group = zarr.open_group(str(zarr_path), mode="a")[
         layout.checkpoint_component
     ]
+    if layout.resumed:
+        try:
+            np.asarray(checkpoint_group["fit_profile_done_pc"], dtype=bool)
+            if layout.fit_mode == "tiled":
+                np.asarray(checkpoint_group["fit_tile_done_pcyx"], dtype=bool)
+            np.asarray(checkpoint_group["transform_done_tpcyx"], dtype=bool)
+        except Exception:
+            layout = _restart_from_fresh_checkpoint(
+                "Detected unreadable flatfield checkpoint state; restarting from a fresh checkpoint"
+            )
+            shape_tpczyx = layout.shape_tpczyx
+            output_chunks = layout.output_chunks_tpczyx
+            checkpoint_group = zarr.open_group(str(zarr_path), mode="a")[
+                layout.checkpoint_component
+            ]
+
     raw_fallback_records = checkpoint_group.attrs.get("fit_fallback_records", [])
     fit_fallback_records: list[dict[str, Any]] = []
     if isinstance(raw_fallback_records, list):

@@ -559,7 +559,7 @@ def save_particle_detections_to_store(
 
     detection_array = np.asarray(detections, dtype=np.float32)
     row_chunks = int(min(max(1, detection_array.shape[0]), 16384))
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="detections",
         data=detection_array,
         chunks=(row_chunks, len(_PARTICLE_COLUMNS)),
@@ -578,7 +578,7 @@ def save_particle_detections_to_store(
         else np.empty((0, 4), dtype=np.float32)
     )
     points_chunks = int(min(max(1, napari_points.shape[0]), 16384))
-    latest_group.create_dataset(
+    latest_group.create_array(
         name="points_tzyx",
         data=napari_points,
         chunks=(points_chunks, 4),

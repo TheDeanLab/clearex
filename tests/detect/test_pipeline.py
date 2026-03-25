@@ -15,6 +15,8 @@ from clearex.detect.pipeline import run_particle_detection_analysis
 from clearex.io.experiment import create_dask_client
 import clearex.detect.pipeline as particle_pipeline
 
+_PARTICLE_COMPONENT = "clearex/results/particle_detection/latest"
+
 
 def test_run_particle_detection_analysis_writes_latest_results(
     tmp_path: Path, monkeypatch
@@ -74,30 +76,29 @@ def test_run_particle_detection_analysis_writes_latest_results(
     finally:
         client.close()
 
-    assert summary.component == "results/particle_detection/latest"
+    assert summary.component == _PARTICLE_COMPONENT
     assert summary.channel_index == 0
     assert summary.chunks_processed == 8
     assert summary.detections == 8
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    detections = np.asarray(
-        output_root["results"]["particle_detection"]["latest"]["detections"]
-    )
-    points = np.asarray(
-        output_root["results"]["particle_detection"]["latest"]["points_tzyx"]
-    )
+    latest = output_root[_PARTICLE_COMPONENT]
+    detections = np.asarray(latest["detections"])
+    points = np.asarray(latest["points_tzyx"])
     assert detections.shape == (8, 8)
     assert points.shape == (8, 4)
-    assert list(
-        output_root["results"]["particle_detection"]["latest"]["detections"].attrs[
-            "columns"
-        ]
-    ) == ["t", "p", "c", "z", "y", "x", "sigma", "intensity"]
-    assert (
-        output_root["results"]["particle_detection"]["latest"].attrs[
-            "napari_points_component"
-        ]
-        == "results/particle_detection/latest/points_tzyx"
+    assert list(latest["detections"].attrs["columns"]) == [
+        "t",
+        "p",
+        "c",
+        "z",
+        "y",
+        "x",
+        "sigma",
+        "intensity",
+    ]
+    assert latest.attrs["napari_points_component"] == (
+        f"{_PARTICLE_COMPONENT}/points_tzyx"
     )
 
 

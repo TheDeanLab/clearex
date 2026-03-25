@@ -767,7 +767,7 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "use_multiscale": True,
         "use_3d_view": True,
         "overlay_particle_detections": True,
-        "particle_detection_component": "results/particle_detection/latest/detections",
+        "particle_detection_component": "clearex/results/particle_detection/latest/detections",
         "launch_mode": "auto",
         "require_gpu_rendering": True,
         "capture_keyframes": True,
@@ -2319,10 +2319,10 @@ def _normalize_visualization_parameters(
         str(
             normalized.get(
                 "particle_detection_component",
-                "results/particle_detection/latest/detections",
+                "clearex/results/particle_detection/latest/detections",
             )
         ).strip()
-        or "results/particle_detection/latest/detections"
+        or "clearex/results/particle_detection/latest/detections"
     )
     normalized["require_gpu_rendering"] = bool(
         normalized.get("require_gpu_rendering", True)

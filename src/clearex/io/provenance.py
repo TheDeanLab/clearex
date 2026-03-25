@@ -921,12 +921,14 @@ def store_latest_analysis_output(
         analysis_group = results_group.require_group(key)
         if "latest" in analysis_group:
             del analysis_group["latest"]
-        analysis_group.create_dataset(
-            name="latest",
-            data=output_array,
-            chunks=chunks,
-            overwrite=True,
-        )
+        create_kwargs: Dict[str, Any] = {
+            "name": "latest",
+            "data": output_array,
+            "overwrite": True,
+        }
+        if chunks is not None:
+            create_kwargs["chunks"] = chunks
+        analysis_group.create_array(**create_kwargs)
 
     root = zarr.open_group(str(zarr_path), mode="a")
     analysis_group = root.require_group("results").require_group(key)

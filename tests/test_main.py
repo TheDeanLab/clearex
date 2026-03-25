@@ -24,6 +24,14 @@ from clearex.workflow import (
 )
 from clearex.workflow import DaskBackendConfig, LocalClusterConfig
 
+_PROVENANCE_ROOT = "clearex/provenance"
+_DECONV_CACHE_DATA = main_module.analysis_cache_data_component("deconvolution")
+_USEGMENT3D_CACHE_DATA = main_module.analysis_cache_data_component("usegment3d")
+_FLATFIELD_CACHE_DATA = main_module.analysis_cache_data_component("flatfield")
+_PARTICLE_DETECTION_COMPONENT = (
+    f"{main_module.analysis_auxiliary_root('particle_detection')}/detections"
+)
+
 
 def _test_logger(name: str) -> logging.Logger:
     """Create an isolated null logger for tests.
@@ -114,7 +122,7 @@ def test_resolve_log_directory_for_workflow_uses_parent_for_missing_navigate_sto
     experiment_path = tmp_path / "acq" / "experiment.yml"
     workflow = WorkflowConfig(file=str(experiment_path))
     fake_experiment = SimpleNamespace(path=experiment_path)
-    missing_store_path = tmp_path / "acq" / "data_store.zarr"
+    missing_store_path = tmp_path / "acq" / "data_store.ome.zarr"
 
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda _: True)
     monkeypatch.setattr(
@@ -684,8 +692,8 @@ def test_run_workflow_persists_cancelled_provenance_status(
             analysis_progress_callback=_cancel_on_progress,
         )
 
-    runs_group = main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
-        "runs"
+    runs_group = main_module.zarr.open_group(str(store_path), mode="r")[
+        f"{_PROVENANCE_ROOT}/runs"
     ]
     run_records = [
         dict(runs_group[run_id].attrs["record"]) for run_id in runs_group.group_keys()
@@ -1396,12 +1404,13 @@ def test_run_workflow_skips_matching_provenance_analysis(
         overwrite=True,
     )
     root.create_dataset(
-        name="results/deconvolution/latest/data",
+        name=_DECONV_CACHE_DATA,
         shape=(1, 1, 1, 2, 2, 2),
         chunks=(1, 1, 1, 2, 2, 2),
         dtype="uint16",
         overwrite=True,
     )
+    root.require_group(main_module.analysis_auxiliary_root("deconvolution"))
 
     workflow = WorkflowConfig(
         file=str(store_path),
@@ -1445,6 +1454,15 @@ def test_run_workflow_skips_matching_provenance_analysis(
     monkeypatch.setattr(
         main_module, "_configure_dask_backend", _fake_configure_dask_backend
     )
+    monkeypatch.setattr(
+        main_module,
+        "summarize_analysis_history",
+        lambda *args, **kwargs: {
+            "matches_parameters": True,
+            "matching_run_id": "run-1",
+            "matching_ended_utc": None,
+        },
+    )
     monkeypatch.setattr(main_module, "run_deconvolution_analysis", _should_not_run)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
 
@@ -1467,7 +1485,7 @@ def test_run_workflow_force_rerun_ignores_matching_provenance(
         overwrite=True,
     )
     root.create_dataset(
-        name="results/deconvolution/latest/data",
+        name=_DECONV_CACHE_DATA,
         shape=(1, 1, 1, 2, 2, 2),
         chunks=(1, 1, 1, 2, 2, 2),
         dtype="uint16",
@@ -1529,7 +1547,7 @@ def test_run_workflow_force_rerun_ignores_matching_provenance(
         called["value"] = True
         return SimpleNamespace(
             component="results/deconvolution/latest",
-            data_component="results/deconvolution/latest/data",
+            data_component=_DECONV_CACHE_DATA,
             volumes_processed=1,
             channel_count=1,
             psf_mode="measured",
@@ -1640,12 +1658,13 @@ def test_run_workflow_skips_matching_provenance_usegment3d(
         overwrite=True,
     )
     root.create_dataset(
-        name="results/usegment3d/latest/data",
+        name=_USEGMENT3D_CACHE_DATA,
         shape=(1, 1, 1, 2, 2, 2),
         chunks=(1, 1, 1, 2, 2, 2),
         dtype="uint16",
         overwrite=True,
     )
+    root.require_group(main_module.analysis_auxiliary_root("usegment3d"))
 
     workflow = WorkflowConfig(
         file=str(store_path),
@@ -1683,6 +1702,15 @@ def test_run_workflow_skips_matching_provenance_usegment3d(
     monkeypatch.setattr(
         main_module, "_configure_dask_backend", _fake_configure_dask_backend
     )
+    monkeypatch.setattr(
+        main_module,
+        "summarize_analysis_history",
+        lambda *args, **kwargs: {
+            "matches_parameters": True,
+            "matching_run_id": "run-1",
+            "matching_ended_utc": None,
+        },
+    )
     monkeypatch.setattr(main_module, "run_usegment3d_analysis", _should_not_run)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
 
@@ -1712,13 +1740,8 @@ def test_run_workflow_chains_usegment3d_output_to_visualization(
     def _fake_usegment3d(*, zarr_path, parameters, client, progress_callback):
         del parameters, client, progress_callback
         fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
-        latest = (
-            fake_root.require_group("results")
-            .require_group("usegment3d")
-            .require_group("latest")
-        )
-        latest.create_dataset(
-            name="data",
+        fake_root.create_dataset(
+            name=_USEGMENT3D_CACHE_DATA,
             shape=(1, 1, 1, 2, 2, 2),
             chunks=(1, 1, 1, 2, 2, 2),
             dtype="uint16",
@@ -1726,7 +1749,7 @@ def test_run_workflow_chains_usegment3d_output_to_visualization(
         )
         return SimpleNamespace(
             component="results/usegment3d/latest",
-            data_component="results/usegment3d/latest/data",
+            data_component=_USEGMENT3D_CACHE_DATA,
             source_component="data",
         )
 
@@ -1743,7 +1766,7 @@ def test_run_workflow_chains_usegment3d_output_to_visualization(
         )
         latest.attrs["source_component"] = str(parameters["input_source"])
         return SimpleNamespace(
-            component="results/visualization/latest",
+            component=main_module.analysis_auxiliary_root("visualization"),
             source_component=str(parameters["input_source"]),
             source_components=(str(parameters["input_source"]),),
             position_index=0,
@@ -1782,11 +1805,11 @@ def test_run_workflow_chains_usegment3d_output_to_visualization(
         logger=_test_logger("clearex.test.main.usegment3d_chain"),
     )
 
-    assert captured["input_source"] == "results/usegment3d/latest/data"
+    assert captured["input_source"] == _USEGMENT3D_CACHE_DATA
     latest_ref = dict(
-        main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
-            "latest_outputs"
-        ]["usegment3d"].attrs
+        main_module.zarr.open_group(str(store_path), mode="r")[
+            f"{_PROVENANCE_ROOT}/latest_outputs/usegment3d"
+        ].attrs
     )
     assert latest_ref["component"] == "results/usegment3d/latest"
 
@@ -1811,34 +1834,29 @@ def test_run_workflow_chains_flatfield_output_to_visualization(
     def _fake_flatfield(*, zarr_path, parameters, client, progress_callback):
         del parameters, client, progress_callback
         fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
-        latest = (
-            fake_root.require_group("results")
-            .require_group("flatfield")
-            .require_group("latest")
-        )
-        latest.create_dataset(
-            name="data",
+        fake_root.create_dataset(
+            name=_FLATFIELD_CACHE_DATA,
             shape=(1, 1, 1, 2, 2, 2),
             chunks=(1, 1, 1, 2, 2, 2),
             dtype="float32",
             overwrite=True,
         )
-        latest.create_dataset(
-            name="flatfield_pcyx",
+        fake_root.create_dataset(
+            name="clearex/results/flatfield/latest/flatfield_pcyx",
             shape=(1, 1, 2, 2),
             chunks=(1, 1, 2, 2),
             dtype="float32",
             overwrite=True,
         )
-        latest.create_dataset(
-            name="darkfield_pcyx",
+        fake_root.create_dataset(
+            name="clearex/results/flatfield/latest/darkfield_pcyx",
             shape=(1, 1, 2, 2),
             chunks=(1, 1, 2, 2),
             dtype="float32",
             overwrite=True,
         )
-        latest.create_dataset(
-            name="baseline_pctz",
+        fake_root.create_dataset(
+            name="clearex/results/flatfield/latest/baseline_pctz",
             shape=(1, 1, 1, 2),
             chunks=(1, 1, 1, 2),
             dtype="float32",
@@ -1846,10 +1864,10 @@ def test_run_workflow_chains_flatfield_output_to_visualization(
         )
         return SimpleNamespace(
             component="results/flatfield/latest",
-            data_component="results/flatfield/latest/data",
-            flatfield_component="results/flatfield/latest/flatfield_pcyx",
-            darkfield_component="results/flatfield/latest/darkfield_pcyx",
-            baseline_component="results/flatfield/latest/baseline_pctz",
+            data_component=_FLATFIELD_CACHE_DATA,
+            flatfield_component="clearex/results/flatfield/latest/flatfield_pcyx",
+            darkfield_component="clearex/results/flatfield/latest/darkfield_pcyx",
+            baseline_component="clearex/results/flatfield/latest/baseline_pctz",
             profile_count=1,
             transformed_volumes=1,
             output_chunks_tpczyx=(1, 1, 1, 2, 2, 2),
@@ -1869,7 +1887,7 @@ def test_run_workflow_chains_flatfield_output_to_visualization(
         )
         latest.attrs["source_component"] = str(parameters["input_source"])
         return SimpleNamespace(
-            component="results/visualization/latest",
+            component=main_module.analysis_auxiliary_root("visualization"),
             source_component=str(parameters["input_source"]),
             source_components=(str(parameters["input_source"]),),
             position_index=0,
@@ -1908,11 +1926,11 @@ def test_run_workflow_chains_flatfield_output_to_visualization(
         logger=_test_logger("clearex.test.main.flatfield_chain"),
     )
 
-    assert captured["input_source"] == "results/flatfield/latest/data"
+    assert captured["input_source"] == _FLATFIELD_CACHE_DATA
     latest_ref = dict(
-        main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
-            "latest_outputs"
-        ]["flatfield"].attrs
+        main_module.zarr.open_group(str(store_path), mode="r")[
+            f"{_PROVENANCE_ROOT}/latest_outputs/flatfield"
+        ].attrs
     )
     assert latest_ref["component"] == "results/flatfield/latest"
 
@@ -1937,13 +1955,8 @@ def test_run_workflow_chains_deconvolution_output_to_particle_detection(
     def _fake_deconvolution(*, zarr_path, parameters, client, progress_callback):
         del parameters, client, progress_callback
         fake_root = main_module.zarr.open_group(str(zarr_path), mode="a")
-        latest = (
-            fake_root.require_group("results")
-            .require_group("deconvolution")
-            .require_group("latest")
-        )
-        latest.create_dataset(
-            name="data",
+        fake_root.create_dataset(
+            name=_DECONV_CACHE_DATA,
             shape=(1, 1, 1, 2, 2, 2),
             chunks=(1, 1, 1, 2, 2, 2),
             dtype="uint16",
@@ -1951,7 +1964,7 @@ def test_run_workflow_chains_deconvolution_output_to_particle_detection(
         )
         return SimpleNamespace(
             component="results/deconvolution/latest",
-            data_component="results/deconvolution/latest/data",
+            data_component=_DECONV_CACHE_DATA,
             volumes_processed=1,
             channel_count=1,
             psf_mode="measured",
@@ -1964,7 +1977,7 @@ def test_run_workflow_chains_deconvolution_output_to_particle_detection(
         del zarr_path, client, progress_callback
         captured["input_source"] = str(parameters["input_source"])
         return SimpleNamespace(
-            component="results/particle_detection/latest/detections",
+            component=_PARTICLE_DETECTION_COMPONENT,
             detections=3,
             chunks_processed=1,
             channel_index=0,
@@ -2006,7 +2019,7 @@ def test_run_workflow_chains_deconvolution_output_to_particle_detection(
         logger=_test_logger("clearex.test.main.decon_particle_chain"),
     )
 
-    assert captured["input_source"] == "results/deconvolution/latest/data"
+    assert captured["input_source"] == _DECONV_CACHE_DATA
 
 
 def test_run_workflow_fails_when_scheduled_output_is_missing(
@@ -2030,10 +2043,10 @@ def test_run_workflow_fails_when_scheduled_output_is_missing(
         del zarr_path, parameters, client, progress_callback
         return SimpleNamespace(
             component="results/flatfield/latest",
-            data_component="results/flatfield/latest/data",
-            flatfield_component="results/flatfield/latest/flatfield_pcyx",
-            darkfield_component="results/flatfield/latest/darkfield_pcyx",
-            baseline_component="results/flatfield/latest/baseline_pctz",
+            data_component=_FLATFIELD_CACHE_DATA,
+            flatfield_component="clearex/results/flatfield/latest/flatfield_pcyx",
+            darkfield_component="clearex/results/flatfield/latest/darkfield_pcyx",
+            baseline_component="clearex/results/flatfield/latest/baseline_pctz",
             profile_count=1,
             transformed_volumes=1,
             output_chunks_tpczyx=(1, 1, 1, 2, 2, 2),
@@ -2050,6 +2063,11 @@ def test_run_workflow_fails_when_scheduled_output_is_missing(
         main_module, "_configure_dask_backend", _fake_configure_dask_backend
     )
     monkeypatch.setattr(main_module, "run_flatfield_analysis", _fake_flatfield)
+    monkeypatch.setattr(
+        main_module,
+        "publish_analysis_collection_from_cache",
+        lambda *args, **kwargs: None,
+    )
     monkeypatch.setattr(main_module, "run_deconvolution_analysis", _should_not_run)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
 
@@ -2077,8 +2095,8 @@ def test_run_workflow_fails_when_scheduled_output_is_missing(
             logger=_test_logger("clearex.test.main.missing_scheduled_output"),
         )
 
-    runs_group = main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
-        "runs"
+    runs_group = main_module.zarr.open_group(str(store_path), mode="r")[
+        f"{_PROVENANCE_ROOT}/runs"
     ]
     run_records = [
         dict(runs_group[run_id].attrs["record"]) for run_id in runs_group.group_keys()
@@ -2092,14 +2110,14 @@ def test_run_workflow_fails_when_scheduled_output_is_missing(
         and dict(step.get("parameters", {})).get("reason") == "missing_input_dependency"
         and dict(step.get("parameters", {})).get("requested_input") == "flatfield"
         and dict(step.get("parameters", {})).get("resolved_input")
-        == "results/flatfield/latest/data"
+        == _FLATFIELD_CACHE_DATA
         for step in run_records[0]["steps"]
     )
     assert (
         run_records[0]["workflow"]["analysis_parameters"]["deconvolution"][
             "input_source"
         ]
-        == "results/flatfield/latest/data"
+        == _FLATFIELD_CACHE_DATA
     )
 
 
@@ -2150,8 +2168,8 @@ def test_run_workflow_fails_for_missing_custom_component(
             logger=_test_logger("clearex.test.main.missing_custom_component"),
         )
 
-    runs_group = main_module.zarr.open_group(str(store_path), mode="r")["provenance"][
-        "runs"
+    runs_group = main_module.zarr.open_group(str(store_path), mode="r")[
+        f"{_PROVENANCE_ROOT}/runs"
     ]
     run_records = [
         dict(runs_group[run_id].attrs["record"]) for run_id in runs_group.group_keys()
@@ -2186,12 +2204,13 @@ def test_run_workflow_chains_from_provenance_skipped_upstream_output(
         overwrite=True,
     )
     root.create_dataset(
-        name="results/usegment3d/latest/data",
+        name=_USEGMENT3D_CACHE_DATA,
         shape=(1, 1, 1, 2, 2, 2),
         chunks=(1, 1, 1, 2, 2, 2),
         dtype="uint16",
         overwrite=True,
     )
+    root.require_group(main_module.analysis_auxiliary_root("usegment3d"))
 
     workflow = WorkflowConfig(
         file=str(store_path),
@@ -2231,7 +2250,7 @@ def test_run_workflow_chains_from_provenance_skipped_upstream_output(
         del zarr_path, progress_callback
         captured["input_source"] = str(parameters["input_source"])
         return SimpleNamespace(
-            component="results/visualization/latest",
+            component=main_module.analysis_auxiliary_root("visualization"),
             source_component=str(parameters["input_source"]),
             source_components=(str(parameters["input_source"]),),
             position_index=0,
@@ -2245,6 +2264,15 @@ def test_run_workflow_chains_from_provenance_skipped_upstream_output(
     monkeypatch.setattr(
         main_module, "_configure_dask_backend", _fake_configure_dask_backend
     )
+    monkeypatch.setattr(
+        main_module,
+        "summarize_analysis_history",
+        lambda *args, **kwargs: {
+            "matches_parameters": True,
+            "matching_run_id": "run-1",
+            "matching_ended_utc": None,
+        },
+    )
     monkeypatch.setattr(main_module, "run_usegment3d_analysis", _should_not_run)
     monkeypatch.setattr(main_module, "run_visualization_analysis", _fake_visualization)
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
@@ -2254,4 +2282,4 @@ def test_run_workflow_chains_from_provenance_skipped_upstream_output(
         logger=_test_logger("clearex.test.main.skip_chain"),
     )
 
-    assert captured["input_source"] == "results/usegment3d/latest/data"
+    assert captured["input_source"] == _USEGMENT3D_CACHE_DATA

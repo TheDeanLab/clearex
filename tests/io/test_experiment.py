@@ -449,11 +449,26 @@ def test_initialize_analysis_store_creates_6d_layout(tmp_path: Path):
     assert output == store_path.resolve()
 
     root = zarr.open_group(str(store_path), mode="r")
-    assert tuple(root["data"].shape) == (2, 3, 2, 4, 8, 16)
-    assert list(root["data"].attrs["axes"]) == ["t", "p", "c", "z", "y", "x"]
-    assert root.attrs["storage_policy_analysis_outputs"] == "latest_only"
-    assert list(root["data"].attrs["chunk_shape_tpczyx"]) == [1, 1, 1, 4, 8, 16]
-    assert list(root.attrs["configured_chunks_tpczyx"]) == [1, 1, 1, 256, 256, 256]
+    metadata = root["clearex/metadata"].attrs
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (2, 3, 2, 4, 8, 16)
+    assert list(root[SOURCE_CACHE_COMPONENT].attrs["axes"]) == [
+        "t",
+        "p",
+        "c",
+        "z",
+        "y",
+        "x",
+    ]
+    assert metadata["storage_policy_analysis_outputs"] == "latest_only"
+    assert list(root[SOURCE_CACHE_COMPONENT].attrs["chunk_shape_tpczyx"]) == [
+        1,
+        1,
+        1,
+        4,
+        8,
+        16,
+    ]
+    assert list(metadata["configured_chunks_tpczyx"]) == [1, 1, 1, 256, 256, 256]
 
 
 def test_initialize_analysis_store_applies_custom_chunks_and_pyramid(tmp_path: Path):
@@ -479,10 +494,18 @@ def test_initialize_analysis_store_applies_custom_chunks_and_pyramid(tmp_path: P
     )
 
     root = zarr.open_group(str(store_path), mode="r")
-    assert tuple(root["data"].chunks) == (1, 1, 1, 8, 32, 32)
-    assert list(root["data"].attrs["chunk_shape_tpczyx"]) == [1, 1, 1, 8, 32, 32]
-    assert list(root.attrs["configured_chunks_tpczyx"]) == [1, 1, 1, 8, 32, 32]
-    assert root.attrs["resolution_pyramid_factors_tpczyx"] == [
+    metadata = root["clearex/metadata"].attrs
+    assert tuple(root[SOURCE_CACHE_COMPONENT].chunks) == (1, 1, 1, 8, 32, 32)
+    assert list(root[SOURCE_CACHE_COMPONENT].attrs["chunk_shape_tpczyx"]) == [
+        1,
+        1,
+        1,
+        8,
+        32,
+        32,
+    ]
+    assert list(metadata["configured_chunks_tpczyx"]) == [1, 1, 1, 8, 32, 32]
+    assert metadata["resolution_pyramid_factors_tpczyx"] == [
         [1],
         [1],
         [1],
@@ -578,7 +601,7 @@ def test_write_zyx_block_numpy(tmp_path: Path):
     )
 
     root = zarr.open_group(str(store_path), mode="r")
-    loaded = np.array(root["data"][1, 2, 1, :, :, :])
+    loaded = np.array(root[SOURCE_CACHE_COMPONENT][1, 2, 1, :, :, :])
     assert np.array_equal(loaded, block)
 
 
@@ -714,7 +737,7 @@ def test_resolve_data_store_path_uses_experiment_directory_for_non_zarr(tmp_path
 
     resolved = resolve_data_store_path(experiment, source_path)
 
-    assert resolved == (experiment_dir / "data_store.zarr").resolve()
+    assert resolved == (experiment_dir / "data_store.ome.zarr").resolve()
 
 
 def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(
@@ -737,16 +760,29 @@ def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(
         pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
     )
 
-    expected_store = (experiment_path.parent / "data_store.zarr").resolve()
+    expected_store = (experiment_path.parent / "data_store.ome.zarr").resolve()
     assert materialized.store_path == expected_store
     root = zarr.open_group(str(expected_store), mode="r")
-    assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
-    assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
-    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
-    assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
-    assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
+    metadata = root["clearex/metadata"].attrs
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 1, 1, 2, 3, 4)
+    assert tuple(root[SOURCE_CACHE_COMPONENT].chunks) == (1, 1, 1, 2, 2, 2)
     assert np.array_equal(
-        np.array(root["data_pyramid/level_1"][0, 0, 0, :, :, :]),
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]), source_data
+    )
+    assert metadata["data_pyramid_levels"] == [
+        SOURCE_CACHE_COMPONENT,
+        source_cache_component(level_index=1),
+    ]
+    assert tuple(root[source_cache_component(level_index=1)].shape) == (
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+    )
+    assert np.array_equal(
+        np.array(root[source_cache_component(level_index=1)][0, 0, 0, :, :, :]),
         source_data[::2, ::2, ::2],
     )
 
@@ -785,9 +821,11 @@ def test_materialize_experiment_data_store_batches_chunk_writes(
         pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
     )
 
-    expected_store = (experiment_path.parent / "data_store.zarr").resolve()
+    expected_store = (experiment_path.parent / "data_store.ome.zarr").resolve()
     root = zarr.open_group(str(expected_store), mode="r")
-    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert np.array_equal(
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]), source_data
+    )
     assert len(compute_calls) == 8
 
 
@@ -831,7 +869,7 @@ def test_materialize_experiment_data_store_resumes_after_interrupted_base_write(
             pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
         )
 
-    expected_store = (experiment_path.parent / "data_store.zarr").resolve()
+    expected_store = (experiment_path.parent / "data_store.ome.zarr").resolve()
     root = zarr.open_group(str(expected_store), mode="r")
     progress = dict(root.attrs["ingestion_progress"])
     assert progress["status"] == "in_progress"
@@ -855,7 +893,9 @@ def test_materialize_experiment_data_store_resumes_after_interrupted_base_write(
 
     assert resume_call_count["value"] == 5
     root = zarr.open_group(str(materialized.store_path), mode="r")
-    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
+    assert np.array_equal(
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]), source_data
+    )
     progress = dict(root.attrs["ingestion_progress"])
     assert progress["status"] == "completed"
     assert progress["base_progress"]["completed_regions"] == 8
@@ -883,9 +923,11 @@ def test_materialize_experiment_data_store_handles_multibatch_base_and_pyramid(
     )
 
     root = zarr.open_group(str(materialized.store_path), mode="r")
-    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
     assert np.array_equal(
-        np.array(root["data_pyramid/level_1"][0, 0, 0, :, :, :]),
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]), source_data
+    )
+    assert np.array_equal(
+        np.array(root[source_cache_component(level_index=1)][0, 0, 0, :, :, :]),
         source_data[::2, ::2, ::2],
     )
 
@@ -914,26 +956,39 @@ def test_materialize_experiment_data_store_reuses_existing_zarr_store(tmp_path: 
 
     assert materialized.store_path == source_store.resolve()
     root = zarr.open_group(str(source_store), mode="r")
-    assert "data" in root
-    assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
-    assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
-    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
-    assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
-    assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
-    assert not (experiment_path.parent / "data_store.zarr").exists()
+    metadata = root["clearex/metadata"].attrs
+    assert SOURCE_CACHE_COMPONENT in root
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 1, 1, 2, 3, 4)
+    assert tuple(root[SOURCE_CACHE_COMPONENT].chunks) == (1, 1, 1, 2, 2, 2)
+    assert np.array_equal(
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]), source_data
+    )
+    assert metadata["data_pyramid_levels"] == [
+        SOURCE_CACHE_COMPONENT,
+        source_cache_component(level_index=1),
+    ]
+    assert tuple(root[source_cache_component(level_index=1)].shape) == (
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+    )
+    assert not (experiment_path.parent / "data_store.ome.zarr").exists()
 
 
 def test_has_canonical_data_component_detects_ready_store(tmp_path: Path):
     store_path = tmp_path / "ready_store.n5"
     root = zarr.open_group(str(store_path), mode="w")
     root.create_dataset(
-        "data",
+        SOURCE_CACHE_COMPONENT,
         shape=(1, 2, 3, 4, 5, 6),
         chunks=(1, 1, 1, 2, 3, 3),
         dtype="uint16",
         overwrite=True,
     )
-    root["data"].attrs["axes"] = ["t", "p", "c", "z", "y", "x"]
+    root[SOURCE_CACHE_COMPONENT].attrs["axes"] = ["t", "p", "c", "z", "y", "x"]
 
     assert has_canonical_data_component(store_path) is True
 
@@ -1135,19 +1190,34 @@ def test_materialize_experiment_data_store_handles_same_component_rewrite(
     )
     source_root["data"].attrs["_ARRAY_DIMENSIONS"] = ["z", "y", "x"]
 
-    materialize_experiment_data_store(
+    materialized = materialize_experiment_data_store(
         experiment=experiment,
         source_path=source_store,
         chunks=(1, 1, 1, 2, 2, 2),
         pyramid_factors=((1,), (1,), (1,), (1, 2), (1, 2), (1, 2)),
     )
 
-    root = zarr.open_group(str(source_store), mode="r")
-    assert tuple(root["data"].shape) == (1, 1, 1, 2, 3, 4)
-    assert tuple(root["data"].chunks) == (1, 1, 1, 2, 2, 2)
-    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
-    assert root.attrs["data_pyramid_levels"] == ["data", "data_pyramid/level_1"]
-    assert tuple(root["data_pyramid/level_1"].shape) == (1, 1, 1, 1, 2, 2)
+    expected_store = (experiment_path.parent / "data_store.ome.zarr").resolve()
+    assert materialized.store_path == expected_store
+    root = zarr.open_group(str(expected_store), mode="r")
+    metadata = root["clearex/metadata"].attrs
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 1, 1, 2, 3, 4)
+    assert tuple(root[SOURCE_CACHE_COMPONENT].chunks) == (1, 1, 1, 2, 2, 2)
+    assert np.array_equal(
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]), source_data
+    )
+    assert metadata["data_pyramid_levels"] == [
+        SOURCE_CACHE_COMPONENT,
+        source_cache_component(level_index=1),
+    ]
+    assert tuple(root[source_cache_component(level_index=1)].shape) == (
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+    )
 
 
 def test_materialize_experiment_data_store_stacks_tiff_positions_and_channels(
@@ -1185,12 +1255,15 @@ def test_materialize_experiment_data_store_stacks_tiff_positions_and_channels(
     )
 
     root = zarr.open_group(str(materialized.store_path), mode="r")
-    assert tuple(root["data"].shape) == (1, 3, 2, 2, 3, 4)
-    assert root.attrs["source_data_path"] == str(tmp_path.resolve())
+    metadata = root["clearex/metadata"].attrs
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 3, 2, 2, 3, 4)
+    assert metadata["source_data_path"] == str(tmp_path.resolve())
 
     for position_index in range(3):
         for channel_index in range(2):
-            loaded = np.array(root["data"][0, position_index, channel_index, :, :, :])
+            loaded = np.array(
+                root[SOURCE_CACHE_COMPONENT][0, position_index, channel_index, :, :, :]
+            )
             assert np.array_equal(
                 loaded,
                 expected_blocks[(position_index, channel_index)],
@@ -1265,12 +1338,15 @@ def test_materialize_experiment_data_store_stacks_bdv_h5_setups(
     )
 
     root = zarr.open_group(str(materialized.store_path), mode="r")
-    assert tuple(root["data"].shape) == (1, 2, 2, 2, 3, 4)
-    assert root.attrs["source_data_path"] == str(source_path.resolve())
+    metadata = root["clearex/metadata"].attrs
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 2, 2, 2, 3, 4)
+    assert metadata["source_data_path"] == str(source_path.resolve())
 
     for position_index in range(2):
         for channel_index in range(2):
-            loaded = np.array(root["data"][0, position_index, channel_index, :, :, :])
+            loaded = np.array(
+                root[SOURCE_CACHE_COMPONENT][0, position_index, channel_index, :, :, :]
+            )
             assert np.array_equal(
                 loaded, expected_blocks[(position_index, channel_index)]
             )
@@ -1613,12 +1689,15 @@ def test_materialize_experiment_data_store_stacks_bdv_ome_zarr_setups(
     )
 
     root = zarr.open_group(str(materialized.store_path), mode="r")
-    assert tuple(root["data"].shape) == (1, 2, 2, 2, 3, 4)
-    assert root.attrs["source_data_path"] == str(source_path.resolve())
+    metadata = root["clearex/metadata"].attrs
+    assert tuple(root[SOURCE_CACHE_COMPONENT].shape) == (1, 2, 2, 2, 3, 4)
+    assert metadata["source_data_path"] == str(source_path.resolve())
 
     for position_index in range(2):
         for channel_index in range(2):
-            loaded = np.array(root["data"][0, position_index, channel_index, :, :, :])
+            loaded = np.array(
+                root[SOURCE_CACHE_COMPONENT][0, position_index, channel_index, :, :, :]
+            )
             assert np.array_equal(
                 loaded, expected_blocks[(position_index, channel_index)]
             )
@@ -1700,15 +1779,16 @@ def test_materialize_experiment_data_store_uses_source_aligned_plane_writes(
     )
 
     root = zarr.open_group(str(materialized.store_path), mode="r")
+    metadata = root["clearex/metadata"].attrs
     assert writer_calls["source_aligned"] == 1
     assert writer_calls["chunk_batched"] == 0
-    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
-    assert (
-        root.attrs["materialization_write_strategy"] == "source_aligned_plane_batches"
+    assert np.array_equal(
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]), source_data
     )
-    assert root.attrs["source_aligned_z_batch_depth"] == 2
-    assert root.attrs["source_aligned_worker_count"] is None
-    assert root.attrs["source_aligned_worker_memory_limit_bytes"] is None
+    assert metadata["materialization_write_strategy"] == "source_aligned_plane_batches"
+    assert metadata["source_aligned_z_batch_depth"] == 2
+    assert metadata["source_aligned_worker_count"] is None
+    assert metadata["source_aligned_worker_memory_limit_bytes"] is None
 
 
 def test_materialize_experiment_data_store_falls_back_to_chunk_batched_writes(
@@ -1763,13 +1843,16 @@ def test_materialize_experiment_data_store_falls_back_to_chunk_batched_writes(
     )
 
     root = zarr.open_group(str(materialized.store_path), mode="r")
+    metadata = root["clearex/metadata"].attrs
     assert writer_calls["source_aligned"] == 0
     assert writer_calls["chunk_batched"] == 1
-    assert np.array_equal(np.array(root["data"][0, 0, 0, :, :, :]), source_data)
-    assert root.attrs["materialization_write_strategy"] == "chunk_region_batches"
-    assert root.attrs["source_aligned_z_batch_depth"] is None
-    assert root.attrs["source_aligned_worker_count"] is None
-    assert root.attrs["source_aligned_worker_memory_limit_bytes"] is None
+    assert np.array_equal(
+        np.array(root[SOURCE_CACHE_COMPONENT][0, 0, 0, :, :, :]), source_data
+    )
+    assert metadata["materialization_write_strategy"] == "chunk_region_batches"
+    assert metadata["source_aligned_z_batch_depth"] is None
+    assert metadata["source_aligned_worker_count"] is None
+    assert metadata["source_aligned_worker_memory_limit_bytes"] is None
 
 
 def test_detect_client_worker_resources_extracts_min_limit():

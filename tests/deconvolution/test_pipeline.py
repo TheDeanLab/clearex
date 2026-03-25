@@ -13,6 +13,9 @@ import zarr
 from clearex.deconvolution.pipeline import run_deconvolution_analysis
 import clearex.deconvolution.pipeline as decon_pipeline
 
+_DECONV_PUBLIC_COMPONENT = "results/deconvolution/latest"
+_DECONV_CACHE_DATA = "clearex/runtime_cache/results/deconvolution/latest/data"
+
 
 def _create_store(
     *,
@@ -69,11 +72,11 @@ def test_run_deconvolution_analysis_schedules_all_tpc_volumes(
     assert captured["task_count"] == 12
     assert summary.volumes_processed == 12
     assert summary.channel_count == 2
-    assert summary.component == "results/deconvolution/latest"
-    assert summary.data_component == "results/deconvolution/latest/data"
+    assert summary.component == _DECONV_PUBLIC_COMPONENT
+    assert summary.data_component == _DECONV_CACHE_DATA
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    output = output_root["results"]["deconvolution"]["latest"]["data"]
+    output = output_root[_DECONV_CACHE_DATA]
     assert tuple(output.shape) == (2, 3, 2, 4, 4, 4)
 
 

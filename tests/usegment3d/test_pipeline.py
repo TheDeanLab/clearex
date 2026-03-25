@@ -13,6 +13,10 @@ from clearex.io.experiment import create_dask_client
 from clearex.usegment3d.pipeline import run_usegment3d_analysis
 import clearex.usegment3d.pipeline as usegment_pipeline
 
+_USEGMENT3D_PUBLIC_COMPONENT = "results/usegment3d/latest"
+_USEGMENT3D_CACHE_DATA = "clearex/runtime_cache/results/usegment3d/latest/data"
+_USEGMENT3D_PROVENANCE_ROOT = "clearex/provenance"
+
 
 class _FakeParameterModule:
     """Minimal parameter-factory module used to mock segment3D.parameters."""
@@ -330,8 +334,8 @@ def test_run_usegment3d_analysis_writes_latest_results(
     finally:
         client.close()
 
-    assert summary.component == "results/usegment3d/latest"
-    assert summary.data_component == "results/usegment3d/latest/data"
+    assert summary.component == _USEGMENT3D_PUBLIC_COMPONENT
+    assert summary.data_component == _USEGMENT3D_CACHE_DATA
     assert summary.source_component == "data"
     assert summary.volumes_processed == 2
     assert summary.channel_indices == (1,)
@@ -341,13 +345,15 @@ def test_run_usegment3d_analysis_writes_latest_results(
     assert summary.gpu_enabled is False
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    labels = np.asarray(output_root["results"]["usegment3d"]["latest"]["data"])
+    labels = np.asarray(output_root[_USEGMENT3D_CACHE_DATA])
     assert tuple(labels.shape) == (1, 2, 1, 4, 5, 6)
     assert labels.dtype == np.uint32
     assert int(labels.max()) == 1
 
-    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
-    assert latest_ref["component"] == "results/usegment3d/latest"
+    latest_ref = dict(
+        output_root[f"{_USEGMENT3D_PROVENANCE_ROOT}/latest_outputs/usegment3d"].attrs
+    )
+    assert latest_ref["component"] == _USEGMENT3D_PUBLIC_COMPONENT
     assert latest_ref["metadata"].get("channel_indices", []) == [1]
     assert latest_ref["metadata"].get("aggregation_tile_mode_effective") is latest_ref[
         "metadata"
@@ -396,11 +402,13 @@ def test_run_usegment3d_analysis_supports_multiple_channels(
     assert summary.channel_index == 0
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    labels = np.asarray(output_root["results"]["usegment3d"]["latest"]["data"])
+    labels = np.asarray(output_root[_USEGMENT3D_CACHE_DATA])
     assert tuple(labels.shape) == (1, 1, 2, 2, 2, 2)
     assert int(labels.max()) == 1
 
-    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    latest_ref = dict(
+        output_root[f"{_USEGMENT3D_PROVENANCE_ROOT}/latest_outputs/usegment3d"].attrs
+    )
     metadata = dict(latest_ref.get("metadata", {}))
     assert metadata.get("channel_indices") == [0, 2]
     assert metadata.get("channels_processed") == 2
@@ -447,11 +455,13 @@ def test_run_usegment3d_analysis_supports_all_channels_mode(
     assert summary.channel_index == 0
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    labels = np.asarray(output_root["results"]["usegment3d"]["latest"]["data"])
+    labels = np.asarray(output_root[_USEGMENT3D_CACHE_DATA])
     assert tuple(labels.shape) == (1, 1, 3, 2, 2, 2)
     assert int(labels.max()) == 1
 
-    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    latest_ref = dict(
+        output_root[f"{_USEGMENT3D_PROVENANCE_ROOT}/latest_outputs/usegment3d"].attrs
+    )
     metadata = dict(latest_ref.get("metadata", {}))
     assert metadata.get("channel_indices") == [0, 1, 2]
     assert metadata.get("channels_processed") == 3
@@ -496,7 +506,9 @@ def test_run_usegment3d_analysis_drops_unknown_parameters(
         client.close()
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    latest_ref = dict(
+        output_root[f"{_USEGMENT3D_PROVENANCE_ROOT}/latest_outputs/usegment3d"].attrs
+    )
     metadata = dict(latest_ref.get("metadata", {}))
     assert "nonstandard_blob" not in metadata.get("parameters", {})
     assert "nonstandard_blob" in metadata.get("dropped_parameter_keys", [])
@@ -540,7 +552,9 @@ def test_run_usegment3d_disables_tile_multiprocessing_with_distributed_client(
         client.close()
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    latest_ref = dict(
+        output_root[f"{_USEGMENT3D_PROVENANCE_ROOT}/latest_outputs/usegment3d"].attrs
+    )
     metadata = dict(latest_ref.get("metadata", {}))
     assert metadata.get("aggregation_tile_mode_requested") is True
     assert metadata.get("aggregation_tile_mode_effective") is False
@@ -604,15 +618,18 @@ def test_run_usegment3d_analysis_segments_pyramid_level_and_upscales_to_level0(
     assert summary.source_component == "data_pyramid/level_1"
 
     output_root = zarr.open_group(str(store_path), mode="r")
-    latest_group = output_root["results"]["usegment3d"]["latest"]
-    labels_level0 = np.asarray(latest_group["data"])
-    labels_native = np.asarray(latest_group["data_native"])
+    labels_level0 = np.asarray(output_root[_USEGMENT3D_CACHE_DATA])
+    labels_native = np.asarray(
+        output_root["clearex/runtime_cache/results/usegment3d/latest/data_native"]
+    )
     assert tuple(labels_level0.shape) == (1, 1, 1, 4, 4, 4)
     assert tuple(labels_native.shape) == (1, 1, 1, 2, 2, 2)
     assert int(labels_level0.max()) == 1
     assert int(labels_native.max()) == 1
 
-    latest_ref = dict(output_root["provenance"]["latest_outputs"]["usegment3d"].attrs)
+    latest_ref = dict(
+        output_root[f"{_USEGMENT3D_PROVENANCE_ROOT}/latest_outputs/usegment3d"].attrs
+    )
     metadata = dict(latest_ref.get("metadata", {}))
     assert metadata.get("source_component") == "data_pyramid/level_1"
     assert metadata.get("requested_source_component") == "data"

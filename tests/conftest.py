@@ -5,13 +5,85 @@ from __future__ import annotations
 import os
 import sys
 
+import numpy as np
 import pytest
+import zarr
+
+try:
+    from numcodecs import Blosc as _NumcodecsBlosc
+except Exception:  # pragma: no cover - optional dependency import guard
+    _NumcodecsBlosc = None
+
+try:
+    from zarr.codecs import BloscCodec
+except Exception:  # pragma: no cover - optional dependency import guard
+    BloscCodec = None
 
 if sys.platform == "darwin":
     # Use Qt's offscreen platform during tests so transient dialogs/viewers do
     # not flash on the interactive desktop. Callers can still override this by
     # exporting QT_QPA_PLATFORM explicitly before running pytest.
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def _normalize_legacy_zarr_compressor(value):
+    """Translate legacy numcodecs compressors into Zarr 3 codecs when needed."""
+    if _NumcodecsBlosc is not None and BloscCodec is not None:
+        if isinstance(value, _NumcodecsBlosc):
+            shuffle = getattr(value, "shuffle", None)
+            if isinstance(shuffle, int):
+                shuffle = {
+                    0: "noshuffle",
+                    1: "shuffle",
+                    2: "bitshuffle",
+                }.get(shuffle, shuffle)
+            return BloscCodec(
+                typesize=int(getattr(value, "typesize", 0) or 0) or None,
+                cname=getattr(value, "cname", "zstd"),
+                clevel=int(getattr(value, "clevel", 5)),
+                shuffle=shuffle,
+                blocksize=int(getattr(value, "blocksize", 0) or 0),
+            )
+    return value
+
+
+_ORIGINAL_ZARR_GROUP_CREATE_DATASET = zarr.Group.create_dataset
+
+
+def _compat_zarr_group_create_dataset(self: zarr.Group, name: str, **kwargs):
+    """Restore legacy ``create_dataset(data=...)`` ergonomics for tests.
+
+    Zarr 3 tightened ``create_dataset`` around the async API and now requires
+    ``shape`` explicitly. The test suite still uses the older, widely used sync
+    pattern that infers shape and dtype from ``data``. Mirror that behavior in
+    tests so the suite can focus on ClearEx semantics rather than Zarr API
+    churn.
+    """
+    normalized = dict(kwargs)
+    data = normalized.get("data")
+    if data is not None:
+        array = data if isinstance(data, np.ndarray) else np.asarray(data)
+        dtype = normalized.pop("dtype", None)
+        if dtype is not None:
+            array = np.asarray(array, dtype=dtype)
+        normalized.pop("shape", None)
+        normalized["data"] = array
+    if "compressor" in normalized:
+        normalized["compressor"] = _normalize_legacy_zarr_compressor(
+            normalized["compressor"]
+        )
+    if "compressors" in normalized:
+        compressors = normalized["compressors"]
+        if isinstance(compressors, (tuple, list)):
+            normalized["compressors"] = [
+                _normalize_legacy_zarr_compressor(item) for item in compressors
+            ]
+        else:
+            normalized["compressors"] = _normalize_legacy_zarr_compressor(compressors)
+    return self.create_array(name, **normalized)
+
+
+zarr.Group.create_dataset = _compat_zarr_group_create_dataset
 
 
 _FAKE_GPU_RENDERER_INFO = {

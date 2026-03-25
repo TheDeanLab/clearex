@@ -656,11 +656,13 @@ def _load_source_experiment_raw(
     None
         Failures are handled internally and return ``None``.
     """
-    source_experiment = (
-        store_metadata.get("source_experiment")
-        if isinstance(store_metadata, Mapping)
-        else root_attrs.get("source_experiment")
-    )
+    source_experiment = None
+    if isinstance(store_metadata, Mapping):
+        candidate = store_metadata.get("source_experiment")
+        if isinstance(candidate, str) and candidate.strip():
+            source_experiment = candidate
+    if source_experiment is None:
+        source_experiment = root_attrs.get("source_experiment")
     if not isinstance(source_experiment, str):
         return None
     text = source_experiment.strip()
@@ -881,6 +883,41 @@ def _build_napari_layer_payload(
     source_components = tuple(str(item) for item in primary_layer.source_components)
     root_attrs = dict(root.attrs)
     store_metadata = load_store_metadata(root)
+    source_data_path = (
+        store_metadata.get("source_data_path")
+        if isinstance(store_metadata, Mapping)
+        else None
+    ) or root_attrs.get("source_data_path")
+    source_data_component = (
+        store_metadata.get("source_data_component")
+        if isinstance(store_metadata, Mapping)
+        else None
+    ) or root_attrs.get("source_data_component")
+    source_experiment = (
+        store_metadata.get("source_experiment")
+        if isinstance(store_metadata, Mapping)
+        else None
+    ) or root_attrs.get("source_experiment")
+    navigate_experiment = (
+        store_metadata.get("navigate_experiment")
+        if isinstance(store_metadata, Mapping)
+        else None
+    ) or root_attrs.get("navigate_experiment")
+    configured_chunks_tpczyx = (
+        store_metadata.get("configured_chunks_tpczyx")
+        if isinstance(store_metadata, Mapping)
+        else None
+    ) or root_attrs.get("configured_chunks_tpczyx")
+    data_pyramid_levels = (
+        store_metadata.get("data_pyramid_levels")
+        if isinstance(store_metadata, Mapping)
+        else None
+    ) or root_attrs.get("data_pyramid_levels")
+    data_pyramid_factors_tpczyx = (
+        store_metadata.get("data_pyramid_factors_tpczyx")
+        if isinstance(store_metadata, Mapping)
+        else None
+    ) or root_attrs.get("data_pyramid_factors_tpczyx")
     source_array = root[str(source_component)]
     source_attrs = dict(source_array.attrs)
     source_experiment_raw = _load_source_experiment_raw(
@@ -925,13 +962,13 @@ def _build_napari_layer_payload(
         "source_components": [str(item) for item in source_components],
         "volume_layers": volume_layers_payload,
         "position_index": int(position_index),
-        "source_data_path": root_attrs.get("source_data_path"),
-        "source_data_component": root_attrs.get("source_data_component"),
+        "source_data_path": source_data_path,
+        "source_data_component": source_data_component,
         "source_data_axes": root_attrs.get("source_data_axes"),
-        "source_experiment": root_attrs.get("source_experiment"),
-        "navigate_experiment": root_attrs.get("navigate_experiment"),
+        "source_experiment": source_experiment,
+        "navigate_experiment": navigate_experiment,
         "source_experiment_metadata": source_experiment_raw,
-        "configured_chunks_tpczyx": root_attrs.get("configured_chunks_tpczyx"),
+        "configured_chunks_tpczyx": configured_chunks_tpczyx,
         "chunk_shape_tpczyx": (
             source_attrs.get("chunk_shape_tpczyx")
             or root_attrs.get("chunk_shape_tpczyx")
@@ -950,8 +987,8 @@ def _build_napari_layer_payload(
             "limits_attr": _DISPLAY_CONTRAST_LIMITS_ATTR,
             "percentiles_attr": _DISPLAY_CONTRAST_PERCENTILES_ATTR,
         },
-        "data_pyramid_levels": root_attrs.get("data_pyramid_levels"),
-        "data_pyramid_factors_tpczyx": root_attrs.get("data_pyramid_factors_tpczyx"),
+        "data_pyramid_levels": data_pyramid_levels,
+        "data_pyramid_factors_tpczyx": data_pyramid_factors_tpczyx,
         "multiscale_levels": multiscale_levels,
         "primary_multiscale_status": str(primary_layer.multiscale_status),
         "source_array_attrs": source_attrs,
@@ -972,7 +1009,7 @@ def _build_napari_layer_payload(
                 f"{analysis_auxiliary_root('particle_detection')}/detections",
             )
         ),
-        "source_data_path": root_attrs.get("source_data_path"),
+        "source_data_path": source_data_path,
     }
 
     image_metadata = _sanitize_metadata_value(image_metadata_raw)
@@ -3166,11 +3203,13 @@ def _load_multiposition_stage_rows(
         if parsed_stage_rows:
             return parsed_stage_rows
 
-    source_experiment = (
-        store_metadata.get("source_experiment")
-        if isinstance(store_metadata, Mapping)
-        else root_attrs.get("source_experiment")
-    )
+    source_experiment = None
+    if isinstance(store_metadata, Mapping):
+        candidate = store_metadata.get("source_experiment")
+        if isinstance(candidate, str) and candidate.strip():
+            source_experiment = candidate
+    if source_experiment is None:
+        source_experiment = root_attrs.get("source_experiment")
     if not isinstance(source_experiment, str):
         return []
 
@@ -3285,7 +3324,7 @@ def _resolve_world_axis_delta(
 def _resolve_position_affines_tczyx(
     *,
     root_attrs: Mapping[str, Any],
-    store_metadata: Optional[Mapping[str, Any]],
+    store_metadata: Optional[Mapping[str, Any]] = None,
     selected_positions: Sequence[int],
     scale_tczyx: Sequence[float],
 ) -> tuple[dict[int, np.ndarray], list[dict[str, float]], SpatialCalibrationConfig]:
