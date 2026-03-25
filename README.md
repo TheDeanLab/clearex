@@ -302,15 +302,21 @@ clearex --migrate-store /path/to/legacy_store.zarr
 - Visualization supports multi-volume overlays using logical sources and/or public OME image collections (for example source data plus `results/usegment3d/latest`) with per-layer image/labels display controls.
 - Multiposition visualization placement now resolves world `z/y/x` translations from the store-level spatial calibration. Bindings support `X`, `Y`, `Z`, and Navigate focus axis `F` with sign inversion or `none`; `THETA` remains a rotation of the `z/y` plane about world `x`.
 - Visualization now probes napari OpenGL renderer info (`vendor`/`renderer`/`version`) and can fail fast when software rendering is detected or GPU rendering cannot be confirmed (`require_gpu_rendering=True`).
-- `render_movie` consumes visualization keyframes and writes latest metadata to
-  `clearex/results/render_movie/latest` plus external PNG frame sets under
-  `<analysis_store>_render_movie/latest/level_<nn>_frames`.
-- `compile_movie` consumes the latest render manifest and writes latest metadata
-  to `clearex/results/compile_movie/latest` plus external movie files under
-  `<analysis_store>_compile_movie/latest`.
+- `render_movie` consumes visualization keyframes and writes both latest
+  metadata and default PNG frame sets inside the canonical store under
+  `clearex/results/render_movie/latest`.
+- `compile_movie` consumes the latest render manifest and writes both latest
+  metadata and default movie files inside the canonical store under
+  `clearex/results/compile_movie/latest`.
 - Offline movie rendering rebuilds captured `Points` and `Tracks` layers from
   the keyframe manifest so particle and track overlays can survive beyond the
   live napari session.
+- `render_movie` now captures from a visible napari viewer by default. This
+  avoids the empty-frame failures seen with hidden/offscreen capture while
+  keeping both GPU-backed and CPU/software-rendered movie capture paths usable.
+- When the ClearEx GUI is already running, `render_movie` opens that visible
+  napari capture viewer in a dedicated subprocess so movie rendering does not
+  create Qt/OpenGL objects from the GUI worker thread.
 - MIP export writes TIFF outputs as OME-TIFF (`.tif`) with projection-aware physical pixel calibration (`PhysicalSizeX/Y`) derived from source `voxel_size_um_zyx`.
 - `mip_export export_format=zarr` writes standalone OME-Zarr v3 image stores (`.ome.zarr`) with axis metadata and physical scale, so the outputs can be opened directly in OME-aware viewers such as napari.
 - uSegment3D runs per `(t, p, selected channel)` volume task and publishes the latest result as `results/usegment3d/latest`.
@@ -385,7 +391,7 @@ clearex --migrate-store /path/to/legacy_store.zarr
 - In napari:
   - Press `K` to capture a keyframe.
   - Press `Shift-K` to remove the most recent keyframe.
-- Default keyframe manifest path is `<analysis_store>.visualization_keyframes.json` (override with `keyframe_manifest_path`).
+- Default keyframe manifest path is `<analysis_store>/clearex/results/visualization/latest/keyframes.json` (override with `keyframe_manifest_path`).
 - Each keyframe stores reproducible viewer state for movie reconstruction, including:
   - camera (angles, zoom, center, perspective),
   - dims (`current_step`, axis labels, order, and 2D/3D display mode),
@@ -415,6 +421,12 @@ clearex --migrate-store /path/to/legacy_store.zarr
   - `zoom_effect_factor`: `0.05` to `0.25`,
   - `mp4_crf`: `16` to `24`,
   - `render_size_xy`: preview `1280x720` or `1600x900`; final `1920x1080` to `3840x2160`.
+- Default movie artifacts stay inside the canonical store:
+  - `render_movie`: `clearex/results/render_movie/latest/render_manifest.json`
+    and `clearex/results/render_movie/latest/level_<nn>_frames/frame_000000.png`
+  - `compile_movie`: `clearex/results/compile_movie/latest/*.mp4` and
+    `clearex/results/compile_movie/latest/*.mov`
+  - Set `output_directory` only when you explicitly want an external export tree.
 
 ## Output Layout (Canonical Store)
 - Public OME source image collection:
@@ -441,10 +453,12 @@ clearex --migrate-store /path/to/legacy_store.zarr
 - External latest-only projection exports:
   - `<output_directory>/mip_<projection>_... .tif`
   - `<output_directory>/mip_<projection>_... .ome.zarr`
-- External latest-only movie exports:
-  - `<analysis_store>_render_movie/latest/level_<nn>_frames/frame_000000.png`
-  - `<analysis_store>_compile_movie/latest/*.mp4`
-  - `<analysis_store>_compile_movie/latest/*.mov`
+- Default latest-only movie exports inside the store:
+  - `clearex/results/visualization/latest/keyframes.json`
+  - `clearex/results/render_movie/latest/render_manifest.json`
+  - `clearex/results/render_movie/latest/level_<nn>_frames/frame_000000.png`
+  - `clearex/results/compile_movie/latest/*.mp4`
+  - `clearex/results/compile_movie/latest/*.mov`
 - Migration-only legacy layouts:
   - root `data`
   - root `data_pyramid`

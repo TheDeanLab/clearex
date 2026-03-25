@@ -223,9 +223,12 @@ This directory contains the runtime orchestration surface for ClearEx.
 - The movie workflow writes latest metadata under:
   - `clearex/results/render_movie/latest`
   - `clearex/results/compile_movie/latest`
-- External latest-only outputs are written beside the store under:
-  - `<analysis_store>_render_movie/latest/...`
-  - `<analysis_store>_compile_movie/latest/...`
+- Default movie artifacts now stay inside the canonical store under:
+  - `clearex/results/visualization/latest/keyframes.json`
+  - `clearex/results/render_movie/latest/...`
+  - `clearex/results/compile_movie/latest/...`
+- `output_directory` remains available only when a user explicitly wants an
+  external movie-export tree.
 - Visualization keyframe manifests (`schema_version=2`) now persist stable
   keyframe ids/order indices and enough overlay metadata to rebuild captured
   `Points` and `Tracks` layers during offline movie rendering.
@@ -233,6 +236,11 @@ This directory contains the runtime orchestration surface for ClearEx.
   changes rather than naive Euler-angle interpolation. This is the intended
   path for avoiding the nonlinear jump seen in older notebook-based movie
   workflows.
+- Movie rendering now uses a visible napari viewer by default and still
+  verifies that the first screenshot is non-empty before continuing.
+- When `render_movie` is launched from the GUI or any other Qt-active context,
+  it should run that visible napari capture inside a dedicated subprocess
+  rather than constructing the viewer on a worker thread.
 - `render_movie` and `compile_movie` are metadata/export analyses only. They do
   not publish public OME image collections and they do not become chainable
   scientific image sources for downstream analysis.

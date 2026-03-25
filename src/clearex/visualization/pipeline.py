@@ -48,6 +48,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 import dask.array as da
 from dask.callbacks import Callback
 import numpy as np
+import numpy.typing as npt
 from PIL import Image, ImageDraw, ImageFont
 from scipy.spatial.transform import Rotation, Slerp
 import zarr
@@ -56,6 +57,7 @@ import zarr
 from clearex.io.experiment import load_navigate_experiment
 from clearex.io.ome_store import (
     analysis_auxiliary_root,
+    ensure_group,
     load_store_metadata,
     resolve_voxel_size_um_zyx_with_source,
 )
@@ -68,6 +70,7 @@ from clearex.visualization.export import (
 from clearex.workflow import (
     SpatialCalibrationConfig,
     format_spatial_calibration,
+    resolve_analysis_input_component,
     spatial_calibration_from_dict,
     spatial_calibration_to_dict,
 )
@@ -122,6 +125,9 @@ _GPU_VENDOR_HINTS = (
     "quadro",
     "tesla",
     "rtx",
+)
+_ZARR_METADATA_FILE_NAMES = frozenset(
+    {"zarr.json", ".zattrs", ".zgroup", ".zmetadata", ".zarray"}
 )
 _LOGGER = logging.getLogger(__name__)
 
@@ -1305,6 +1311,12 @@ def _normalize_render_movie_parameters(
         )
     normalized["overlay_scalebar_position"] = scalebar_position
     normalized["output_directory"] = str(normalized.get("output_directory", "")).strip()
+    launch_mode = str(normalized.get("launch_mode", "auto")).strip().lower() or "auto"
+    if launch_mode not in {"auto", "in_process", "subprocess"}:
+        raise ValueError(
+            "render_movie launch_mode must be one of auto, in_process, subprocess."
+        )
+    normalized["launch_mode"] = launch_mode
     return normalized
 
 
@@ -1452,6 +1464,25 @@ def _resolve_keyframe_manifest_path(
     if explicit_path:
         return Path(explicit_path).expanduser().resolve()
 
+    store_path = Path(zarr_path).expanduser().resolve()
+    return (
+        store_path / analysis_auxiliary_root("visualization") / "keyframes.json"
+    ).resolve()
+
+
+def _legacy_keyframe_manifest_path(zarr_path: Union[str, Path]) -> Path:
+    """Return the legacy sidecar keyframe-manifest path.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+
+    Returns
+    -------
+    pathlib.Path
+        Legacy sidecar keyframe-manifest path used by older ClearEx versions.
+    """
     store_path = Path(zarr_path).expanduser().resolve()
     return Path(f"{store_path}.visualization_keyframes.json")
 
@@ -2129,6 +2160,29 @@ def _resolve_movie_output_base_directory(
         if not resolved.is_absolute():
             resolved = (store_path.parent / resolved).resolve()
         return resolved
+    return (store_path / analysis_auxiliary_root(str(suffix))).resolve().parent
+
+
+def _legacy_movie_output_base_directory(
+    *,
+    zarr_path: Union[str, Path],
+    suffix: str,
+) -> Path:
+    """Return the legacy sidecar movie-output directory root.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    suffix : str
+        Sidecar suffix previously used for movie artifacts.
+
+    Returns
+    -------
+    pathlib.Path
+        Legacy output base directory outside the store.
+    """
+    store_path = Path(zarr_path).expanduser().resolve()
     return (store_path.parent / f"{store_path.name}_{suffix}").resolve()
 
 
@@ -2145,11 +2199,40 @@ def _prepare_movie_output_directory(base_directory: Path) -> Path:
     pathlib.Path
         Prepared ``latest`` directory path.
     """
-    latest_directory = (base_directory / "latest").resolve()
-    if latest_directory.exists():
-        shutil.rmtree(latest_directory)
+    latest_directory = (
+        base_directory
+        if str(base_directory.name).strip().lower() == "latest"
+        else (base_directory / "latest")
+    ).resolve()
     latest_directory.mkdir(parents=True, exist_ok=True)
+    for child in tuple(latest_directory.iterdir()):
+        if child.name in _ZARR_METADATA_FILE_NAMES:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
     return latest_directory
+
+
+def _clear_group_attrs(group: zarr.Group) -> None:
+    """Remove all attributes from one Zarr group in place.
+
+    Parameters
+    ----------
+    group : zarr.Group
+        Group whose attributes should be cleared.
+
+    Returns
+    -------
+    None
+        Mutates ``group.attrs`` in place.
+    """
+    for key in tuple(getattr(group, "attrs", {}).keys()):
+        try:
+            del group.attrs[key]
+        except Exception:
+            continue
 
 
 def _ease_fraction(alpha: float, mode: str) -> float:
@@ -2203,7 +2286,7 @@ def _slerp_camera_angles(
     )
 
 
-def _ensure_rgba_frame(frame: np.ndarray) -> np.ndarray:
+def _ensure_rgba_frame(frame: npt.ArrayLike) -> npt.NDArray[np.uint8]:
     """Coerce screenshot data into RGBA uint8."""
     rgba = np.asarray(frame)
     if rgba.dtype != np.uint8:
@@ -2221,7 +2304,26 @@ def _ensure_rgba_frame(frame: np.ndarray) -> np.ndarray:
     return rgba
 
 
-def _load_overlay_font(size: int) -> ImageFont.ImageFont:
+def _frame_has_visible_rgb_content(frame: npt.ArrayLike) -> bool:
+    """Return whether a captured frame contains any visible RGB signal.
+
+    Parameters
+    ----------
+    frame : numpy.ndarray
+        Captured frame data in any napari/PIL-compatible image shape.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one RGB value is non-zero after RGBA coercion.
+    """
+    rgba = _ensure_rgba_frame(frame)
+    if rgba.size <= 0:
+        return False
+    return bool(np.any(rgba[..., :3] > 0))
+
+
+def _load_overlay_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """Load a font suitable for movie overlays."""
     for candidate in (
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -2235,7 +2337,7 @@ def _load_overlay_font(size: int) -> ImageFont.ImageFont:
 
 
 def _movie_overlay_rgba(
-    frame_rgba_u8: np.ndarray,
+    frame_rgba_u8: npt.ArrayLike,
     *,
     title: str,
     subtitle: str,
@@ -2244,7 +2346,7 @@ def _movie_overlay_rgba(
     scalebar_length_um: float,
     scalebar_position: str,
     pixel_size_x_um: Optional[float],
-) -> np.ndarray:
+) -> npt.NDArray[np.uint8]:
     """Draw title/subtitle/frame-text/scalebar overlays on one frame."""
     rgba = _ensure_rgba_frame(frame_rgba_u8)
     base = Image.fromarray(rgba, mode="RGBA")
@@ -4120,6 +4222,48 @@ def _load_particle_overlay_points(
     return np.empty((0, 5), dtype=np.float32), {}
 
 
+def _build_visualization_subprocess_command(
+    *,
+    zarr_path: Union[str, Path],
+    normalized_parameters: Mapping[str, Any],
+    mode: str,
+    run_id: Optional[str] = None,
+) -> list[str]:
+    """Build a module-entrypoint command for visualization subprocess work.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Zarr analysis-store path.
+    normalized_parameters : mapping[str, Any]
+        Normalized visualization or movie-render parameters.
+    mode : str
+        Subprocess entrypoint mode.
+    run_id : str, optional
+        Provenance run identifier when available.
+
+    Returns
+    -------
+    list[str]
+        Argument vector suitable for ``subprocess`` execution.
+    """
+    payload = json.dumps(dict(normalized_parameters), separators=(",", ":"))
+    command = [
+        sys.executable,
+        "-m",
+        "clearex.visualization.pipeline",
+        "--mode",
+        str(mode),
+        "--zarr-path",
+        str(zarr_path),
+        "--parameters-json",
+        payload,
+    ]
+    if run_id is not None and str(run_id).strip():
+        command.extend(["--run-id", str(run_id).strip()])
+    return command
+
+
 def _launch_napari_subprocess(
     *,
     zarr_path: Union[str, Path],
@@ -4139,18 +4283,65 @@ def _launch_napari_subprocess(
     int
         Spawned process ID.
     """
-    payload = json.dumps(dict(normalized_parameters), separators=(",", ":"))
-    command = [
-        sys.executable,
-        "-m",
-        "clearex.visualization.pipeline",
-        "--zarr-path",
-        str(zarr_path),
-        "--parameters-json",
-        payload,
-    ]
+    command = _build_visualization_subprocess_command(
+        zarr_path=zarr_path,
+        normalized_parameters=normalized_parameters,
+        mode="visualization",
+    )
     process = subprocess.Popen(command)
     return int(process.pid)
+
+
+def _run_render_movie_subprocess(
+    *,
+    zarr_path: Union[str, Path],
+    normalized_parameters: Mapping[str, Any],
+    run_id: Optional[str] = None,
+) -> None:
+    """Run visible movie rendering in a dedicated subprocess and wait.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    normalized_parameters : mapping[str, Any]
+        Normalized render-movie parameters for the child process.
+    run_id : str, optional
+        Provenance run identifier when available.
+
+    Returns
+    -------
+    None
+        Blocks until the child render completes successfully.
+
+    Raises
+    ------
+    RuntimeError
+        If the render subprocess exits unsuccessfully.
+    """
+    command = _build_visualization_subprocess_command(
+        zarr_path=zarr_path,
+        normalized_parameters=normalized_parameters,
+        mode="render_movie",
+        run_id=run_id,
+    )
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 0:
+        return
+    stderr = str(completed.stderr or "").strip()
+    stdout = str(completed.stdout or "").strip()
+    details = stderr or stdout
+    message = (
+        "render_movie subprocess failed " f"with exit code {int(completed.returncode)}."
+    )
+    if details:
+        message = f"{message} {details}"
+    raise RuntimeError(message)
 
 
 def _build_napari_viewer_scene(
@@ -5221,9 +5412,8 @@ def _save_visualization_metadata(
     """
     root = zarr.open_group(str(zarr_path), mode="a")
     component = analysis_auxiliary_root("visualization")
-    if component in root:
-        del root[component]
-    latest_group = root.require_group(component)
+    latest_group = ensure_group(root, component)
+    _clear_group_attrs(latest_group)
 
     payload: Dict[str, Any] = {
         "source_component": str(source_component),
@@ -5695,6 +5885,133 @@ def _read_latest_analysis_metadata(
     return {str(key): value for key, value in dict(group.attrs).items()}
 
 
+def _resolve_render_movie_keyframe_manifest_path(
+    *,
+    zarr_path: Union[str, Path],
+    parameters: Mapping[str, Any],
+    visualization_metadata: Mapping[str, Any],
+) -> str:
+    """Resolve the keyframe manifest path consumed by ``render_movie``.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    parameters : mapping[str, Any]
+        Normalized render-movie parameters.
+    visualization_metadata : mapping[str, Any]
+        Latest visualization metadata payload.
+
+    Returns
+    -------
+    str
+        Resolved JSON manifest path, or an empty string when no candidate can
+        be inferred.
+    """
+    explicit_path = str(parameters.get("keyframe_manifest_path", "")).strip()
+    if explicit_path:
+        return str(Path(explicit_path).expanduser().resolve())
+
+    fallback_missing_candidate: Optional[str] = None
+    metadata_candidates: list[str] = []
+    metadata_path = str(
+        visualization_metadata.get("keyframe_manifest_path", "")
+    ).strip()
+    if metadata_path:
+        metadata_candidates.append(metadata_path)
+    metadata_parameters = visualization_metadata.get("parameters", {})
+    if isinstance(metadata_parameters, Mapping):
+        manifest_from_parameters = str(
+            metadata_parameters.get("keyframe_manifest_path", "")
+        ).strip()
+        if manifest_from_parameters:
+            metadata_candidates.append(manifest_from_parameters)
+    for candidate in metadata_candidates:
+        resolved = Path(candidate).expanduser().resolve()
+        if resolved.exists():
+            return str(resolved)
+        if fallback_missing_candidate is None:
+            fallback_missing_candidate = str(resolved)
+
+    default_manifest = _resolve_keyframe_manifest_path(
+        zarr_path=zarr_path,
+        parameters={"capture_keyframes": True},
+    )
+    if default_manifest is not None:
+        resolved_default = default_manifest.expanduser().resolve()
+        if resolved_default.exists():
+            return str(resolved_default)
+
+    legacy_default = _legacy_keyframe_manifest_path(zarr_path)
+    if legacy_default.exists():
+        return str(legacy_default.resolve())
+
+    return fallback_missing_candidate or ""
+
+
+def _resolve_compile_movie_render_manifest_path(
+    *,
+    zarr_path: Union[str, Path],
+    parameters: Mapping[str, Any],
+    render_metadata: Mapping[str, Any],
+) -> str:
+    """Resolve the render manifest path consumed by ``compile_movie``.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    parameters : mapping[str, Any]
+        Normalized compile-movie parameters.
+    render_metadata : mapping[str, Any]
+        Latest render-movie metadata payload.
+
+    Returns
+    -------
+    str
+        Resolved JSON manifest path, or an empty string when no candidate can
+        be inferred.
+    """
+    explicit_path = str(parameters.get("render_manifest_path", "")).strip()
+    if explicit_path:
+        return str(Path(explicit_path).expanduser().resolve())
+
+    fallback_missing_candidate: Optional[str] = None
+    metadata_candidates: list[str] = []
+    metadata_path = str(render_metadata.get("render_manifest_path", "")).strip()
+    if metadata_path:
+        metadata_candidates.append(metadata_path)
+    metadata_parameters = render_metadata.get("parameters", {})
+    if isinstance(metadata_parameters, Mapping):
+        manifest_from_parameters = str(
+            metadata_parameters.get("render_manifest_path", "")
+        ).strip()
+        if manifest_from_parameters:
+            metadata_candidates.append(manifest_from_parameters)
+    output_directory = str(render_metadata.get("output_directory", "")).strip()
+    if output_directory:
+        metadata_candidates.append(
+            str((Path(output_directory).expanduser() / "render_manifest.json"))
+        )
+    for candidate in metadata_candidates:
+        resolved = Path(candidate).expanduser().resolve()
+        if resolved.exists():
+            return str(resolved)
+        if fallback_missing_candidate is None:
+            fallback_missing_candidate = str(resolved)
+    legacy_manifest = (
+        _legacy_movie_output_base_directory(
+            zarr_path=zarr_path,
+            suffix="render_movie",
+        )
+        / "latest"
+        / "render_manifest.json"
+    ).resolve()
+    if legacy_manifest.exists():
+        return str(legacy_manifest)
+    return fallback_missing_candidate or ""
+
+
 def _normalize_captured_keyframes(value: Any) -> tuple[Dict[str, Any], ...]:
     """Normalize keyframe payloads loaded from disk.
 
@@ -6107,6 +6424,159 @@ def _process_pending_qt_events() -> None:
     except Exception:
         pass
     time.sleep(0.01)
+
+
+def _resize_movie_viewer_canvas(
+    *,
+    viewer: Any,
+    render_size_xy: Sequence[int],
+) -> None:
+    """Best-effort resize of the napari canvas before movie screenshots.
+
+    Parameters
+    ----------
+    viewer : Any
+        Live napari viewer instance.
+    render_size_xy : sequence of int
+        Requested movie frame size in ``(x, y)`` order.
+
+    Returns
+    -------
+    None
+        Applies resize side effects to the viewer when the underlying Qt
+        widgets are available.
+    """
+    if len(render_size_xy) < 2:
+        return
+    width = max(1, int(render_size_xy[0]))
+    height = max(1, int(render_size_xy[1]))
+    try:
+        window = getattr(viewer, "window", None)
+        qt_viewer = getattr(window, "qt_viewer", None)
+        canvas = getattr(qt_viewer, "canvas", None)
+        native_canvas = getattr(canvas, "native", None)
+        if native_canvas is not None and hasattr(native_canvas, "resize"):
+            native_canvas.resize(width, height)
+        if window is not None and hasattr(window, "resize"):
+            window.resize(width + 200, height + 50)
+    except Exception:
+        pass
+    _process_pending_qt_events()
+
+
+def _set_napari_async_slice_loading(enabled: bool) -> Optional[bool]:
+    """Set napari async slice loading and return the previous value.
+
+    Parameters
+    ----------
+    enabled : bool
+        Desired async slice-loading state.
+
+    Returns
+    -------
+    bool, optional
+        Previous async state when napari settings are available, otherwise
+        ``None``.
+    """
+    try:
+        from napari.settings import get_settings
+
+        settings = get_settings()
+        experimental = getattr(settings, "experimental", None)
+        if experimental is None or not hasattr(experimental, "async_"):
+            return None
+        previous = bool(getattr(experimental, "async_"))
+        setattr(experimental, "async_", bool(enabled))
+        return previous
+    except Exception:
+        return None
+
+
+def _refresh_movie_viewer_layers(viewer: Any) -> None:
+    """Synchronously refresh napari layers before capturing a movie frame.
+
+    Parameters
+    ----------
+    viewer : Any
+        Live napari viewer instance.
+
+    Returns
+    -------
+    None
+        Forces layer refresh side effects when supported by the active napari
+        layer classes.
+    """
+    for layer in tuple(getattr(viewer, "layers", tuple())):
+        refresh = getattr(layer, "refresh", None)
+        if not callable(refresh):
+            continue
+        try:
+            refresh(
+                thumbnail=False,
+                data_displayed=True,
+                highlight=False,
+                extent=False,
+                force=True,
+            )
+        except TypeError:
+            try:
+                refresh(force=True)
+            except TypeError:
+                try:
+                    refresh()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    _process_pending_qt_events()
+    time.sleep(0.05)
+    _process_pending_qt_events()
+
+
+def _build_movie_render_viewer_scene(
+    *,
+    zarr_path: Union[str, Path],
+    scene: PreparedVisualizationScene,
+    movie_level_index: int,
+) -> tuple[BuiltNapariScene, bool]:
+    """Build a visible napari viewer for movie capture.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    scene : PreparedVisualizationScene
+        Prepared visualization scene shared with interactive visualization.
+    movie_level_index : int
+        Requested movie resolution level.
+
+    Returns
+    -------
+    tuple[BuiltNapariScene, bool]
+        The built viewer scene and a flag indicating that the movie viewer is
+        visible.
+    """
+    common_kwargs: Dict[str, Any] = {
+        "zarr_path": zarr_path,
+        "volume_layers": scene.volume_layers,
+        "selected_positions": scene.selected_positions,
+        "points_by_position": scene.points_by_position,
+        "point_properties_by_position": scene.point_properties_by_position,
+        "position_affines_tczyx": scene.position_affines_tczyx,
+        "axis_labels": scene.napari_payload.axis_labels_tczyx,
+        "scale_tczyx": scene.napari_payload.scale_tczyx,
+        "image_metadata": scene.napari_payload.image_metadata,
+        "points_metadata": scene.napari_payload.points_metadata,
+        "require_gpu_rendering": False,
+        "capture_keyframes": False,
+        "keyframe_manifest_path": None,
+        "movie_level_index": int(movie_level_index),
+    }
+    built_scene = _build_napari_viewer_scene(
+        **common_kwargs,
+        show=True,
+    )
+    return built_scene, True
 
 
 def _restore_captured_overlay_layers(
@@ -6565,9 +7035,8 @@ def _save_render_movie_metadata(
     """Persist render-movie metadata in ``clearex/results/render_movie/latest``."""
     root = zarr.open_group(str(zarr_path), mode="a")
     component = analysis_auxiliary_root("render_movie")
-    if component in root:
-        del root[component]
-    latest_group = root.require_group(component)
+    latest_group = ensure_group(root, component)
+    _clear_group_attrs(latest_group)
     payload: Dict[str, Any] = {
         "visualization_component": str(visualization_component),
         "keyframe_manifest_path": str(keyframe_manifest_path),
@@ -6612,9 +7081,8 @@ def _save_compile_movie_metadata(
     """Persist compile-movie metadata in ``clearex/results/compile_movie/latest``."""
     root = zarr.open_group(str(zarr_path), mode="a")
     component = analysis_auxiliary_root("compile_movie")
-    if component in root:
-        del root[component]
-    latest_group = root.require_group(component)
+    latest_group = ensure_group(root, component)
+    _clear_group_attrs(latest_group)
     payload: Dict[str, Any] = {
         "render_component": str(render_component),
         "render_manifest_path": str(render_manifest_path),
@@ -6638,7 +7106,116 @@ def _save_compile_movie_metadata(
     return component
 
 
+def _render_movie_summary_from_latest_metadata(
+    *,
+    zarr_path: Union[str, Path],
+) -> RenderMovieSummary:
+    """Build a render-movie summary from the latest persisted metadata.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+
+    Returns
+    -------
+    RenderMovieSummary
+        Parsed latest render-movie summary.
+    """
+    metadata = _read_latest_analysis_metadata(
+        zarr_path=zarr_path,
+        component=analysis_auxiliary_root("render_movie"),
+        operation_name="render_movie",
+    )
+    rendered_levels_raw = metadata.get("rendered_levels", [])
+    if not isinstance(rendered_levels_raw, (tuple, list)):
+        rendered_levels_raw = [rendered_levels_raw]
+    return RenderMovieSummary(
+        component=str(
+            metadata.get("component", analysis_auxiliary_root("render_movie"))
+        ).strip()
+        or analysis_auxiliary_root("render_movie"),
+        visualization_component=str(
+            metadata.get(
+                "visualization_component",
+                analysis_auxiliary_root("visualization"),
+            )
+        ).strip()
+        or analysis_auxiliary_root("visualization"),
+        keyframe_manifest_path=str(metadata.get("keyframe_manifest_path", "")).strip(),
+        render_manifest_path=str(metadata.get("render_manifest_path", "")).strip(),
+        output_directory=str(metadata.get("output_directory", "")).strip(),
+        rendered_levels=tuple(int(value) for value in rendered_levels_raw),
+        frame_count=max(0, int(metadata.get("frame_count", 0))),
+        fps=max(1, int(metadata.get("fps", 24))),
+    )
+
+
 def run_render_movie_analysis(
+    *,
+    zarr_path: Union[str, Path],
+    parameters: Mapping[str, Any],
+    progress_callback: Optional[ProgressCallback] = None,
+    run_id: Optional[str] = None,
+) -> RenderMovieSummary:
+    """Render smooth frame sequences from captured napari keyframes.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Canonical analysis-store path.
+    parameters : mapping[str, Any]
+        Render-movie parameter mapping.
+    progress_callback : callable, optional
+        Optional callback receiving ``(percent, message)`` progress updates.
+    run_id : str, optional
+        Provenance run identifier when available.
+
+    Returns
+    -------
+    RenderMovieSummary
+        Summary of rendered frame sets and latest metadata paths.
+
+    Raises
+    ------
+    ValueError
+        If required visualization metadata or keyframes are missing.
+    RuntimeError
+        If a render subprocess fails.
+    """
+
+    def _emit(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(int(percent), str(message))
+
+    normalized = _normalize_render_movie_parameters(parameters)
+    effective_launch_mode = _resolve_effective_launch_mode(
+        str(normalized.get("launch_mode", "auto"))
+    )
+    if effective_launch_mode == "subprocess":
+        _emit(5, "Launching visible napari movie renderer in a separate process")
+        subprocess_parameters: Dict[str, Any] = {
+            **normalized,
+            "launch_mode": "in_process",
+        }
+        _run_render_movie_subprocess(
+            zarr_path=zarr_path,
+            normalized_parameters=subprocess_parameters,
+            run_id=run_id,
+        )
+        _emit(95, "Collecting rendered movie metadata from subprocess")
+        _emit(100, "Render-movie workflow complete")
+        return _render_movie_summary_from_latest_metadata(zarr_path=zarr_path)
+    return _run_render_movie_analysis_in_process(
+        zarr_path=zarr_path,
+        parameters=normalized,
+        progress_callback=progress_callback,
+        run_id=run_id,
+    )
+
+
+def _run_render_movie_analysis_in_process(
     *,
     zarr_path: Union[str, Path],
     parameters: Mapping[str, Any],
@@ -6674,10 +7251,13 @@ def run_render_movie_analysis(
             return
         progress_callback(int(percent), str(message))
 
-    normalized = _normalize_render_movie_parameters(parameters)
-    visualization_component = str(
-        normalized.get("input_source", analysis_auxiliary_root("visualization"))
-    ).strip() or analysis_auxiliary_root("visualization")
+    normalized = dict(parameters)
+    visualization_component = resolve_analysis_input_component(
+        str(
+            normalized.get("input_source", analysis_auxiliary_root("visualization"))
+        ).strip()
+        or analysis_auxiliary_root("visualization")
+    )
     visualization_metadata = _read_latest_analysis_metadata(
         zarr_path=zarr_path,
         component=visualization_component,
@@ -6687,12 +7267,11 @@ def run_render_movie_analysis(
     if not isinstance(visualization_parameters, Mapping):
         visualization_parameters = {}
 
-    keyframe_manifest_candidate = str(
-        normalized.get(
-            "keyframe_manifest_path",
-            visualization_metadata.get("keyframe_manifest_path", ""),
-        )
-    ).strip()
+    keyframe_manifest_candidate = _resolve_render_movie_keyframe_manifest_path(
+        zarr_path=zarr_path,
+        parameters=normalized,
+        visualization_metadata=visualization_metadata,
+    )
     if not keyframe_manifest_candidate:
         raise ValueError(
             "render_movie requires a keyframe manifest path. Capture keyframes "
@@ -6778,113 +7357,150 @@ def run_render_movie_analysis(
     level_manifest_rows: list[Dict[str, Any]] = []
     total_levels = max(1, len(rendered_levels))
     total_frames = max(1, len(frame_specs))
+    previous_async_slice_loading = _set_napari_async_slice_loading(False)
 
-    for level_offset, level_index in enumerate(rendered_levels):
-        level_progress_start = 10 + int(
-            (float(level_offset) / float(total_levels)) * 75.0
-        )
-        level_progress_end = 10 + int(
-            (float(level_offset + 1) / float(total_levels)) * 75.0
-        )
-        frames_directory = (
-            output_directory / f"level_{int(level_index):02d}_frames"
-        ).resolve()
-        frames_directory.mkdir(parents=True, exist_ok=True)
-        frame_directories_by_level[str(level_index)] = str(frames_directory)
+    try:
+        for level_offset, level_index in enumerate(rendered_levels):
+            level_progress_start = 10 + int(
+                (float(level_offset) / float(total_levels)) * 75.0
+            )
+            level_progress_end = 10 + int(
+                (float(level_offset + 1) / float(total_levels)) * 75.0
+            )
+            frames_directory = (
+                output_directory / f"level_{int(level_index):02d}_frames"
+            ).resolve()
+            frames_directory.mkdir(parents=True, exist_ok=True)
+            frame_directories_by_level[str(level_index)] = str(frames_directory)
 
-        _emit(
-            level_progress_start,
-            f"Rendering movie frames for resolution level {int(level_index)}",
-        )
-        built_scene = _build_napari_viewer_scene(
-            zarr_path=zarr_path,
-            volume_layers=scene.volume_layers,
-            selected_positions=scene.selected_positions,
-            points_by_position=scene.points_by_position,
-            point_properties_by_position=scene.point_properties_by_position,
-            position_affines_tczyx=scene.position_affines_tczyx,
-            axis_labels=scene.napari_payload.axis_labels_tczyx,
-            scale_tczyx=scene.napari_payload.scale_tczyx,
-            image_metadata=scene.napari_payload.image_metadata,
-            points_metadata=scene.napari_payload.points_metadata,
-            require_gpu_rendering=False,
-            capture_keyframes=False,
-            keyframe_manifest_path=None,
-            movie_level_index=int(level_index),
-            show=False,
-        )
-        viewer = built_scene.viewer
-        _restore_captured_overlay_layers(
-            viewer,
-            keyframe_manifest.get("captured_overlay_layers", []),
-        )
-        try:
-            for frame_index, spec in enumerate(frame_specs):
-                _apply_movie_frame_state(
-                    viewer=viewer,
-                    spec=spec,
-                    keyframes=keyframes,
-                    parameters=normalized,
+            _emit(
+                level_progress_start,
+                f"Rendering movie frames for resolution level {int(level_index)}",
+            )
+            built_scene, using_visible_viewer = _build_movie_render_viewer_scene(
+                zarr_path=zarr_path,
+                scene=scene,
+                movie_level_index=int(level_index),
+            )
+            viewer = built_scene.viewer
+            if using_visible_viewer:
+                _emit(
+                    level_progress_start,
+                    "Using visible napari viewer for movie capture",
                 )
-                _process_pending_qt_events()
-                screenshot = viewer.screenshot(
-                    canvas_only=True,
-                    flash=False,
-                    size=render_size_xy,
+            try:
+
+                def _prepare_viewer_for_capture(active_viewer: Any) -> None:
+                    """Restore overlays and resize one movie-capture viewer."""
+                    _restore_captured_overlay_layers(
+                        active_viewer,
+                        keyframe_manifest.get("captured_overlay_layers", []),
+                    )
+                    _resize_movie_viewer_canvas(
+                        viewer=active_viewer,
+                        render_size_xy=render_size_xy,
+                    )
+
+                def _capture_frame_rgba(
+                    *,
+                    active_viewer: Any,
+                    spec: Mapping[str, Any],
+                    frame_index: int,
+                ) -> npt.NDArray[np.uint8]:
+                    """Apply one frame specification and capture the screenshot."""
+                    _apply_movie_frame_state(
+                        viewer=active_viewer,
+                        spec=spec,
+                        keyframes=keyframes,
+                        parameters=normalized,
+                    )
+                    _refresh_movie_viewer_layers(active_viewer)
+                    screenshot = active_viewer.screenshot(
+                        canvas_only=True,
+                        flash=False,
+                        size=(int(render_size_xy[1]), int(render_size_xy[0])),
+                    )
+                    frame_text = _frame_text_for_movie_spec(
+                        spec=spec,
+                        keyframes=keyframes,
+                        mode=str(normalized.get("overlay_frame_text_mode", "none")),
+                        frame_index=int(frame_index),
+                        total_frames=int(total_frames),
+                    )
+                    return _movie_overlay_rgba(
+                        _ensure_rgba_frame(np.asarray(screenshot)),
+                        title=str(normalized.get("overlay_title", "")),
+                        subtitle=str(normalized.get("overlay_subtitle", "")),
+                        frame_text=frame_text,
+                        scalebar_enabled=bool(
+                            normalized.get("overlay_scalebar", False)
+                        ),
+                        scalebar_length_um=float(
+                            normalized.get("overlay_scalebar_length_um", 50.0)
+                        ),
+                        scalebar_position=str(
+                            normalized.get("overlay_scalebar_position", "bottom_left")
+                        ),
+                        pixel_size_x_um=_viewer_pixel_size_x_um(active_viewer),
+                    )
+
+                _prepare_viewer_for_capture(viewer)
+                first_frame_rgba = _capture_frame_rgba(
+                    active_viewer=viewer,
+                    spec=frame_specs[0],
+                    frame_index=0,
                 )
-                frame_text = _frame_text_for_movie_spec(
-                    spec=spec,
-                    keyframes=keyframes,
-                    mode=str(normalized.get("overlay_frame_text_mode", "none")),
-                    frame_index=int(frame_index),
-                    total_frames=int(total_frames),
-                )
-                rgba = _movie_overlay_rgba(
-                    _ensure_rgba_frame(np.asarray(screenshot)),
-                    title=str(normalized.get("overlay_title", "")),
-                    subtitle=str(normalized.get("overlay_subtitle", "")),
-                    frame_text=frame_text,
-                    scalebar_enabled=bool(normalized.get("overlay_scalebar", False)),
-                    scalebar_length_um=float(
-                        normalized.get("overlay_scalebar_length_um", 50.0)
-                    ),
-                    scalebar_position=str(
-                        normalized.get("overlay_scalebar_position", "bottom_left")
-                    ),
-                    pixel_size_x_um=_viewer_pixel_size_x_um(viewer),
-                )
-                frame_path = frames_directory / f"frame_{int(frame_index):06d}.png"
-                Image.fromarray(rgba, mode="RGBA").save(frame_path)
-                mapped = level_progress_start + int(
-                    (
-                        (float(frame_index + 1) / float(total_frames))
-                        * max(
-                            1,
-                            level_progress_end - level_progress_start,
+                if not _frame_has_visible_rgb_content(first_frame_rgba):
+                    raise RuntimeError(
+                        "render_movie captured an empty napari probe frame from "
+                        "the visible viewer. Check the saved visualization "
+                        "keyframes and source layer visibility."
+                    )
+
+                for frame_index, spec in enumerate(frame_specs):
+                    if int(frame_index) == 0:
+                        rgba = np.asarray(first_frame_rgba, dtype=np.uint8)
+                    else:
+                        rgba = _capture_frame_rgba(
+                            active_viewer=viewer,
+                            spec=spec,
+                            frame_index=int(frame_index),
+                        )
+                    frame_path = frames_directory / f"frame_{int(frame_index):06d}.png"
+                    Image.fromarray(rgba, mode="RGBA").save(frame_path)
+                    mapped = level_progress_start + int(
+                        (
+                            (float(frame_index + 1) / float(total_frames))
+                            * max(
+                                1,
+                                level_progress_end - level_progress_start,
+                            )
                         )
                     )
-                )
-                _emit(
-                    mapped,
-                    f"Rendered frame {int(frame_index) + 1}/{int(total_frames)} "
-                    f"for level {int(level_index)}",
-                )
-        finally:
-            try:
-                viewer.close()
-            except Exception:
-                pass
-            _process_pending_qt_events()
+                    _emit(
+                        mapped,
+                        f"Rendered frame {int(frame_index) + 1}/{int(total_frames)} "
+                        f"for level {int(level_index)}",
+                    )
+            finally:
+                try:
+                    viewer.close()
+                except Exception:
+                    pass
+                _process_pending_qt_events()
 
-        level_manifest_rows.append(
-            {
-                "requested_level": int(level_index),
-                "frame_directory": str(frames_directory),
-                "frame_pattern": "frame_%06d.png",
-                "frame_count": int(total_frames),
-                "render_size_xy": [int(render_size_xy[0]), int(render_size_xy[1])],
-            }
-        )
+            level_manifest_rows.append(
+                {
+                    "requested_level": int(level_index),
+                    "frame_directory": str(frames_directory),
+                    "frame_pattern": "frame_%06d.png",
+                    "frame_count": int(total_frames),
+                    "render_size_xy": [int(render_size_xy[0]), int(render_size_xy[1])],
+                }
+            )
+    finally:
+        if previous_async_slice_loading is not None:
+            _set_napari_async_slice_loading(previous_async_slice_loading)
 
     render_manifest_payload: Dict[str, Any] = {
         "schema_version": 1,
@@ -6997,20 +7613,22 @@ def run_compile_movie_analysis(
         progress_callback(int(percent), str(message))
 
     normalized = _normalize_compile_movie_parameters(parameters)
-    render_component = str(
-        normalized.get("input_source", analysis_auxiliary_root("render_movie"))
-    ).strip() or analysis_auxiliary_root("render_movie")
+    render_component = resolve_analysis_input_component(
+        str(
+            normalized.get("input_source", analysis_auxiliary_root("render_movie"))
+        ).strip()
+        or analysis_auxiliary_root("render_movie")
+    )
     render_metadata = _read_latest_analysis_metadata(
         zarr_path=zarr_path,
         component=render_component,
         operation_name="compile_movie",
     )
-    render_manifest_candidate = str(
-        normalized.get(
-            "render_manifest_path",
-            render_metadata.get("render_manifest_path", ""),
-        )
-    ).strip()
+    render_manifest_candidate = _resolve_compile_movie_render_manifest_path(
+        zarr_path=zarr_path,
+        parameters=normalized,
+        render_metadata=render_metadata,
+    )
     if not render_manifest_candidate:
         raise ValueError(
             "compile_movie requires a render manifest. Run render_movie first "
@@ -7154,8 +7772,14 @@ def _create_subprocess_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m clearex.visualization.pipeline",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("visualization", "render_movie"),
+        default="visualization",
+    )
     parser.add_argument("--zarr-path", required=True)
     parser.add_argument("--parameters-json", default="{}")
+    parser.add_argument("--run-id", default="")
     return parser
 
 
@@ -7181,10 +7805,19 @@ def _run_subprocess_entrypoint(argv: Optional[Sequence[str]] = None) -> int:
     if not isinstance(parameters_raw, dict):
         parameters_raw = {}
     parameters_raw["launch_mode"] = "in_process"
+    if str(args.mode).strip().lower() == "render_movie":
+        run_render_movie_analysis(
+            zarr_path=str(args.zarr_path),
+            parameters=parameters_raw,
+            progress_callback=None,
+            run_id=str(args.run_id).strip() or None,
+        )
+        return 0
     run_visualization_analysis(
         zarr_path=str(args.zarr_path),
         parameters=parameters_raw,
         progress_callback=None,
+        run_id=str(args.run_id).strip() or None,
     )
     return 0
 

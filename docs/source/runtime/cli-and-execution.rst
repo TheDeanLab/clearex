@@ -233,7 +233,7 @@ When visualization launches napari, keyframe capture is enabled by default:
 
 The keyframe manifest path defaults to:
 
-- ``<analysis_store>.visualization_keyframes.json``
+- ``<analysis_store>/clearex/results/visualization/latest/keyframes.json``
 
 and can be overridden with ``keyframe_manifest_path`` in visualization
 parameters.
@@ -270,10 +270,15 @@ Runtime storage:
   - ``clearex/results/render_movie/latest``
 - ``compile_movie`` latest metadata:
   - ``clearex/results/compile_movie/latest``
-- External outputs:
-  - ``<analysis_store>_render_movie/latest/level_<nn>_frames/frame_000000.png``
-  - ``<analysis_store>_compile_movie/latest/*.mp4``
-  - ``<analysis_store>_compile_movie/latest/*.mov``
+- Default in-store artifacts:
+  - ``<analysis_store>/clearex/results/visualization/latest/keyframes.json``
+  - ``<analysis_store>/clearex/results/render_movie/latest/render_manifest.json``
+  - ``<analysis_store>/clearex/results/render_movie/latest/level_<nn>_frames/frame_000000.png``
+  - ``<analysis_store>/clearex/results/compile_movie/latest/*.mp4``
+  - ``<analysis_store>/clearex/results/compile_movie/latest/*.mov``
+- Override note:
+  - ``output_directory`` can still redirect ``render_movie`` or
+    ``compile_movie`` to an external export tree when desired.
 
 Practical guidance:
 
@@ -290,6 +295,13 @@ Practical guidance:
 Captured napari ``Points`` and ``Tracks`` layers are serialized into the
 keyframe manifest and rebuilt during ``render_movie`` so common particle/track
 overlays can survive beyond the interactive session.
+
+``render_movie`` now captures from a visible napari viewer by default.
+This avoids the empty-frame failures seen with hidden/offscreen capture while
+keeping CPU/software rendering and GPU-backed rendering usable.
+When ClearEx is already running inside a Qt GUI, the visible movie-capture
+viewer is launched in a dedicated subprocess so rendering does not touch Qt
+or OpenGL from the GUI worker thread.
 
 The CLI currently exposes ``--render-movie`` and ``--compile-movie`` as
 operation flags. Detailed movie parameter editing is currently done through the

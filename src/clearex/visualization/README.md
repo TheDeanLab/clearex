@@ -233,15 +233,24 @@ offline PNG frame sequences for one or more selected pyramid levels.
 - Captured `Points` and `Tracks` layers are serialized into the keyframe
   manifest and rebuilt during offline rendering so particle/track overlays can
   survive beyond the interactive viewer session.
+- `render_movie` now uses a visible napari viewer by default and validates the
+  first captured screenshot before continuing.
+- When a Qt application is already active, `render_movie` launches that visible
+  capture viewer in a dedicated subprocess so GUI-triggered runs do not create
+  Qt/OpenGL objects from a worker thread.
 
 ### Storage contract
 
+- Default keyframe manifests are written inside the store at:
+  - `clearex/results/visualization/latest/keyframes.json`
 - Latest task metadata is stored at:
   - `clearex/results/render_movie/latest`
-- External rendered frames are written outside the store under:
-  - `<analysis_store>_render_movie/latest/level_<nn>_frames/frame_000000.png`
-- Each run also writes a render manifest:
-  - `<analysis_store>_render_movie/latest/render_manifest.json`
+- Default rendered frames are written inside the store under:
+  - `clearex/results/render_movie/latest/level_<nn>_frames/frame_000000.png`
+- Each run also writes a render manifest at:
+  - `clearex/results/render_movie/latest/render_manifest.json`
+- Users can still override `output_directory` when they explicitly want an
+  external export tree.
 
 ### Parameter guidance
 
@@ -317,9 +326,11 @@ into review and/or delivery movies.
 
 - Latest task metadata is stored at:
   - `clearex/results/compile_movie/latest`
-- External compiled files are written outside the store under:
-  - `<analysis_store>_compile_movie/latest/*.mp4`
-  - `<analysis_store>_compile_movie/latest/*.mov`
+- Default compiled files are written inside the store under:
+  - `clearex/results/compile_movie/latest/*.mp4`
+  - `clearex/results/compile_movie/latest/*.mov`
+- Users can still override `output_directory` when they explicitly want an
+  external export tree.
 
 ### Parameter guidance
 

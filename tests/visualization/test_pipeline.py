@@ -29,6 +29,16 @@ _VISUALIZATION_LATEST_OUTPUT_COMPONENT = (
 )
 
 
+def _visualization_keyframe_manifest_path(store_path: Path) -> str:
+    """Return the canonical in-store keyframe manifest path for tests."""
+    return str((store_path.resolve() / _VISUALIZATION_COMPONENT / "keyframes.json"))
+
+
+def _render_movie_output_directory(store_path: Path) -> str:
+    """Return the canonical in-store render output directory for tests."""
+    return str((store_path.resolve() / "clearex/results/render_movie/latest"))
+
+
 def _single_image_volume_layers(
     component: str = "data",
     source_components: tuple[str, ...] = ("data",),
@@ -122,8 +132,14 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
         del point_properties_by_position
         del require_gpu_rendering
         del capture_keyframes
-        del keyframe_manifest_path
         del keyframe_layer_overrides
+        if keyframe_manifest_path is not None:
+            manifest_path = Path(str(keyframe_manifest_path))
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(
+                json.dumps({"schema_version": 2, "keyframes": []}),
+                encoding="utf-8",
+            )
         captured["volume_layers"] = list(volume_layers)
         captured["source_components"] = tuple(volume_layers[0].source_components)
         captured["selected_positions"] = tuple(
@@ -171,11 +187,11 @@ def test_run_visualization_analysis_in_process_writes_latest_metadata(
     assert summary.viewer_ndisplay_requested == 2
     assert summary.viewer_ndisplay_effective == 2
     assert summary.display_mode_fallback_reason is None
-    assert (
-        summary.keyframe_manifest_path
-        == f"{store_path.resolve()}.visualization_keyframes.json"
+    assert summary.keyframe_manifest_path == _visualization_keyframe_manifest_path(
+        store_path
     )
     assert summary.keyframe_count == 0
+    assert Path(summary.keyframe_manifest_path).exists()
 
     assert captured["source_components"] == ("data", "data_pyramid/level_1")
     assert len(captured["volume_layers"]) == 1
@@ -268,17 +284,15 @@ def test_run_visualization_analysis_subprocess_launch(
     assert summary.viewer_ndisplay_requested == 3
     assert summary.viewer_ndisplay_effective == 3
     assert summary.display_mode_fallback_reason is None
-    assert (
-        summary.keyframe_manifest_path
-        == f"{store_path.resolve()}.visualization_keyframes.json"
+    assert summary.keyframe_manifest_path == _visualization_keyframe_manifest_path(
+        store_path
     )
     assert summary.keyframe_count == 0
     assert captured["zarr_path"] == str(store_path)
     assert dict(captured["parameters"])["launch_mode"] == "in_process"
-    assert (
-        dict(captured["parameters"])["keyframe_manifest_path"]
-        == f"{store_path.resolve()}.visualization_keyframes.json"
-    )
+    assert dict(captured["parameters"])[
+        "keyframe_manifest_path"
+    ] == _visualization_keyframe_manifest_path(store_path)
     assert dict(captured["parameters"])["keyframe_layer_overrides"] == []
 
     output_root = zarr.open_group(str(store_path), mode="r")
@@ -689,7 +703,7 @@ def test_run_visualization_analysis_uses_experiment_spacing_when_available(
     )
     root.attrs.update({"source_experiment": str(experiment_path)})
 
-    captured: dict[str, object] = {}
+    captured: dict[str, str | None] = {}
 
     def _fake_launch_napari_viewer(
         *,
@@ -2096,40 +2110,8 @@ def test_run_render_movie_analysis_writes_frames_and_manifest(
         dtype="uint16",
         overwrite=True,
     )
-    root.require_group(_VISUALIZATION_COMPONENT).attrs.update(
-        {
-            "source_component": "data",
-            "source_components": ["data", "data_pyramid/level_1"],
-            "position_index": 0,
-            "selected_positions": [0],
-            "show_all_positions": False,
-            "overlay_points_count": 0,
-            "viewer_ndisplay_effective": 3,
-            "parameters": {
-                "input_source": "data",
-                "position_index": 0,
-                "show_all_positions": False,
-                "use_multiscale": True,
-                "use_3d_view": True,
-                "overlay_particle_detections": False,
-                "volume_layers": [
-                    {
-                        "component": "data",
-                        "name": "",
-                        "layer_type": "image",
-                        "channels": [],
-                        "visible": None,
-                        "opacity": None,
-                        "blending": "",
-                        "colormap": "",
-                        "rendering": "",
-                        "multiscale_policy": "inherit",
-                    }
-                ],
-            },
-        }
-    )
-    keyframe_manifest_path = tmp_path / "keyframes.json"
+    keyframe_manifest_path = store_path / _VISUALIZATION_COMPONENT / "keyframes.json"
+    keyframe_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     keyframe_manifest_path.write_text(
         json.dumps(
             {
@@ -2246,6 +2228,40 @@ def test_run_render_movie_analysis_writes_frames_and_manifest(
         ),
         encoding="utf-8",
     )
+    root.require_group(_VISUALIZATION_COMPONENT).attrs.update(
+        {
+            "source_component": "data",
+            "source_components": ["data", "data_pyramid/level_1"],
+            "position_index": 0,
+            "selected_positions": [0],
+            "show_all_positions": False,
+            "overlay_points_count": 0,
+            "viewer_ndisplay_effective": 3,
+            "keyframe_manifest_path": str(keyframe_manifest_path),
+            "parameters": {
+                "input_source": "data",
+                "position_index": 0,
+                "show_all_positions": False,
+                "use_multiscale": True,
+                "use_3d_view": True,
+                "overlay_particle_detections": False,
+                "volume_layers": [
+                    {
+                        "component": "data",
+                        "name": "",
+                        "layer_type": "image",
+                        "channels": [],
+                        "visible": None,
+                        "opacity": None,
+                        "blending": "",
+                        "colormap": "",
+                        "rendering": "",
+                        "multiscale_policy": "inherit",
+                    }
+                ],
+            },
+        }
+    )
 
     fake_scene = visualization_pipeline.PreparedVisualizationScene(
         normalized_parameters={},
@@ -2295,16 +2311,47 @@ def test_run_render_movie_analysis_writes_frames_and_manifest(
             self.scale = (1.0, 1.0, 1.0, 1.0, 1.0)
             self.size = (6.0,)
             self.tail_length = 0.0
+            self.refresh_calls = 0
+
+        def refresh(self, *args, **kwargs) -> None:
+            del args, kwargs
+            self.refresh_calls += 1
+
+    class _FakeCanvasNative:
+        def __init__(self) -> None:
+            self.resize_calls: list[tuple[int, int]] = []
+
+        def resize(self, width: int, height: int) -> None:
+            self.resize_calls.append((int(width), int(height)))
+
+    class _FakeCanvas:
+        def __init__(self) -> None:
+            self.native = _FakeCanvasNative()
+
+    class _FakeQtViewer:
+        def __init__(self) -> None:
+            self.canvas = _FakeCanvas()
+
+    class _FakeWindow:
+        def __init__(self) -> None:
+            self.qt_viewer = _FakeQtViewer()
+            self.resize_calls: list[tuple[int, int]] = []
+
+        def resize(self, width: int, height: int) -> None:
+            self.resize_calls.append((int(width), int(height)))
 
     class _FakeViewer:
         def __init__(self) -> None:
             self.dims = _FakeDims()
             self.camera = _FakeCamera()
             self.layers = [_FakeLayer()]
+            self.window = _FakeWindow()
+            self.screenshot_sizes: list[tuple[int, int]] = []
 
         def screenshot(self, *, canvas_only: bool, flash: bool, size):
             del canvas_only, flash
-            width, height = size
+            self.screenshot_sizes.append(tuple(int(value) for value in size))
+            height, width = size
             image = np.zeros((int(height), int(width), 4), dtype=np.uint8)
             image[..., 3] = 255
             return image
@@ -2332,6 +2379,21 @@ def test_run_render_movie_analysis_writes_frames_and_manifest(
             return layer
 
     built_viewers: list[_FakeViewer] = []
+    build_scene_calls: list[dict[str, object]] = []
+
+    def _fake_build_napari_viewer_scene(**kwargs):
+        build_scene_calls.append(dict(kwargs))
+        built_viewers.append(_FakeViewer())
+        return visualization_pipeline.BuiltNapariScene(
+            viewer=built_viewers[-1],
+            renderer_info={"gpu_renderer": True},
+            manifest_path=None,
+            primary_source_component="data",
+            primary_source_components=("data", "data_pyramid/level_1"),
+            serialized_volume_layers=[],
+            axis_labels_tczyx=("t", "c", "z", "y", "x"),
+            scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        )
 
     monkeypatch.setattr(
         visualization_pipeline,
@@ -2343,29 +2405,18 @@ def test_run_render_movie_analysis_writes_frames_and_manifest(
         "_process_pending_qt_events",
         lambda: None,
     )
+    monkeypatch.setattr(visualization_pipeline.time, "sleep", lambda *_args: None)
     monkeypatch.setattr(
         visualization_pipeline,
         "_build_napari_viewer_scene",
-        lambda **kwargs: (
-            built_viewers.append(_FakeViewer())
-            or visualization_pipeline.BuiltNapariScene(
-                viewer=built_viewers[-1],
-                renderer_info={},
-                manifest_path=None,
-                primary_source_component="data",
-                primary_source_components=("data", "data_pyramid/level_1"),
-                serialized_volume_layers=[],
-                axis_labels_tczyx=("t", "c", "z", "y", "x"),
-                scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
-            )
-        ),
+        _fake_build_napari_viewer_scene,
     )
 
     summary = visualization_pipeline.run_render_movie_analysis(
         zarr_path=store_path,
         parameters={
-            "input_source": _VISUALIZATION_COMPONENT,
-            "keyframe_manifest_path": str(keyframe_manifest_path),
+            "input_source": "visualization",
+            "launch_mode": "in_process",
             "resolution_levels": [0, 1],
             "render_size_xy": [96, 64],
             "fps": 12,
@@ -2378,20 +2429,509 @@ def test_run_render_movie_analysis_writes_frames_and_manifest(
     assert summary.component == "clearex/results/render_movie/latest"
     assert summary.rendered_levels == (0, 1)
     assert summary.frame_count == 4
+    assert summary.output_directory == _render_movie_output_directory(store_path)
     manifest = json.loads(
         Path(summary.render_manifest_path).read_text(encoding="utf-8")
     )
     assert manifest["rendered_levels"] == [0, 1]
     assert manifest["frame_count"] == 4
     assert len(built_viewers) == 2
+    assert len(build_scene_calls) == 2
+    assert all(bool(call.get("show", False)) for call in build_scene_calls)
     for viewer in built_viewers:
         layer_names = [str(layer.name) for layer in viewer.layers]
         assert "Manual Points" in layer_names
         assert "Manual Tracks" in layer_names
+        assert viewer.window.qt_viewer.canvas.native.resize_calls == [(96, 64)]
+        assert viewer.window.resize_calls == [(296, 114)]
+        assert viewer.screenshot_sizes == [(64, 96)] * 4
+        assert all(int(layer.refresh_calls) >= 4 for layer in viewer.layers)
     for level_index in (0, 1):
         frame_dir = Path(summary.output_directory) / f"level_{level_index:02d}_frames"
         assert frame_dir.exists()
         assert len(sorted(frame_dir.glob("frame_*.png"))) == 4
+
+
+def test_run_render_movie_analysis_raises_when_visible_probe_is_blank(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_movie_blank_probe.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    keyframe_manifest_path = store_path / _VISUALIZATION_COMPONENT / "keyframes.json"
+    keyframe_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    keyframe_manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "keyframes": [
+                    {
+                        "id": "keyframe_0000",
+                        "index": 0,
+                        "order_index": 0,
+                        "camera": {
+                            "angles": [0.0, 0.0, 0.0],
+                            "zoom": 1.0,
+                            "center": [0.0, 0.0, 0.0],
+                            "perspective": 0.0,
+                            "field_of_view": 0.0,
+                        },
+                        "dims": {
+                            "current_step": [0, 0, 0, 0, 0],
+                            "ndisplay": 2,
+                            "order": [0, 1, 2, 3, 4],
+                        },
+                        "layers": [{"name": "Volume", "visible": True}],
+                    },
+                    {
+                        "id": "keyframe_0001",
+                        "index": 1,
+                        "order_index": 1,
+                        "camera": {
+                            "angles": [0.0, 0.0, 0.0],
+                            "zoom": 1.0,
+                            "center": [0.0, 0.0, 0.0],
+                            "perspective": 0.0,
+                            "field_of_view": 0.0,
+                        },
+                        "dims": {
+                            "current_step": [0, 0, 0, 0, 0],
+                            "ndisplay": 2,
+                            "order": [0, 1, 2, 3, 4],
+                        },
+                        "layers": [{"name": "Volume", "visible": True}],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    root.require_group(_VISUALIZATION_COMPONENT).attrs.update(
+        {
+            "source_component": "data",
+            "source_components": ["data"],
+            "position_index": 0,
+            "selected_positions": [0],
+            "show_all_positions": False,
+            "overlay_points_count": 0,
+            "viewer_ndisplay_effective": 2,
+            "keyframe_manifest_path": str(keyframe_manifest_path),
+            "parameters": {
+                "input_source": "data",
+                "position_index": 0,
+                "show_all_positions": False,
+                "use_multiscale": True,
+                "use_3d_view": False,
+                "overlay_particle_detections": False,
+                "volume_layers": [
+                    {
+                        "component": "data",
+                        "name": "",
+                        "layer_type": "image",
+                        "channels": [],
+                        "visible": None,
+                        "opacity": None,
+                        "blending": "",
+                        "colormap": "",
+                        "rendering": "",
+                        "multiscale_policy": "inherit",
+                    }
+                ],
+            },
+        }
+    )
+
+    fake_scene = visualization_pipeline.PreparedVisualizationScene(
+        normalized_parameters={},
+        volume_layers=_single_image_volume_layers(),
+        selected_positions=(0,),
+        reference_position_index=0,
+        points_by_position={},
+        point_properties_by_position={},
+        total_overlay_points=0,
+        source_component="data",
+        source_components=("data",),
+        viewer_ndisplay_requested=2,
+        viewer_ndisplay_effective=2,
+        display_mode_fallback_reason=None,
+        napari_payload=visualization_pipeline.NapariLayerPayload(
+            axis_labels_tczyx=("t", "c", "z", "y", "x"),
+            scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+            image_metadata={},
+            points_metadata={},
+        ),
+        position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+        spatial_calibration=visualization_pipeline.SpatialCalibrationConfig(),
+    )
+
+    class _FakeDims:
+        def __init__(self) -> None:
+            self.current_step = (0, 0, 0, 0, 0)
+            self.order = (0, 1, 2, 3, 4)
+            self.ndisplay = 2
+
+    class _FakeCamera:
+        def __init__(self) -> None:
+            self.angles = (0.0, 0.0, 0.0)
+            self.zoom = 1.0
+            self.center = (0.0, 0.0, 0.0)
+            self.perspective = 0.0
+            self.fov = 0.0
+
+    class _FakeLayer:
+        def __init__(self) -> None:
+            self.name = "Volume"
+            self.visible = True
+            self.opacity = 1.0
+            self.blending = "opaque"
+            self.refresh_calls = 0
+
+        def refresh(self, *args, **kwargs) -> None:
+            del args, kwargs
+            self.refresh_calls += 1
+
+    class _FakeCanvasNative:
+        def resize(self, width: int, height: int) -> None:
+            del width, height
+
+    class _FakeCanvas:
+        def __init__(self) -> None:
+            self.native = _FakeCanvasNative()
+
+    class _FakeQtViewer:
+        def __init__(self) -> None:
+            self.canvas = _FakeCanvas()
+
+    class _FakeWindow:
+        def __init__(self) -> None:
+            self.qt_viewer = _FakeQtViewer()
+
+        def resize(self, width: int, height: int) -> None:
+            del width, height
+
+    class _FakeViewer:
+        def __init__(self) -> None:
+            self.dims = _FakeDims()
+            self.camera = _FakeCamera()
+            self.layers = [_FakeLayer()]
+            self.window = _FakeWindow()
+            self.closed = False
+
+        def screenshot(self, *, canvas_only: bool, flash: bool, size):
+            del canvas_only, flash
+            height, width = size
+            image = np.zeros((int(height), int(width), 4), dtype=np.uint8)
+            image[..., 3] = 255
+            return image
+
+        def close(self) -> None:
+            self.closed = True
+
+    build_scene_calls: list[dict[str, object]] = []
+
+    def _fake_build_napari_viewer_scene(**kwargs):
+        build_scene_calls.append(dict(kwargs))
+        return visualization_pipeline.BuiltNapariScene(
+            viewer=_FakeViewer(),
+            renderer_info={"gpu_renderer": True},
+            manifest_path=None,
+            primary_source_component="data",
+            primary_source_components=("data",),
+            serialized_volume_layers=[],
+            axis_labels_tczyx=("t", "c", "z", "y", "x"),
+            scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        )
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_prepare_visualization_scene",
+        lambda **kwargs: fake_scene,
+    )
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_process_pending_qt_events",
+        lambda: None,
+    )
+    monkeypatch.setattr(visualization_pipeline.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_build_napari_viewer_scene",
+        _fake_build_napari_viewer_scene,
+    )
+
+    with pytest.raises(RuntimeError, match="empty napari probe frame"):
+        visualization_pipeline.run_render_movie_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "visualization",
+                "launch_mode": "in_process",
+                "resolution_levels": [0],
+                "render_size_xy": [96, 64],
+                "fps": 12,
+                "default_transition_frames": 1,
+                "hold_frames": 0,
+            },
+        )
+
+    assert [bool(call.get("show", False)) for call in build_scene_calls] == [True]
+
+
+def test_run_render_movie_analysis_auto_uses_subprocess_with_active_qt_app(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_render_movie_subprocess.zarr"
+    zarr.open_group(str(store_path), mode="w")
+
+    class _FakeQApplication:
+        @staticmethod
+        def instance() -> object:
+            return object()
+
+    class _FakeQtWidgets:
+        QApplication = _FakeQApplication
+
+    monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", _FakeQtWidgets)
+
+    captured: dict[str, object] = {}
+    captured_parameters: dict[str, object] = {}
+
+    def _fake_run_render_movie_subprocess(
+        *,
+        zarr_path: str | Path,
+        normalized_parameters: dict[str, object],
+        run_id: str | None,
+    ) -> None:
+        captured["zarr_path"] = str(zarr_path)
+        captured_parameters.clear()
+        captured_parameters.update(dict(normalized_parameters))
+        captured["run_id"] = run_id
+        output_directory = Path(_render_movie_output_directory(store_path))
+        output_directory.mkdir(parents=True, exist_ok=True)
+        render_manifest_path = output_directory / "render_manifest.json"
+        render_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "rendered_levels": [0],
+                    "levels": [
+                        {
+                            "requested_level": 0,
+                            "frame_directory": str(
+                                (output_directory / "level_00_frames").resolve()
+                            ),
+                            "frame_pattern": "frame_%06d.png",
+                            "frame_count": 3,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        visualization_pipeline._save_render_movie_metadata(
+            zarr_path=zarr_path,
+            visualization_component=_VISUALIZATION_COMPONENT,
+            keyframe_manifest_path=_visualization_keyframe_manifest_path(store_path),
+            render_manifest_path=str(render_manifest_path.resolve()),
+            output_directory=str(output_directory.resolve()),
+            rendered_levels=(0,),
+            frame_count=3,
+            fps=24,
+            frame_directories_by_level={
+                "0": str((output_directory / "level_00_frames").resolve())
+            },
+            parameters=normalized_parameters,
+            source_component="data",
+            source_components=("data",),
+            run_id=run_id,
+        )
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_run_render_movie_subprocess",
+        _fake_run_render_movie_subprocess,
+    )
+
+    summary = visualization_pipeline.run_render_movie_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "visualization",
+            "resolution_levels": [0],
+            "render_size_xy": [96, 64],
+        },
+        run_id="run-123",
+    )
+
+    assert captured["zarr_path"] == str(store_path)
+    assert captured_parameters["launch_mode"] == "in_process"
+    assert captured["run_id"] == "run-123"
+    assert summary.component == "clearex/results/render_movie/latest"
+    assert summary.visualization_component == _VISUALIZATION_COMPONENT
+    assert summary.rendered_levels == (0,)
+    assert summary.frame_count == 3
+    assert summary.output_directory == _render_movie_output_directory(store_path)
+
+
+def test_build_movie_render_viewer_scene_uses_visible_viewer(
+    monkeypatch,
+) -> None:
+    call_log: list[dict[str, object]] = []
+
+    class _DummyViewer:
+        def close(self) -> None:
+            return None
+
+    def _fake_build_napari_viewer_scene(**kwargs):
+        call_log.append(dict(kwargs))
+        return visualization_pipeline.BuiltNapariScene(
+            viewer=_DummyViewer(),
+            renderer_info={"gpu_renderer": True},
+            manifest_path=None,
+            primary_source_component="data",
+            primary_source_components=("data",),
+            serialized_volume_layers=[],
+            axis_labels_tczyx=("t", "c", "z", "y", "x"),
+            scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+        )
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "_build_napari_viewer_scene",
+        _fake_build_napari_viewer_scene,
+    )
+
+    built_scene, used_visible_fallback = (
+        visualization_pipeline._build_movie_render_viewer_scene(
+            zarr_path=Path("/tmp/example.zarr"),
+            scene=visualization_pipeline.PreparedVisualizationScene(
+                normalized_parameters={},
+                volume_layers=_single_image_volume_layers(),
+                selected_positions=(0,),
+                reference_position_index=0,
+                points_by_position={},
+                point_properties_by_position={},
+                total_overlay_points=0,
+                source_component="data",
+                source_components=("data",),
+                viewer_ndisplay_requested=2,
+                viewer_ndisplay_effective=2,
+                display_mode_fallback_reason=None,
+                napari_payload=visualization_pipeline.NapariLayerPayload(
+                    axis_labels_tczyx=("t", "c", "z", "y", "x"),
+                    scale_tczyx=(1.0, 1.0, 1.0, 1.0, 1.0),
+                    image_metadata={},
+                    points_metadata={},
+                ),
+                position_affines_tczyx={0: np.eye(6, dtype=np.float64)},
+                spatial_calibration=visualization_pipeline.SpatialCalibrationConfig(),
+            ),
+            movie_level_index=0,
+        )
+    )
+
+    assert used_visible_fallback is True
+    assert [bool(call.get("show", False)) for call in call_log] == [True]
+    assert built_scene.renderer_info["gpu_renderer"] is True
+
+
+def test_resolve_render_movie_keyframe_manifest_path_uses_store_default_when_needed(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store_default_manifest.zarr"
+    zarr.open_group(str(store_path), mode="w")
+    manifest_path = store_path / _VISUALIZATION_COMPONENT / "keyframes.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps({"schema_version": 2, "keyframes": []}),
+        encoding="utf-8",
+    )
+
+    resolved = visualization_pipeline._resolve_render_movie_keyframe_manifest_path(
+        zarr_path=store_path,
+        parameters={"keyframe_manifest_path": ""},
+        visualization_metadata={},
+    )
+
+    assert resolved == str(manifest_path.resolve())
+
+
+def test_resolve_render_movie_keyframe_manifest_path_falls_back_to_legacy_sidecar(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store_legacy_manifest.zarr"
+    zarr.open_group(str(store_path), mode="w")
+    manifest_path = Path(f"{store_path}.visualization_keyframes.json")
+    manifest_path.write_text(
+        json.dumps({"schema_version": 2, "keyframes": []}),
+        encoding="utf-8",
+    )
+
+    resolved = visualization_pipeline._resolve_render_movie_keyframe_manifest_path(
+        zarr_path=store_path,
+        parameters={"keyframe_manifest_path": ""},
+        visualization_metadata={},
+    )
+
+    assert resolved == str(manifest_path.resolve())
+
+
+def test_run_subprocess_entrypoint_dispatches_render_movie(
+    monkeypatch,
+) -> None:
+    captured: dict[str, str | None] = {}
+    captured_parameters: dict[str, object] = {}
+
+    def _fake_run_render_movie_analysis(
+        *,
+        zarr_path: str | Path,
+        parameters: dict[str, object],
+        progress_callback: object,
+        run_id: str | None = None,
+    ) -> visualization_pipeline.RenderMovieSummary:
+        del progress_callback
+        captured["zarr_path"] = str(zarr_path)
+        captured_parameters.clear()
+        captured_parameters.update(dict(parameters))
+        captured["run_id"] = run_id
+        return visualization_pipeline.RenderMovieSummary(
+            component="clearex/results/render_movie/latest",
+            visualization_component=_VISUALIZATION_COMPONENT,
+            keyframe_manifest_path="/tmp/keyframes.json",
+            render_manifest_path="/tmp/render_manifest.json",
+            output_directory="/tmp/render_movie/latest",
+            rendered_levels=(0,),
+            frame_count=1,
+            fps=24,
+        )
+
+    monkeypatch.setattr(
+        visualization_pipeline,
+        "run_render_movie_analysis",
+        _fake_run_render_movie_analysis,
+    )
+
+    exit_code = visualization_pipeline._run_subprocess_entrypoint(
+        [
+            "--mode",
+            "render_movie",
+            "--zarr-path",
+            "/tmp/example.ome.zarr",
+            "--parameters-json",
+            '{"input_source":"visualization","launch_mode":"subprocess"}',
+            "--run-id",
+            "movie-run-1",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["zarr_path"] == "/tmp/example.ome.zarr"
+    assert captured_parameters["launch_mode"] == "in_process"
+    assert captured["run_id"] == "movie-run-1"
 
 
 def test_run_compile_movie_analysis_writes_selected_outputs(
@@ -2461,8 +3001,7 @@ def test_run_compile_movie_analysis_writes_selected_outputs(
     summary = visualization_pipeline.run_compile_movie_analysis(
         zarr_path=store_path,
         parameters={
-            "input_source": "clearex/results/render_movie/latest",
-            "render_manifest_path": str(render_manifest_path),
+            "input_source": "render_movie",
             "rendered_level": 1,
             "output_format": "both",
             "fps": 24,
