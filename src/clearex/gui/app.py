@@ -246,6 +246,38 @@ def _resolve_gui_asset_path(filename: str) -> Path:
     return (_GUI_ASSET_DIRECTORY / filename).resolve()
 
 
+def _apply_application_icon(app: Any) -> None:
+    """Fallback no-op when PyQt6 is unavailable at import time.
+
+    Parameters
+    ----------
+    app : Any
+        Placeholder application object.
+
+    Returns
+    -------
+    None
+        No-op fallback used until the PyQt implementation overrides it.
+    """
+    del app
+
+
+def _show_startup_splash(app: Any) -> None:
+    """Fallback no-op when PyQt6 is unavailable at import time.
+
+    Parameters
+    ----------
+    app : Any
+        Placeholder application object.
+
+    Returns
+    -------
+    None
+        No-op fallback used until the PyQt implementation overrides it.
+    """
+    del app
+
+
 def _primary_screen_available_size() -> Optional[tuple[int, int]]:
     """Return the available size of the primary screen for the active app.
 

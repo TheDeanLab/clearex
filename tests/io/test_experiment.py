@@ -353,7 +353,10 @@ def test_create_dask_client_gpu_worker_env_merges_inherited_library_path(
         "_detect_cuda_library_paths",
         lambda: ["/cuda/runtime/lib", "/cuda/cudnn/lib"],
     )
-    path_env_var = experiment_module._library_path_env_vars_for_platform()[0]
+    path_env_vars = experiment_module._library_path_env_vars_for_platform()
+    for env_var in path_env_vars:
+        monkeypatch.delenv(env_var, raising=False)
+    path_env_var = path_env_vars[0]
     monkeypatch.setenv(path_env_var, "/cluster/custom/lib")
 
     _ = experiment_module.create_dask_client(

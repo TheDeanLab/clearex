@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import inspect
+import json
 import math
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -257,6 +260,51 @@ def test_resolve_initial_dialog_dimensions_keeps_larger_default_size() -> None:
 
     assert minimum_size == app_module._SETUP_DIALOG_MINIMUM_SIZE
     assert startup_size == app_module._SETUP_DIALOG_PREFERRED_SIZE
+
+
+def test_gui_module_exports_fallback_helpers_when_pyqt6_is_unavailable() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    script = f"""
+import builtins
+import importlib
+import json
+import sys
+
+sys.path.insert(0, {str(repo_root / "src")!r})
+original_import = builtins.__import__
+
+
+def _blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "PyQt6" or name.startswith("PyQt6."):
+        raise ImportError("blocked for test")
+    return original_import(name, globals, locals, fromlist, level)
+
+
+builtins.__import__ = _blocked_import
+module = importlib.import_module("clearex.gui.app")
+print(
+    json.dumps(
+        {{
+            "HAS_PYQT6": module.HAS_PYQT6,
+            "has_apply_application_icon": hasattr(module, "_apply_application_icon"),
+            "has_show_startup_splash": hasattr(module, "_show_startup_splash"),
+        }}
+    )
+)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+    )
+
+    assert json.loads(result.stdout) == {
+        "HAS_PYQT6": False,
+        "has_apply_application_icon": True,
+        "has_show_startup_splash": True,
+    }
 
 
 def test_resolve_initial_dialog_dimensions_clamps_to_available_screen() -> None:
