@@ -91,6 +91,7 @@ _MAX_LAYER_DISPLAY_VOXELS = 256_000_000
 _DISPLAY_PYRAMID_LEVELS_ATTR = "display_pyramid_levels"
 _DISPLAY_PYRAMID_FACTORS_ATTR = "display_pyramid_factors_tpczyx"
 _DISPLAY_PYRAMID_ROOT_MAP_ATTR = "display_pyramid_levels_by_component"
+_DISPLAY_PYRAMID_BUILD_COMPLETE_ATTR = "display_pyramid_build_complete"
 _LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR = "visualization_pyramid_levels"
 _LEGACY_DISPLAY_PYRAMID_FACTORS_ATTR = "visualization_pyramid_factors_tpczyx"
 _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR = "visualization_pyramid_levels_by_component"
@@ -3098,6 +3099,223 @@ def _display_pyramid_level_component(
     return f"{component}_pyramid/level_{level_index}"
 
 
+def _display_pyramid_root_component(*, source_component: str) -> str:
+    """Return the pyramid-root group path for one source component."""
+    component = str(source_component).strip() or "data"
+    if component == "data":
+        return "data_pyramid"
+    return f"{component}_pyramid"
+
+
+def _component_sequence_matches(
+    payload: object,
+    *,
+    expected: Sequence[str],
+) -> bool:
+    """Return whether metadata payload matches an ordered component sequence."""
+    if not isinstance(payload, (tuple, list)):
+        return False
+    normalized = tuple(str(item).strip() for item in payload if str(item).strip())
+    return normalized == tuple(str(item).strip() for item in expected)
+
+
+def _display_pyramid_level_metadata_is_complete(
+    *,
+    root: zarr.hierarchy.Group,
+    component: str,
+    level_index: int,
+) -> bool:
+    """Return whether one existing level looks fully materialized."""
+    try:
+        array = root[str(component)]
+    except Exception:
+        return False
+
+    if len(tuple(getattr(array, "shape", tuple()))) != 6:
+        return False
+
+    attrs = dict(array.attrs)
+    try:
+        if int(attrs.get("pyramid_level", -1)) != int(level_index):
+            return False
+    except Exception:
+        return False
+
+    axes = attrs.get("axes")
+    if list(axes) != ["t", "p", "c", "z", "y", "x"]:
+        return False
+
+    factors = attrs.get("downsample_factors_tpczyx")
+    if not isinstance(factors, (tuple, list)) or len(factors) != 6:
+        return False
+    try:
+        if any(int(value) < 1 for value in factors):
+            return False
+    except Exception:
+        return False
+
+    chunk_shape = attrs.get("chunk_shape_tpczyx")
+    if not isinstance(chunk_shape, (tuple, list)) or len(chunk_shape) != 6:
+        return False
+    try:
+        chunk_shape_tpczyx = tuple(int(value) for value in chunk_shape)
+    except Exception:
+        return False
+    array_chunks = getattr(array, "chunks", None)
+    if array_chunks is None:
+        return False
+    if tuple(int(value) for value in tuple(array_chunks)) != chunk_shape_tpczyx:
+        return False
+
+    source_component = str(attrs.get("source_component", "")).strip()
+    return bool(source_component)
+
+
+def _source_has_multiscale_lookup_metadata(
+    *,
+    root: zarr.hierarchy.Group,
+    source_component: str,
+    source_components: Sequence[str],
+) -> bool:
+    """Return whether lookup metadata references the discovered components."""
+    expected = tuple(str(item).strip() for item in source_components)
+    source_attrs = dict(root[str(source_component)].attrs)
+    source_match = any(
+        _component_sequence_matches(source_attrs.get(attr_name), expected=expected)
+        for attr_name in (
+            _DISPLAY_PYRAMID_LEVELS_ATTR,
+            _LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR,
+            "pyramid_levels",
+        )
+    )
+    if source_match:
+        return True
+
+    root_attrs = dict(root.attrs)
+    for attr_name in (
+        _DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+        _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+    ):
+        payload = root_attrs.get(attr_name)
+        if not isinstance(payload, Mapping):
+            continue
+        if _component_sequence_matches(
+            payload.get(str(source_component)),
+            expected=expected,
+        ):
+            return True
+
+    if str(source_component).strip() == "data":
+        return _component_sequence_matches(
+            root_attrs.get("data_pyramid_levels"),
+            expected=expected,
+        )
+    return False
+
+
+def _display_pyramid_state_is_complete(
+    *,
+    root: zarr.hierarchy.Group,
+    source_component: str,
+) -> bool:
+    """Return whether an existing pyramid can be safely reused as-is."""
+    source_components = _collect_existing_multiscale_components(
+        root=root,
+        source_component=str(source_component),
+    )
+    if len(source_components) <= 1:
+        return False
+    if not _is_source_pyramid_layout_compatible(
+        source_component=str(source_component),
+        source_components=source_components,
+    ):
+        return False
+    if not _source_has_multiscale_lookup_metadata(
+        root=root,
+        source_component=str(source_component),
+        source_components=source_components,
+    ):
+        return False
+
+    for level_index, component in enumerate(source_components[1:], start=1):
+        if not _display_pyramid_level_metadata_is_complete(
+            root=root,
+            component=str(component),
+            level_index=int(level_index),
+        ):
+            return False
+
+    build_complete = root[str(source_component)].attrs.get(
+        _DISPLAY_PYRAMID_BUILD_COMPLETE_ATTR
+    )
+    if build_complete is None:
+        return True
+    return bool(build_complete)
+
+
+def _clear_display_pyramid_retry_metadata(
+    *,
+    root: zarr.hierarchy.Group,
+    source_component: str,
+) -> None:
+    """Clear display-pyramid lookup metadata for one source component."""
+    source_attrs = root[str(source_component)].attrs
+    for attr_name in (
+        _DISPLAY_PYRAMID_LEVELS_ATTR,
+        _DISPLAY_PYRAMID_FACTORS_ATTR,
+        _DISPLAY_PYRAMID_BUILD_COMPLETE_ATTR,
+        _LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR,
+        _LEGACY_DISPLAY_PYRAMID_FACTORS_ATTR,
+    ):
+        if attr_name in source_attrs:
+            del source_attrs[attr_name]
+
+    for attr_name in (
+        _DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+        _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR,
+    ):
+        payload = root.attrs.get(attr_name)
+        if not isinstance(payload, Mapping):
+            continue
+        updated = {
+            str(key): value
+            for key, value in dict(payload).items()
+            if str(key).strip() != str(source_component).strip()
+        }
+        if updated:
+            root.attrs[attr_name] = _sanitize_metadata_value(updated)
+        elif attr_name in root.attrs:
+            del root.attrs[attr_name]
+
+
+def _cleanup_incomplete_display_pyramid_state(
+    *,
+    root: zarr.hierarchy.Group,
+    source_component: str,
+) -> bool:
+    """Delete an incomplete source-specific pyramid subtree before retry."""
+    pyramid_root = _display_pyramid_root_component(source_component=source_component)
+    if pyramid_root not in root:
+        return False
+    if _display_pyramid_state_is_complete(
+        root=root,
+        source_component=str(source_component),
+    ):
+        return False
+
+    _LOGGER.warning(
+        "[display_pyramid] deleting incomplete pyramid subtree for source=%s root=%s",
+        str(source_component),
+        str(pyramid_root),
+    )
+    del root[pyramid_root]
+    _clear_display_pyramid_retry_metadata(
+        root=root,
+        source_component=str(source_component),
+    )
+    return True
+
+
 def _is_source_pyramid_layout_compatible(
     *,
     source_component: str,
@@ -3416,6 +3634,7 @@ def _build_visualization_multiscale_components(
     root.attrs[_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = _sanitize_metadata_value(
         legacy_component_map
     )
+    root[str(source_component)].attrs[_DISPLAY_PYRAMID_BUILD_COMPLETE_ATTR] = True
     return tuple(str(item) for item in level_paths)
 
 
@@ -5221,6 +5440,16 @@ def run_display_pyramid_analysis(
             f"Input component '{source_component}' is incompatible."
         )
 
+    cleaned_incomplete_pyramid = _cleanup_incomplete_display_pyramid_state(
+        root=root,
+        source_component=source_component,
+    )
+    if cleaned_incomplete_pyramid:
+        _emit(
+            15,
+            "Found incomplete display pyramid state; rebuilding from source.",
+        )
+
     source_attrs = dict(source_array.attrs)
     root_attrs = dict(root.attrs)
     channel_count = max(1, int(tuple(source_array.shape)[2]))
@@ -5248,6 +5477,8 @@ def run_display_pyramid_analysis(
                 15,
                 "Existing display pyramid uses legacy layout; rebuilding source-adjacent levels.",
             )
+        if _DISPLAY_PYRAMID_BUILD_COMPLETE_ATTR in root[str(source_component)].attrs:
+            del root[str(source_component)].attrs[_DISPLAY_PYRAMID_BUILD_COMPLETE_ATTR]
         _emit(30, f"Preparing display pyramid for {source_component}")
         level_factors = _resolve_visualization_pyramid_factors_tpczyx(
             root_attrs=root_attrs,

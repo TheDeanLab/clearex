@@ -92,6 +92,9 @@ and avoid global graph reshapes for interactive workflows.
 
 - If matching pyramid levels already exist for the selected component, ClearEx
   reuses them unless `force_rerun=True`.
+- If a prior `display_pyramid` write left behind an incomplete source-adjacent
+  pyramid subtree, the next retry deletes that subtree and rebuilds from the
+  full-resolution source before reusing anything.
 - Existing ingest-time raw-data pyramids are still valid display sources.
 - Re-running `display_pyramid` only overwrites the selected component's explicit
   display-pyramid namespace.

@@ -509,6 +509,15 @@ def test_run_display_pyramid_analysis_reuses_existing_levels(
         dtype="uint16",
         overwrite=True,
     )
+    root["data_pyramid/level_1"].attrs.update(
+        {
+            "axes": ["t", "p", "c", "z", "y", "x"],
+            "pyramid_level": 1,
+            "downsample_factors_tpczyx": [1, 1, 1, 2, 2, 2],
+            "chunk_shape_tpczyx": [1, 1, 1, 4, 4, 4],
+            "source_component": "data",
+        }
+    )
     root.attrs["data_pyramid_levels"] = ["data", "data_pyramid/level_1"]
     root["data"].attrs["pyramid_levels"] = ["data", "data_pyramid/level_1"]
 
@@ -519,6 +528,54 @@ def test_run_display_pyramid_analysis_reuses_existing_levels(
 
     assert summary.source_components == ("data", "data_pyramid/level_1")
     assert summary.reused_existing_levels is True
+
+
+def test_run_display_pyramid_analysis_rebuilds_incomplete_existing_levels(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    source_component = "results/shear_transform/latest/data"
+    level_1_component = "results/shear_transform/latest/data_pyramid/level_1"
+    stale_component = "results/shear_transform/latest/data_pyramid/stale_extra"
+
+    source_data = np.arange(8 * 8 * 8, dtype=np.uint16).reshape((1, 1, 1, 8, 8, 8))
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name=source_component,
+        shape=tuple(int(size) for size in source_data.shape),
+        chunks=(1, 1, 1, 4, 4, 4),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root[source_component][:] = source_data
+    root.create_dataset(
+        name=level_1_component,
+        shape=(1, 1, 1, 4, 4, 4),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+    root[level_1_component][:] = np.full((1, 1, 1, 4, 4, 4), 65535, dtype=np.uint16)
+    root.create_dataset(
+        name=stale_component,
+        shape=(1, 1, 1, 1, 1, 1),
+        chunks=(1, 1, 1, 1, 1, 1),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    summary = run_display_pyramid_analysis(
+        zarr_path=store_path,
+        parameters={"input_source": source_component},
+    )
+
+    assert summary.reused_existing_levels is False
+
+    output_root = zarr.open_group(str(store_path), mode="r")
+    level_1 = np.asarray(output_root[level_1_component][:])
+    expected_level_1 = source_data[:, :, :, ::2, ::2, ::2]
+    np.testing.assert_array_equal(level_1, expected_level_1)
+    assert stale_component not in output_root
 
 
 def test_run_display_pyramid_analysis_avoids_forced_rechunk(
