@@ -164,6 +164,10 @@ class TestWorkflowConfig:
         cfg.display_pyramid = True
         assert cfg.has_analysis_selection() is True
 
+        cfg.display_pyramid = False
+        cfg.volume_export = True
+        assert cfg.has_analysis_selection() is True
+
     def test_default_zarr_save_config(self):
         cfg = WorkflowConfig()
         assert cfg.zarr_save.chunks_ptczyx == DEFAULT_ZARR_CHUNKS_PTCZYX
@@ -274,8 +278,24 @@ class TestWorkflowConfig:
         )
         assert cfg.analysis_parameters["compile_movie"]["rendered_level"] == 0
         assert cfg.analysis_parameters["compile_movie"]["output_format"] == "mp4"
+        assert "volume_export" in cfg.analysis_parameters
+        assert cfg.analysis_parameters["volume_export"]["execution_order"] == 12
+        assert cfg.analysis_parameters["volume_export"]["input_source"] == "data"
+        assert (
+            cfg.analysis_parameters["volume_export"]["export_scope"]
+            == "current_selection"
+        )
+        assert cfg.analysis_parameters["volume_export"]["t_index"] == 0
+        assert cfg.analysis_parameters["volume_export"]["p_index"] == 0
+        assert cfg.analysis_parameters["volume_export"]["c_index"] == 0
+        assert cfg.analysis_parameters["volume_export"]["resolution_level"] == 0
+        assert cfg.analysis_parameters["volume_export"]["export_format"] == "ome-zarr"
+        assert (
+            cfg.analysis_parameters["volume_export"]["tiff_file_layout"]
+            == "single_file"
+        )
         assert "mip_export" in cfg.analysis_parameters
-        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 12
+        assert cfg.analysis_parameters["mip_export"]["execution_order"] == 13
         assert (
             cfg.analysis_parameters["mip_export"]["position_mode"] == "multi_position"
         )
@@ -598,6 +618,31 @@ class TestWorkflowConfig:
         )
         params = cfg.analysis_parameters["mip_export"]
         assert params["export_format"] == "ome-tiff"
+
+    def test_normalizes_volume_export_parameters(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "volume_export": {
+                    "input_source": "fusion",
+                    "export_scope": "all_indices",
+                    "t_index": "7",
+                    "p_index": "8",
+                    "c_index": "9",
+                    "resolution_level": "2",
+                    "export_format": "OME-TIFF",
+                    "tiff_file_layout": "per_volume_files",
+                }
+            }
+        )
+        params = cfg.analysis_parameters["volume_export"]
+        assert params["input_source"] == "fusion"
+        assert params["export_scope"] == "all_indices"
+        assert params["t_index"] == 7
+        assert params["p_index"] == 8
+        assert params["c_index"] == 9
+        assert params["resolution_level"] == 2
+        assert params["export_format"] == "ome-tiff"
+        assert params["tiff_file_layout"] == "per_volume_files"
 
     def test_normalizes_shear_transform_parameters(self):
         cfg = WorkflowConfig(
@@ -1047,7 +1092,16 @@ def test_normalize_analysis_operation_parameters_returns_defaults():
     assert normalized["render_movie"]["resolution_levels"] == [0]
     assert normalized["compile_movie"]["execution_order"] == 11
     assert normalized["compile_movie"]["input_source"] == "render_movie"
-    assert normalized["mip_export"]["execution_order"] == 12
+    assert normalized["volume_export"]["execution_order"] == 12
+    assert normalized["volume_export"]["input_source"] == "data"
+    assert normalized["volume_export"]["export_scope"] == "current_selection"
+    assert normalized["volume_export"]["t_index"] == 0
+    assert normalized["volume_export"]["p_index"] == 0
+    assert normalized["volume_export"]["c_index"] == 0
+    assert normalized["volume_export"]["resolution_level"] == 0
+    assert normalized["volume_export"]["export_format"] == "ome-zarr"
+    assert normalized["volume_export"]["tiff_file_layout"] == "single_file"
+    assert normalized["mip_export"]["execution_order"] == 13
     assert normalized["mip_export"]["position_mode"] == "multi_position"
     assert normalized["mip_export"]["export_format"] == "ome-tiff"
 
@@ -1065,6 +1119,7 @@ def test_resolve_analysis_execution_sequence_uses_execution_order():
         visualization=False,
         render_movie=False,
         compile_movie=False,
+        volume_export=False,
         mip_export=False,
         analysis_parameters={
             "flatfield": {"execution_order": 4},
@@ -1096,6 +1151,7 @@ def test_resolve_analysis_execution_sequence_includes_mip_export_last_by_default
         visualization=True,
         render_movie=True,
         compile_movie=True,
+        volume_export=False,
         mip_export=True,
         analysis_parameters=None,
     )
@@ -1104,6 +1160,33 @@ def test_resolve_analysis_execution_sequence_includes_mip_export_last_by_default
         "visualization",
         "render_movie",
         "compile_movie",
+        "mip_export",
+    )
+
+
+def test_resolve_analysis_execution_sequence_includes_volume_export_before_mip_export():
+    sequence = resolve_analysis_execution_sequence(
+        flatfield=False,
+        deconvolution=False,
+        shear_transform=False,
+        particle_detection=False,
+        usegment3d=False,
+        registration=False,
+        fusion=False,
+        display_pyramid=True,
+        visualization=True,
+        render_movie=True,
+        compile_movie=True,
+        volume_export=True,
+        mip_export=True,
+        analysis_parameters=None,
+    )
+    assert sequence == (
+        "display_pyramid",
+        "visualization",
+        "render_movie",
+        "compile_movie",
+        "volume_export",
         "mip_export",
     )
 
@@ -1121,6 +1204,7 @@ def test_analysis_operation_order_contains_expected_keys():
         "visualization",
         "render_movie",
         "compile_movie",
+        "volume_export",
         "mip_export",
     )
 

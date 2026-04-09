@@ -67,6 +67,7 @@ ANALYSIS_OPERATION_ORDER = (
     "visualization",
     "render_movie",
     "compile_movie",
+    "volume_export",
     "mip_export",
 )
 
@@ -91,6 +92,7 @@ ANALYSIS_KNOWN_OUTPUT_COMPONENTS: Dict[str, str] = {
     "visualization": "clearex/results/visualization/latest",
     "render_movie": "clearex/results/render_movie/latest",
     "compile_movie": "clearex/results/compile_movie/latest",
+    "volume_export": "clearex/results/volume_export/latest",
     "mip_export": "clearex/results/mip_export/latest",
 }
 _OUTPUT_COMPONENT_TO_OPERATION: Dict[str, str] = {
@@ -265,9 +267,10 @@ _OPERATIONS_CONSUMING_FUSED_IMAGES = frozenset(
         "display_pyramid",
         "particle_detection",
         "usegment3d",
-        "visualization",
-        "mip_export",
-    }
+    "visualization",
+    "volume_export",
+    "mip_export",
+}
 )
 
 
@@ -841,8 +844,25 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "output_directory": "",
         "output_stem": "",
     },
-    "mip_export": {
+    "volume_export": {
         "execution_order": 12,
+        "input_source": "data",
+        "force_rerun": False,
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 1.0,
+        "export_scope": "current_selection",
+        "t_index": 0,
+        "p_index": 0,
+        "c_index": 0,
+        "resolution_level": 0,
+        "export_format": "ome-zarr",
+        "tiff_file_layout": "single_file",
+    },
+    "mip_export": {
+        "execution_order": 13,
         "input_source": "data",
         "force_rerun": False,
         "chunk_basis": "3d",
@@ -2793,6 +2813,78 @@ def _normalize_mip_export_parameters(
     return normalized
 
 
+def _normalize_volume_export_parameters(
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize volume export runtime parameters.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Candidate volume-export parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized volume-export parameters.
+
+    Raises
+    ------
+    ValueError
+        If export mode values are unsupported.
+    """
+    normalized = _normalize_common_operation_parameters("volume_export", params)
+    normalized["input_source"] = _normalize_operation_input_source_alias(
+        "volume_export",
+        normalized.get("input_source", "data"),
+    )
+    normalized["chunk_basis"] = "3d"
+    normalized["detect_2d_per_slice"] = False
+    normalized["use_map_overlap"] = False
+    normalized["overlap_zyx"] = [0, 0, 0]
+
+    export_scope = (
+        str(normalized.get("export_scope", "current_selection")).strip().lower()
+        or "current_selection"
+    )
+    if export_scope not in {"current_selection", "all_indices"}:
+        raise ValueError(
+            "volume_export export_scope must be one of: current_selection, all_indices."
+        )
+    normalized["export_scope"] = export_scope
+
+    for field_name in ("t_index", "p_index", "c_index", "resolution_level"):
+        value = int(normalized.get(field_name, 0))
+        if value < 0:
+            value = 0
+        normalized[field_name] = value
+
+    export_format_raw = (
+        str(normalized.get("export_format", "ome-zarr")).strip().lower()
+        or "ome-zarr"
+    )
+    if export_format_raw in {"ome-zarr", "ome_zarr", "ome.zarr", "zarr"}:
+        export_format = "ome-zarr"
+    elif export_format_raw in {"ome-tiff", "ome_tiff", "ome.tiff", "tiff"}:
+        export_format = "ome-tiff"
+    else:
+        raise ValueError(
+            "volume_export export_format must be one of: ome-zarr, zarr, ome-tiff, tiff."
+        )
+    normalized["export_format"] = export_format
+
+    tiff_file_layout = (
+        str(normalized.get("tiff_file_layout", "single_file")).strip().lower()
+        or "single_file"
+    )
+    if tiff_file_layout not in {"single_file", "per_volume_files"}:
+        raise ValueError(
+            "volume_export tiff_file_layout must be one of: single_file, per_volume_files."
+        )
+    normalized["tiff_file_layout"] = tiff_file_layout
+    return normalized
+
+
 def normalize_analysis_operation_parameters(
     parameters: Optional[Dict[str, Dict[str, Any]]],
 ) -> Dict[str, Dict[str, Any]]:
@@ -2926,6 +3018,10 @@ def normalize_analysis_operation_parameters(
             merged[operation_name] = _normalize_compile_movie_parameters(
                 merged[operation_name]
             )
+        elif operation_name == "volume_export":
+            merged[operation_name] = _normalize_volume_export_parameters(
+                merged[operation_name]
+            )
         elif operation_name == "mip_export":
             merged[operation_name] = _normalize_mip_export_parameters(
                 merged[operation_name]
@@ -2951,6 +3047,7 @@ def selected_analysis_operations(
     visualization: bool,
     render_movie: bool,
     compile_movie: bool,
+    volume_export: bool,
     mip_export: bool,
 ) -> Tuple[str, ...]:
     """Collect enabled analysis operation names.
@@ -2979,6 +3076,8 @@ def selected_analysis_operations(
         Whether movie rendering is enabled.
     compile_movie : bool
         Whether movie compilation is enabled.
+    volume_export : bool
+        Whether volume export is enabled.
     mip_export : bool
         Whether MIP export is enabled.
 
@@ -3010,6 +3109,8 @@ def selected_analysis_operations(
         selected.append("render_movie")
     if compile_movie:
         selected.append("compile_movie")
+    if volume_export:
+        selected.append("volume_export")
     if mip_export:
         selected.append("mip_export")
     return tuple(selected)
@@ -3028,6 +3129,7 @@ def resolve_analysis_execution_sequence(
     visualization: bool,
     render_movie: bool,
     compile_movie: bool,
+    volume_export: bool,
     mip_export: bool,
     analysis_parameters: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[str, ...]:
@@ -3057,6 +3159,8 @@ def resolve_analysis_execution_sequence(
         Whether movie rendering is enabled.
     compile_movie : bool
         Whether movie compilation is enabled.
+    volume_export : bool
+        Whether volume export is enabled.
     mip_export : bool
         Whether MIP export is enabled.
     analysis_parameters : dict[str, dict[str, Any]], optional
@@ -3082,6 +3186,7 @@ def resolve_analysis_execution_sequence(
         visualization=visualization,
         render_movie=render_movie,
         compile_movie=compile_movie,
+        volume_export=volume_export,
         mip_export=mip_export,
     )
     index_map = {name: idx for idx, name in enumerate(ANALYSIS_OPERATION_ORDER)}
@@ -5248,6 +5353,8 @@ class WorkflowConfig:
         Flag indicating whether movie-render workflow should run.
     compile_movie : bool
         Flag indicating whether movie-compile workflow should run.
+    volume_export : bool
+        Flag indicating whether volume-export workflow should run.
     mip_export : bool
         Flag indicating whether MIP-export workflow should run.
     zarr_save : ZarrSaveConfig
@@ -5280,6 +5387,7 @@ class WorkflowConfig:
     visualization: bool = False
     render_movie: bool = False
     compile_movie: bool = False
+    volume_export: bool = False
     mip_export: bool = False
     zarr_save: ZarrSaveConfig = field(default_factory=ZarrSaveConfig)
     spatial_calibration: SpatialCalibrationConfig = field(
@@ -5406,6 +5514,7 @@ class WorkflowConfig:
                 self.visualization,
                 self.render_movie,
                 self.compile_movie,
+                self.volume_export,
                 self.mip_export,
             )
         )
