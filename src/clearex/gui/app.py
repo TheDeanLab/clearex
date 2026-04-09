@@ -14889,9 +14889,10 @@ if HAS_PYQT6:
                 combo.setCurrentIndex(combo_index)
                 combo.blockSignals(False)
 
+            time_count = 1
             channel_count = 1
             position_count = 1
-            max_usegment3d_resolution_level = 0
+            max_source_resolution_level = 0
             store_xy_um: Optional[float] = None
             store_z_um: Optional[float] = None
             if initial.file and is_zarr_store_path(initial.file):
@@ -14900,6 +14901,7 @@ if HAS_PYQT6:
                     source_component = _analysis_store_runtime_source_component(root)
                     shape = _analysis_store_runtime_source_shape_tpczyx(root)
                     if source_component is not None and shape is not None:
+                        time_count = max(1, int(shape[0]))
                         position_count = max(1, int(shape[1]))
                         channel_count = max(1, int(shape[2]))
                         voxel_size_um_zyx, _ = resolve_voxel_size_um_zyx_with_source(
@@ -14913,19 +14915,26 @@ if HAS_PYQT6:
                             source_component=source_component,
                         )
                         if available_levels:
-                            max_usegment3d_resolution_level = max(
+                            max_source_resolution_level = max(
                                 max(0, int(level)) for level in available_levels
                             )
                 except Exception:
+                    time_count = 1
                     position_count = 1
                     channel_count = 1
-                    max_usegment3d_resolution_level = 0
+                    max_source_resolution_level = 0
                     store_xy_um = None
                     store_z_um = None
+            self._volume_export_t_spin.setMaximum(time_count - 1)
+            self._volume_export_p_spin.setMaximum(position_count - 1)
+            self._volume_export_c_spin.setMaximum(channel_count - 1)
             self._visualization_position_spin.setMaximum(position_count - 1)
             self._particle_channel_spin.setMaximum(channel_count - 1)
             self._usegment3d_resolution_level_spin.setMaximum(
-                max(0, int(max_usegment3d_resolution_level))
+                max(0, int(max_source_resolution_level))
+            )
+            self._volume_export_resolution_level_spin.setMaximum(
+                max(0, int(max_source_resolution_level))
             )
             self._refresh_registration_channel_options()
             self._refresh_registration_resolution_level_options()
@@ -15899,16 +15908,40 @@ if HAS_PYQT6:
                 volume_export_scope_index = 0
             self._volume_export_scope_combo.setCurrentIndex(volume_export_scope_index)
             self._volume_export_t_spin.setValue(
-                max(0, int(volume_export_params.get("t_index", 0)))
+                max(
+                    0,
+                    min(
+                        int(self._volume_export_t_spin.maximum()),
+                        int(volume_export_params.get("t_index", 0)),
+                    ),
+                )
             )
             self._volume_export_p_spin.setValue(
-                max(0, int(volume_export_params.get("p_index", 0)))
+                max(
+                    0,
+                    min(
+                        int(self._volume_export_p_spin.maximum()),
+                        int(volume_export_params.get("p_index", 0)),
+                    ),
+                )
             )
             self._volume_export_c_spin.setValue(
-                max(0, int(volume_export_params.get("c_index", 0)))
+                max(
+                    0,
+                    min(
+                        int(self._volume_export_c_spin.maximum()),
+                        int(volume_export_params.get("c_index", 0)),
+                    ),
+                )
             )
             self._volume_export_resolution_level_spin.setValue(
-                max(0, int(volume_export_params.get("resolution_level", 0)))
+                max(
+                    0,
+                    min(
+                        int(self._volume_export_resolution_level_spin.maximum()),
+                        int(volume_export_params.get("resolution_level", 0)),
+                    ),
+                )
             )
             volume_export_format = (
                 str(volume_export_params.get("export_format", "ome-zarr"))

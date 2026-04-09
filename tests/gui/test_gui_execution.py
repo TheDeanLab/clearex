@@ -551,6 +551,86 @@ def test_analysis_dialog_restores_saved_analysis_tab(
     dialog.close()
 
 
+def test_analysis_dialog_clamps_volume_export_values_when_restoring_saved_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module,
+        "_save_last_used_dask_backend_config",
+        lambda _config: None,
+    )
+
+    store_path = _create_gui_analysis_store(tmp_path)
+    zarr.open_group(str(store_path), mode="a").require_group("clearex").require_group(
+        "provenance"
+    )
+    workflow = app_module.WorkflowConfig(
+        file=str(store_path),
+        volume_export=True,
+        analysis_parameters={
+            "volume_export": {
+                "execution_order": 11,
+                "input_source": "data",
+                "force_rerun": False,
+                "export_scope": "current_selection",
+                "t_index": 9,
+                "p_index": 8,
+                "c_index": 7,
+                "resolution_level": 12,
+                "export_format": "ome-tiff",
+                "tiff_file_layout": "per_volume_files",
+            }
+        },
+    )
+    payload = app_module._analysis_gui_state_payload_from_workflow(
+        workflow,
+        analysis_selected_tab="Visualization",
+    )
+    payload["analysis_parameters"]["volume_export"].update(
+        {
+            "t_index": 9,
+            "p_index": 8,
+            "c_index": 7,
+            "resolution_level": 12,
+            "export_scope": "current_selection",
+            "export_format": "ome-tiff",
+            "tiff_file_layout": "per_volume_files",
+        }
+    )
+    app_module.persist_latest_analysis_gui_state(str(store_path), payload)
+
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(file=str(store_path))
+    )
+
+    assert dialog._operation_checkboxes["volume_export"].isChecked() is True
+    assert dialog._volume_export_scope_combo.currentData() == "current_selection"
+    assert dialog._volume_export_t_spin.maximum() == 0
+    assert dialog._volume_export_t_spin.value() == 0
+    assert dialog._volume_export_p_spin.maximum() == 0
+    assert dialog._volume_export_p_spin.value() == 0
+    assert dialog._volume_export_c_spin.maximum() == 1
+    assert dialog._volume_export_c_spin.value() == 1
+    assert dialog._volume_export_resolution_level_spin.maximum() == 1
+    assert dialog._volume_export_resolution_level_spin.value() == 1
+    assert dialog._volume_export_format_combo.currentData() == "ome-tiff"
+    assert dialog._volume_export_t_spin.isEnabled() is True
+    assert dialog._volume_export_p_spin.isEnabled() is True
+    assert dialog._volume_export_c_spin.isEnabled() is True
+    assert dialog._volume_export_tiff_layout_combo.isEnabled() is True
+    assert dialog._volume_export_tiff_layout_combo.currentData() == "per_volume_files"
+
+    dialog.close()
+
+
 def test_analysis_dialog_persists_registration_parameters(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
