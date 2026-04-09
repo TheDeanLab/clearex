@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'darwin'",
@@ -596,6 +596,7 @@ dependencies = [
     { name = "antspyx" },
     { name = "basicpy" },
     { name = "bioio-ome-zarr" },
+    { name = "bokeh" },
     { name = "cython" },
     { name = "dask" },
     { name = "dask-image" },
@@ -662,6 +663,7 @@ requires-dist = [
     { name = "basicpy" },
     { name = "bioio-ome-zarr" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=25.11.0" },
+    { name = "bokeh", specifier = ">=3.1.0" },
     { name = "cellpose", marker = "extra == 'usegment3d'", specifier = "<3" },
     { name = "codespell", marker = "extra == 'docs'" },
     { name = "cython", specifier = ">=3.1.4" },
