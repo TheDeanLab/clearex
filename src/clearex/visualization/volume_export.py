@@ -246,17 +246,96 @@ def _resolve_volume_export_voxel_size_um_zyx(
         root,
         source_component=resolved_resolution_component,
     )
-    if voxel_size_source != "default" or str(resolved_resolution_component) == str(
-        source_component
+    resolved_component = (
+        str(resolved_resolution_component).strip() or str(source_component).strip()
+    )
+    direct_resolution_sources = {
+        f"component:{resolved_component}",
+        f"component_navigate:{resolved_component}",
+    }
+    if (
+        voxel_size_source in direct_resolution_sources
+        or resolved_component == str(source_component).strip()
     ):
         return voxel_size_um_zyx, voxel_size_source
+
     fallback_voxel_size_um_zyx, fallback_source = resolve_voxel_size_um_zyx_with_source(
         root,
         source_component=source_component,
     )
-    if fallback_source != "default":
-        return fallback_voxel_size_um_zyx, fallback_source
-    return voxel_size_um_zyx, voxel_size_source
+    if fallback_source == "default":
+        return voxel_size_um_zyx, voxel_size_source
+
+    downsample_factors_tpczyx = _resolve_volume_export_level_factors_tpczyx(
+        root=root,
+        source_component=source_component,
+        resolved_resolution_component=resolved_component,
+    )
+    return (
+        (
+            float(fallback_voxel_size_um_zyx[0]) * float(downsample_factors_tpczyx[3]),
+            float(fallback_voxel_size_um_zyx[1]) * float(downsample_factors_tpczyx[4]),
+            float(fallback_voxel_size_um_zyx[2]) * float(downsample_factors_tpczyx[5]),
+        ),
+        fallback_source,
+    )
+
+
+def _resolve_volume_export_level_factors_tpczyx(
+    *,
+    root: zarr.Group,
+    source_component: str,
+    resolved_resolution_component: str,
+) -> tuple[int, int, int, int, int, int]:
+    """Resolve absolute downsample factors for one export level."""
+    resolved_component = (
+        str(resolved_resolution_component).strip() or str(source_component).strip()
+    )
+    if resolved_component == str(source_component).strip():
+        return (1, 1, 1, 1, 1, 1)
+
+    try:
+        resolved_node = get_node(root, resolved_component)
+    except Exception:
+        resolved_node = None
+    payload = getattr(resolved_node, "attrs", {}).get("downsample_factors_tpczyx")
+    if isinstance(payload, (tuple, list)) and len(payload) == 6:
+        try:
+            return tuple(int(value) for value in payload)  # type: ignore[return-value]
+        except Exception:
+            pass
+
+    try:
+        source_node = get_node(root, source_component)
+    except Exception:
+        source_node = None
+    source_attrs = dict(getattr(source_node, "attrs", {}))
+    level_factors_tpczyx = (
+        visualization_pipeline._resolve_visualization_pyramid_factors_tpczyx(
+            root_attrs=dict(root.attrs),
+            source_attrs=source_attrs,
+        )
+    )
+    discovered_components = _discover_source_adjacent_resolution_components(
+        root=root,
+        source_component=source_component,
+    )
+    try:
+        level_index = next(
+            index
+            for index, component in enumerate(discovered_components)
+            if str(component).strip() == resolved_component
+        )
+    except StopIteration:
+        return (1, 1, 1, 1, 1, 1)
+
+    extended_factors_tpczyx = _extend_level_factors_tpczyx(
+        level_factors_tpczyx,
+        level_index,
+    )
+    return tuple(
+        int(value) for value in extended_factors_tpczyx[int(level_index)]
+    )  # type: ignore[return-value]
 
 
 def _resolve_volume_export_resolution_component(

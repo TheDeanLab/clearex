@@ -193,6 +193,52 @@ def test_run_volume_export_analysis_writes_current_selection_ome_tiff_with_calib
     assert auxiliary.attrs["voxel_size_um_zyx"] == [4.0, 2.0, 2.0]
 
 
+def test_run_volume_export_analysis_writes_downsampled_ome_tiff_with_scaled_calibration(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(2 * 2 * 2 * 3 * 4 * 5, dtype=np.uint16).reshape((2, 2, 2, 3, 4, 5))
+    source_component = _write_source_cache_volume(root, data)
+    level_component = source_cache_component(level_index=1)
+    _write_source_adjacent_level(
+        root,
+        source_component=source_component,
+        level_component=level_component,
+        data=data[:, :, :, ::2, ::2, ::2],
+    )
+
+    summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "current_selection",
+            "t_index": 1,
+            "p_index": 0,
+            "c_index": 1,
+            "resolution_level": 1,
+            "export_format": "ome-tiff",
+            "tiff_file_layout": "single_file",
+        },
+    )
+
+    [artifact_relative_path] = summary.artifact_paths
+    pixels, series_axes, series_shapes, is_bigtiff = _ome_tiff_metadata(
+        store_path / artifact_relative_path
+    )
+    assert is_bigtiff is True
+    assert series_axes == ["ZYX"]
+    assert series_shapes == [(2, 2, 3)]
+    assert len(pixels) == 1
+    assert pixels[0]["PhysicalSizeZ"] == "8.0"
+    assert pixels[0]["PhysicalSizeY"] == "4.0"
+    assert pixels[0]["PhysicalSizeX"] == "4.0"
+
+    runtime_cache = zarr.open_group(str(store_path), mode="r")
+    auxiliary = runtime_cache["clearex/results/volume_export/latest"]
+    assert auxiliary.attrs["voxel_size_um_zyx"] == [8.0, 4.0, 4.0]
+
+
 def test_run_volume_export_analysis_writes_all_indices_single_file_ome_tiff_series_per_position(
     tmp_path: Path,
 ) -> None:
@@ -459,7 +505,7 @@ def test_run_volume_export_analysis_extends_partial_existing_pyramid(
     )
     assert generated_level.attrs["downsample_factors_tpczyx"] == [1, 1, 1, 4, 4, 4]
     auxiliary = runtime_cache["clearex/results/volume_export/latest"]
-    assert auxiliary.attrs["voxel_size_um_zyx"] == [4.0, 2.0, 2.0]
+    assert auxiliary.attrs["voxel_size_um_zyx"] == [16.0, 8.0, 8.0]
     assert (
         auxiliary.attrs["voxel_size_resolution_source"]
         == f"component:{source_component}"
@@ -495,11 +541,25 @@ def test_run_volume_export_analysis_uses_discovered_noncanonical_level(
     assert summary.generated_resolution_level is False
     runtime_cache = zarr.open_group(str(store_path), mode="r")
     auxiliary = runtime_cache["clearex/results/volume_export/latest"]
-    assert auxiliary.attrs["voxel_size_um_zyx"] == [4.0, 2.0, 2.0]
+    assert auxiliary.attrs["voxel_size_um_zyx"] == [8.0, 4.0, 4.0]
     assert (
         auxiliary.attrs["voxel_size_resolution_source"]
         == f"component:{source_component}"
     )
+
+    publish_analysis_collection_from_cache(
+        store_path,
+        analysis_name="volume_export",
+    )
+
+    image_group = zarr.open_group(str(store_path), mode="r")[
+        "results/volume_export/latest/A/1/0"
+    ]
+    transforms = image_group.attrs["ome"]["multiscales"][0]["datasets"][0][
+        "coordinateTransformations"
+    ]
+    assert transforms[0]["type"] == "scale"
+    assert transforms[0]["scale"] == [1.0, 1.0, 8.0, 4.0, 4.0]
 
 
 def test_run_volume_export_analysis_all_indices_ignores_stale_selection_indices(

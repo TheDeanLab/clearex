@@ -11779,7 +11779,14 @@ if HAS_PYQT6:
                 channel_count,
                 available_levels,
             ) = self._volume_export_available_bounds()
-            max_level = max(0, max(available_levels) if available_levels else 0)
+            discovered_max_level = max(
+                0,
+                max(available_levels) if available_levels else 0,
+            )
+            max_level = max(
+                int(self._volume_export_resolution_level_spin.maximum()),
+                discovered_max_level,
+            )
             self._volume_export_t_spin.setMaximum(time_count - 1)
             self._volume_export_p_spin.setMaximum(position_count - 1)
             self._volume_export_c_spin.setMaximum(channel_count - 1)

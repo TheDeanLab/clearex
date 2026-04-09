@@ -551,7 +551,7 @@ def test_analysis_dialog_restores_saved_analysis_tab(
     dialog.close()
 
 
-def test_analysis_dialog_clamps_volume_export_values_when_restoring_saved_state(
+def test_analysis_dialog_clamps_volume_export_indices_and_preserves_requested_resolution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -624,8 +624,8 @@ def test_analysis_dialog_clamps_volume_export_values_when_restoring_saved_state(
     assert dialog._volume_export_p_spin.value() == 0
     assert dialog._volume_export_c_spin.maximum() == 0
     assert dialog._volume_export_c_spin.value() == 0
-    assert dialog._volume_export_resolution_level_spin.maximum() == 0
-    assert dialog._volume_export_resolution_level_spin.value() == 0
+    assert dialog._volume_export_resolution_level_spin.maximum() == 64
+    assert dialog._volume_export_resolution_level_spin.value() == 12
     assert dialog._volume_export_format_combo.currentData() == "ome-tiff"
     assert dialog._volume_export_t_spin.isEnabled() is True
     assert dialog._volume_export_p_spin.isEnabled() is True
@@ -639,7 +639,8 @@ def test_analysis_dialog_clamps_volume_export_values_when_restoring_saved_state(
     input_combo.setCurrentIndex(data_index)
     app.processEvents()
     assert dialog._volume_export_c_spin.maximum() == 1
-    assert dialog._volume_export_resolution_level_spin.maximum() == 1
+    assert dialog._volume_export_resolution_level_spin.maximum() == 64
+    assert dialog._volume_export_resolution_level_spin.value() == 12
 
     dialog.close()
 
