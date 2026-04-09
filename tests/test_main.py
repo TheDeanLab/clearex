@@ -1517,6 +1517,7 @@ def test_run_workflow_dispatches_volume_export_tiff_without_public_publish(
         dtype="uint16",
         overwrite=True,
     )
+    root.require_group(main_module.public_analysis_root("volume_export"))
 
     workflow = WorkflowConfig(
         file=str(store_path),
@@ -1571,6 +1572,9 @@ def test_run_workflow_dispatches_volume_export_tiff_without_public_publish(
     )
 
     assert published["called"] is False
+    runtime_root = main_module.zarr.open_group(str(store_path), mode="r")
+    with pytest.raises(Exception):
+        _ = runtime_root[main_module.public_analysis_root("volume_export")]
 
 
 def test_run_workflow_existing_store_persists_explicit_spatial_calibration(

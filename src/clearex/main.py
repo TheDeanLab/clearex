@@ -58,6 +58,7 @@ from clearex.io.ome_store import (
     SOURCE_CACHE_COMPONENT,
     analysis_auxiliary_root,
     analysis_cache_data_component,
+    delete_path,
     is_legacy_clearex_store,
     migrate_legacy_store,
     public_analysis_root,
@@ -3213,6 +3214,12 @@ def _run_workflow(
                             publish_analysis_collection_from_cache(
                                 provenance_store_path,
                                 analysis_name="volume_export",
+                            )
+                        else:
+                            root = zarr.open_group(str(provenance_store_path), mode="a")
+                            delete_path(
+                                root,
+                                public_analysis_root("volume_export"),
                             )
                         output_records["volume_export"] = {
                             "component": summary.component,
