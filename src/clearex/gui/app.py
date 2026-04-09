@@ -7168,6 +7168,7 @@ if HAS_PYQT6:
                 registration=False,
                 fusion=False,
                 visualization=False,
+                volume_export=False,
                 mip_export=False,
                 zarr_save=self._zarr_save_config,
                 spatial_calibration=spatial_calibration,
@@ -7405,6 +7406,7 @@ if HAS_PYQT6:
             "visualization",
             "render_movie",
             "compile_movie",
+            "volume_export",
             "mip_export",
         )
         _PROVENANCE_HISTORY_OPERATIONS: tuple[str, ...] = (
@@ -7418,6 +7420,7 @@ if HAS_PYQT6:
             "display_pyramid",
             "render_movie",
             "compile_movie",
+            "volume_export",
             "mip_export",
         )
         _OPERATION_LABELS: Dict[str, str] = {
@@ -7432,6 +7435,7 @@ if HAS_PYQT6:
             "visualization": "Napari",
             "render_movie": "Render Movie",
             "compile_movie": "Compile Movie",
+            "volume_export": "Volume Export",
             "mip_export": "MIP Export",
         }
         _OPERATION_TABS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -7449,7 +7453,13 @@ if HAS_PYQT6:
             ("Segmentation", ("particle_detection", "usegment3d")),
             (
                 "Visualization",
-                ("visualization", "render_movie", "compile_movie", "mip_export"),
+                (
+                    "visualization",
+                    "render_movie",
+                    "compile_movie",
+                    "volume_export",
+                    "mip_export",
+                ),
             ),
         )
         _OPERATION_OUTPUT_COMPONENTS: Dict[str, str] = {
@@ -7463,6 +7473,7 @@ if HAS_PYQT6:
             "visualization": "clearex/results/visualization/latest",
             "render_movie": "clearex/results/render_movie/latest",
             "compile_movie": "clearex/results/compile_movie/latest",
+            "volume_export": "clearex/results/volume_export/latest",
             "mip_export": "clearex/results/mip_export/latest",
         }
         _PARTICLE_DETECTION_OVERLAY_COMPONENT = (
@@ -7961,6 +7972,28 @@ if HAS_PYQT6:
                 "Optional export directory path. Leave empty to write under an "
                 "auto-generated sibling directory next to the analysis store."
             ),
+            "volume_export_scope": (
+                "Choose whether volume export uses the current selection or "
+                "exports all time, position, and channel indices."
+            ),
+            "volume_export_t_index": (
+                "Time index used when exporting the current selection."
+            ),
+            "volume_export_p_index": (
+                "Position index used when exporting the current selection."
+            ),
+            "volume_export_c_index": (
+                "Channel index used when exporting the current selection."
+            ),
+            "volume_export_resolution_level": ("Pyramid resolution level to export."),
+            "volume_export_export_format": (
+                "Choose OME-Zarr for canonical multi-resolution output or "
+                "OME-TIFF for TIFF export."
+            ),
+            "volume_export_tiff_file_layout": (
+                "Choose whether OME-TIFF output is written as one file or as "
+                "one file per volume."
+            ),
             "render_movie_keyframe_manifest_path": (
                 "Optional explicit keyframe manifest JSON. Leave empty to use the "
                 "latest keyframes captured by the selected visualization result."
@@ -8119,6 +8152,9 @@ if HAS_PYQT6:
             )
             self._compile_movie_defaults = dict(
                 self._operation_defaults.get("compile_movie", {})
+            )
+            self._volume_export_defaults = dict(
+                self._operation_defaults.get("volume_export", {})
             )
             self._mip_export_defaults = dict(
                 self._operation_defaults.get("mip_export", {})
@@ -8514,6 +8550,7 @@ if HAS_PYQT6:
                 registration=selected_flags["registration"],
                 fusion=selected_flags["fusion"],
                 visualization=selected_flags["visualization"],
+                volume_export=selected_flags["volume_export"],
                 mip_export=selected_flags["mip_export"],
                 spatial_calibration=normalize_spatial_calibration(
                     spatial_calibration_payload
@@ -9341,6 +9378,8 @@ if HAS_PYQT6:
                 self._build_render_movie_parameter_rows(form)
             elif operation_name == "compile_movie":
                 self._build_compile_movie_parameter_rows(form)
+            elif operation_name == "volume_export":
+                self._build_volume_export_parameter_rows(form)
             elif operation_name == "mip_export":
                 self._build_mip_export_parameter_rows(form)
             else:
@@ -11237,6 +11276,89 @@ if HAS_PYQT6:
             self._register_parameter_hint(
                 self._compile_movie_output_stem_input,
                 self._PARAMETER_HINTS["compile_movie_output_stem"],
+            )
+
+        def _build_volume_export_parameter_rows(self, form: QFormLayout) -> None:
+            """Add volume-export parameter controls to a form."""
+            self._volume_export_scope_combo = QComboBox()
+            self._volume_export_scope_combo.addItem(
+                "Current selection", "current_selection"
+            )
+            self._volume_export_scope_combo.addItem("All indices", "all_indices")
+            self._volume_export_scope_combo.currentIndexChanged.connect(
+                self._set_volume_export_parameter_enabled_state
+            )
+            form.addRow("Export scope", self._volume_export_scope_combo)
+            self._register_parameter_hint(
+                self._volume_export_scope_combo,
+                self._PARAMETER_HINTS["volume_export_scope"],
+            )
+
+            volume_export_index_widget = QWidget()
+            volume_export_index_layout = QHBoxLayout(volume_export_index_widget)
+            volume_export_index_layout.setContentsMargins(0, 0, 0, 0)
+            volume_export_index_layout.setSpacing(8)
+            self._volume_export_t_spin = QSpinBox()
+            self._volume_export_t_spin.setRange(0, 1_000_000)
+            self._volume_export_p_spin = QSpinBox()
+            self._volume_export_p_spin.setRange(0, 1_000_000)
+            self._volume_export_c_spin = QSpinBox()
+            self._volume_export_c_spin.setRange(0, 1_000_000)
+            volume_export_index_layout.addWidget(QLabel("T"))
+            volume_export_index_layout.addWidget(self._volume_export_t_spin)
+            volume_export_index_layout.addWidget(QLabel("P"))
+            volume_export_index_layout.addWidget(self._volume_export_p_spin)
+            volume_export_index_layout.addWidget(QLabel("C"))
+            volume_export_index_layout.addWidget(self._volume_export_c_spin)
+            form.addRow("T/P/C index", volume_export_index_widget)
+            for widget in (
+                self._volume_export_t_spin,
+                self._volume_export_p_spin,
+                self._volume_export_c_spin,
+            ):
+                hint_key = {
+                    self._volume_export_t_spin: "volume_export_t_index",
+                    self._volume_export_p_spin: "volume_export_p_index",
+                    self._volume_export_c_spin: "volume_export_c_index",
+                }[widget]
+                self._register_parameter_hint(
+                    widget,
+                    self._PARAMETER_HINTS[hint_key],
+                )
+
+            self._volume_export_resolution_level_spin = QSpinBox()
+            self._volume_export_resolution_level_spin.setRange(0, 64)
+            form.addRow(
+                "Resolution level",
+                self._volume_export_resolution_level_spin,
+            )
+            self._register_parameter_hint(
+                self._volume_export_resolution_level_spin,
+                self._PARAMETER_HINTS["volume_export_resolution_level"],
+            )
+
+            self._volume_export_format_combo = QComboBox()
+            self._volume_export_format_combo.addItem("OME-Zarr", "ome-zarr")
+            self._volume_export_format_combo.addItem("OME-TIFF", "ome-tiff")
+            self._volume_export_format_combo.currentIndexChanged.connect(
+                self._set_volume_export_parameter_enabled_state
+            )
+            form.addRow("Export format", self._volume_export_format_combo)
+            self._register_parameter_hint(
+                self._volume_export_format_combo,
+                self._PARAMETER_HINTS["volume_export_export_format"],
+            )
+
+            self._volume_export_tiff_layout_combo = QComboBox()
+            self._volume_export_tiff_layout_combo.addItem("Single file", "single_file")
+            self._volume_export_tiff_layout_combo.addItem(
+                "Per-volume files",
+                "per_volume_files",
+            )
+            form.addRow("TIFF file layout", self._volume_export_tiff_layout_combo)
+            self._register_parameter_hint(
+                self._volume_export_tiff_layout_combo,
+                self._PARAMETER_HINTS["volume_export_tiff_file_layout"],
             )
 
         def _coerce_optional_bool(self, value: Any) -> Optional[bool]:
@@ -13886,6 +14008,7 @@ if HAS_PYQT6:
             self._set_visualization_parameter_enabled_state()
             self._set_render_movie_parameter_enabled_state()
             self._set_compile_movie_parameter_enabled_state()
+            self._set_volume_export_parameter_enabled_state()
             self._set_mip_export_parameter_enabled_state()
 
             if (
@@ -13927,6 +14050,7 @@ if HAS_PYQT6:
             self._set_visualization_parameter_enabled_state()
             self._set_render_movie_parameter_enabled_state()
             self._set_compile_movie_parameter_enabled_state()
+            self._set_volume_export_parameter_enabled_state()
             sequence = self._selected_operations_in_sequence()
             if sequence:
                 sequence_text = " -> ".join(
@@ -14620,6 +14744,30 @@ if HAS_PYQT6:
             for widget in widgets:
                 widget.setEnabled(mip_enabled)
 
+        def _set_volume_export_parameter_enabled_state(self) -> None:
+            """Enable/disable volume-export widgets based on operation state."""
+            volume_enabled = self._operation_checkboxes["volume_export"].isChecked()
+            self._volume_export_scope_combo.setEnabled(volume_enabled)
+            self._volume_export_format_combo.setEnabled(volume_enabled)
+            self._volume_export_resolution_level_spin.setEnabled(volume_enabled)
+
+            scope = str(
+                self._volume_export_scope_combo.currentData() or "current_selection"
+            ).strip()
+            tpc_enabled = volume_enabled and scope == "current_selection"
+            self._volume_export_t_spin.setEnabled(tpc_enabled)
+            self._volume_export_p_spin.setEnabled(tpc_enabled)
+            self._volume_export_c_spin.setEnabled(tpc_enabled)
+
+            export_format = (
+                str(self._volume_export_format_combo.currentData() or "ome-zarr")
+                .strip()
+                .lower()
+            )
+            self._volume_export_tiff_layout_combo.setEnabled(
+                volume_enabled and export_format == "ome-tiff"
+            )
+
         def _hydrate(self, initial: WorkflowConfig) -> None:
             """Populate analysis selections from initial workflow values.
 
@@ -14669,6 +14817,12 @@ if HAS_PYQT6:
                     self._compile_movie_defaults,
                 )
             )
+            volume_export_params = dict(
+                normalized_parameters.get(
+                    "volume_export",
+                    self._volume_export_defaults,
+                )
+            )
             mip_export_params = dict(
                 normalized_parameters.get("mip_export", self._mip_export_defaults)
             )
@@ -14688,6 +14842,7 @@ if HAS_PYQT6:
                 "visualization": bool(initial.visualization),
                 "render_movie": bool(getattr(initial, "render_movie", False)),
                 "compile_movie": bool(getattr(initial, "compile_movie", False)),
+                "volume_export": bool(getattr(initial, "volume_export", False)),
                 "mip_export": bool(initial.mip_export),
             }
 
@@ -15730,6 +15885,68 @@ if HAS_PYQT6:
                 str(compile_movie_params.get("output_stem", "") or "").strip()
             )
 
+            volume_export_scope = str(
+                volume_export_params.get("export_scope", "current_selection")
+            ).strip()
+            volume_export_scope_index = self._volume_export_scope_combo.findData(
+                volume_export_scope
+            )
+            if volume_export_scope_index < 0:
+                volume_export_scope_index = self._volume_export_scope_combo.findData(
+                    "current_selection"
+                )
+            if volume_export_scope_index < 0:
+                volume_export_scope_index = 0
+            self._volume_export_scope_combo.setCurrentIndex(volume_export_scope_index)
+            self._volume_export_t_spin.setValue(
+                max(0, int(volume_export_params.get("t_index", 0)))
+            )
+            self._volume_export_p_spin.setValue(
+                max(0, int(volume_export_params.get("p_index", 0)))
+            )
+            self._volume_export_c_spin.setValue(
+                max(0, int(volume_export_params.get("c_index", 0)))
+            )
+            self._volume_export_resolution_level_spin.setValue(
+                max(0, int(volume_export_params.get("resolution_level", 0)))
+            )
+            volume_export_format = (
+                str(volume_export_params.get("export_format", "ome-zarr"))
+                .strip()
+                .lower()
+            )
+            if volume_export_format in {"zarr", "ome_zarr", "ome.zarr"}:
+                volume_export_format = "ome-zarr"
+            volume_export_format_index = self._volume_export_format_combo.findData(
+                volume_export_format
+            )
+            if volume_export_format_index < 0:
+                volume_export_format_index = self._volume_export_format_combo.findData(
+                    "ome-zarr"
+                )
+            if volume_export_format_index < 0:
+                volume_export_format_index = 0
+            self._volume_export_format_combo.setCurrentIndex(volume_export_format_index)
+            volume_export_tiff_layout = (
+                str(volume_export_params.get("tiff_file_layout", "single_file"))
+                .strip()
+                .lower()
+            )
+            volume_export_tiff_layout_index = (
+                self._volume_export_tiff_layout_combo.findData(
+                    volume_export_tiff_layout
+                )
+            )
+            if volume_export_tiff_layout_index < 0:
+                volume_export_tiff_layout_index = (
+                    self._volume_export_tiff_layout_combo.findData("single_file")
+                )
+            if volume_export_tiff_layout_index < 0:
+                volume_export_tiff_layout_index = 0
+            self._volume_export_tiff_layout_combo.setCurrentIndex(
+                volume_export_tiff_layout_index
+            )
+
             mip_mode = (
                 str(mip_export_params.get("position_mode", "multi_position")).strip()
                 or "multi_position"
@@ -15759,6 +15976,7 @@ if HAS_PYQT6:
                 str(mip_export_params.get("output_directory", "") or "").strip()
             )
 
+            self._set_volume_export_parameter_enabled_state()
             self._refresh_operation_provenance_statuses()
             self._on_operation_selection_changed()
             if self._operation_panel_stack is not None:
@@ -16796,6 +17014,37 @@ if HAS_PYQT6:
                 ).strip(),
             }
 
+        def _collect_volume_export_parameters(self) -> Dict[str, Any]:
+            """Collect volume-export parameter values from widgets."""
+            return {
+                "chunk_basis": "3d",
+                "detect_2d_per_slice": False,
+                "use_map_overlap": False,
+                "overlap_zyx": [0, 0, 0],
+                "memory_overhead_factor": float(
+                    self._volume_export_defaults.get("memory_overhead_factor", 1.0)
+                ),
+                "export_scope": str(
+                    self._volume_export_scope_combo.currentData() or "current_selection"
+                ).strip(),
+                "t_index": int(self._volume_export_t_spin.value()),
+                "p_index": int(self._volume_export_p_spin.value()),
+                "c_index": int(self._volume_export_c_spin.value()),
+                "resolution_level": int(
+                    self._volume_export_resolution_level_spin.value()
+                ),
+                "export_format": str(
+                    self._volume_export_format_combo.currentData() or "ome-zarr"
+                )
+                .strip()
+                .lower(),
+                "tiff_file_layout": str(
+                    self._volume_export_tiff_layout_combo.currentData() or "single_file"
+                )
+                .strip()
+                .lower(),
+            }
+
         def _collect_mip_export_parameters(self) -> Dict[str, Any]:
             """Collect MIP-export parameter values from widgets.
 
@@ -16876,6 +17125,8 @@ if HAS_PYQT6:
                 defaults.update(self._collect_render_movie_parameters())
             elif operation_name == "compile_movie":
                 defaults.update(self._collect_compile_movie_parameters())
+            elif operation_name == "volume_export":
+                defaults.update(self._collect_volume_export_parameters())
             elif operation_name == "mip_export":
                 defaults.update(self._collect_mip_export_parameters())
             return defaults
@@ -17030,6 +17281,7 @@ if HAS_PYQT6:
                 "visualization": selected_flags["visualization"],
                 "render_movie": selected_flags["render_movie"],
                 "compile_movie": selected_flags["compile_movie"],
+                "volume_export": selected_flags["volume_export"],
                 "mip_export": selected_flags["mip_export"],
                 "zarr_save": self._base_config.zarr_save,
                 "spatial_calibration": self._base_config.spatial_calibration,

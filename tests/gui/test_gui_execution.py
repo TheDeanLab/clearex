@@ -2488,6 +2488,119 @@ def test_collect_visualization_parameters_syncs_combo_with_primary_layer() -> No
     )
 
 
+def test_collect_volume_export_parameters_uses_widget_values() -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    class _FakeCombo:
+        def __init__(self, data: object) -> None:
+            self._data = data
+
+        def currentData(self) -> object:
+            return self._data
+
+    class _FakeSpin:
+        def __init__(self, value: int) -> None:
+            self._value = int(value)
+
+        def value(self) -> int:
+            return int(self._value)
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    dialog._volume_export_defaults = {"memory_overhead_factor": 3.25}
+    dialog._volume_export_scope_combo = _FakeCombo("all_indices")
+    dialog._volume_export_t_spin = _FakeSpin(4)
+    dialog._volume_export_p_spin = _FakeSpin(2)
+    dialog._volume_export_c_spin = _FakeSpin(1)
+    dialog._volume_export_resolution_level_spin = _FakeSpin(6)
+    dialog._volume_export_format_combo = _FakeCombo("ome-tiff")
+    dialog._volume_export_tiff_layout_combo = _FakeCombo("per_volume_files")
+
+    params = app_module.AnalysisSelectionDialog._collect_volume_export_parameters(
+        dialog
+    )
+
+    assert params == {
+        "chunk_basis": "3d",
+        "detect_2d_per_slice": False,
+        "use_map_overlap": False,
+        "overlap_zyx": [0, 0, 0],
+        "memory_overhead_factor": 3.25,
+        "export_scope": "all_indices",
+        "t_index": 4,
+        "p_index": 2,
+        "c_index": 1,
+        "resolution_level": 6,
+        "export_format": "ome-tiff",
+        "tiff_file_layout": "per_volume_files",
+    }
+
+
+def test_volume_export_parameter_enablement_tracks_scope_and_format() -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    class _FakeCombo:
+        def __init__(self, data: object) -> None:
+            self._data = data
+            self.enabled = True
+
+        def currentData(self) -> object:
+            return self._data
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = bool(enabled)
+
+    class _FakeSpin:
+        def __init__(self) -> None:
+            self.enabled = True
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = bool(enabled)
+
+    class _FakeCheckbox:
+        def __init__(self, checked: bool) -> None:
+            self._checked = bool(checked)
+
+        def isChecked(self) -> bool:
+            return bool(self._checked)
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    dialog._operation_checkboxes = {"volume_export": _FakeCheckbox(True)}
+    dialog._volume_export_scope_combo = _FakeCombo("current_selection")
+    dialog._volume_export_t_spin = _FakeSpin()
+    dialog._volume_export_p_spin = _FakeSpin()
+    dialog._volume_export_c_spin = _FakeSpin()
+    dialog._volume_export_resolution_level_spin = _FakeSpin()
+    dialog._volume_export_format_combo = _FakeCombo("ome-zarr")
+    dialog._volume_export_tiff_layout_combo = _FakeCombo("single_file")
+
+    app_module.AnalysisSelectionDialog._set_volume_export_parameter_enabled_state(
+        dialog
+    )
+    assert dialog._volume_export_scope_combo.enabled is True
+    assert dialog._volume_export_t_spin.enabled is True
+    assert dialog._volume_export_p_spin.enabled is True
+    assert dialog._volume_export_c_spin.enabled is True
+    assert dialog._volume_export_resolution_level_spin.enabled is True
+    assert dialog._volume_export_format_combo.enabled is True
+    assert dialog._volume_export_tiff_layout_combo.enabled is False
+
+    dialog._volume_export_scope_combo = _FakeCombo("all_indices")
+    dialog._volume_export_format_combo = _FakeCombo("ome-tiff")
+    app_module.AnalysisSelectionDialog._set_volume_export_parameter_enabled_state(
+        dialog
+    )
+    assert dialog._volume_export_t_spin.enabled is False
+    assert dialog._volume_export_p_spin.enabled is False
+    assert dialog._volume_export_c_spin.enabled is False
+    assert dialog._volume_export_tiff_layout_combo.enabled is True
+
+
 def test_on_run_propagates_display_pyramid_flag_into_workflow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2598,6 +2711,7 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
     assert dialog_cls._OPERATION_LABELS["visualization"] == "Napari"
     assert dialog_cls._OPERATION_LABELS["render_movie"] == "Render Movie"
     assert dialog_cls._OPERATION_LABELS["compile_movie"] == "Compile Movie"
+    assert dialog_cls._OPERATION_LABELS["volume_export"] == "Volume Export"
     assert dialog_cls._OPERATION_LABELS["display_pyramid"] == "Pyramidal Downsampling"
     assert (
         "Preprocessing",
@@ -2612,8 +2726,18 @@ def test_analysis_selection_dialog_uses_napari_and_visualization_labels() -> Non
     ) in dialog_cls._OPERATION_TABS
     assert (
         "Visualization",
-        ("visualization", "render_movie", "compile_movie", "mip_export"),
+        (
+            "visualization",
+            "render_movie",
+            "compile_movie",
+            "volume_export",
+            "mip_export",
+        ),
     ) in dialog_cls._OPERATION_TABS
+    assert (
+        dialog_cls._OPERATION_OUTPUT_COMPONENTS["volume_export"]
+        == "clearex/results/volume_export/latest"
+    )
 
 
 def test_analysis_selection_dialog_themes_rounded_scroll_surfaces() -> None:
