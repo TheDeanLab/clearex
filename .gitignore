@@ -183,3 +183,4 @@ cython_debug/
 
 *downloaded_data*
 /job_*.out
+.worktrees/
