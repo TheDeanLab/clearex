@@ -214,3 +214,126 @@ def test_dashboard_relay_manager_shutdown_continues_after_close_failure(
     assert closed == [second_client_id]
     assert not manager._clients
     assert not manager._sessions
+
+
+def test_dashboard_relay_manager_skips_stale_client_when_purge_close_fails(
+    monkeypatch,
+) -> None:
+    manager = DashboardRelayManager()
+    healthy_client = SimpleNamespace(
+        dashboard_link="http://scheduler.example.internal:8787/status",
+        status="running",
+    )
+    stale_client = SimpleNamespace(
+        dashboard_link="http://scheduler.example.internal:8787/status",
+        status="closed",
+    )
+    started: list[str] = []
+    closed: list[str] = []
+
+    def _fake_start_session(*, client_id: str, upstream_url: str):
+        started.append(client_id)
+        del upstream_url
+        if client_id == stale_client_id:
+
+            def _raise_close() -> None:
+                raise RuntimeError(f"failed to close {client_id}")
+
+            close = _raise_close
+            local_url = "http://127.0.0.1:44000/?token=token-stale"
+        else:
+
+            def _close() -> None:
+                closed.append(client_id)
+
+            close = _close
+            local_url = "http://127.0.0.1:44100/?token=token-healthy"
+        return SimpleNamespace(
+            client_id=client_id,
+            token=f"token-{client_id}",
+            local_url=local_url,
+            upstream_url="http://scheduler.example.internal:8787/status",
+            close=close,
+        )
+
+    monkeypatch.setattr(manager, "_start_session", _fake_start_session)
+
+    healthy_client_id = manager.register_client(
+        workload="analysis",
+        backend_mode="local_cluster",
+        client=healthy_client,
+    )
+    stale_client_id = manager.register_client(
+        workload="analysis",
+        backend_mode="local_cluster",
+        client=stale_client,
+    )
+    manager._sessions[stale_client_id] = SimpleNamespace(
+        client_id=stale_client_id,
+        token="token-stale",
+        local_url="http://127.0.0.1:44000/?token=token-stale",
+        upstream_url="http://scheduler.example.internal:8787/status",
+        close=lambda: _raise_close(stale_client_id),
+    )
+
+    resolved = manager.open_dashboard(workload="analysis")
+
+    assert resolved == "http://127.0.0.1:44100/?token=token-healthy"
+    assert healthy_client_id in manager._clients
+    assert stale_client_id not in manager._clients
+    assert stale_client_id not in manager._sessions
+    assert started == [healthy_client_id]
+    assert closed == []
+
+
+def _raise_close(client_id: str) -> None:
+    raise RuntimeError(f"failed to close {client_id}")
+
+
+def test_dashboard_relay_manager_skips_client_with_invalid_refreshed_dashboard_link(
+    monkeypatch,
+) -> None:
+    manager = DashboardRelayManager()
+    healthy_client = SimpleNamespace(
+        dashboard_link="http://scheduler.example.internal:8787/status",
+        status="running",
+    )
+    stale_client = SimpleNamespace(
+        dashboard_link="http://scheduler.example.internal:8787/status",
+        status="running",
+    )
+    started: list[str] = []
+
+    def _fake_start_session(*, client_id: str, upstream_url: str):
+        started.append(client_id)
+        del upstream_url
+        return SimpleNamespace(
+            client_id=client_id,
+            token=f"token-{client_id}",
+            local_url="http://127.0.0.1:45000/?token=token-healthy",
+            upstream_url="http://scheduler.example.internal:8787/status",
+            close=lambda: None,
+        )
+
+    monkeypatch.setattr(manager, "_start_session", _fake_start_session)
+
+    healthy_client_id = manager.register_client(
+        workload="analysis",
+        backend_mode="local_cluster",
+        client=healthy_client,
+    )
+    stale_client_id = manager.register_client(
+        workload="analysis",
+        backend_mode="local_cluster",
+        client=stale_client,
+    )
+    stale_client.dashboard_link = ""
+
+    assert manager.has_available_client(workload="analysis") is True
+    resolved = manager.open_dashboard(workload="analysis")
+
+    assert resolved == "http://127.0.0.1:45000/?token=token-healthy"
+    assert healthy_client_id in manager._clients
+    assert stale_client_id not in manager._clients
+    assert stale_client_id not in manager._sessions
+    assert started == [healthy_client_id]

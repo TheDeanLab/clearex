@@ -92,9 +92,19 @@ class DashboardRelayManager:
                 continue
             if requested is not None and registered.workload != requested:
                 continue
-            if self._refresh_registered_client(registered):
+            refreshed = False
+            try:
+                refreshed = self._refresh_registered_client(registered)
+            except Exception:
+                refreshed = False
+            finally:
+                if not refreshed:
+                    try:
+                        self.unregister_client(client_id)
+                    except Exception:
+                        pass
+            if refreshed:
                 return client_id
-            self.unregister_client(client_id)
         return None
 
     def _refresh_registered_client(self, registered: RegisteredDashboardClient) -> bool:
