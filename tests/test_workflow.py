@@ -686,9 +686,12 @@ class TestWorkflowConfig:
         assert resolve_analysis_input_component("volume_export") == (
             "clearex/results/volume_export/latest"
         )
-        assert analysis_operation_for_output_component(
-            "clearex/results/volume_export/latest"
-        ) == "volume_export"
+        assert (
+            analysis_operation_for_output_component(
+                "clearex/results/volume_export/latest"
+            )
+            == "volume_export"
+        )
 
     def test_normalizes_shear_transform_parameters(self):
         cfg = WorkflowConfig(

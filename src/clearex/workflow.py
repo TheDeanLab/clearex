@@ -267,10 +267,10 @@ _OPERATIONS_CONSUMING_FUSED_IMAGES = frozenset(
         "display_pyramid",
         "particle_detection",
         "usegment3d",
-    "visualization",
-    "volume_export",
-    "mip_export",
-}
+        "visualization",
+        "volume_export",
+        "mip_export",
+    }
 )
 
 
@@ -2860,8 +2860,7 @@ def _normalize_volume_export_parameters(
         normalized[field_name] = value
 
     export_format_raw = (
-        str(normalized.get("export_format", "ome-zarr")).strip().lower()
-        or "ome-zarr"
+        str(normalized.get("export_format", "ome-zarr")).strip().lower() or "ome-zarr"
     )
     if export_format_raw in {"ome-zarr", "ome_zarr", "ome.zarr", "zarr"}:
         export_format = "ome-zarr"
