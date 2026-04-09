@@ -87,6 +87,9 @@ from clearex.visualization.pipeline import (
     run_render_movie_analysis,
     run_visualization_analysis,
 )
+from clearex.visualization.volume_export import (
+    run_volume_export_analysis,
+)
 from clearex.mip_export.pipeline import (
     run_mip_export_analysis,
 )
@@ -256,6 +259,10 @@ _ANALYSIS_PROVENANCE_REQUIRED_COMPONENTS: Dict[str, tuple[str, ...]] = {
     "display_pyramid": (analysis_auxiliary_root("display_pyramid"),),
     "render_movie": (analysis_auxiliary_root("render_movie"),),
     "compile_movie": (analysis_auxiliary_root("compile_movie"),),
+    "volume_export": (
+        analysis_cache_data_component("volume_export"),
+        analysis_auxiliary_root("volume_export"),
+    ),
     "mip_export": (analysis_auxiliary_root("mip_export"),),
 }
 _DISTRIBUTED_TEARDOWN_NOISE_LOGGERS = ("distributed.batched",)
@@ -712,6 +719,7 @@ def _build_workflow_config(args: argparse.Namespace) -> WorkflowConfig:
         visualization=args.visualization,
         render_movie=bool(getattr(args, "render_movie", False)),
         compile_movie=bool(getattr(args, "compile_movie", False)),
+        volume_export=bool(getattr(args, "volume_export", False)),
         mip_export=args.mip_export,
         spatial_calibration=spatial_calibration,
         spatial_calibration_explicit=spatial_calibration_explicit,
@@ -1296,6 +1304,7 @@ def _run_workflow(
         workflow.analysis_parameters
     )
     runtime_spatial_calibration = workflow.spatial_calibration
+    run_id: Optional[str] = None
 
     if workflow.file:
         is_experiment_input = is_navigate_experiment_file(workflow.file)
@@ -3169,6 +3178,111 @@ def _run_workflow(
                         _emit_analysis_progress(
                             operation_end,
                             "Compile movie skipped (no Zarr/N5 store).",
+                        )
+                    continue
+
+                if operation_name == "volume_export":
+                    volume_export_parameters = dict(operation_parameters)
+                    if provenance_store_path and is_zarr_store_path(
+                        provenance_store_path
+                    ):
+
+                        def _volume_export_progress(
+                            percent: int,
+                            message: str,
+                        ) -> None:
+                            """Map volume-export progress into workflow progress."""
+                            mapped = operation_start + int(
+                                (max(0, min(100, int(percent))) / 100)
+                                * max(1, operation_end - operation_start)
+                            )
+                            logger.info(f"[volume_export] {int(percent)}% - {message}")
+                            _emit_analysis_progress(
+                                mapped,
+                                f"volume_export: {message}",
+                            )
+
+                        summary = run_volume_export_analysis(
+                            zarr_path=provenance_store_path,
+                            parameters=volume_export_parameters,
+                            client=analysis_client,
+                            progress_callback=_volume_export_progress,
+                            run_id=run_id,
+                        )
+                        if str(summary.export_format) == "ome-zarr":
+                            publish_analysis_collection_from_cache(
+                                provenance_store_path,
+                                analysis_name="volume_export",
+                            )
+                        output_records["volume_export"] = {
+                            "component": summary.component,
+                            "data_component": summary.data_component,
+                            "source_component": summary.source_component,
+                            "resolved_resolution_component": (
+                                summary.resolved_resolution_component
+                            ),
+                            "export_scope": summary.export_scope,
+                            "resolution_level": summary.resolution_level,
+                            "generated_resolution_level": (
+                                summary.generated_resolution_level
+                            ),
+                            "export_format": summary.export_format,
+                            "tiff_file_layout": summary.tiff_file_layout,
+                            "artifact_paths": list(summary.artifact_paths),
+                            "storage_policy": "latest_only",
+                        }
+                        logger.info(
+                            "Volume export completed: "
+                            f"component={summary.component}, "
+                            f"source={summary.source_component}, "
+                            f"resolved={summary.resolved_resolution_component}, "
+                            f"scope={summary.export_scope}, "
+                            f"level={summary.resolution_level}, "
+                            f"format={summary.export_format}."
+                        )
+                        step_records.append(
+                            {
+                                "name": "volume_export",
+                                "parameters": {
+                                    **volume_export_parameters,
+                                    "component": summary.component,
+                                    "data_component": summary.data_component,
+                                    "source_component": summary.source_component,
+                                    "resolved_resolution_component": (
+                                        summary.resolved_resolution_component
+                                    ),
+                                    "export_scope": summary.export_scope,
+                                    "resolution_level": summary.resolution_level,
+                                    "generated_resolution_level": (
+                                        summary.generated_resolution_level
+                                    ),
+                                    "export_format": summary.export_format,
+                                    "tiff_file_layout": summary.tiff_file_layout,
+                                    "artifact_paths": list(summary.artifact_paths),
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Volume export complete.",
+                        )
+                    else:
+                        logger.warning(
+                            "Volume export requires a canonical OME-Zarr store."
+                        )
+                        step_records.append(
+                            {
+                                "name": "volume_export",
+                                "parameters": {
+                                    **volume_export_parameters,
+                                    "status": "skipped",
+                                    "reason": "no_zarr_store",
+                                },
+                            }
+                        )
+                        _emit_analysis_progress(
+                            operation_end,
+                            "Volume export skipped (no Zarr/N5 store).",
                         )
                     continue
 

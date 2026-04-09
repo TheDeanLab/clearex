@@ -555,7 +555,9 @@ def test_run_workflow_threads_volume_export_through_sequence_and_provenance(
         "_resolve_effective_store_spatial_calibration",
         _fake_resolve_effective_store_spatial_calibration,
     )
-    monkeypatch.setattr(main_module, "persist_run_provenance", _fake_persist_run_provenance)
+    monkeypatch.setattr(
+        main_module, "persist_run_provenance", _fake_persist_run_provenance
+    )
     monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
 
     workflow = WorkflowConfig(
@@ -1197,6 +1199,15 @@ def test_build_workflow_config_maps_usegment3d_flag() -> None:
     assert workflow.usegment3d is True
 
 
+def test_build_workflow_config_propagates_volume_export_flag() -> None:
+    parser = main_module.create_parser()
+    args = parser.parse_args(["--file", "/tmp/data_store.zarr", "--volume-export"])
+
+    workflow = main_module._build_workflow_config(args)
+
+    assert workflow.volume_export is True
+
+
 def test_build_workflow_config_applies_persisted_dask_backend(monkeypatch) -> None:
     args = SimpleNamespace(
         file=None,
@@ -1421,6 +1432,145 @@ def test_run_workflow_experiment_file_starts_io_dask_startup(
     )
 
     assert workloads == ["io"]
+
+
+def test_run_workflow_dispatches_volume_export_and_publishes_collection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_volume_export.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name=main_module.SOURCE_CACHE_COMPONENT,
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        volume_export=True,
+        analysis_parameters={
+            "volume_export": {
+                "input_source": "data",
+                "export_scope": "current_selection",
+                "t_index": 0,
+                "p_index": 0,
+                "c_index": 0,
+                "resolution_level": 0,
+                "export_format": "ome-zarr",
+                "tiff_file_layout": "single_file",
+            }
+        },
+    )
+
+    published = {"analysis_name": None}
+    called = {"value": False}
+
+    def _fake_volume_export(
+        *, zarr_path, parameters, progress_callback, run_id=None, client=None
+    ):
+        del zarr_path, parameters, progress_callback, run_id, client
+        called["value"] = True
+        return SimpleNamespace(
+            component=main_module.analysis_auxiliary_root("volume_export"),
+            data_component="clearex/runtime_cache/results/volume_export/latest/data",
+            source_component=main_module.SOURCE_CACHE_COMPONENT,
+            resolved_resolution_component=main_module.SOURCE_CACHE_COMPONENT,
+            export_scope="current_selection",
+            resolution_level=0,
+            generated_resolution_level=False,
+            export_format="ome-zarr",
+            tiff_file_layout="single_file",
+            artifact_paths=(),
+        )
+
+    def _fake_publish(zarr_path, analysis_name):
+        del zarr_path
+        published["analysis_name"] = analysis_name
+
+    monkeypatch.setattr(main_module, "run_volume_export_analysis", _fake_volume_export)
+    monkeypatch.setattr(
+        main_module, "publish_analysis_collection_from_cache", _fake_publish
+    )
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+    monkeypatch.setattr(main_module, "is_legacy_clearex_store", lambda path: False)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.volume_export_dispatch"),
+    )
+
+    assert called["value"] is True
+    assert published["analysis_name"] == "volume_export"
+
+
+def test_run_workflow_dispatches_volume_export_tiff_without_public_publish(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_volume_export_tiff.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name=main_module.SOURCE_CACHE_COMPONENT,
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        volume_export=True,
+        analysis_parameters={
+            "volume_export": {
+                "input_source": "data",
+                "export_scope": "current_selection",
+                "t_index": 0,
+                "p_index": 0,
+                "c_index": 0,
+                "resolution_level": 0,
+                "export_format": "ome-tiff",
+                "tiff_file_layout": "single_file",
+            }
+        },
+    )
+
+    published = {"called": False}
+
+    def _fake_volume_export(
+        *, zarr_path, parameters, progress_callback, run_id=None, client=None
+    ):
+        del zarr_path, parameters, progress_callback, run_id, client
+        return SimpleNamespace(
+            component=main_module.analysis_auxiliary_root("volume_export"),
+            data_component="clearex/runtime_cache/results/volume_export/latest/data",
+            source_component=main_module.SOURCE_CACHE_COMPONENT,
+            resolved_resolution_component=main_module.SOURCE_CACHE_COMPONENT,
+            export_scope="current_selection",
+            resolution_level=0,
+            generated_resolution_level=False,
+            export_format="ome-tiff",
+            tiff_file_layout="single_file",
+            artifact_paths=("clearex/results/volume_export/latest/files/test.ome.tif",),
+        )
+
+    def _fake_publish(*args, **kwargs):
+        del args, kwargs
+        published["called"] = True
+
+    monkeypatch.setattr(main_module, "run_volume_export_analysis", _fake_volume_export)
+    monkeypatch.setattr(
+        main_module, "publish_analysis_collection_from_cache", _fake_publish
+    )
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+    monkeypatch.setattr(main_module, "is_legacy_clearex_store", lambda path: False)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.volume_export_tiff_dispatch"),
+    )
+
+    assert published["called"] is False
 
 
 def test_run_workflow_existing_store_persists_explicit_spatial_calibration(

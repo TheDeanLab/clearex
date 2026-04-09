@@ -237,6 +237,14 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     input_args.add_argument(
+        "--volume-export",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Export full 3D volumes from a selected image-producing source",
+    )
+
+    input_args.add_argument(
         "--mip-export",
         required=False,
         default=False,

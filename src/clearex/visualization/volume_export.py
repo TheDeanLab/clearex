@@ -457,10 +457,12 @@ def run_volume_export_analysis(
     *,
     zarr_path: str | Path,
     parameters: Mapping[str, Any],
+    client: Optional[Any] = None,
     progress_callback: Optional[ProgressCallback] = None,
     run_id: Optional[str] = None,
 ) -> VolumeExportSummary:
     """Export the resolved source component into the runtime-cache volume."""
+    del client
     _emit(progress_callback, 0, "Normalizing volume export parameters")
     normalized = dict(
         normalize_analysis_operation_parameters({"volume_export": dict(parameters)})[
