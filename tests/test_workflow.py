@@ -34,6 +34,8 @@ from clearex.workflow import (
     ANALYSIS_OPERATION_ORDER,
     ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS,
     AnalysisTarget,
+    analysis_chainable_output_component,
+    analysis_operation_for_output_component,
     DASK_BACKEND_LOCAL_CLUSTER,
     DASK_BACKEND_SLURM_CLUSTER,
     DASK_BACKEND_SLURM_RUNNER,
@@ -643,6 +645,50 @@ class TestWorkflowConfig:
         assert params["resolution_level"] == 2
         assert params["export_format"] == "ome-tiff"
         assert params["tiff_file_layout"] == "per_volume_files"
+
+    def test_normalizes_volume_export_negative_indices_to_zero(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "volume_export": {
+                    "t_index": "-7",
+                    "p_index": -8,
+                    "c_index": "-9",
+                    "resolution_level": -2,
+                }
+            }
+        )
+        params = cfg.analysis_parameters["volume_export"]
+        assert params["t_index"] == 0
+        assert params["p_index"] == 0
+        assert params["c_index"] == 0
+        assert params["resolution_level"] == 0
+
+    @pytest.mark.parametrize(
+        "field_name, value, match",
+        [
+            ("export_scope", "invalid_scope", "export_scope must be one of"),
+            ("export_format", "invalid_format", "export_format must be one of"),
+            (
+                "tiff_file_layout",
+                "invalid_layout",
+                "tiff_file_layout must be one of",
+            ),
+        ],
+    )
+    def test_rejects_invalid_volume_export_parameters(
+        self, field_name: str, value: str, match: str
+    ) -> None:
+        with pytest.raises(ValueError, match=match):
+            WorkflowConfig(analysis_parameters={"volume_export": {field_name: value}})
+
+    def test_volume_export_is_known_but_not_chainable(self):
+        assert analysis_chainable_output_component("volume_export") is None
+        assert resolve_analysis_input_component("volume_export") == (
+            "clearex/results/volume_export/latest"
+        )
+        assert analysis_operation_for_output_component(
+            "clearex/results/volume_export/latest"
+        ) == "volume_export"
 
     def test_normalizes_shear_transform_parameters(self):
         cfg = WorkflowConfig(

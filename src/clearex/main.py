@@ -1457,6 +1457,7 @@ def _run_workflow(
             visualization=workflow.visualization,
             render_movie=workflow.render_movie,
             compile_movie=workflow.compile_movie,
+            volume_export=workflow.volume_export,
             mip_export=workflow.mip_export,
             analysis_parameters=runtime_analysis_parameters,
         )
@@ -3343,6 +3344,7 @@ def _run_workflow(
             visualization=workflow.visualization,
             render_movie=workflow.render_movie,
             compile_movie=workflow.compile_movie,
+            volume_export=workflow.volume_export,
             mip_export=workflow.mip_export,
             zarr_save=workflow.zarr_save,
             spatial_calibration=runtime_spatial_calibration,

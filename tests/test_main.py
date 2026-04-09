@@ -491,6 +491,91 @@ def test_run_workflow_compile_movie_only_skips_analysis_dask_startup(
     assert workloads == []
 
 
+def test_run_workflow_threads_volume_export_through_sequence_and_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_volume_export.zarr"
+    captured: dict[str, object] = {}
+
+    class _DummyOpener:
+        def open(self, path, *, prefer_dask, chunks):
+            del prefer_dask, chunks
+            return None, ImageInfo(
+                path=Path(path),
+                shape=(1, 1, 1, 2, 2, 2),
+                dtype=np.uint16,
+                axes="TPCZYX",
+                metadata={},
+            )
+
+    def _fake_resolve_analysis_execution_sequence(**kwargs):
+        captured["sequence_kwargs"] = kwargs
+        return ()
+
+    def _fake_collect_available_analysis_components(*args, **kwargs):
+        del args, kwargs
+        return {"data"}
+
+    def _fake_validate_analysis_input_references(*args, **kwargs):
+        del args, kwargs
+        return ()
+
+    def _fake_resolve_effective_store_spatial_calibration(
+        *, store_path, desired_calibration, persist
+    ):
+        del store_path, persist
+        return desired_calibration
+
+    def _fake_persist_run_provenance(
+        *, zarr_path, workflow, image_info, steps, outputs, status, **kwargs
+    ):
+        del zarr_path, image_info, steps, outputs, status, kwargs
+        captured["provenance_workflow_volume_export"] = workflow.volume_export
+        captured["provenance_workflow_mip_export"] = workflow.mip_export
+        return "run-1"
+
+    monkeypatch.setattr(main_module, "ImageOpener", _DummyOpener)
+    monkeypatch.setattr(
+        main_module,
+        "resolve_analysis_execution_sequence",
+        _fake_resolve_analysis_execution_sequence,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_collect_available_analysis_components",
+        _fake_collect_available_analysis_components,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_analysis_input_references",
+        _fake_validate_analysis_input_references,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_resolve_effective_store_spatial_calibration",
+        _fake_resolve_effective_store_spatial_calibration,
+    )
+    monkeypatch.setattr(main_module, "persist_run_provenance", _fake_persist_run_provenance)
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=False,
+        volume_export=True,
+        mip_export=True,
+    )
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.volume_export"),
+    )
+
+    assert captured["sequence_kwargs"]["volume_export"] is True
+    assert captured["sequence_kwargs"]["mip_export"] is True
+    assert captured["provenance_workflow_volume_export"] is True
+    assert captured["provenance_workflow_mip_export"] is True
+
+
 def test_run_workflow_particle_detection_starts_analysis_dask_startup(
     monkeypatch,
 ) -> None:
