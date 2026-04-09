@@ -30,6 +30,32 @@ def _write_source_cache_volume(root: zarr.Group, data: np.ndarray[Any, Any]) -> 
     return source_component
 
 
+def _write_source_adjacent_level(
+    root: zarr.Group,
+    *,
+    source_component: str,
+    level_component: str,
+    data: np.ndarray[Any, Any],
+) -> None:
+    parent = root.require_group(level_component.rsplit("/", 1)[0])
+    parent.create_dataset(
+        name=level_component.rsplit("/", 1)[1],
+        data=data,
+        chunks=data.shape,
+        overwrite=True,
+    )
+    source_node = root[source_component]
+    assert isinstance(source_node, zarr.Array)
+    source_node.attrs["display_pyramid_levels"] = [source_component, level_component]
+    source_node.attrs["display_pyramid_factors_tpczyx"] = [
+        [1, 1, 1, 1, 1, 1],
+        [1, 1, 1, 2, 2, 2],
+    ]
+    root.attrs["display_pyramid_levels_by_component"] = {
+        source_component: [source_component, level_component]
+    }
+
+
 def test_run_volume_export_analysis_writes_current_selection_cache_and_publishable_ome_zarr(
     tmp_path: Path,
 ) -> None:
@@ -177,3 +203,97 @@ def test_run_volume_export_analysis_writes_all_indices_and_generates_missing_res
     assert exported.shape == generated_level.shape
     assert np.array_equal(exported[...], generated_level[...])
     assert runtime_cache_component in runtime_cache
+
+
+def test_run_volume_export_analysis_extends_partial_existing_pyramid(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(2 * 2 * 2 * 4 * 4 * 4, dtype=np.uint16).reshape((2, 2, 2, 4, 4, 4))
+    source_component = _write_source_cache_volume(root, data)
+    level_1_component = source_cache_component(level_index=1)
+    level_1_data = data[:, :, :, ::2, ::2, ::2]
+    _write_source_adjacent_level(
+        root,
+        source_component=source_component,
+        level_component=level_1_component,
+        data=level_1_data,
+    )
+
+    summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "all_indices",
+            "resolution_level": 2,
+            "export_format": "ome-zarr",
+        },
+    )
+
+    assert summary.resolution_level == 2
+    assert summary.generated_resolution_level is True
+    assert summary.resolved_resolution_component == source_cache_component(
+        level_index=2
+    )
+    runtime_cache = zarr.open_group(str(store_path), mode="r")
+    generated_level = runtime_cache[source_cache_component(level_index=2)]
+    assert isinstance(generated_level, zarr.Array)
+    assert generated_level.shape == (2, 2, 2, 1, 1, 1)
+
+
+def test_run_volume_export_analysis_uses_discovered_noncanonical_level(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(2 * 2 * 2 * 3 * 4 * 5, dtype=np.uint16).reshape((2, 2, 2, 3, 4, 5))
+    source_component = _write_source_cache_volume(root, data)
+    discovered_level = "clearex/runtime_cache/source/custom_levels/level_one"
+    _write_source_adjacent_level(
+        root,
+        source_component=source_component,
+        level_component=discovered_level,
+        data=data[:, :, :, ::2, ::2, ::2],
+    )
+
+    summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "all_indices",
+            "resolution_level": 1,
+            "export_format": "ome-zarr",
+        },
+    )
+
+    assert summary.resolved_resolution_component == discovered_level
+    assert summary.generated_resolution_level is False
+
+
+def test_run_volume_export_analysis_all_indices_ignores_stale_selection_indices(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(2 * 2 * 2 * 3 * 4 * 5, dtype=np.uint16).reshape((2, 2, 2, 3, 4, 5))
+    source_component = _write_source_cache_volume(root, data)
+
+    summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "all_indices",
+            "t_index": 99,
+            "p_index": 99,
+            "c_index": 99,
+            "resolution_level": 0,
+            "export_format": "ome-zarr",
+        },
+    )
+
+    assert summary.source_component == source_component
+    runtime_cache = zarr.open_group(str(store_path), mode="r")
+    exported = runtime_cache["clearex/runtime_cache/results/volume_export/latest/data"]
+    assert isinstance(exported, zarr.Array)
+    assert exported.shape == data.shape

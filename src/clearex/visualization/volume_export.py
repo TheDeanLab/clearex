@@ -18,7 +18,7 @@ from clearex.io.ome_store import (
     resolve_voxel_size_um_zyx_with_source,
 )
 from clearex.io.provenance import register_latest_output_reference
-from clearex.visualization.pipeline import run_display_pyramid_analysis
+from clearex.visualization import pipeline as visualization_pipeline
 from clearex.workflow import (
     normalize_analysis_operation_parameters,
     resolve_analysis_input_component,
@@ -30,8 +30,10 @@ _AXES_TPCZYX = ("t", "p", "c", "z", "y", "x")
 _AXES_TCZYX = ("t", "c", "z", "y", "x")
 _ANALYSIS_NAME = "volume_export"
 _DISPLAY_PYRAMID_LEVELS_ATTR = "display_pyramid_levels"
+_DISPLAY_PYRAMID_FACTORS_ATTR = "display_pyramid_factors_tpczyx"
 _DISPLAY_PYRAMID_ROOT_MAP_ATTR = "display_pyramid_levels_by_component"
 _LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR = "visualization_pyramid_levels"
+_LEGACY_DISPLAY_PYRAMID_FACTORS_ATTR = "visualization_pyramid_factors_tpczyx"
 _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR = "visualization_pyramid_levels_by_component"
 
 
@@ -52,59 +54,171 @@ def _discover_source_adjacent_resolution_components(
     source_component: str,
 ) -> tuple[str, ...]:
     """Return known 6D source-adjacent resolution components for one source."""
-    try:
-        source_node = root[source_component]
-    except Exception as exc:
-        raise ValueError(
-            f"volume_export source component '{source_component}' was not found in the store."
-        ) from exc
-    assert isinstance(source_node, zarr.Array)
+    return visualization_pipeline._collect_existing_multiscale_components(
+        root=root,
+        source_component=source_component,
+    )
 
-    if len(tuple(source_node.shape)) != 6:
+
+def _extend_level_factors_tpczyx(
+    level_factors_tpczyx: tuple[tuple[int, int, int, int, int, int], ...],
+    required_level_index: int,
+) -> tuple[tuple[int, int, int, int, int, int], ...]:
+    """Extend absolute pyramid factors until a requested level index exists."""
+    factors = [tuple(int(value) for value in row) for row in level_factors_tpczyx]
+    if not factors:
+        factors = [(1, 1, 1, 1, 1, 1)]
+    while len(factors) <= int(required_level_index):
+        previous = factors[-1]
+        factors.append(
+            (
+                int(previous[0]),
+                int(previous[1]),
+                int(previous[2]),
+                int(max(1, previous[3] * 2)),
+                int(max(1, previous[4] * 2)),
+                int(max(1, previous[5] * 2)),
+            )
+        )
+    return tuple(factors)
+
+
+def _generate_missing_volume_export_resolution_components(
+    *,
+    zarr_path: str | Path,
+    root: zarr.Group,
+    source_component: str,
+    resolution_level: int,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> tuple[str, bool]:
+    """Materialize missing source-adjacent levels up to ``resolution_level``."""
+    source_node = root[source_component]
+    if not isinstance(source_node, zarr.Array):
         raise ValueError(
-            f"volume_export expected canonical 6D input at '{source_component}', "
-            f"but found shape {tuple(source_node.shape)}."
+            f"volume_export expected a 6D array at '{source_component}', "
+            f"but found {type(source_node).__name__}."
         )
 
-    candidates: list[str] = [str(source_component)]
     source_attrs = dict(source_node.attrs)
-    for key in (
-        _DISPLAY_PYRAMID_LEVELS_ATTR,
-        "pyramid_levels",
-        _LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR,
-    ):
-        values = source_attrs.get(key)
-        if isinstance(values, (tuple, list)):
-            candidates.extend(str(item) for item in values)
-
     root_attrs = dict(root.attrs)
-    for key in (_DISPLAY_PYRAMID_ROOT_MAP_ATTR, _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR):
-        root_level_map = root_attrs.get(key)
-        if not isinstance(root_level_map, Mapping):
-            continue
-        mapped = root_level_map.get(str(source_component))
-        if isinstance(mapped, (tuple, list)):
-            candidates.extend(str(item) for item in mapped)
+    level_factors = (
+        visualization_pipeline._resolve_visualization_pyramid_factors_tpczyx(
+            root_attrs=root_attrs,
+            source_attrs=source_attrs,
+        )
+    )
+    level_factors = _extend_level_factors_tpczyx(level_factors, resolution_level)
 
-    if str(source_component).endswith("/data") or str(source_component) == "data":
-        root_levels = root_attrs.get("data_pyramid_levels")
-        if isinstance(root_levels, (tuple, list)):
-            candidates.extend(str(item) for item in root_levels)
+    discovered_components = list(
+        _discover_source_adjacent_resolution_components(
+            root=root,
+            source_component=source_component,
+        )
+    )
+    if int(resolution_level) < len(discovered_components):
+        return str(discovered_components[int(resolution_level)]), False
 
-    ordered: list[str] = []
-    for candidate in candidates:
-        component = str(candidate).strip()
-        if not component or component in ordered:
-            continue
-        try:
-            node = root[component]
-        except Exception:
-            continue
-        assert isinstance(node, zarr.Array)
-        if len(tuple(node.shape)) != 6:
-            continue
-        ordered.append(component)
-    return tuple(ordered) if ordered else (str(source_component),)
+    source_chunks = (
+        tuple(source_node.chunks) if source_node.chunks is not None else None
+    )
+    prior_component = (
+        str(discovered_components[-1])
+        if discovered_components
+        else str(source_component)
+    )
+    prior_factors = tuple(
+        int(value) for value in level_factors[len(discovered_components) - 1]
+    )
+    level_paths = list(discovered_components)
+    factor_payload = [list(row) for row in level_factors[: len(level_paths)]]
+
+    for level_index in range(len(level_paths), int(resolution_level) + 1):
+        absolute_factors = tuple(int(value) for value in level_factors[level_index])
+        all_relative = all(
+            int(current) % int(previous) == 0
+            for current, previous in zip(absolute_factors, prior_factors, strict=False)
+        )
+        if all_relative:
+            downsample_factors = (
+                int(absolute_factors[0] // prior_factors[0]),
+                int(absolute_factors[1] // prior_factors[1]),
+                int(absolute_factors[2] // prior_factors[2]),
+                int(absolute_factors[3] // prior_factors[3]),
+                int(absolute_factors[4] // prior_factors[4]),
+                int(absolute_factors[5] // prior_factors[5]),
+            )
+            source_level_component = str(prior_component)
+        else:
+            downsample_factors = absolute_factors
+            source_level_component = str(source_component)
+
+        target_component = _display_pyramid_level_component(
+            source_component=source_component,
+            level=int(level_index),
+        )
+        source_level = da.from_zarr(str(zarr_path), component=source_level_component)
+        downsampled = visualization_pipeline._downsample_tpczyx_by_stride(
+            source_level,
+            downsample_factors,
+        )
+        level_shape = tuple(int(size) for size in tuple(downsampled.shape))
+        level_chunks = visualization_pipeline._resolve_level_chunks_tpczyx(
+            source_chunks=source_chunks,
+            level_shape=level_shape,
+            level_array=downsampled,
+        )
+        if not visualization_pipeline._component_matches_shape_chunks(
+            root=root,
+            component=target_component,
+            shape_tpczyx=(
+                int(level_shape[0]),
+                int(level_shape[1]),
+                int(level_shape[2]),
+                int(level_shape[3]),
+                int(level_shape[4]),
+                int(level_shape[5]),
+            ),
+            chunks_tpczyx=level_chunks,
+        ):
+            parent_path, _, leaf = target_component.rpartition("/")
+            parent_group = ensure_group(root, parent_path) if parent_path else root
+            target = parent_group.create_array(
+                leaf,
+                shape=level_shape,
+                chunks=level_chunks,
+                dtype=source_node.dtype,
+                overwrite=True,
+                dimension_names=_AXES_TPCZYX,
+            )
+            da.store(downsampled, target, lock=False, compute=True)
+        level_paths.append(target_component)
+        factor_payload.append([int(value) for value in absolute_factors])
+        prior_component = target_component
+        prior_factors = absolute_factors
+
+    root[str(source_component)].attrs[_DISPLAY_PYRAMID_LEVELS_ATTR] = [
+        str(item) for item in level_paths
+    ]
+    root[str(source_component)].attrs[_DISPLAY_PYRAMID_FACTORS_ATTR] = [
+        list(row) for row in factor_payload
+    ]
+    root[str(source_component)].attrs[_LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR] = [
+        str(item) for item in level_paths
+    ]
+    root[str(source_component)].attrs[_LEGACY_DISPLAY_PYRAMID_FACTORS_ATTR] = [
+        list(row) for row in factor_payload
+    ]
+    component_map = root.attrs.get(_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
+    if not isinstance(component_map, dict):
+        component_map = {}
+    component_map[str(source_component)] = [str(item) for item in level_paths]
+    root.attrs[_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = component_map
+    legacy_component_map = root.attrs.get(_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR)
+    if not isinstance(legacy_component_map, dict):
+        legacy_component_map = {}
+    legacy_component_map[str(source_component)] = [str(item) for item in level_paths]
+    root.attrs[_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = legacy_component_map
+    return str(level_paths[int(resolution_level)]), True
 
 
 def _resolve_volume_export_resolution_component(
@@ -121,34 +235,20 @@ def _resolve_volume_export_resolution_component(
     if level_index <= 0:
         return str(source_component), False
 
-    requested_component = _display_pyramid_level_component(
-        source_component=source_component,
-        level=level_index,
-    )
     discovered_components = _discover_source_adjacent_resolution_components(
         root=root,
         source_component=source_component,
     )
-    if requested_component in discovered_components:
-        return requested_component, False
+    if level_index < len(discovered_components):
+        return str(discovered_components[level_index]), False
 
-    _ = run_display_pyramid_analysis(
+    return _generate_missing_volume_export_resolution_components(
         zarr_path=zarr_path,
-        parameters={"input_source": source_component},
-        progress_callback=progress_callback,
-        run_id=run_id,
-    )
-
-    refreshed_components = _discover_source_adjacent_resolution_components(
-        root=zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="a"),
+        root=root,
         source_component=source_component,
+        resolution_level=level_index,
+        progress_callback=progress_callback,
     )
-    if requested_component not in refreshed_components:
-        raise ValueError(
-            f"volume_export could not resolve resolution_level={level_index} "
-            f"for source component '{source_component}'."
-        )
-    return requested_component, True
 
 
 @dataclass(frozen=True)
@@ -275,18 +375,19 @@ def run_volume_export_analysis(
     t_index = int(normalized.get("t_index", 0))
     p_index = int(normalized.get("p_index", 0))
     c_index = int(normalized.get("c_index", 0))
-    if t_index < 0 or t_index >= resolved_shape[0]:
-        raise ValueError(
-            f"volume_export t_index={t_index} is out of bounds for shape {resolved_shape}."
-        )
-    if p_index < 0 or p_index >= resolved_shape[1]:
-        raise ValueError(
-            f"volume_export p_index={p_index} is out of bounds for shape {resolved_shape}."
-        )
-    if c_index < 0 or c_index >= resolved_shape[2]:
-        raise ValueError(
-            f"volume_export c_index={c_index} is out of bounds for shape {resolved_shape}."
-        )
+    if export_scope == "current_selection":
+        if t_index < 0 or t_index >= resolved_shape[0]:
+            raise ValueError(
+                f"volume_export t_index={t_index} is out of bounds for shape {resolved_shape}."
+            )
+        if p_index < 0 or p_index >= resolved_shape[1]:
+            raise ValueError(
+                f"volume_export p_index={p_index} is out of bounds for shape {resolved_shape}."
+            )
+        if c_index < 0 or c_index >= resolved_shape[2]:
+            raise ValueError(
+                f"volume_export c_index={c_index} is out of bounds for shape {resolved_shape}."
+            )
 
     delete_path(root, analysis_cache_root(_ANALYSIS_NAME))
     data_component = analysis_cache_data_component(_ANALYSIS_NAME)
