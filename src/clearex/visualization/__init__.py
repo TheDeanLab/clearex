@@ -32,10 +32,12 @@ __all__ = [
     "CompileMovieSummary",
     "DisplayPyramidSummary",
     "RenderMovieSummary",
+    "VolumeExportSummary",
     "VisualizationSummary",
     "run_compile_movie_analysis",
     "run_display_pyramid_analysis",
     "run_render_movie_analysis",
+    "run_volume_export_analysis",
     "run_visualization_analysis",
 ]
 
@@ -62,12 +64,21 @@ def __getattr__(name: str) -> Any:
         "CompileMovieSummary",
         "DisplayPyramidSummary",
         "RenderMovieSummary",
+        "VolumeExportSummary",
         "VisualizationSummary",
         "run_compile_movie_analysis",
         "run_display_pyramid_analysis",
         "run_render_movie_analysis",
+        "run_volume_export_analysis",
         "run_visualization_analysis",
     }:
+        if name in {
+            "VolumeExportSummary",
+            "run_volume_export_analysis",
+        }:
+            from . import volume_export
+
+            return getattr(volume_export, name)
         from . import pipeline
 
         return getattr(pipeline, name)
