@@ -11,6 +11,7 @@ import zarr
 from clearex.io.ome_store import (
     analysis_auxiliary_root,
     analysis_cache_data_component,
+    analysis_cache_root,
     delete_path,
     ensure_group,
     get_node,
@@ -58,14 +59,9 @@ def _emit(
     progress_callback(int(percent), str(message))
 
 
-def _source_component_for_input(root: zarr.Group, input_source: str) -> str:
+def _source_component_for_input(input_source: str) -> str:
     """Resolve the requested source against the current store layout."""
     requested = str(input_source).strip() or "data"
-    if requested == "data":
-        return resolve_analysis_input_component(
-            requested,
-            produced_components={"data": "data"},
-        )
     return resolve_analysis_input_component(requested)
 
 
@@ -102,10 +98,14 @@ def run_volume_export_analysis(
 
     root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="a")
     source_component = _source_component_for_input(
-        root,
-        str(normalized.get("input_source", "data")),
+        str(normalized.get("input_source", "data"))
     )
-    source_node = get_node(root, source_component)
+    try:
+        source_node = get_node(root, source_component)
+    except Exception as exc:
+        raise ValueError(
+            f"volume_export source component '{source_component}' was not found in the store."
+        ) from exc
     if not isinstance(source_node, zarr.Array):
         raise ValueError(
             f"volume_export expected a 6D array at '{source_component}', "
@@ -135,10 +135,10 @@ def run_volume_export_analysis(
             f"volume_export c_index={c_index} is out of bounds for shape {source_shape}."
         )
 
+    delete_path(root, analysis_cache_root(_ANALYSIS_NAME))
     data_component = analysis_cache_data_component(_ANALYSIS_NAME)
     parent_path, _, leaf = data_component.rpartition("/")
     parent_group = ensure_group(root, parent_path) if parent_path else root
-    delete_path(root, data_component)
     target = parent_group.create_array(
         leaf,
         shape=(1, 1, 1, source_shape[3], source_shape[4], source_shape[5]),
@@ -166,6 +166,7 @@ def run_volume_export_analysis(
     resolved_resolution_component = source_component
     generated_resolution_level = False
     auxiliary_root = analysis_auxiliary_root(_ANALYSIS_NAME)
+    delete_path(root, auxiliary_root)
     auxiliary_group = ensure_group(root, auxiliary_root)
 
     selection_payload = {
