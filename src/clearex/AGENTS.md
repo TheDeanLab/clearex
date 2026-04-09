@@ -238,6 +238,28 @@ This directory contains the runtime orchestration surface for ClearEx.
   workflows.
 - Movie rendering now uses a visible napari viewer by default and still
   verifies that the first screenshot is non-empty before continuing.
+
+## Recent Runtime Updates (2026-04-08)
+
+- Added `volume_export` as a visualization-family analysis operation between
+  `compile_movie` and `mip_export`.
+- `volume_export` exports one selected image-producing source component at an
+  explicit `(t, p, c)` selection or across all available indices.
+- Runtime now supports source-selectable resolution-level export:
+  - existing discovered source-adjacent pyramid levels are reused when present,
+  - missing deeper levels can be generated during export,
+  - exported metadata preserves voxel calibration through source ancestry.
+- Storage contract for `volume_export` is:
+  - runtime-cache image data at
+    `clearex/runtime_cache/results/volume_export/latest/data`
+  - latest metadata at `clearex/results/volume_export/latest`
+  - public OME image collection at `results/volume_export/latest` only when
+    `export_format=ome-zarr`
+  - in-store TIFF artifacts at
+    `clearex/results/volume_export/latest/files/*.ome.tif` when
+    `export_format=ome-tiff`
+- `volume_export` is not a preferred chainable scientific upstream alias; it is
+  an export workflow that records latest outputs and provenance.
 - When `render_movie` is launched from the GUI or any other Qt-active context,
   it should run that visible napari capture inside a dedicated subprocess
   rather than constructing the viewer on a worker thread.

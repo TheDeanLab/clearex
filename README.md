@@ -26,6 +26,7 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
   - particle detection (`clearex/results/particle_detection/latest`)
   - display-pyramid metadata (`clearex/results/display_pyramid/latest`)
   - visualization metadata (`clearex/results/visualization/latest`) with napari launch
+  - volume-export metadata (`clearex/results/volume_export/latest`) with in-store OME-Zarr / OME-TIFF outputs
   - render-movie metadata (`clearex/results/render_movie/latest`) with external PNG frame sets
   - compile-movie metadata (`clearex/results/compile_movie/latest`) with external MP4 / ProRes files
   - MIP export metadata (`clearex/results/mip_export/latest`) with external OME-TIFF / OME-Zarr files
@@ -36,6 +37,7 @@ ClearEx is an open source Python package for scalable analytics of cleared and e
 - The public source image collection is a synthetic single-well HCS layout at the store root: `A/1/<field>/<level>`.
 - Public image-producing analysis outputs are sibling HCS collections under `results/<analysis>/latest`.
 - `registration` is metadata-only under `clearex/results/registration/latest`; `fusion` owns the stitched image output under `results/fusion/latest`.
+- `volume_export` writes canonical cache data under `clearex/runtime_cache/results/volume_export/latest/data`; OME-Zarr exports also publish `results/volume_export/latest`, while OME-TIFF artifacts stay in-store under `clearex/results/volume_export/latest/files`.
 - Standalone projection exports from `mip_export` are written outside the store as OME-TIFF (`.tif`) or standalone OME-Zarr (`.ome.zarr`) files.
 - ClearEx internal execution data lives under:
   - `clearex/runtime_cache/source/...`
@@ -166,7 +168,8 @@ usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
                [--usegment3d] [--channel-indices CHANNEL_INDICES]
                [--input-resolution-level INPUT_RESOLUTION_LEVEL]
                [--shear-transform] [-r] [--fusion] [--display-pyramid] [-v]
-               [--render-movie] [--compile-movie] [--mip-export] [-f FILE]
+               [--render-movie] [--compile-movie] [--volume-export]
+               [--mip-export] [-f FILE]
                [--migrate-store MIGRATE_STORE]
                [--migrate-output MIGRATE_OUTPUT] [--migrate-overwrite]
                [--dask | --no-dask] [--chunks CHUNKS]
@@ -189,6 +192,7 @@ usage: clearex [-h] [--flatfield] [--deconvolution] [--particle-detection]
 - `-v, --visualization`: Run visualization workflow.
 - `--render-movie`: Render PNG movie frames from captured visualization keyframes.
 - `--compile-movie`: Compile rendered PNG frames into MP4 and/or ProRes movies.
+- `--volume-export`: Export full 3D volumes from one selected source as OME-Zarr or OME-TIFF.
 - `--mip-export`: Export XY/XZ/YZ maximum-intensity projections as OME-TIFF or standalone OME-Zarr.
 - `--migrate-store`: Convert one legacy ClearEx `.zarr` / `.n5` store into canonical OME-Zarr v3.
 - `--migrate-output`: Optional destination path for `--migrate-store`.
@@ -277,6 +281,14 @@ clearex --headless \
   --compile-movie
 ```
 
+Run headless volume export against an existing canonical store:
+
+```bash
+clearex --headless \
+  --file /path/to/data_store.ome.zarr \
+  --volume-export
+```
+
 Detailed movie timing, overlay, and codec parameters are currently configured
 through the GUI or programmatic `WorkflowConfig.analysis_parameters`; the CLI
 currently exposes the movie operations as top-level flags.
@@ -308,6 +320,9 @@ clearex --migrate-store /path/to/legacy_store.zarr
 - `compile_movie` consumes the latest render manifest and writes both latest
   metadata and default movie files inside the canonical store under
   `clearex/results/compile_movie/latest`.
+- `volume_export` is visualization-driven but source-selectable: it can export
+  the active source component as either a published OME-Zarr image collection
+  or in-store OME-TIFF artifacts.
 - Offline movie rendering rebuilds captured `Points` and `Tracks` layers from
   the keyframe manifest so particle and track overlays can survive beyond the
   live napari session.

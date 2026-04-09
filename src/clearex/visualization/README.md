@@ -32,6 +32,7 @@ The practical consequence is that visualization is now split into:
 
 - `display_pyramid`: an explicit preparation task
 - `visualization`: a viewer-launch task
+- `volume_export`: a reproducible 3D volume export task for one selected image source
 - `render_movie`: an offline frame-render task driven by captured keyframes
 - `compile_movie`: a fast encode task driven by rendered frame sets
 
@@ -367,9 +368,45 @@ into review and/or delivery movies.
 4. Re-run `render_movie` at level `0` and the final output size.
 5. Run `compile_movie` again for the publication deliverables.
 
+## Volume Export Task
+
+`volume_export` is a visualization-family export workflow for one selected
+image-producing source component.
+
+### Input contract
+
+- Input source is one canonical 6D component in `(t, p, c, z, y, x)` order.
+- The operation uses `analysis_parameters["volume_export"]["input_source"]`.
+- `export_scope=current_selection` exports one explicit `(t, p, c)` volume.
+- `export_scope=all_indices` exports every available `(t, p, c)` volume for
+  the selected source.
+- `resolution_level` reuses discovered source-adjacent pyramid levels when
+  available and can generate deeper missing levels during export.
+
+### Storage contract
+
+- Latest task metadata is stored at:
+  - `clearex/results/volume_export/latest`
+- Exported runtime-cache image data is written at:
+  - `clearex/runtime_cache/results/volume_export/latest/data`
+- `export_format=ome-zarr` publishes a public OME image collection at:
+  - `results/volume_export/latest`
+- `export_format=ome-tiff` keeps file artifacts inside the store under:
+  - `clearex/results/volume_export/latest/files/*.ome.tif`
+
+### TIFF layout policy
+
+- `current_selection` writes one `ZYX` OME-TIFF/BigTIFF volume.
+- `all_indices + single_file` writes one BigTIFF with one `TCZYX` series per
+  position field.
+- `all_indices + per_volume_files` writes one `ZYX` OME-TIFF per exported
+  `(t, p, c)` volume.
+- TIFF metadata must preserve resolved `PhysicalSizeZ/Y/X`.
+
 ## GUI / Workflow Notes
 
 - `display_pyramid` is ordered between `registration` and `visualization`.
+- `volume_export` is ordered after `compile_movie` and before `mip_export`.
 - `render_movie` is ordered after `visualization`.
 - `compile_movie` is ordered after `render_movie`.
 - The visualization GUI should describe `use_multiscale` as using existing
@@ -378,6 +415,7 @@ into review and/or delivery movies.
   2D for oversized image layers.
 - The Visualization tab now owns three related workflows:
   - `visualization` for napari launch and keyframe capture,
+  - `volume_export` for source-selectable 3D OME-Zarr / OME-TIFF export,
   - `render_movie` for offline frame generation,
   - `compile_movie` for ffmpeg encoding.
 - `launch_mode=auto` should resolve to `subprocess` whenever a Qt application

@@ -21,6 +21,7 @@ Current primary arguments are:
 - ``--visualization``
 - ``--render-movie``
 - ``--compile-movie``
+- ``--volume-export``
 - ``--mip-export``
 - ``--file``
 - ``--migrate-store``
@@ -136,6 +137,13 @@ Examples
 
 .. code-block:: bash
 
+   # Headless volume export against an existing canonical OME-Zarr store
+   clearex --headless \
+     --file /path/to/data_store.ome.zarr \
+     --volume-export
+
+.. code-block:: bash
+
    # Migrate one legacy ClearEx store
    clearex --migrate-store /path/to/legacy_store.zarr
 
@@ -202,6 +210,25 @@ Runtime source aliases currently include:
 Public OME image collections at the root and under ``results/<analysis>/latest``
 exist for interoperability and visualization. Analysis kernels should not write
 into those public arrays directly.
+
+Volume Export
+-------------
+
+``volume_export`` is a visualization-family export workflow for one selected
+image-producing source component.
+
+- ``export_scope=current_selection`` exports one explicit ``(t, p, c)`` volume.
+- ``export_scope=all_indices`` exports every available ``(t, p, c)`` volume.
+- ``resolution_level`` can reuse discovered source-adjacent pyramid levels or
+  generate missing deeper levels during export.
+- ``export_format=ome-zarr`` publishes ``results/volume_export/latest`` from
+  the runtime cache.
+- ``export_format=ome-tiff`` writes in-store artifacts under
+  ``<analysis_store>/clearex/results/volume_export/latest/files``.
+- ``tiff_file_layout=single_file`` writes one current-selection ``ZYX``
+  OME-TIFF or one all-position BigTIFF with one ``TCZYX`` series per position.
+- ``tiff_file_layout=per_volume_files`` writes one ``ZYX`` OME-TIFF per
+  exported ``(t, p, c)`` volume.
 
 When a requested source component does not exist, runtime raises an input
 dependency error instead of silently falling back.
