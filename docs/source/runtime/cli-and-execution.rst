@@ -217,8 +217,17 @@ Volume Export
 ``volume_export`` is a visualization-family export workflow for one selected
 image-producing source component.
 
+- ``input_source`` resolves the upstream image-producing component to export.
+  It accepts the usual runtime aliases such as ``data``, ``flatfield``,
+  ``deconvolution``, ``shear_transform``, ``fusion``, and explicit internal
+  component paths.
+- ``force_rerun`` bypasses provenance-based reuse and rewrites the latest
+  export payload even when matching latest metadata already exists.
 - ``export_scope=current_selection`` exports one explicit ``(t, p, c)`` volume.
 - ``export_scope=all_indices`` exports every available ``(t, p, c)`` volume.
+- ``t_index``, ``p_index``, and ``c_index`` select the exported volume when
+  ``export_scope=current_selection``. They are ignored for
+  ``export_scope=all_indices``.
 - ``resolution_level`` can reuse discovered source-adjacent pyramid levels or
   generate missing deeper levels during export.
 - ``export_format=ome-zarr`` publishes ``results/volume_export/latest`` from
@@ -229,9 +238,22 @@ image-producing source component.
   OME-TIFF or one all-position BigTIFF with one ``TCZYX`` series per position.
 - ``tiff_file_layout=per_volume_files`` writes one ``ZYX`` OME-TIFF per
   exported ``(t, p, c)`` volume.
+- ``memory_overhead_factor`` is preserved in the normalized workflow payload as
+  a scheduler hint, even though the current export implementation does not use
+  it directly.
+- ``chunk_basis``, ``detect_2d_per_slice``, ``use_map_overlap``, and
+  ``overlap_zyx`` are normalized compatibility fields inherited from other
+  volume analyses and are pinned to 3D/no-overlap behavior for
+  ``volume_export``.
 
 When a requested source component does not exist, runtime raises an input
 dependency error instead of silently falling back.
+
+The CLI currently exposes ``--volume-export`` as the operation flag. Detailed
+parameter editing is currently done through the GUI or a programmatic
+``WorkflowConfig.analysis_parameters["volume_export"]`` payload. The full
+parameter-by-parameter reference lives in
+:doc:`../workflows/analysis-volume-export`.
 
 Progress and Run Lifecycle
 --------------------------

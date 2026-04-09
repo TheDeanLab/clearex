@@ -380,11 +380,34 @@ image-producing source component.
 
 - Input source is one canonical 6D component in `(t, p, c, z, y, x)` order.
 - The operation uses `analysis_parameters["volume_export"]["input_source"]`.
+- `force_rerun` preserves the standard latest-only rerun semantics for the
+  export result.
 - `export_scope=current_selection` exports one explicit `(t, p, c)` volume.
 - `export_scope=all_indices` exports every available `(t, p, c)` volume for
   the selected source.
 - `resolution_level` reuses discovered source-adjacent pyramid levels when
   available and can generate deeper missing levels during export.
+
+### Parameter reference
+
+- `execution_order=12` places `volume_export` after `compile_movie` and before
+  `mip_export`.
+- `input_source` selects the image-producing upstream component or explicit
+  internal component path to export.
+- `force_rerun` bypasses provenance-based reuse of the latest export result.
+- `memory_overhead_factor` is carried through normalized workflow payloads as a
+  scheduler hint; the current export path does not consume it directly.
+- `export_scope` chooses `current_selection` or `all_indices`.
+- `t_index`, `p_index`, and `c_index` are used only for
+  `export_scope=current_selection`.
+- `resolution_level` selects the source-adjacent pyramid level to export,
+  generating missing deeper levels when needed.
+- `export_format` chooses between `ome-zarr` and `ome-tiff`.
+- `tiff_file_layout` chooses `single_file` or `per_volume_files` for TIFF
+  output.
+- `chunk_basis`, `detect_2d_per_slice`, `use_map_overlap`, and `overlap_zyx`
+  are normalized compatibility fields inherited from other volume analyses and
+  remain pinned to 3D/no-overlap behavior for `volume_export`.
 
 ### Storage contract
 

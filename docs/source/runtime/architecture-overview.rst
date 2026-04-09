@@ -69,10 +69,9 @@ These contracts are stable and expected by multiple modules:
   ``results/<analysis>/latest``.
 - Internal image-producing analysis arrays live under
   ``clearex/runtime_cache/results/<analysis>/latest``.
-- ``volume_export`` is hybrid:
-  - OME-Zarr runs publish ``results/volume_export/latest``
-  - OME-TIFF runs keep artifacts under
-    ``clearex/results/volume_export/latest/files``
+- ``volume_export`` is hybrid: OME-Zarr runs publish
+  ``results/volume_export/latest``; OME-TIFF runs keep artifacts under
+  ``clearex/results/volume_export/latest/files``.
 - ClearEx-owned metadata, provenance, GUI state, and non-image artifacts live
   under ``clearex/...``.
 - Store-level placement metadata is persisted in

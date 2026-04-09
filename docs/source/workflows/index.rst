@@ -6,3 +6,4 @@ Workflows
 
    zarr-materialization
    analysis-particle-detection
+   analysis-volume-export
