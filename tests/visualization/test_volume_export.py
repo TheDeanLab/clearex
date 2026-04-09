@@ -288,6 +288,49 @@ def test_run_volume_export_analysis_writes_all_indices_per_volume_files_ome_tiff
         assert pixels[0]["PhysicalSizeX"] == "2.0"
 
 
+def test_run_volume_export_analysis_ome_zarr_clears_prior_tiff_artifacts(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(2 * 2 * 2 * 3 * 4 * 5, dtype=np.uint16).reshape((2, 2, 2, 3, 4, 5))
+    _ = _write_source_cache_volume(root, data)
+
+    tiff_summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "current_selection",
+            "t_index": 0,
+            "p_index": 0,
+            "c_index": 0,
+            "resolution_level": 0,
+            "export_format": "ome-tiff",
+            "tiff_file_layout": "single_file",
+        },
+    )
+    [artifact_path] = tiff_summary.artifact_paths
+    stale_artifact = store_path / artifact_path
+    assert stale_artifact.exists()
+
+    zarr_summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "current_selection",
+            "t_index": 0,
+            "p_index": 0,
+            "c_index": 0,
+            "resolution_level": 0,
+            "export_format": "ome-zarr",
+        },
+    )
+
+    assert zarr_summary.export_format == "ome-zarr"
+    assert not stale_artifact.exists()
+    assert not (store_path / "clearex/results/volume_export/latest/files").exists()
+
+
 def test_run_volume_export_analysis_writes_all_indices_cache_and_publishable_ome_zarr(
     tmp_path: Path,
 ) -> None:
