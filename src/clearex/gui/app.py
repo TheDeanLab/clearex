@@ -9357,6 +9357,10 @@ if HAS_PYQT6:
                 input_combo.currentIndexChanged.connect(
                     self._on_registration_input_source_changed
                 )
+            if operation_name == "volume_export":
+                input_combo.currentIndexChanged.connect(
+                    self._on_volume_export_input_source_changed
+                )
 
             if operation_name == "deconvolution":
                 self._build_deconvolution_parameter_rows(form)
@@ -11721,6 +11725,103 @@ if HAS_PYQT6:
                 source_component=resolved_source,
             )
 
+        def _volume_export_selected_input_source(self) -> str:
+            """Return the selected volume-export input-source value."""
+            combo = self._operation_input_combos.get("volume_export")
+            if combo is None:
+                return "data"
+            selected = combo.currentData()
+            return (str(selected).strip() if selected is not None else "data") or "data"
+
+        def _volume_export_available_bounds(
+            self,
+        ) -> tuple[int, int, int, tuple[int, ...]]:
+            """Return bounds for the selected volume-export input source."""
+            store_path = str(self._base_config.file or "").strip()
+            if not store_path or not is_zarr_store_path(store_path):
+                return (1, 1, 1, (0,))
+
+            requested_source = self._volume_export_selected_input_source()
+            resolved_source = resolve_analysis_input_component(requested_source)
+            try:
+                root = zarr.open_group(store_path, mode="r")
+            except Exception:
+                return (1, 1, 1, (0,))
+
+            time_count = 1
+            position_count = 1
+            channel_count = 1
+            try:
+                source = root[resolved_source]
+                shape = tuple(getattr(source, "shape", ()))
+            except Exception:
+                shape = ()
+            if len(shape) >= 3:
+                try:
+                    time_count = max(1, int(shape[0]))
+                    position_count = max(1, int(shape[1]))
+                    channel_count = max(1, int(shape[2]))
+                except Exception:
+                    time_count = 1
+                    position_count = 1
+                    channel_count = 1
+            available_levels = _discover_component_resolution_levels(
+                root=root,
+                source_component=resolved_source,
+            )
+            return (time_count, position_count, channel_count, available_levels)
+
+        def _refresh_volume_export_parameter_bounds(self) -> None:
+            """Refresh source-aware volume-export bounds and clamp selection."""
+            (
+                time_count,
+                position_count,
+                channel_count,
+                available_levels,
+            ) = self._volume_export_available_bounds()
+            max_level = max(0, max(available_levels) if available_levels else 0)
+            self._volume_export_t_spin.setMaximum(time_count - 1)
+            self._volume_export_p_spin.setMaximum(position_count - 1)
+            self._volume_export_c_spin.setMaximum(channel_count - 1)
+            self._volume_export_resolution_level_spin.setMaximum(max_level)
+            self._volume_export_t_spin.setValue(
+                max(
+                    0,
+                    min(
+                        int(self._volume_export_t_spin.maximum()),
+                        int(self._volume_export_t_spin.value()),
+                    ),
+                )
+            )
+            self._volume_export_p_spin.setValue(
+                max(
+                    0,
+                    min(
+                        int(self._volume_export_p_spin.maximum()),
+                        int(self._volume_export_p_spin.value()),
+                    ),
+                )
+            )
+            self._volume_export_c_spin.setValue(
+                max(
+                    0,
+                    min(
+                        int(self._volume_export_c_spin.maximum()),
+                        int(self._volume_export_c_spin.value()),
+                    ),
+                )
+            )
+            self._volume_export_resolution_level_spin.setValue(
+                max(
+                    0,
+                    min(
+                        int(self._volume_export_resolution_level_spin.maximum()),
+                        int(self._volume_export_resolution_level_spin.value()),
+                    ),
+                )
+            )
+            self._set_volume_export_parameter_enabled_state()
+
         def _refresh_registration_channel_options(
             self,
             *,
@@ -11838,6 +11939,10 @@ if HAS_PYQT6:
             self._refresh_registration_channel_options()
             self._refresh_registration_channel_options()
             self._refresh_registration_resolution_level_options()
+
+        def _on_volume_export_input_source_changed(self, _index: int) -> None:
+            """Refresh volume-export bounds after input-source changes."""
+            self._refresh_volume_export_parameter_bounds()
 
         def _refresh_visualization_volume_layers_summary(self) -> None:
             """Refresh summary text for visualization volume-layer rows."""
@@ -14008,7 +14113,7 @@ if HAS_PYQT6:
             self._set_visualization_parameter_enabled_state()
             self._set_render_movie_parameter_enabled_state()
             self._set_compile_movie_parameter_enabled_state()
-            self._set_volume_export_parameter_enabled_state()
+            self._refresh_volume_export_parameter_bounds()
             self._set_mip_export_parameter_enabled_state()
 
             if (
@@ -14050,7 +14155,7 @@ if HAS_PYQT6:
             self._set_visualization_parameter_enabled_state()
             self._set_render_movie_parameter_enabled_state()
             self._set_compile_movie_parameter_enabled_state()
-            self._set_volume_export_parameter_enabled_state()
+            self._refresh_volume_export_parameter_bounds()
             sequence = self._selected_operations_in_sequence()
             if sequence:
                 sequence_text = " -> ".join(
@@ -14889,7 +14994,6 @@ if HAS_PYQT6:
                 combo.setCurrentIndex(combo_index)
                 combo.blockSignals(False)
 
-            time_count = 1
             channel_count = 1
             position_count = 1
             max_source_resolution_level = 0
@@ -14901,7 +15005,6 @@ if HAS_PYQT6:
                     source_component = _analysis_store_runtime_source_component(root)
                     shape = _analysis_store_runtime_source_shape_tpczyx(root)
                     if source_component is not None and shape is not None:
-                        time_count = max(1, int(shape[0]))
                         position_count = max(1, int(shape[1]))
                         channel_count = max(1, int(shape[2]))
                         voxel_size_um_zyx, _ = resolve_voxel_size_um_zyx_with_source(
@@ -14919,21 +15022,14 @@ if HAS_PYQT6:
                                 max(0, int(level)) for level in available_levels
                             )
                 except Exception:
-                    time_count = 1
                     position_count = 1
                     channel_count = 1
                     max_source_resolution_level = 0
                     store_xy_um = None
                     store_z_um = None
-            self._volume_export_t_spin.setMaximum(time_count - 1)
-            self._volume_export_p_spin.setMaximum(position_count - 1)
-            self._volume_export_c_spin.setMaximum(channel_count - 1)
             self._visualization_position_spin.setMaximum(position_count - 1)
             self._particle_channel_spin.setMaximum(channel_count - 1)
             self._usegment3d_resolution_level_spin.setMaximum(
-                max(0, int(max_source_resolution_level))
-            )
-            self._volume_export_resolution_level_spin.setMaximum(
                 max(0, int(max_source_resolution_level))
             )
             self._refresh_registration_channel_options()
@@ -15907,6 +16003,7 @@ if HAS_PYQT6:
             if volume_export_scope_index < 0:
                 volume_export_scope_index = 0
             self._volume_export_scope_combo.setCurrentIndex(volume_export_scope_index)
+            self._refresh_volume_export_parameter_bounds()
             self._volume_export_t_spin.setValue(
                 max(
                     0,
@@ -15979,7 +16076,7 @@ if HAS_PYQT6:
             self._volume_export_tiff_layout_combo.setCurrentIndex(
                 volume_export_tiff_layout_index
             )
-
+            self._refresh_volume_export_parameter_bounds()
             mip_mode = (
                 str(mip_export_params.get("position_mode", "multi_position")).strip()
                 or "multi_position"

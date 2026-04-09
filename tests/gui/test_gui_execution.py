@@ -578,7 +578,7 @@ def test_analysis_dialog_clamps_volume_export_values_when_restoring_saved_state(
         analysis_parameters={
             "volume_export": {
                 "execution_order": 11,
-                "input_source": "data",
+                "input_source": "shear_transform",
                 "force_rerun": False,
                 "export_scope": "current_selection",
                 "t_index": 9,
@@ -600,6 +600,7 @@ def test_analysis_dialog_clamps_volume_export_values_when_restoring_saved_state(
             "p_index": 8,
             "c_index": 7,
             "resolution_level": 12,
+            "input_source": "shear_transform",
             "export_scope": "current_selection",
             "export_format": "ome-tiff",
             "tiff_file_layout": "per_volume_files",
@@ -612,21 +613,33 @@ def test_analysis_dialog_clamps_volume_export_values_when_restoring_saved_state(
     )
 
     assert dialog._operation_checkboxes["volume_export"].isChecked() is True
+    assert (
+        dialog._operation_input_combos["volume_export"].currentData()
+        == "shear_transform"
+    )
     assert dialog._volume_export_scope_combo.currentData() == "current_selection"
     assert dialog._volume_export_t_spin.maximum() == 0
     assert dialog._volume_export_t_spin.value() == 0
     assert dialog._volume_export_p_spin.maximum() == 0
     assert dialog._volume_export_p_spin.value() == 0
-    assert dialog._volume_export_c_spin.maximum() == 1
-    assert dialog._volume_export_c_spin.value() == 1
-    assert dialog._volume_export_resolution_level_spin.maximum() == 1
-    assert dialog._volume_export_resolution_level_spin.value() == 1
+    assert dialog._volume_export_c_spin.maximum() == 0
+    assert dialog._volume_export_c_spin.value() == 0
+    assert dialog._volume_export_resolution_level_spin.maximum() == 0
+    assert dialog._volume_export_resolution_level_spin.value() == 0
     assert dialog._volume_export_format_combo.currentData() == "ome-tiff"
     assert dialog._volume_export_t_spin.isEnabled() is True
     assert dialog._volume_export_p_spin.isEnabled() is True
     assert dialog._volume_export_c_spin.isEnabled() is True
     assert dialog._volume_export_tiff_layout_combo.isEnabled() is True
     assert dialog._volume_export_tiff_layout_combo.currentData() == "per_volume_files"
+
+    input_combo = dialog._operation_input_combos["volume_export"]
+    data_index = input_combo.findData("data")
+    assert data_index >= 0
+    input_combo.setCurrentIndex(data_index)
+    app.processEvents()
+    assert dialog._volume_export_c_spin.maximum() == 1
+    assert dialog._volume_export_resolution_level_spin.maximum() == 1
 
     dialog.close()
 
