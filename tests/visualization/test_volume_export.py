@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import zarr
+import tifffile
 
 from clearex.io.ome_store import publish_analysis_collection_from_cache
 from clearex.io.ome_store import source_cache_component
@@ -54,6 +56,26 @@ def _write_source_adjacent_level(
     root.attrs["display_pyramid_levels_by_component"] = {
         source_component: [source_component, level_component]
     }
+
+
+def _ome_tiff_metadata(
+    path: Path,
+) -> tuple[list[dict[str, str]], list[str], list[tuple[int, ...]], bool]:
+    """Return OME Pixels metadata and series layout for one TIFF file."""
+    with tifffile.TiffFile(str(path)) as tif:
+        ome_xml = tif.ome_metadata
+        assert ome_xml is not None
+        ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
+        root = ET.fromstring(ome_xml)
+        pixels = [
+            dict(image.find("ome:Pixels", ns).attrib)
+            for image in root.findall("ome:Image", ns)
+        ]
+        series_axes = [str(series.axes) for series in tif.series]
+        series_shapes = [
+            tuple(int(value) for value in series.shape) for series in tif.series
+        ]
+        return pixels, series_axes, series_shapes, bool(tif.is_bigtiff)
 
 
 def test_run_volume_export_analysis_writes_current_selection_cache_and_publishable_ome_zarr(
@@ -115,6 +137,155 @@ def test_run_volume_export_analysis_writes_current_selection_cache_and_publishab
     ]
     assert isinstance(published, zarr.Array)
     assert published.shape == (1, 1, 3, 4, 5)
+
+
+def test_run_volume_export_analysis_writes_current_selection_ome_tiff_with_calibration(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(2 * 2 * 2 * 3 * 4 * 5, dtype=np.uint16).reshape((2, 2, 2, 3, 4, 5))
+    source_component = _write_source_cache_volume(root, data)
+
+    summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "current_selection",
+            "t_index": 1,
+            "p_index": 0,
+            "c_index": 1,
+            "resolution_level": 0,
+            "export_format": "ome-tiff",
+            "tiff_file_layout": "single_file",
+        },
+    )
+
+    assert isinstance(summary, VolumeExportSummary)
+    assert summary.source_component == source_component
+    assert summary.export_format == "ome-tiff"
+    assert summary.tiff_file_layout == "single_file"
+    assert len(summary.artifact_paths) == 1
+    assert summary.artifact_paths[0].startswith(
+        "clearex/results/volume_export/latest/files/"
+    )
+
+    artifact_path = store_path / summary.artifact_paths[0]
+    assert artifact_path.exists()
+
+    pixels, series_axes, series_shapes, is_bigtiff = _ome_tiff_metadata(artifact_path)
+    assert is_bigtiff is True
+    assert series_axes == ["ZYX"]
+    assert series_shapes == [(3, 4, 5)]
+    assert len(pixels) == 1
+    assert pixels[0]["PhysicalSizeZ"] == "4.0"
+    assert pixels[0]["PhysicalSizeY"] == "2.0"
+    assert pixels[0]["PhysicalSizeX"] == "2.0"
+
+    volume = np.asarray(tifffile.imread(str(artifact_path)))
+    np.testing.assert_array_equal(volume, data[1, 0, 1])
+
+    runtime_cache = zarr.open_group(str(store_path), mode="r")
+    auxiliary = runtime_cache["clearex/results/volume_export/latest"]
+    assert auxiliary.attrs["export_format"] == "ome-tiff"
+    assert auxiliary.attrs["tiff_file_layout"] == "single_file"
+    assert auxiliary.attrs["artifact_paths"] == list(summary.artifact_paths)
+    assert auxiliary.attrs["voxel_size_um_zyx"] == [4.0, 2.0, 2.0]
+
+
+def test_run_volume_export_analysis_writes_all_indices_single_file_ome_tiff_series_per_position(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(2 * 2 * 2 * 3 * 4 * 5, dtype=np.uint16).reshape((2, 2, 2, 3, 4, 5))
+    source_component = _write_source_cache_volume(root, data)
+
+    summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "all_indices",
+            "resolution_level": 0,
+            "export_format": "ome-tiff",
+            "tiff_file_layout": "single_file",
+        },
+    )
+
+    assert isinstance(summary, VolumeExportSummary)
+    assert summary.source_component == source_component
+    assert summary.export_format == "ome-tiff"
+    assert summary.tiff_file_layout == "single_file"
+    assert len(summary.artifact_paths) == 1
+
+    artifact_path = store_path / summary.artifact_paths[0]
+    assert artifact_path.exists()
+
+    pixels, series_axes, series_shapes, is_bigtiff = _ome_tiff_metadata(artifact_path)
+    assert is_bigtiff is True
+    assert series_axes == ["TCZYX", "TCZYX"]
+    assert series_shapes == [(2, 2, 3, 4, 5), (2, 2, 3, 4, 5)]
+    assert len(pixels) == 2
+    for pixel in pixels:
+        assert pixel["PhysicalSizeZ"] == "4.0"
+        assert pixel["PhysicalSizeY"] == "2.0"
+        assert pixel["PhysicalSizeX"] == "2.0"
+
+    runtime_cache = zarr.open_group(str(store_path), mode="r")
+    auxiliary = runtime_cache["clearex/results/volume_export/latest"]
+    assert auxiliary.attrs["export_format"] == "ome-tiff"
+    assert auxiliary.attrs["tiff_file_layout"] == "single_file"
+    assert auxiliary.attrs["artifact_paths"] == list(summary.artifact_paths)
+    assert auxiliary.attrs["voxel_size_um_zyx"] == [4.0, 2.0, 2.0]
+
+
+def test_run_volume_export_analysis_writes_all_indices_per_volume_files_ome_tiff(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(2 * 2 * 2 * 3 * 4 * 5, dtype=np.uint16).reshape((2, 2, 2, 3, 4, 5))
+    source_component = _write_source_cache_volume(root, data)
+
+    summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "all_indices",
+            "resolution_level": 0,
+            "export_format": "ome-tiff",
+            "tiff_file_layout": "per_volume_files",
+        },
+    )
+
+    assert isinstance(summary, VolumeExportSummary)
+    assert summary.source_component == source_component
+    assert summary.export_format == "ome-tiff"
+    assert summary.tiff_file_layout == "per_volume_files"
+    assert len(summary.artifact_paths) == 8
+    assert all(
+        path.startswith("clearex/results/volume_export/latest/files/")
+        for path in summary.artifact_paths
+    )
+
+    runtime_cache = zarr.open_group(str(store_path), mode="r")
+    auxiliary = runtime_cache["clearex/results/volume_export/latest"]
+    assert auxiliary.attrs["export_format"] == "ome-tiff"
+    assert auxiliary.attrs["tiff_file_layout"] == "per_volume_files"
+    assert auxiliary.attrs["artifact_paths"] == list(summary.artifact_paths)
+    assert auxiliary.attrs["voxel_size_um_zyx"] == [4.0, 2.0, 2.0]
+
+    for artifact_path in summary.artifact_paths:
+        file_path = store_path / artifact_path
+        assert file_path.exists()
+        pixels, series_axes, series_shapes, is_bigtiff = _ome_tiff_metadata(file_path)
+        assert is_bigtiff is True
+        assert series_axes == ["ZYX"]
+        assert series_shapes == [(3, 4, 5)]
+        assert len(pixels) == 1
+        assert pixels[0]["PhysicalSizeZ"] == "4.0"
+        assert pixels[0]["PhysicalSizeY"] == "2.0"
+        assert pixels[0]["PhysicalSizeX"] == "2.0"
 
 
 def test_run_volume_export_analysis_writes_all_indices_cache_and_publishable_ome_zarr(

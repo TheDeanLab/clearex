@@ -4,8 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 import json
+import shutil
 
 import dask.array as da
+import numpy as np
+import tifffile
 import zarr
 
 from clearex.io.ome_store import (
@@ -35,6 +38,7 @@ _DISPLAY_PYRAMID_ROOT_MAP_ATTR = "display_pyramid_levels_by_component"
 _LEGACY_DISPLAY_PYRAMID_LEVELS_ATTR = "visualization_pyramid_levels"
 _LEGACY_DISPLAY_PYRAMID_FACTORS_ATTR = "visualization_pyramid_factors_tpczyx"
 _LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR = "visualization_pyramid_levels_by_component"
+_ARTIFACTS_ROOT = f"{analysis_auxiliary_root(_ANALYSIS_NAME)}/files"
 
 
 def _display_pyramid_level_component(*, source_component: str, level: int) -> str:
@@ -320,6 +324,135 @@ def _source_component_for_input(input_source: str) -> str:
     return resolve_analysis_input_component(requested)
 
 
+def _artifact_directory(zarr_path: str | Path) -> Path:
+    """Return the filesystem directory for TIFF artifacts."""
+    return Path(zarr_path).expanduser().resolve() / _ARTIFACTS_ROOT
+
+
+def _reset_artifact_directory(zarr_path: str | Path) -> Path:
+    """Remove any prior TIFF artifacts and return a fresh directory."""
+    artifact_dir = _artifact_directory(zarr_path)
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir
+
+
+def _artifact_relative_path(filename: str) -> str:
+    """Return the store-relative artifact path for one filename."""
+    return f"{_ARTIFACTS_ROOT}/{filename}"
+
+
+def _ome_tiff_metadata(
+    *,
+    axes: str,
+    voxel_size_um_zyx: tuple[float, float, float],
+) -> dict[str, Any]:
+    """Return OME-TIFF metadata for one exported volume payload."""
+    return {
+        "axes": str(axes),
+        "PhysicalSizeZ": float(voxel_size_um_zyx[0]),
+        "PhysicalSizeY": float(voxel_size_um_zyx[1]),
+        "PhysicalSizeX": float(voxel_size_um_zyx[2]),
+    }
+
+
+def _write_single_volume_tiff(
+    *,
+    output_path: Path,
+    volume: np.ndarray[Any, Any],
+    voxel_size_um_zyx: tuple[float, float, float],
+) -> None:
+    """Write one OME-TIFF volume with ``ZYX`` axes."""
+    tifffile.imwrite(
+        str(output_path),
+        np.asarray(volume),
+        photometric="minisblack",
+        ome=True,
+        bigtiff=True,
+        metadata=_ome_tiff_metadata(
+            axes="ZYX",
+            voxel_size_um_zyx=voxel_size_um_zyx,
+        ),
+    )
+
+
+def _write_volume_export_tiffs(
+    *,
+    zarr_path: str | Path,
+    export_array: da.Array,
+    export_scope: str,
+    tiff_file_layout: str,
+    selection_payload: Mapping[str, int],
+    voxel_size_um_zyx: tuple[float, float, float],
+) -> tuple[str, ...]:
+    """Write TIFF artifacts for one resolved export payload."""
+    artifact_dir = _reset_artifact_directory(zarr_path)
+    artifact_paths: list[str] = []
+
+    if str(export_scope) == "current_selection":
+        filename = (
+            "volume_export_"
+            f"t{int(selection_payload['t_index']):04d}_"
+            f"p{int(selection_payload['p_index']):04d}_"
+            f"c{int(selection_payload['c_index']):04d}.ome.tif"
+        )
+        output_path = artifact_dir / filename
+        _write_single_volume_tiff(
+            output_path=output_path,
+            volume=np.asarray(export_array[0, 0, 0].compute()),
+            voxel_size_um_zyx=voxel_size_um_zyx,
+        )
+        artifact_paths.append(_artifact_relative_path(filename))
+        return tuple(artifact_paths)
+
+    if str(tiff_file_layout) == "single_file":
+        filename = "volume_export_all_positions.ome.tif"
+        output_path = artifact_dir / filename
+        with tifffile.TiffWriter(str(output_path), bigtiff=True, ome=True) as tif:
+            for position_index in range(int(export_array.shape[1])):
+                position_payload = np.asarray(
+                    export_array[:, position_index, :, :, :, :].compute()
+                )
+                tif.write(
+                    position_payload,
+                    photometric="minisblack",
+                    metadata=_ome_tiff_metadata(
+                        axes="TCZYX",
+                        voxel_size_um_zyx=voxel_size_um_zyx,
+                    ),
+                )
+        artifact_paths.append(_artifact_relative_path(filename))
+        return tuple(artifact_paths)
+
+    for time_index in range(int(export_array.shape[0])):
+        for position_index in range(int(export_array.shape[1])):
+            for channel_index in range(int(export_array.shape[2])):
+                filename = (
+                    "volume_export_"
+                    f"t{int(time_index):04d}_"
+                    f"p{int(position_index):04d}_"
+                    f"c{int(channel_index):04d}.ome.tif"
+                )
+                output_path = artifact_dir / filename
+                _write_single_volume_tiff(
+                    output_path=output_path,
+                    volume=np.asarray(
+                        export_array[
+                            time_index,
+                            position_index,
+                            channel_index,
+                            :,
+                            :,
+                            :,
+                        ].compute()
+                    ),
+                    voxel_size_um_zyx=voxel_size_um_zyx,
+                )
+                artifact_paths.append(_artifact_relative_path(filename))
+    return tuple(artifact_paths)
+
+
 def run_volume_export_analysis(
     *,
     zarr_path: str | Path,
@@ -346,9 +479,9 @@ def run_volume_export_analysis(
         raise ValueError("volume_export resolution_level must be >= 0.")
 
     export_format = str(normalized.get("export_format", "ome-zarr")).strip()
-    if export_format != "ome-zarr":
+    if export_format not in {"ome-zarr", "ome-tiff"}:
         raise ValueError(
-            "volume_export currently supports only export_format=ome-zarr."
+            "volume_export currently supports only export_format=ome-zarr or ome-tiff."
         )
 
     root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="a")
@@ -487,6 +620,18 @@ def run_volume_export_analysis(
         "resolution_level": resolution_level,
     }
     export_shape_tpczyx = [int(value) for value in tuple(export_array.shape)]
+    artifact_paths: tuple[str, ...]
+    if export_format == "ome-tiff":
+        artifact_paths = _write_volume_export_tiffs(
+            zarr_path=zarr_path,
+            export_array=export_array,
+            export_scope=export_scope,
+            tiff_file_layout=str(normalized.get("tiff_file_layout", "single_file")),
+            selection_payload=selection_payload,
+            voxel_size_um_zyx=voxel_size_um_zyx,
+        )
+    else:
+        artifact_paths = (data_component, auxiliary_root)
     metadata = {
         "analysis_name": _ANALYSIS_NAME,
         "component": auxiliary_root,
@@ -509,7 +654,7 @@ def run_volume_export_analysis(
         "dimension_names_tpczyx": list(_AXES_TPCZYX),
         "voxel_size_um_zyx": [float(value) for value in voxel_size_um_zyx],
         "voxel_size_resolution_source": str(voxel_size_source),
-        "artifact_paths": [data_component, auxiliary_root],
+        "artifact_paths": [str(path) for path in artifact_paths],
     }
     target.attrs.update(
         _jsonable(
@@ -537,6 +682,7 @@ def run_volume_export_analysis(
                 "dimension_names_tpczyx": list(_AXES_TPCZYX),
                 "voxel_size_um_zyx": [float(value) for value in voxel_size_um_zyx],
                 "voxel_size_resolution_source": str(voxel_size_source),
+                "artifact_paths": [str(path) for path in artifact_paths],
             }
         )
     )
@@ -561,5 +707,5 @@ def run_volume_export_analysis(
         generated_resolution_level=generated_resolution_level,
         export_format=export_format,
         tiff_file_layout=str(normalized.get("tiff_file_layout", "single_file")),
-        artifact_paths=(data_component, auxiliary_root),
+        artifact_paths=tuple(str(path) for path in artifact_paths),
     )
