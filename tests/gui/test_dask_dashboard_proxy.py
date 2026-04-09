@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import sys
+import threading
 from types import SimpleNamespace
+import urllib.error
+import urllib.request
+
+from tornado import httpserver, netutil, web, websocket
+from tornado.ioloop import IOLoop
+from tornado.websocket import websocket_connect
 
 import pytest
 
@@ -337,3 +346,150 @@ def test_dashboard_relay_manager_skips_client_with_invalid_refreshed_dashboard_l
     assert stale_client_id not in manager._clients
     assert stale_client_id not in manager._sessions
     assert started == [healthy_client_id]
+
+
+class _UpstreamStatusHandler(web.RequestHandler):
+    def get(self) -> None:
+        self.write("upstream-status-ok")
+
+
+class _UpstreamRedirectHandler(web.RequestHandler):
+    def get(self) -> None:
+        self.redirect("/status")
+
+
+class _UpstreamWebSocketHandler(websocket.WebSocketHandler):
+    def open(self) -> None:
+        return None
+
+    def on_message(self, message: str) -> None:
+        self.write_message(f"echo:{message}")
+
+
+def _run_tornado_app(
+    application: web.Application,
+) -> tuple[IOLoop, int, threading.Thread]:
+    asyncio_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(asyncio_loop)
+    loop = IOLoop(asyncio_loop=asyncio_loop)
+    asyncio.set_event_loop(None)
+    sockets = netutil.bind_sockets(0, "127.0.0.1")
+    port = sockets[0].getsockname()[1]
+    server = httpserver.HTTPServer(application)
+    ready = threading.Event()
+
+    def _start() -> None:
+        asyncio.set_event_loop(asyncio_loop)
+        server.add_sockets(sockets)
+        ready.set()
+        loop.start()
+
+    thread = threading.Thread(target=_start, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=5), "upstream tornado app did not start"
+    return loop, port, thread
+
+
+def _stop_tornado_app(loop: IOLoop, thread: threading.Thread) -> None:
+    loop.add_callback(loop.stop)
+    thread.join(timeout=5)
+
+
+def test_dashboard_proxy_requires_token() -> None:
+    upstream_loop, upstream_port, upstream_thread = _run_tornado_app(
+        web.Application([(r"/status", _UpstreamStatusHandler)])
+    )
+    manager = DashboardRelayManager()
+    client = SimpleNamespace(
+        dashboard_link=f"http://127.0.0.1:{upstream_port}/status",
+        status="running",
+    )
+    manager.register_client(
+        workload="analysis", backend_mode="local_cluster", client=client
+    )
+    tokenized_url = manager.open_dashboard(workload="analysis")
+    unauthorized = tokenized_url.split("?", 1)[0]
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    try:
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            opener.open(unauthorized)
+
+        assert excinfo.value.code in {401, 403}
+    finally:
+        manager.shutdown()
+        _stop_tornado_app(upstream_loop, upstream_thread)
+
+
+def test_dashboard_proxy_forwards_http_and_rewrites_redirects() -> None:
+    upstream_loop, upstream_port, upstream_thread = _run_tornado_app(
+        web.Application(
+            [
+                (r"/status", _UpstreamStatusHandler),
+                (r"/redirect", _UpstreamRedirectHandler),
+            ]
+        )
+    )
+    manager = DashboardRelayManager()
+    client = SimpleNamespace(
+        dashboard_link=f"http://127.0.0.1:{upstream_port}/redirect",
+        status="running",
+    )
+    manager.register_client(
+        workload="analysis", backend_mode="local_cluster", client=client
+    )
+    tokenized_url = manager.open_dashboard(workload="analysis")
+
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(),
+    )
+
+    try:
+        response = opener.open(tokenized_url)
+        payload = response.read().decode("utf-8")
+
+        assert "upstream-status-ok" in payload
+        assert f"127.0.0.1:{upstream_port}" not in response.geturl()
+
+        follow_up = opener.open(tokenized_url.rsplit("/", 1)[0] + "/status")
+        assert "upstream-status-ok" in follow_up.read().decode("utf-8")
+    finally:
+        manager.shutdown()
+        _stop_tornado_app(upstream_loop, upstream_thread)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="websocket test uses POSIX event loop assumptions",
+)
+def test_dashboard_proxy_forwards_websocket_messages() -> None:
+    upstream_loop, upstream_port, upstream_thread = _run_tornado_app(
+        web.Application([(r"/ws", _UpstreamWebSocketHandler)])
+    )
+    manager = DashboardRelayManager()
+    client = SimpleNamespace(
+        dashboard_link=f"http://127.0.0.1:{upstream_port}/status",
+        status="running",
+    )
+    manager.register_client(
+        workload="analysis", backend_mode="local_cluster", client=client
+    )
+    tokenized_url = manager.open_dashboard(workload="analysis")
+    base_url, query = tokenized_url.split("?", 1)
+    ws_url = base_url.rsplit("/", 1)[0].replace("http://", "ws://") + f"/ws?{query}"
+
+    async def _exercise() -> str:
+        conn = await websocket_connect(ws_url)
+        await conn.write_message("hello")
+        message = await conn.read_message()
+        conn.close()
+        return str(message)
+
+    try:
+        echoed = asyncio.run(_exercise())
+
+        assert echoed == "echo:hello"
+    finally:
+        manager.shutdown()
+        _stop_tornado_app(upstream_loop, upstream_thread)
