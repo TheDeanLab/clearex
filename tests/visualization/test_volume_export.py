@@ -588,3 +588,6 @@ def test_run_volume_export_analysis_all_indices_ignores_stale_selection_indices(
     exported = runtime_cache["clearex/runtime_cache/results/volume_export/latest/data"]
     assert isinstance(exported, zarr.Array)
     assert exported.shape == data.shape
+    assert exported.attrs["selection"] == {"resolution_level": 0}
+    auxiliary = runtime_cache["clearex/results/volume_export/latest"]
+    assert auxiliary.attrs["selection"] == {"resolution_level": 0}

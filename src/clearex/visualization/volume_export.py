@@ -694,12 +694,17 @@ def run_volume_export_analysis(
     delete_path(root, auxiliary_root)
     auxiliary_group = ensure_group(root, auxiliary_root)
 
-    selection_payload = {
-        "t_index": t_index,
-        "p_index": p_index,
-        "c_index": c_index,
+    selection_payload: dict[str, int] = {
         "resolution_level": resolution_level,
     }
+    if export_scope == "current_selection":
+        selection_payload.update(
+            {
+                "t_index": t_index,
+                "p_index": p_index,
+                "c_index": c_index,
+            }
+        )
     export_shape_tpczyx = [int(value) for value in tuple(export_array.shape)]
     artifact_paths: tuple[str, ...]
     if export_format == "ome-tiff":
