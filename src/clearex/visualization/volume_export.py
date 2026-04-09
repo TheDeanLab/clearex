@@ -191,6 +191,16 @@ def _generate_missing_volume_export_resolution_components(
                 dimension_names=_AXES_TPCZYX,
             )
             da.store(downsampled, target, lock=False, compute=True)
+        root[target_component].attrs.update(
+            {
+                "axes": list(_AXES_TPCZYX),
+                "pyramid_level": int(level_index),
+                "downsample_factors_tpczyx": [int(value) for value in absolute_factors],
+                "chunk_shape_tpczyx": [int(value) for value in level_chunks],
+                "source_component": str(source_level_component),
+                "generated_by": "volume_export",
+            }
+        )
         level_paths.append(target_component)
         factor_payload.append([int(value) for value in absolute_factors])
         prior_component = target_component
@@ -219,6 +229,30 @@ def _generate_missing_volume_export_resolution_components(
     legacy_component_map[str(source_component)] = [str(item) for item in level_paths]
     root.attrs[_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = legacy_component_map
     return str(level_paths[int(resolution_level)]), True
+
+
+def _resolve_volume_export_voxel_size_um_zyx(
+    *,
+    root: zarr.Group,
+    source_component: str,
+    resolved_resolution_component: str,
+) -> tuple[tuple[float, float, float], str]:
+    """Resolve voxel size for export with a fallback to the base source."""
+    voxel_size_um_zyx, voxel_size_source = resolve_voxel_size_um_zyx_with_source(
+        root,
+        source_component=resolved_resolution_component,
+    )
+    if voxel_size_source != "default" or str(resolved_resolution_component) == str(
+        source_component
+    ):
+        return voxel_size_um_zyx, voxel_size_source
+    fallback_voxel_size_um_zyx, fallback_source = resolve_voxel_size_um_zyx_with_source(
+        root,
+        source_component=source_component,
+    )
+    if fallback_source != "default":
+        return fallback_voxel_size_um_zyx, fallback_source
+    return voxel_size_um_zyx, voxel_size_source
 
 
 def _resolve_volume_export_resolution_component(
@@ -437,9 +471,10 @@ def run_volume_export_analysis(
 
     da.store(export_array, target, lock=False, compute=True)
 
-    voxel_size_um_zyx, voxel_size_source = resolve_voxel_size_um_zyx_with_source(
-        root,
-        source_component=resolved_resolution_component,
+    voxel_size_um_zyx, voxel_size_source = _resolve_volume_export_voxel_size_um_zyx(
+        root=root,
+        source_component=source_component,
+        resolved_resolution_component=resolved_resolution_component,
     )
     auxiliary_root = analysis_auxiliary_root(_ANALYSIS_NAME)
     delete_path(root, auxiliary_root)

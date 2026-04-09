@@ -240,6 +240,16 @@ def test_run_volume_export_analysis_extends_partial_existing_pyramid(
     generated_level = runtime_cache[source_cache_component(level_index=2)]
     assert isinstance(generated_level, zarr.Array)
     assert generated_level.shape == (2, 2, 2, 1, 1, 1)
+    assert generated_level.attrs["source_component"] == source_cache_component(
+        level_index=1
+    )
+    assert generated_level.attrs["downsample_factors_tpczyx"] == [1, 1, 1, 4, 4, 4]
+    auxiliary = runtime_cache["clearex/results/volume_export/latest"]
+    assert auxiliary.attrs["voxel_size_um_zyx"] == [4.0, 2.0, 2.0]
+    assert (
+        auxiliary.attrs["voxel_size_resolution_source"]
+        == f"component:{source_component}"
+    )
 
 
 def test_run_volume_export_analysis_uses_discovered_noncanonical_level(
@@ -269,6 +279,13 @@ def test_run_volume_export_analysis_uses_discovered_noncanonical_level(
 
     assert summary.resolved_resolution_component == discovered_level
     assert summary.generated_resolution_level is False
+    runtime_cache = zarr.open_group(str(store_path), mode="r")
+    auxiliary = runtime_cache["clearex/results/volume_export/latest"]
+    assert auxiliary.attrs["voxel_size_um_zyx"] == [4.0, 2.0, 2.0]
+    assert (
+        auxiliary.attrs["voxel_size_resolution_source"]
+        == f"component:{source_component}"
+    )
 
 
 def test_run_volume_export_analysis_all_indices_ignores_stale_selection_indices(
