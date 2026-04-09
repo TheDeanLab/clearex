@@ -293,26 +293,25 @@ ClearEx now separates movie generation into two explicit operations:
 
 Runtime storage:
 
-- ``render_movie`` latest metadata:
-  - ``clearex/results/render_movie/latest``
-- ``compile_movie`` latest metadata:
-  - ``clearex/results/compile_movie/latest``
-- Default in-store artifacts:
-  - ``<analysis_store>/clearex/results/visualization/latest/keyframes.json``
-  - ``<analysis_store>/clearex/results/render_movie/latest/render_manifest.json``
-  - ``<analysis_store>/clearex/results/render_movie/latest/level_<nn>_frames/frame_000000.png``
-  - ``<analysis_store>/clearex/results/compile_movie/latest/*.mp4``
-  - ``<analysis_store>/clearex/results/compile_movie/latest/*.mov``
-- Override note:
-  - ``output_directory`` can still redirect ``render_movie`` or
-    ``compile_movie`` to an external export tree when desired.
+- ``render_movie`` latest metadata lives under
+  ``clearex/results/render_movie/latest``.
+- ``compile_movie`` latest metadata lives under
+  ``clearex/results/compile_movie/latest``.
+- Default in-store artifacts include
+  ``<analysis_store>/clearex/results/visualization/latest/keyframes.json``,
+  ``<analysis_store>/clearex/results/render_movie/latest/render_manifest.json``,
+  ``<analysis_store>/clearex/results/render_movie/latest/level_<nn>_frames/frame_000000.png``,
+  ``<analysis_store>/clearex/results/compile_movie/latest/*.mp4``, and
+  ``<analysis_store>/clearex/results/compile_movie/latest/*.mov``.
+- ``output_directory`` can still redirect ``render_movie`` or
+  ``compile_movie`` to an external export tree when desired.
 
 Practical guidance:
 
 - Use coarse levels such as ``[1]`` or ``[2]`` plus moderate frame sizes for
   preview renders.
 - Use level ``0`` and the final frame size for publication renders.
-- `default_transition_frames` around ``48`` is a good default for smooth
+- ``default_transition_frames`` around ``48`` is a good default for smooth
   motion.
 - ``mp4_crf`` in the ``16`` to ``24`` range is a reasonable review/final
   quality band, with lower values trading size for quality.
