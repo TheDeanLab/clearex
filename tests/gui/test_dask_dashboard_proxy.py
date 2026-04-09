@@ -465,7 +465,7 @@ def test_dashboard_proxy_forwards_http_and_rewrites_redirects() -> None:
 )
 def test_dashboard_proxy_forwards_websocket_messages() -> None:
     upstream_loop, upstream_port, upstream_thread = _run_tornado_app(
-        web.Application([(r"/ws", _UpstreamWebSocketHandler)])
+        web.Application([(r"/status/ws", _UpstreamWebSocketHandler)])
     )
     manager = DashboardRelayManager()
     client = SimpleNamespace(
@@ -477,7 +477,7 @@ def test_dashboard_proxy_forwards_websocket_messages() -> None:
     )
     tokenized_url = manager.open_dashboard(workload="analysis")
     base_url, query = tokenized_url.split("?", 1)
-    ws_url = base_url.rsplit("/", 1)[0].replace("http://", "ws://") + f"/ws?{query}"
+    ws_url = base_url.replace("http://", "ws://") + f"/ws?{query}"
 
     async def _exercise() -> str:
         conn = await websocket_connect(ws_url)

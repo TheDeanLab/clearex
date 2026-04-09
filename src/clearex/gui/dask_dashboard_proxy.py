@@ -328,7 +328,7 @@ class DashboardRelayManager:
         application = web.Application(
             [
                 (
-                    r"/ws(?:/(.*))?",
+                    r"/(?:.+/)?ws(?:/.*)?",
                     _ProxyWebSocketHandler,
                     {
                         "token": token,
