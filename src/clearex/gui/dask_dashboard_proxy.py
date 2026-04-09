@@ -52,10 +52,13 @@ class DashboardRelayManager:
         return client_id
 
     def unregister_client(self, client_id: str) -> None:
-        session = self._sessions.pop(str(client_id), None)
-        if session is not None:
-            session.close()
-        self._clients.pop(str(client_id), None)
+        client_key = str(client_id)
+        session = self._sessions.pop(client_key, None)
+        try:
+            if session is not None:
+                session.close()
+        finally:
+            self._clients.pop(client_key, None)
 
     def has_available_client(self, *, workload: Optional[str] = None) -> bool:
         return self._select_client_id(workload=workload) is not None
@@ -76,14 +79,31 @@ class DashboardRelayManager:
 
     def shutdown(self) -> None:
         for client_id in list(self._clients):
-            self.unregister_client(client_id)
+            try:
+                self.unregister_client(client_id)
+            except Exception:
+                continue
 
     def _select_client_id(self, *, workload: Optional[str]) -> Optional[str]:
         requested = str(workload).strip().lower() if workload is not None else None
-        for client_id, registered in reversed(self._clients.items()):
-            if requested is None or registered.workload == requested:
+        for client_id in list(self._clients.keys())[::-1]:
+            registered = self._clients.get(client_id)
+            if registered is None:
+                continue
+            if requested is not None and registered.workload != requested:
+                continue
+            if self._refresh_registered_client(registered):
                 return client_id
+            self.unregister_client(client_id)
         return None
+
+    def _refresh_registered_client(self, registered: RegisteredDashboardClient) -> bool:
+        client = registered.client
+        status = str(getattr(client, "status", "") or "").strip().lower()
+        if status != "running":
+            return False
+        registered.upstream_url = resolve_client_dashboard_url(client)
+        return True
 
     def _start_session(
         self, *, client_id: str, upstream_url: str
