@@ -228,6 +228,43 @@ def test_progress_dialog_creates_disabled_dashboard_button() -> None:
     dialog.close()
 
 
+def test_dask_dialog_registers_plain_language_help_for_all_backend_modes() -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.DaskBackendConfigDialog(
+        initial=app_module.DaskBackendConfig(),
+        recommendation_shape_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_chunks_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_dtype_itemsize=2,
+    )
+
+    expected_widgets = [
+        dialog._mode_combo,
+        dialog._local_workers_input,
+        dialog._local_threads_spin,
+        dialog._local_memory_input,
+        dialog._runner_scheduler_file_input,
+        dialog._runner_wait_workers_spin,
+        dialog._cluster_workers_spin,
+        dialog._cluster_dashboard_input,
+        dialog._cluster_allowed_failures_spin,
+    ]
+
+    for widget in expected_widgets:
+        assert widget in dialog._parameter_help_map
+        message = dialog._parameter_help_map[widget]
+        assert isinstance(message, str)
+        assert message.strip()
+        assert widget.toolTip() == message
+
+    dialog.close()
+
+
 def test_summarize_image_info_extracts_pixel_size_from_voxel_size_metadata() -> None:
     info = app_module.ImageInfo(
         path=Path("/tmp/data_store.zarr"),
@@ -976,7 +1013,134 @@ def test_dask_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     dialog.close()
 
 
+def test_dask_dialog_keeps_footer_outside_scroll_area(monkeypatch) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
+
+    dialog = app_module.DaskBackendConfigDialog(
+        initial=app_module.DaskBackendConfig(),
+        recommendation_shape_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_chunks_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_dtype_itemsize=2,
+    )
+    dialog.show()
+    app.processEvents()
+
+    scroll = dialog.findChild(app_module.QScrollArea, "popupDialogScroll")
+    assert scroll is not None
+    scroll_widget = scroll.widget()
+    assert scroll_widget is not None
+
+    assert dialog._defaults_button.parentWidget() is dialog
+    assert dialog._cancel_button.parentWidget() is dialog
+    assert dialog._apply_button.parentWidget() is dialog
+    assert dialog._defaults_button.parentWidget() is not scroll_widget
+    assert dialog._cancel_button.parentWidget() is not scroll_widget
+    assert dialog._apply_button.parentWidget() is not scroll_widget
+
+    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+    app.processEvents()
+
+    assert dialog._apply_button.isVisible()
+    assert dialog._apply_button.geometry().height() >= 36
+
+    dialog.close()
+
+
+def test_dask_dialog_keeps_footer_outside_scroll_area(monkeypatch) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
+
+    dialog = app_module.DaskBackendConfigDialog(
+        initial=app_module.DaskBackendConfig(),
+        recommendation_shape_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_chunks_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_dtype_itemsize=2,
+    )
+    dialog.show()
+    app.processEvents()
+
+    scroll = dialog.findChild(app_module.QScrollArea, "popupDialogScroll")
+    assert scroll is not None
+    scroll_widget = scroll.widget()
+    assert scroll_widget is not None
+
+    assert dialog._defaults_button.parentWidget() is dialog
+    assert dialog._cancel_button.parentWidget() is dialog
+    assert dialog._apply_button.parentWidget() is dialog
+    assert dialog._defaults_button.parentWidget() is not scroll_widget
+    assert dialog._cancel_button.parentWidget() is not scroll_widget
+    assert dialog._apply_button.parentWidget() is not scroll_widget
+
+    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+    app.processEvents()
+
+    assert dialog._apply_button.isVisible()
+    assert dialog._apply_button.geometry().height() >= 36
+
+    dialog.close()
+
+
+def test_dask_dialog_keeps_footer_outside_scroll_area(monkeypatch) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
+
+    dialog = app_module.DaskBackendConfigDialog(
+        initial=app_module.DaskBackendConfig(),
+        recommendation_shape_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_chunks_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_dtype_itemsize=2,
+    )
+    dialog.show()
+    app.processEvents()
+
+    scroll = dialog.findChild(app_module.QScrollArea, "popupDialogScroll")
+    assert scroll is not None
+    scroll_widget = scroll.widget()
+    assert scroll_widget is not None
+
+    assert dialog._defaults_button.parentWidget() is dialog
+    assert dialog._cancel_button.parentWidget() is dialog
+    assert dialog._apply_button.parentWidget() is dialog
+    assert dialog._defaults_button.parentWidget() is not scroll_widget
+    assert dialog._cancel_button.parentWidget() is not scroll_widget
+    assert dialog._apply_button.parentWidget() is not scroll_widget
+
+    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+    app.processEvents()
+
+    assert dialog._apply_button.isVisible()
+    assert dialog._apply_button.geometry().height() >= 36
+
+    dialog.close()
+
+
 def test_save_and_load_experiment_list_round_trip(tmp_path) -> None:
+    # marker
     first = tmp_path / "first" / "experiment.yml"
     second = tmp_path / "second" / "experiment.yaml"
     first.parent.mkdir(parents=True)
