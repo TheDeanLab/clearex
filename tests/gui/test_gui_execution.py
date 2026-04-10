@@ -943,6 +943,41 @@ def test_zarr_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     dialog.close()
 
 
+def test_dask_dialog_parameter_help_shows_on_focus_and_hides_on_blur() -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.DaskBackendConfigDialog(
+        initial=app_module.DaskBackendConfig(),
+        recommendation_shape_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_chunks_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_dtype_itemsize=2,
+    )
+    dialog.show()
+    app.processEvents()
+
+    assert dialog._parameter_help_card is not None
+    assert dialog._parameter_help_label is not None
+    assert dialog._parameter_help_card.isHidden()
+
+    dialog._local_workers_input.setFocus()
+    app.processEvents()
+
+    assert dialog._parameter_help_card.isVisible()
+    assert "how many separate Dask workers" in dialog._parameter_help_label.text()
+
+    dialog._apply_button.setFocus()
+    app.processEvents()
+
+    assert dialog._parameter_help_card.isHidden()
+
+    dialog.close()
+
+
 def test_dask_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     if not app_module.HAS_PYQT6:
         return

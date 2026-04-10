@@ -2589,6 +2589,19 @@ def _popup_dialog_stylesheet() -> str:
         QLineEdit::placeholder, QPlainTextEdit {
             color: #a6b7d0;
         }
+        QFrame#helpCard {
+            background-color: #0f1b2a;
+            border: 1px solid #2a3442;
+            border-radius: 8px;
+            padding: 8px;
+        }
+        QLabel#helpTitle {
+            color: #9cc6ff;
+            font-weight: 700;
+        }
+        QLabel#helpBody {
+            color: #d9e2f1;
+        }
         QPushButton {
             background-color: #1a2635;
             border: 1px solid #2f4460;
@@ -3653,6 +3666,9 @@ if HAS_PYQT6:
             self._latest_local_recommendation: Optional[LocalClusterRecommendation] = (
                 None
             )
+            self._parameter_help_map: Dict[QObject, str] = {}
+            self._parameter_help_card: Optional[QFrame] = None
+            self._parameter_help_label: Optional[QLabel] = None
 
             self._build_ui()
             self._hydrate(initial)
@@ -3741,6 +3757,20 @@ if HAS_PYQT6:
             self._mode_stack.addWidget(self._build_slurm_cluster_page())
             root.addWidget(self._mode_stack, 1)
 
+            self._parameter_help_card = QFrame(self)
+            self._parameter_help_card.setObjectName("helpCard")
+            help_layout = QVBoxLayout(self._parameter_help_card)
+            apply_help_stack_spacing(help_layout)
+            help_title = QLabel("Parameter Help")
+            help_title.setObjectName("helpTitle")
+            help_layout.addWidget(help_title)
+            self._parameter_help_label = QLabel("")
+            self._parameter_help_label.setObjectName("helpBody")
+            self._parameter_help_label.setWordWrap(True)
+            help_layout.addWidget(self._parameter_help_label)
+            self._parameter_help_card.hide()
+            outer_root.addWidget(self._parameter_help_card, 0)
+
             footer_frame = QFrame(self)
             footer_frame.setObjectName("analysisFooterCard")
             footer_frame.setSizePolicy(
@@ -3772,6 +3802,28 @@ if HAS_PYQT6:
             self._apply_button.clicked.connect(self._on_apply)
             content_widget.setMinimumHeight(root.sizeHint().height())
 
+        def _register_parameter_hint(self, widget: QWidget, message: str) -> None:
+            """Register focus and hover help text for a dialog widget."""
+            widget.setToolTip(message)
+            widget.installEventFilter(self)
+            self._parameter_help_map[widget] = str(message)
+
+        def _set_parameter_help(self, text: str) -> None:
+            """Update the fixed parameter-help label text."""
+            if self._parameter_help_label is not None:
+                self._parameter_help_label.setText(str(text))
+
+        def _show_parameter_help(self, text: str) -> None:
+            """Show the fixed parameter-help card."""
+            self._set_parameter_help(text)
+            if self._parameter_help_card is not None:
+                self._parameter_help_card.show()
+
+        def _hide_parameter_help(self) -> None:
+            """Hide the fixed parameter-help card."""
+            if self._parameter_help_card is not None:
+                self._parameter_help_card.hide()
+
         def _build_local_cluster_page(self) -> QWidget:
             """Build page for LocalCluster options.
 
@@ -3794,6 +3846,10 @@ if HAS_PYQT6:
             self._local_workers_input = QLineEdit()
             self._local_workers_input.setPlaceholderText("blank = auto")
             form.addRow("Workers", self._local_workers_input)
+            self._register_parameter_hint(
+                self._local_workers_input,
+                "Specify how many separate Dask workers should run in the local cluster.",
+            )
 
             self._local_threads_spin = QSpinBox()
             self._local_threads_spin.setRange(1, 1024)
@@ -4045,6 +4101,26 @@ if HAS_PYQT6:
             mode_index = self._mode_index.get(mode, 0)
             self._mode_stack.setCurrentIndex(mode_index)
             self._mode_help_label.setText(_dask_mode_help_text(mode))
+
+        def eventFilter(self, watched: QObject, event: Optional[QEvent]) -> bool:
+            """Handle hover and focus transitions for registered parameter help."""
+            message = self._parameter_help_map.get(watched)
+            if message and event is not None:
+                event_type = event.type()
+                if event_type in (QEvent.Type.Enter, QEvent.Type.FocusIn):
+                    self._show_parameter_help(message)
+                elif event_type in (QEvent.Type.Leave, QEvent.Type.FocusOut):
+                    focus_widget = self.focusWidget()
+                    if (
+                        focus_widget is not None
+                        and focus_widget in self._parameter_help_map
+                    ):
+                        self._show_parameter_help(
+                            self._parameter_help_map[focus_widget]
+                        )
+                    else:
+                        self._hide_parameter_help()
+            return super().eventFilter(watched, event)
 
         def _hydrate(self, initial: DaskBackendConfig) -> None:
             """Populate all controls from an initial backend configuration.
