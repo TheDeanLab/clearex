@@ -6,6 +6,7 @@ import threading
 from types import SimpleNamespace
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 from tornado import httpserver, netutil, web, websocket
 from tornado.ioloop import IOLoop
@@ -355,7 +356,12 @@ class _UpstreamStatusHandler(web.RequestHandler):
 
 class _UpstreamRedirectHandler(web.RequestHandler):
     def get(self) -> None:
-        self.redirect("/status")
+        self.redirect(f"http://{self.request.host}/status")
+
+
+class _UpstreamExternalRedirectHandler(web.RequestHandler):
+    def get(self) -> None:
+        self.redirect("https://example.invalid/status")
 
 
 class _UpstreamWebSocketHandler(websocket.WebSocketHandler):
@@ -393,6 +399,11 @@ def _run_tornado_app(
 def _stop_tornado_app(loop: IOLoop, thread: threading.Thread) -> None:
     loop.add_callback(loop.stop)
     thread.join(timeout=5)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def http_error_302(self, req, fp, code, msg, headers):
+        return fp
 
 
 def test_dashboard_proxy_requires_token() -> None:
@@ -443,17 +454,56 @@ def test_dashboard_proxy_forwards_http_and_rewrites_redirects() -> None:
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         urllib.request.HTTPCookieProcessor(),
+        _NoRedirectHandler(),
     )
 
     try:
         response = opener.open(tokenized_url)
-        payload = response.read().decode("utf-8")
+        rewritten_location = response.headers.get("Location")
 
-        assert "upstream-status-ok" in payload
-        assert f"127.0.0.1:{upstream_port}" not in response.geturl()
+        assert response.code == 302
+        assert rewritten_location is not None
+        parsed_location = urlparse(rewritten_location)
+        local_origin = (
+            f"{urlparse(tokenized_url).scheme}://{urlparse(tokenized_url).netloc}"
+        )
+        assert parsed_location.scheme == "http"
+        assert parsed_location.netloc == urlparse(local_origin).netloc
+        assert parsed_location.path == "/status"
+        assert "token=" in parsed_location.query
+        assert f"127.0.0.1:{upstream_port}" not in rewritten_location
+    finally:
+        manager.shutdown()
+        _stop_tornado_app(upstream_loop, upstream_thread)
 
-        follow_up = opener.open(tokenized_url.rsplit("/", 1)[0] + "/status")
-        assert "upstream-status-ok" in follow_up.read().decode("utf-8")
+
+def test_dashboard_proxy_does_not_tokenize_external_redirects() -> None:
+    upstream_loop, upstream_port, upstream_thread = _run_tornado_app(
+        web.Application([(r"/external", _UpstreamExternalRedirectHandler)])
+    )
+    manager = DashboardRelayManager()
+    client = SimpleNamespace(
+        dashboard_link=f"http://127.0.0.1:{upstream_port}/external",
+        status="running",
+    )
+    manager.register_client(
+        workload="analysis", backend_mode="local_cluster", client=client
+    )
+    tokenized_url = manager.open_dashboard(workload="analysis")
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(),
+        _NoRedirectHandler(),
+    )
+
+    try:
+        response = opener.open(tokenized_url)
+        location = response.headers.get("Location")
+
+        assert response.code == 302
+        assert location is not None
+        assert location == "https://example.invalid/status"
+        assert "token=" not in location
     finally:
         manager.shutdown()
         _stop_tornado_app(upstream_loop, upstream_thread)

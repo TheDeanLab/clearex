@@ -57,6 +57,7 @@ def _localize_redirect(
     parsed_redirect = urlparse(redirect_url)
     parsed_local_origin = urlparse(local_origin)
     parsed_upstream_origin = urlparse(upstream_origin)
+    attach_token = True
     if parsed_redirect.scheme and parsed_redirect.netloc:
         if (
             parsed_redirect.scheme == parsed_upstream_origin.scheme
@@ -68,11 +69,12 @@ def _localize_redirect(
             )
         else:
             rewritten = parsed_redirect
+            attach_token = False
     else:
         rewritten = urlparse(urljoin(local_origin.rstrip("/") + "/", redirect_url))
 
     query = rewritten.query
-    if request_token and "token=" not in query:
+    if attach_token and request_token and "token=" not in query:
         query = f"{query}&token={request_token}" if query else f"token={request_token}"
     return rewritten._replace(query=query).geturl()
 
