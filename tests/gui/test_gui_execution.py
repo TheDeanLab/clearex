@@ -1078,17 +1078,30 @@ def test_dask_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
 
     scroll = dialog.findChild(app_module.QScrollArea, "popupDialogScroll")
     assert scroll is not None
+    scroll_widget = scroll.widget()
+    assert scroll_widget is not None
     assert scroll.verticalScrollBar().maximum() > 0
     assert dialog._parameter_help_card is not None
     assert dialog._parameter_help_label is not None
-    assert dialog._parameter_help_card.parentWidget() is dialog
-    assert dialog._parameter_help_card.parentWidget() is not scroll.widget()
+    assert not scroll_widget.isAncestorOf(dialog._parameter_help_card)
     assert dialog._parameter_help_card.isHidden()
+    help_origin = dialog._parameter_help_card.mapTo(dialog, app_module.QPoint(0, 0))
+    help_size = dialog._parameter_help_card.size()
     assert dialog._defaults_button.geometry().height() >= 36
     assert dialog._cancel_button.geometry().height() >= 36
     assert dialog._apply_button.geometry().height() >= 36
     assert dialog._mode_help_label.geometry().height() >= 28
     assert dialog._local_recommendation_label.geometry().height() >= 28
+
+    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+    app.processEvents()
+
+    assert dialog._parameter_help_card.mapTo(
+        dialog, app_module.QPoint(0, 0)
+    ) == help_origin
+    assert dialog._parameter_help_card.size() == help_size
+    assert help_origin.y() >= 0
+    assert help_origin.y() + help_size.height() <= dialog.rect().bottom() + 1
 
     dialog.close()
 
