@@ -5,9 +5,11 @@ from __future__ import annotations
 
 # Standard Library Imports
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import logging
+import sys
 
 # Third Party Imports
 import numpy as np
@@ -369,6 +371,82 @@ def test_configure_dask_backend_ignores_lifecycle_callback_failures(
         )
 
         assert client is not None
+
+
+def test_configure_dask_backend_slurm_runner_closes_client_on_wait_failure(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+
+    class _FakeRunner:
+        def __init__(self, *, scheduler_file: str) -> None:
+            events.append(("runner_init", scheduler_file))
+            self.n_workers = 1
+
+        def __enter__(self):
+            events.append("runner_enter")
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            events.append("runner_exit")
+
+    class _FakeClient:
+        def __init__(self, runner) -> None:
+            events.append(("client_init", runner))
+
+        def wait_for_workers(self, count: int) -> None:
+            events.append(("wait_for_workers", count))
+            raise RuntimeError("worker wait failed")
+
+        def close(self) -> None:
+            events.append("client_close")
+
+    fake_dask = ModuleType("dask")
+    fake_distributed = ModuleType("dask.distributed")
+    fake_distributed.Client = _FakeClient
+    fake_dask.distributed = fake_distributed
+    fake_jobqueue = ModuleType("dask_jobqueue")
+    fake_slurm = ModuleType("dask_jobqueue.slurm")
+    fake_slurm.SLURMRunner = _FakeRunner
+    fake_jobqueue.slurm = fake_slurm
+
+    monkeypatch.setitem(sys.modules, "dask", fake_dask)
+    monkeypatch.setitem(sys.modules, "dask.distributed", fake_distributed)
+    monkeypatch.setitem(sys.modules, "dask_jobqueue", fake_jobqueue)
+    monkeypatch.setitem(sys.modules, "dask_jobqueue.slurm", fake_slurm)
+
+    default_backend = DaskBackendConfig()
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        dask_backend=replace(
+            default_backend,
+            mode=main_module.DASK_BACKEND_SLURM_RUNNER,
+            slurm_runner=replace(
+                default_backend.slurm_runner,
+                scheduler_file="/tmp/scheduler.json",
+                wait_for_workers=1,
+            ),
+        ),
+    )
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.slurm_runner_wait_failure"),
+            exit_stack=stack,
+            workload="analysis",
+        )
+
+        assert client is None
+
+    assert events[0] == ("runner_init", "/tmp/scheduler.json")
+    assert events[1] == "runner_enter"
+    assert isinstance(events[2], tuple)
+    assert events[2][0] == "client_init"
+    assert events[3] == ("wait_for_workers", 1)
+    assert events[4] == "client_close"
+    assert events[5] == "runner_exit"
 
 
 def test_close_dask_client_prefers_shutdown_for_local_clusters() -> None:

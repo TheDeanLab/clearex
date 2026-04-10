@@ -37,7 +37,17 @@ import sys
 import traceback
 import webbrowser
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    cast,
+)
 from urllib.parse import urlparse
 
 # Local Imports
@@ -195,14 +205,15 @@ except ImportError:
 
 
 DaskClientLifecycleCallback = Callable[[str, str, str, object], None]
-GuiRunCallback = Callable[
-    [
-        WorkflowConfig,
-        Callable[[int, str], None],
-        Optional[DaskClientLifecycleCallback],
-    ],
-    None,
-]
+
+
+class GuiRunCallback(Protocol):
+    def __call__(
+        self,
+        workflow: WorkflowConfig,
+        progress_callback: Callable[[int, str], None],
+        dask_client_lifecycle_callback: Optional[DaskClientLifecycleCallback] = None,
+    ) -> None: ...
 
 
 class GuiUnavailableError(RuntimeError):

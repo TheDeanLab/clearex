@@ -1192,6 +1192,12 @@ def _configure_dask_backend(
                 SLURMRunner(scheduler_file=scheduler_file)
             )
             client = Client(runner)
+            _register_client_teardown(
+                client,
+                allow_shutdown=False,
+                retire_workers=False,
+                close_attached_cluster=False,
+            )
 
             wait_for_workers = backend.slurm_runner.wait_for_workers
             if wait_for_workers is None:
@@ -1200,13 +1206,6 @@ def _configure_dask_backend(
                     wait_for_workers = runner_workers
             if wait_for_workers is not None:
                 client.wait_for_workers(wait_for_workers)
-
-            _register_client_teardown(
-                client,
-                allow_shutdown=False,
-                retire_workers=False,
-                close_attached_cluster=False,
-            )
 
             logger.info(
                 f"Connected to SLURMRunner backend (scheduler_file={scheduler_file})."
