@@ -194,6 +194,17 @@ except ImportError:
     HAS_PYQT6 = False
 
 
+DaskClientLifecycleCallback = Callable[[str, str, str, object], None]
+GuiRunCallback = Callable[
+    [
+        WorkflowConfig,
+        Callable[[int, str], None],
+        Optional[DaskClientLifecycleCallback],
+    ],
+    None,
+]
+
+
 class GuiUnavailableError(RuntimeError):
     """Raised when the PyQt GUI cannot be launched in this environment."""
 
@@ -4737,8 +4748,8 @@ if HAS_PYQT6:
         workflow : WorkflowConfig
             Workflow configuration selected in GUI.
         run_callback : callable
-            Callback with signature ``(workflow, progress_callback)`` that
-            executes the workflow.
+            Callback with signature ``(workflow, progress_callback,
+            dask_client_lifecycle_callback=None)`` that executes the workflow.
 
         Attributes
         ----------
@@ -4759,10 +4770,10 @@ if HAS_PYQT6:
             self,
             *,
             workflow: WorkflowConfig,
-            run_callback: Callable[
-                [WorkflowConfig, Callable[[int, str], None]],
-                None,
-            ],
+            run_callback: GuiRunCallback,
+            dask_client_lifecycle_callback: Optional[
+                DaskClientLifecycleCallback
+            ] = None,
         ) -> None:
             """Initialize worker state.
 
@@ -4781,6 +4792,7 @@ if HAS_PYQT6:
             super().__init__()
             self._workflow = workflow
             self._run_callback = run_callback
+            self._dask_client_lifecycle_callback = dask_client_lifecycle_callback
             self._cancel_requested = False
 
         def cancel(self) -> None:
@@ -4832,7 +4844,14 @@ if HAS_PYQT6:
             """
             try:
                 self._emit_progress(1, "Starting analysis workflow...")
-                self._run_callback(self._workflow, self._emit_progress)
+                if self._dask_client_lifecycle_callback is None:
+                    self._run_callback(self._workflow, self._emit_progress)
+                else:
+                    self._run_callback(
+                        self._workflow,
+                        self._emit_progress,
+                        self._dask_client_lifecycle_callback,
+                    )
                 self._emit_progress(100, "Analysis workflow completed.")
                 self.succeeded.emit()
             except WorkflowExecutionCancelled as exc:
@@ -17517,9 +17536,7 @@ if HAS_PYQT6:
 
 def launch_gui(
     initial: Optional[WorkflowConfig] = None,
-    run_callback: Optional[
-        Callable[[WorkflowConfig, Callable[[int, str], None]], None]
-    ] = None,
+    run_callback: Optional[GuiRunCallback] = None,
 ) -> Optional[WorkflowConfig]:
     """Launch the PyQt GUI for workflow selection/execution.
 
@@ -17859,7 +17876,8 @@ def _workflows_for_selected_analysis_scope(
 def run_workflow_with_progress(
     *,
     workflow: WorkflowConfig,
-    run_callback: Callable[[WorkflowConfig, Callable[[int, str], None]], None],
+    run_callback: GuiRunCallback,
+    dask_client_lifecycle_callback: Optional[DaskClientLifecycleCallback] = None,
 ) -> bool:
     """Execute a workflow while showing a modal GUI progress dialog.
 
@@ -17869,7 +17887,9 @@ def run_workflow_with_progress(
         Workflow configuration to execute.
     run_callback : callable
         Callback that performs workflow execution. Signature must be
-        ``(workflow, progress_callback)``.
+        ``(workflow, progress_callback, dask_client_lifecycle_callback=None)``.
+    dask_client_lifecycle_callback : callable, optional
+        Optional lifecycle callback forwarded to the workflow run callback.
 
     Returns
     -------
@@ -17906,11 +17926,28 @@ def run_workflow_with_progress(
     scoped_workflows = _workflows_for_selected_analysis_scope(workflow)
     execution_workflow = scoped_workflows[0]
     effective_run_callback = run_callback
+
+    def _invoke_run_callback(
+        workflow: WorkflowConfig,
+        progress_callback: Callable[[int, str], None],
+    ) -> None:
+        if dask_client_lifecycle_callback is None:
+            run_callback(workflow, progress_callback)
+        else:
+            run_callback(
+                workflow,
+                progress_callback,
+                dask_client_lifecycle_callback,
+            )
+
     if len(scoped_workflows) > 1:
 
         def _batch_run_callback(
             _workflow: WorkflowConfig,
             progress_callback: Callable[[int, str], None],
+            dask_client_lifecycle_callback: Optional[
+                DaskClientLifecycleCallback
+            ] = None,
         ) -> None:
             """Execute one run callback across multiple prepared workflows.
 
@@ -17927,6 +17964,20 @@ def run_workflow_with_progress(
                 Side-effect execution only.
             """
             del _workflow
+            if dask_client_lifecycle_callback is None:
+                callback = _invoke_run_callback
+            else:
+
+                def callback(
+                    workflow: WorkflowConfig,
+                    inner_progress_callback: Callable[[int, str], None],
+                ) -> None:
+                    run_callback(
+                        workflow,
+                        inner_progress_callback,
+                        dask_client_lifecycle_callback,
+                    )
+
             total = len(scoped_workflows)
             for index, target_workflow in enumerate(scoped_workflows):
                 target = _resolve_selected_analysis_target(target_workflow)
@@ -17957,7 +18008,7 @@ def run_workflow_with_progress(
                     max(0, min(99, int(round((float(index) / float(total)) * 100.0)))),
                     f"Starting [{index + 1}/{total}] {target_label}",
                 )
-                run_callback(target_workflow, _batch_progress)
+                callback(target_workflow, _batch_progress)
             progress_callback(
                 100,
                 f"Completed analysis for {len(scoped_workflows)} experiments.",
@@ -18027,7 +18078,7 @@ def run_workflow_with_progress(
                 )
             else:
                 _progress_with_events(1, "Starting analysis workflow...")
-            effective_run_callback(execution_workflow, _progress_with_events)
+            _invoke_run_callback(execution_workflow, _progress_with_events)
             if len(scoped_workflows) == 1:
                 _progress_with_events(100, "Analysis workflow completed.")
             completed["ok"] = True
@@ -18049,6 +18100,7 @@ def run_workflow_with_progress(
         worker = AnalysisExecutionWorker(
             workflow=execution_workflow,
             run_callback=effective_run_callback,
+            dask_client_lifecycle_callback=dask_client_lifecycle_callback,
         )
         worker.progress_changed.connect(progress_dialog.update_progress)
         worker.succeeded.connect(lambda: completed.__setitem__("ok", True))

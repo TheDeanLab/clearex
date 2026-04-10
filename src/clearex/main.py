@@ -125,6 +125,7 @@ from clearex.workflow import (
 )
 
 ProgressCallback = Callable[[int, str], None]
+DaskClientLifecycleCallback = Callable[[str, str, str, object], None]
 
 
 class AnalysisRunner(Protocol):
@@ -988,6 +989,7 @@ def _configure_dask_backend(
     exit_stack: ExitStack,
     *,
     workload: str = "io",
+    dask_client_lifecycle_callback: Optional[DaskClientLifecycleCallback] = None,
 ) -> Optional[Any]:
     """Initialize and register the configured Dask backend.
 
@@ -1026,6 +1028,24 @@ def _configure_dask_backend(
 
     backend = workflow.dask_backend
     workload_name = workload.strip().lower()
+
+    def _register_client_lifecycle(client: Any) -> Any:
+        if dask_client_lifecycle_callback is not None:
+            dask_client_lifecycle_callback(
+                "started",
+                workload_name,
+                backend.mode,
+                client,
+            )
+            exit_stack.callback(
+                dask_client_lifecycle_callback,
+                "stopped",
+                workload_name,
+                backend.mode,
+                client,
+            )
+        return client
+
     logger.info(
         "Dask backend selection: "
         f"{format_dask_backend_summary(backend)} (workload={workload_name})"
@@ -1131,7 +1151,7 @@ def _configure_dask_backend(
                 "Connected to LocalCluster backend "
                 f"(processes={use_processes}, gpu_mode={use_gpu_local_cluster})."
             )
-            return client
+            return _register_client_lifecycle(client)
 
         if backend.mode == DASK_BACKEND_SLURM_RUNNER:
             scheduler_file = backend.slurm_runner.scheduler_file
@@ -1157,7 +1177,7 @@ def _configure_dask_backend(
             logger.info(
                 f"Connected to SLURMRunner backend (scheduler_file={scheduler_file})."
             )
-            return client
+            return _register_client_lifecycle(client)
 
         if backend.mode == DASK_BACKEND_SLURM_CLUSTER:
             from dask.distributed import Client
@@ -1226,7 +1246,7 @@ def _configure_dask_backend(
                 "Connected to SLURMCluster backend "
                 f"(workers={cluster_cfg.workers}, queue={cluster_cfg.queue})."
             )
-            return client
+            return _register_client_lifecycle(client)
 
         raise ValueError(f"Unsupported Dask backend mode: {backend.mode}")
     except Exception as exc:
@@ -1243,6 +1263,7 @@ def _run_workflow(
     logger: logging.Logger,
     *,
     analysis_progress_callback: Optional[Callable[[int, str], None]] = None,
+    dask_client_lifecycle_callback: Optional[DaskClientLifecycleCallback] = None,
 ) -> None:
     """Execute a configured workflow in headless mode.
 
@@ -1316,6 +1337,7 @@ def _run_workflow(
                     logger=logger,
                     exit_stack=io_stack,
                     workload="io",
+                    dask_client_lifecycle_callback=dask_client_lifecycle_callback,
                 )
                 if is_experiment_input
                 else None
@@ -1545,6 +1567,7 @@ def _run_workflow(
                 logger=logger,
                 exit_stack=analysis_stack,
                 workload="analysis",
+                dask_client_lifecycle_callback=dask_client_lifecycle_callback,
             )
             if failure_exc is None
             and _analysis_execution_requires_dask_client(execution_sequence)
@@ -3577,6 +3600,9 @@ def main() -> None:
             def _run_from_gui(
                 selected_workflow: WorkflowConfig,
                 progress_callback: Callable[[int, str], None],
+                dask_client_lifecycle_callback: Optional[
+                    DaskClientLifecycleCallback
+                ] = None,
             ) -> None:
                 """Execute one GUI-selected workflow with per-run logger setup.
 
@@ -3611,6 +3637,7 @@ def main() -> None:
                     workflow=selected_workflow,
                     logger=run_logger,
                     analysis_progress_callback=progress_callback,
+                    dask_client_lifecycle_callback=dask_client_lifecycle_callback,
                 )
 
             _ = launch_gui(initial=workflow, run_callback=_run_from_gui)

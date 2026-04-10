@@ -241,6 +241,77 @@ def test_configure_dask_backend_uses_threads_for_single_worker_io(monkeypatch) -
     assert captured["processes"] is False
 
 
+def test_configure_dask_backend_emits_client_lifecycle_callbacks(
+    monkeypatch,
+) -> None:
+    captured: list[tuple[str, str, str, object]] = []
+
+    def _lifecycle_callback(
+        event: str,
+        workload: str,
+        backend_mode: str,
+        client: object,
+    ) -> None:
+        captured.append((event, workload, backend_mode, client))
+
+    class _DummyClient:
+        dashboard_link = "http://127.0.0.1:8787/status"
+
+        def close(self) -> None:
+            return None
+
+    def _fake_create_dask_client(**kwargs):
+        del kwargs
+        return _DummyClient()
+
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        dask_backend=DaskBackendConfig(
+            local_cluster=LocalClusterConfig(
+                n_workers=2,
+                threads_per_worker=1,
+                memory_limit="8GB",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(main_module, "create_dask_client", _fake_create_dask_client)
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.configure_lifecycle"),
+            exit_stack=stack,
+            workload="analysis",
+            dask_client_lifecycle_callback=_lifecycle_callback,
+        )
+
+        assert client is not None
+        assert captured == [
+            (
+                "started",
+                "analysis",
+                main_module.DASK_BACKEND_LOCAL_CLUSTER,
+                client,
+            )
+        ]
+
+    assert captured == [
+        (
+            "started",
+            "analysis",
+            main_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        ),
+        (
+            "stopped",
+            "analysis",
+            main_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        ),
+    ]
+
+
 def test_close_dask_client_prefers_shutdown_for_local_clusters() -> None:
     calls: list[object] = []
 
@@ -489,6 +560,77 @@ def test_run_workflow_compile_movie_only_skips_analysis_dask_startup(
     )
 
     assert workloads == []
+
+
+def test_run_workflow_propagates_lifecycle_callback_to_analysis_backend(
+    monkeypatch,
+) -> None:
+    forwarded: list[tuple[str, str, str, object]] = []
+
+    def _lifecycle_callback(
+        event: str,
+        workload: str,
+        backend_mode: str,
+        client: object,
+    ) -> None:
+        forwarded.append((event, workload, backend_mode, client))
+
+    class _DummyClient:
+        dashboard_link = "http://127.0.0.1:8787/status"
+
+        def close(self) -> None:
+            return None
+
+    def _fake_configure_dask_backend(
+        *,
+        workflow,
+        logger,
+        exit_stack,
+        workload="io",
+        dask_client_lifecycle_callback=None,
+    ):
+        del workflow, logger, exit_stack
+        if workload == "analysis" and dask_client_lifecycle_callback is not None:
+            client = _DummyClient()
+            dask_client_lifecycle_callback(
+                "started",
+                workload,
+                main_module.DASK_BACKEND_LOCAL_CLUSTER,
+                client,
+            )
+            dask_client_lifecycle_callback(
+                "stopped",
+                workload,
+                main_module.DASK_BACKEND_LOCAL_CLUSTER,
+                client,
+            )
+            return client
+        return None
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_analysis_execution_requires_dask_client",
+        lambda sequence: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "resolve_analysis_execution_sequence",
+        lambda **kwargs: (),
+    )
+
+    workflow = WorkflowConfig(file=None, prefer_dask=True)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.workflow_lifecycle"),
+        dask_client_lifecycle_callback=_lifecycle_callback,
+    )
+
+    assert forwarded[0][:2] == ("started", "analysis")
+    assert forwarded[1][:2] == ("stopped", "analysis")
 
 
 def test_run_workflow_threads_volume_export_through_sequence_and_provenance(

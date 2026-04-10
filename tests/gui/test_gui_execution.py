@@ -158,6 +158,9 @@ def _install_fake_gui_runtime(monkeypatch):
         def update_progress(self, percent: int, message: str) -> None:
             self.updates.append((int(percent), str(message)))
 
+        def exec(self) -> int:
+            return 0
+
         def show(self) -> None:
             self.shown = True
 
@@ -1543,8 +1546,13 @@ def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
     )
     seen_threads: list[threading.Thread] = []
 
-    def _run_callback(workflow, progress_callback):
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
         del workflow
+        assert dask_client_lifecycle_callback is None
         seen_threads.append(threading.current_thread())
         progress_callback(35, "SLURM setup")
         progress_callback(80, "running")
@@ -1579,6 +1587,71 @@ def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
     assert dialog.updates[-1] == (100, "Analysis workflow completed.")
 
 
+def test_run_workflow_with_progress_slurm_forwards_lifecycle_callback(
+    monkeypatch,
+) -> None:
+    fake_app_cls, fake_dialog_cls = _install_fake_gui_runtime(monkeypatch)
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
+        ),
+    )
+    lifecycle_events: list[tuple[str, str, str, object]] = []
+    seen_callbacks: list[object] = []
+
+    def _lifecycle_callback(event: str, workload: str, backend_mode: str, client):
+        lifecycle_events.append((event, workload, backend_mode, client))
+
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
+        del workflow
+        seen_callbacks.append(dask_client_lifecycle_callback)
+        assert dask_client_lifecycle_callback is _lifecycle_callback
+        dask_client_lifecycle_callback(
+            "started",
+            "analysis",
+            app_module.DASK_BACKEND_SLURM_CLUSTER,
+            object(),
+        )
+        progress_callback(40, "running")
+
+    workflow = app_module.WorkflowConfig(
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        )
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+        dask_client_lifecycle_callback=_lifecycle_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert seen_callbacks == [_lifecycle_callback]
+    assert len(lifecycle_events) == 1
+
+    app_instance = fake_app_cls.instance()
+    assert app_instance is not None
+    assert app_instance.quit_calls == 1
+
+    dialog = fake_dialog_cls.last_instance
+    assert dialog is not None
+    assert dialog.shown is True
+    assert dialog.accepted is True
+    assert dialog.rejected is False
+    assert dialog.closed is True
+
+
 def test_run_workflow_with_progress_slurm_batches_all_selected_experiments(
     monkeypatch,
 ) -> None:
@@ -1595,8 +1668,13 @@ def test_run_workflow_with_progress_slurm_batches_all_selected_experiments(
     )
     executed_files: list[str] = []
 
-    def _run_callback(workflow, progress_callback):
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
         executed_files.append(str(workflow.file))
+        assert dask_client_lifecycle_callback is None
         progress_callback(50, "running")
 
     workflow = app_module.WorkflowConfig(
@@ -1663,8 +1741,13 @@ def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
     )
     seen_threads: list[threading.Thread] = []
 
-    def _run_callback(workflow, progress_callback):
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
         del workflow
+        assert dask_client_lifecycle_callback is None
         seen_threads.append(threading.current_thread())
         progress_callback(5, "starting")
         raise RuntimeError("boom")
@@ -1713,8 +1796,13 @@ def test_run_workflow_with_progress_slurm_cancels_without_error_dialog(
         ),
     )
 
-    def _run_callback(workflow, progress_callback):
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
         del workflow
+        assert dask_client_lifecycle_callback is None
         dialog = fake_dialog_cls.last_instance
         assert dialog is not None
         dialog.cancel_requested.emit()
@@ -1745,6 +1833,123 @@ def test_run_workflow_with_progress_slurm_cancels_without_error_dialog(
     assert dialog.rejected is True
     assert dialog.closed is True
     assert dialog.updates == [(1, "Starting analysis workflow...")]
+
+
+def test_run_workflow_with_progress_worker_forwards_lifecycle_callback(
+    monkeypatch,
+) -> None:
+    fake_app_cls, fake_dialog_cls = _install_fake_gui_runtime(monkeypatch)
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
+        ),
+    )
+    seen_callbacks: list[object] = []
+    lifecycle_events: list[tuple[str, str, str, object]] = []
+
+    class _FakeSignal:
+        def __init__(self) -> None:
+            self._callbacks: list[object] = []
+
+        def connect(self, callback) -> None:
+            self._callbacks.append(callback)
+
+        def emit(self, *args, **kwargs) -> None:
+            for callback in list(self._callbacks):
+                callback(*args, **kwargs)
+
+    class _FakeWorker:
+        def __init__(
+            self,
+            *,
+            workflow,
+            run_callback,
+            dask_client_lifecycle_callback=None,
+        ) -> None:
+            self.workflow = workflow
+            self.run_callback = run_callback
+            self.dask_client_lifecycle_callback = dask_client_lifecycle_callback
+            self.progress_changed = _FakeSignal()
+            self.succeeded = _FakeSignal()
+            self.cancelled = _FakeSignal()
+            self.failed = _FakeSignal()
+
+        def cancel(self) -> None:
+            return None
+
+        def start(self) -> None:
+            seen_callbacks.append(self.dask_client_lifecycle_callback)
+            assert self.dask_client_lifecycle_callback is _lifecycle_callback
+
+            def _progress_callback(percent: int, message: str) -> None:
+                self.progress_changed.emit(percent, message)
+
+            self.run_callback(
+                self.workflow,
+                _progress_callback,
+                self.dask_client_lifecycle_callback,
+            )
+            self.succeeded.emit()
+
+        def wait(self) -> None:
+            return None
+
+    def _lifecycle_callback(event: str, workload: str, backend_mode: str, client):
+        lifecycle_events.append((event, workload, backend_mode, client))
+
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
+        del workflow
+        seen_callbacks.append(dask_client_lifecycle_callback)
+        assert dask_client_lifecycle_callback is _lifecycle_callback
+        dask_client_lifecycle_callback(
+            "started",
+            "analysis",
+            app_module.DASK_BACKEND_LOCAL_CLUSTER,
+            object(),
+        )
+        progress_callback(55, "running")
+
+    monkeypatch.setattr(
+        app_module, "AnalysisExecutionWorker", _FakeWorker, raising=False
+    )
+
+    workflow = app_module.WorkflowConfig(
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_LOCAL_CLUSTER
+        )
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+        dask_client_lifecycle_callback=_lifecycle_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert seen_callbacks == [_lifecycle_callback, _lifecycle_callback]
+    assert len(lifecycle_events) == 1
+
+    app_instance = fake_app_cls.instance()
+    assert app_instance is not None
+    assert app_instance.quit_calls == 1
+
+    dialog = fake_dialog_cls.last_instance
+    assert dialog is not None
+    assert dialog.shown is False
+    assert dialog.accepted is True
+    assert dialog.rejected is False
+    assert dialog.closed is False
+    assert dialog.updates[-1] == (55, "running")
 
 
 def test_ensure_clearex_settings_directory_creates_target(tmp_path) -> None:
@@ -2054,7 +2259,7 @@ def test_launch_gui_persists_reset_state_after_successful_run(
     monkeypatch.setattr(
         app_module,
         "run_workflow_with_progress",
-        lambda workflow, run_callback: True,
+        lambda workflow, run_callback, dask_client_lifecycle_callback=None: True,
     )
     monkeypatch.setattr(
         app_module,
