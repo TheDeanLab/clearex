@@ -1725,6 +1725,89 @@ def test_run_workflow_with_progress_slurm_batches_all_selected_experiments(
     assert dialog.updates[-1] == (100, "Completed analysis for 2 experiments.")
 
 
+def test_run_workflow_with_progress_slurm_batches_forward_lifecycle_callback(
+    monkeypatch,
+) -> None:
+    fake_app_cls, fake_dialog_cls = _install_fake_gui_runtime(monkeypatch)
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
+        ),
+    )
+    executed_files: list[str] = []
+    seen_callbacks: list[object] = []
+    lifecycle_events: list[tuple[str, str, str, object]] = []
+
+    def _lifecycle_callback(event: str, workload: str, backend_mode: str, client):
+        lifecycle_events.append((event, workload, backend_mode, client))
+
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
+        executed_files.append(str(workflow.file))
+        seen_callbacks.append(dask_client_lifecycle_callback)
+        assert dask_client_lifecycle_callback is _lifecycle_callback
+        dask_client_lifecycle_callback(
+            "started",
+            "analysis",
+            app_module.DASK_BACKEND_SLURM_CLUSTER,
+            object(),
+        )
+        progress_callback(50, "running")
+
+    workflow = app_module.WorkflowConfig(
+        file="/tmp/cell_002/data_store.zarr",
+        analysis_targets=(
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_001/experiment.yml",
+                store_path="/tmp/cell_001/data_store.zarr",
+            ),
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_002/experiment.yml",
+                store_path="/tmp/cell_002/data_store.zarr",
+            ),
+        ),
+        analysis_selected_experiment_path="/tmp/cell_002/experiment.yml",
+        analysis_apply_to_all=True,
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        ),
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+        dask_client_lifecycle_callback=_lifecycle_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert executed_files == [
+        "/tmp/cell_001/data_store.zarr",
+        "/tmp/cell_002/data_store.zarr",
+    ]
+    assert seen_callbacks == [_lifecycle_callback, _lifecycle_callback]
+    assert len(lifecycle_events) == 2
+
+    app_instance = fake_app_cls.instance()
+    assert app_instance is not None
+    assert app_instance.quit_calls == 1
+
+    dialog = fake_dialog_cls.last_instance
+    assert dialog is not None
+    assert dialog.shown is True
+    assert dialog.accepted is True
+    assert dialog.rejected is False
+    assert dialog.closed is True
+
+
 def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
     monkeypatch,
 ) -> None:

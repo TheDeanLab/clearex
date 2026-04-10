@@ -244,7 +244,7 @@ def test_configure_dask_backend_uses_threads_for_single_worker_io(monkeypatch) -
 def test_configure_dask_backend_emits_client_lifecycle_callbacks(
     monkeypatch,
 ) -> None:
-    captured: list[tuple[str, str, str, object]] = []
+    captured: list[object] = []
 
     def _lifecycle_callback(
         event: str,
@@ -257,8 +257,15 @@ def test_configure_dask_backend_emits_client_lifecycle_callbacks(
     class _DummyClient:
         dashboard_link = "http://127.0.0.1:8787/status"
 
+        def retire_workers(self, *args, **kwargs) -> None:
+            del args, kwargs
+            captured.append("retire_workers")
+
+        def shutdown(self) -> None:
+            captured.append("shutdown")
+
         def close(self) -> None:
-            return None
+            captured.append("close")
 
     def _fake_create_dask_client(**kwargs):
         del kwargs
@@ -303,6 +310,8 @@ def test_configure_dask_backend_emits_client_lifecycle_callbacks(
             main_module.DASK_BACKEND_LOCAL_CLUSTER,
             client,
         ),
+        "retire_workers",
+        "shutdown",
         (
             "stopped",
             "analysis",
@@ -310,6 +319,56 @@ def test_configure_dask_backend_emits_client_lifecycle_callbacks(
             client,
         ),
     ]
+
+
+def test_configure_dask_backend_ignores_lifecycle_callback_failures(
+    monkeypatch,
+) -> None:
+    class _DummyClient:
+        dashboard_link = "http://127.0.0.1:8787/status"
+
+        def shutdown(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def _fake_create_dask_client(**kwargs):
+        del kwargs
+        return _DummyClient()
+
+    def _raising_callback(
+        event: str,
+        workload: str,
+        backend_mode: str,
+        client: object,
+    ) -> None:
+        del event, workload, backend_mode, client
+        raise RuntimeError("callback boom")
+
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        dask_backend=DaskBackendConfig(
+            local_cluster=LocalClusterConfig(
+                n_workers=2,
+                threads_per_worker=1,
+                memory_limit="8GB",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(main_module, "create_dask_client", _fake_create_dask_client)
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.configure_lifecycle_best_effort"),
+            exit_stack=stack,
+            workload="analysis",
+            dask_client_lifecycle_callback=_raising_callback,
+        )
+
+        assert client is not None
 
 
 def test_close_dask_client_prefers_shutdown_for_local_clusters() -> None:

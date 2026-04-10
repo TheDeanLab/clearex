@@ -1029,22 +1029,51 @@ def _configure_dask_backend(
     backend = workflow.dask_backend
     workload_name = workload.strip().lower()
 
-    def _register_client_lifecycle(client: Any) -> Any:
-        if dask_client_lifecycle_callback is not None:
+    def _emit_client_lifecycle(event: str, client: Any) -> None:
+        if dask_client_lifecycle_callback is None:
+            return
+        try:
             dask_client_lifecycle_callback(
-                "started",
+                event,
                 workload_name,
                 backend.mode,
                 client,
             )
-            exit_stack.callback(
-                dask_client_lifecycle_callback,
-                "stopped",
+        except Exception as exc:
+            logger.warning(
+                "Dask client lifecycle callback failed during %s "
+                "(workload=%s, backend=%s): %s: %s",
+                event,
                 workload_name,
                 backend.mode,
-                client,
+                type(exc).__name__,
+                exc,
             )
+
+    def _register_client_lifecycle(client: Any) -> Any:
+        _emit_client_lifecycle("started", client)
         return client
+
+    def _register_client_teardown(
+        client: Any,
+        *,
+        allow_shutdown: bool,
+        retire_workers: bool,
+        close_attached_cluster: bool,
+    ) -> None:
+        def _teardown() -> None:
+            try:
+                _close_dask_client(
+                    client=client,
+                    logger=logger,
+                    allow_shutdown=allow_shutdown,
+                    retire_workers=retire_workers,
+                    close_attached_cluster=close_attached_cluster,
+                )
+            finally:
+                _emit_client_lifecycle("stopped", client)
+
+        exit_stack.callback(_teardown)
 
     logger.info(
         "Dask backend selection: "
@@ -1139,10 +1168,8 @@ def _configure_dask_backend(
                 local_directory=local_cfg.local_directory,
                 gpu_enabled=use_gpu_local_cluster,
             )
-            exit_stack.callback(
-                _close_dask_client,
-                client=client,
-                logger=logger,
+            _register_client_teardown(
+                client,
                 allow_shutdown=True,
                 retire_workers=True,
                 close_attached_cluster=True,
@@ -1164,7 +1191,7 @@ def _configure_dask_backend(
             runner = exit_stack.enter_context(
                 SLURMRunner(scheduler_file=scheduler_file)
             )
-            client = exit_stack.enter_context(Client(runner))
+            client = Client(runner)
 
             wait_for_workers = backend.slurm_runner.wait_for_workers
             if wait_for_workers is None:
@@ -1173,6 +1200,13 @@ def _configure_dask_backend(
                     wait_for_workers = runner_workers
             if wait_for_workers is not None:
                 client.wait_for_workers(wait_for_workers)
+
+            _register_client_teardown(
+                client,
+                allow_shutdown=False,
+                retire_workers=False,
+                close_attached_cluster=False,
+            )
 
             logger.info(
                 f"Connected to SLURMRunner backend (scheduler_file={scheduler_file})."
@@ -1233,10 +1267,8 @@ def _configure_dask_backend(
             cluster.scale(jobs=cluster_cfg.workers)
 
             client = Client(cluster)
-            exit_stack.callback(
-                _close_dask_client,
-                client=client,
-                logger=logger,
+            _register_client_teardown(
+                client,
                 allow_shutdown=False,
                 retire_workers=False,
                 close_attached_cluster=False,
