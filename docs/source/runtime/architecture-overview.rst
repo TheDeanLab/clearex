@@ -22,7 +22,9 @@ Layered Runtime Model
 ClearEx is intentionally split into layers that can evolve independently:
 
 1. Interface layer:
-   GUI in ``clearex.gui.app`` and CLI parsing in ``clearex.io.cli``.
+   GUI in ``clearex.gui.app``, localhost dashboard relay in
+   ``clearex.gui.dask_dashboard_proxy``, and CLI parsing in
+   ``clearex.io.cli``.
 2. Configuration layer:
    typed runtime schema in ``clearex.workflow.WorkflowConfig`` (plus
    ``DaskBackendConfig``, ``ZarrSaveConfig``, and
@@ -94,3 +96,8 @@ driven by normalized per-operation parameters in ``analysis_parameters``:
 
 This allows one run to execute only one step, or a custom chain of steps,
 without changing orchestration code.
+
+GUI-triggered Dask dashboard access is intentionally mediated through the
+localhost relay layer instead of opening scheduler dashboard URLs directly.
+That keeps browser access scoped to ClearEx-managed clients and lets the GUI
+fail with a warning when the upstream dashboard is unreachable.

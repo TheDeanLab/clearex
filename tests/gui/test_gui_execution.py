@@ -149,14 +149,24 @@ def _install_fake_gui_runtime(monkeypatch):
             del parent
             type(self).last_instance = self
             self.updates: list[tuple[int, str]] = []
+            self.dashboard_enabled_states: list[tuple[bool, str]] = []
             self.shown = False
             self.accepted = False
             self.rejected = False
             self.closed = False
             self.cancel_requested = _FakeSignal()
+            self.dashboard_requested = _FakeSignal()
 
         def update_progress(self, percent: int, message: str) -> None:
             self.updates.append((int(percent), str(message)))
+
+        def set_dashboard_available(
+            self, available: bool, tooltip: str | None = None
+        ) -> None:
+            self.dashboard_enabled_states.append((bool(available), str(tooltip or "")))
+
+        def exec(self) -> int:
+            return 0
 
         def show(self) -> None:
             self.shown = True
@@ -199,6 +209,23 @@ def _install_fake_gui_runtime(monkeypatch):
         raising=False,
     )
     return _FakeApplication, _FakeProgressDialog
+
+
+def test_progress_dialog_creates_disabled_dashboard_button() -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.AnalysisExecutionProgressDialog(parent=None)
+
+    assert dialog._dashboard_button is not None
+    assert dialog._dashboard_button.text() == "Open Dask Dashboard"
+    assert dialog._dashboard_button.isEnabled() is False
+
+    dialog.close()
 
 
 def test_summarize_image_info_extracts_pixel_size_from_voxel_size_metadata() -> None:
@@ -1543,8 +1570,13 @@ def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
     )
     seen_threads: list[threading.Thread] = []
 
-    def _run_callback(workflow, progress_callback):
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
         del workflow
+        assert callable(dask_client_lifecycle_callback)
         seen_threads.append(threading.current_thread())
         progress_callback(35, "SLURM setup")
         progress_callback(80, "running")
@@ -1579,6 +1611,100 @@ def test_run_workflow_with_progress_slurm_executes_callback_on_main_thread(
     assert dialog.updates[-1] == (100, "Analysis workflow completed.")
 
 
+def test_run_workflow_with_progress_slurm_forwards_lifecycle_callback(
+    monkeypatch,
+) -> None:
+    fake_app_cls, fake_dialog_cls = _install_fake_gui_runtime(monkeypatch)
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
+        ),
+    )
+
+    class _FakeRelayManager:
+        def __init__(self) -> None:
+            self.registered_clients: list[tuple[str, str, object]] = []
+            self.unregistered_client_ids: list[str] = []
+
+        def register_client(self, *, workload, backend_mode, client):
+            self.registered_clients.append((workload, backend_mode, client))
+            return f"{workload}-client"
+
+        def unregister_client(self, client_id: str) -> None:
+            self.unregistered_client_ids.append(client_id)
+
+        def has_available_client(self, *, workload=None):
+            del workload
+            return bool(self.registered_clients)
+
+        def open_dashboard(self, *, workload=None):
+            del workload
+            return "http://127.0.0.1:8787/status?token=relay"
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        app_module,
+        "get_dashboard_relay_manager",
+        lambda: _FakeRelayManager(),
+    )
+    lifecycle_events: list[tuple[str, str, str, object]] = []
+    seen_callbacks: list[object] = []
+
+    def _lifecycle_callback(event: str, workload: str, backend_mode: str, client):
+        lifecycle_events.append((event, workload, backend_mode, client))
+
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
+        del workflow
+        seen_callbacks.append(dask_client_lifecycle_callback)
+        assert callable(dask_client_lifecycle_callback)
+        dask_client_lifecycle_callback(
+            "started",
+            "analysis",
+            app_module.DASK_BACKEND_SLURM_CLUSTER,
+            object(),
+        )
+        progress_callback(40, "running")
+
+    workflow = app_module.WorkflowConfig(
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        )
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+        dask_client_lifecycle_callback=_lifecycle_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert len(seen_callbacks) == 1
+    assert len(lifecycle_events) == 1
+
+    app_instance = fake_app_cls.instance()
+    assert app_instance is not None
+    assert app_instance.quit_calls == 1
+
+    dialog = fake_dialog_cls.last_instance
+    assert dialog is not None
+    assert dialog.shown is True
+    assert dialog.accepted is True
+    assert dialog.rejected is False
+    assert dialog.closed is True
+
+
 def test_run_workflow_with_progress_slurm_batches_all_selected_experiments(
     monkeypatch,
 ) -> None:
@@ -1595,8 +1721,13 @@ def test_run_workflow_with_progress_slurm_batches_all_selected_experiments(
     )
     executed_files: list[str] = []
 
-    def _run_callback(workflow, progress_callback):
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
         executed_files.append(str(workflow.file))
+        assert callable(dask_client_lifecycle_callback)
         progress_callback(50, "running")
 
     workflow = app_module.WorkflowConfig(
@@ -1647,6 +1778,118 @@ def test_run_workflow_with_progress_slurm_batches_all_selected_experiments(
     assert dialog.updates[-1] == (100, "Completed analysis for 2 experiments.")
 
 
+def test_run_workflow_with_progress_slurm_batches_forward_lifecycle_callback(
+    monkeypatch,
+) -> None:
+    fake_app_cls, fake_dialog_cls = _install_fake_gui_runtime(monkeypatch)
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
+        ),
+    )
+
+    class _FakeRelayManager:
+        def __init__(self) -> None:
+            self.registered_clients: list[tuple[str, str, object]] = []
+            self.unregistered_client_ids: list[str] = []
+
+        def register_client(self, *, workload, backend_mode, client):
+            self.registered_clients.append((workload, backend_mode, client))
+            return f"{workload}-client"
+
+        def unregister_client(self, client_id: str) -> None:
+            self.unregistered_client_ids.append(client_id)
+
+        def has_available_client(self, *, workload=None):
+            del workload
+            return bool(self.registered_clients)
+
+        def open_dashboard(self, *, workload=None):
+            del workload
+            return "http://127.0.0.1:8787/status?token=relay"
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        app_module,
+        "get_dashboard_relay_manager",
+        lambda: _FakeRelayManager(),
+    )
+    executed_files: list[str] = []
+    seen_callbacks: list[object] = []
+    lifecycle_events: list[tuple[str, str, str, object]] = []
+
+    def _lifecycle_callback(event: str, workload: str, backend_mode: str, client):
+        lifecycle_events.append((event, workload, backend_mode, client))
+
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
+        executed_files.append(str(workflow.file))
+        seen_callbacks.append(dask_client_lifecycle_callback)
+        assert callable(dask_client_lifecycle_callback)
+        dask_client_lifecycle_callback(
+            "started",
+            "analysis",
+            app_module.DASK_BACKEND_SLURM_CLUSTER,
+            object(),
+        )
+        progress_callback(50, "running")
+
+    workflow = app_module.WorkflowConfig(
+        file="/tmp/cell_002/data_store.zarr",
+        analysis_targets=(
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_001/experiment.yml",
+                store_path="/tmp/cell_001/data_store.zarr",
+            ),
+            app_module.AnalysisTarget(
+                experiment_path="/tmp/cell_002/experiment.yml",
+                store_path="/tmp/cell_002/data_store.zarr",
+            ),
+        ),
+        analysis_selected_experiment_path="/tmp/cell_002/experiment.yml",
+        analysis_apply_to_all=True,
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        ),
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+        dask_client_lifecycle_callback=_lifecycle_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert executed_files == [
+        "/tmp/cell_001/data_store.zarr",
+        "/tmp/cell_002/data_store.zarr",
+    ]
+    assert len(seen_callbacks) == 2
+    assert len(lifecycle_events) == 2
+
+    app_instance = fake_app_cls.instance()
+    assert app_instance is not None
+    assert app_instance.quit_calls == 1
+
+    dialog = fake_dialog_cls.last_instance
+    assert dialog is not None
+    assert dialog.shown is True
+    assert dialog.accepted is True
+    assert dialog.rejected is False
+    assert dialog.closed is True
+
+
 def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
     monkeypatch,
 ) -> None:
@@ -1663,8 +1906,13 @@ def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
     )
     seen_threads: list[threading.Thread] = []
 
-    def _run_callback(workflow, progress_callback):
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
         del workflow
+        assert callable(dask_client_lifecycle_callback)
         seen_threads.append(threading.current_thread())
         progress_callback(5, "starting")
         raise RuntimeError("boom")
@@ -1713,8 +1961,13 @@ def test_run_workflow_with_progress_slurm_cancels_without_error_dialog(
         ),
     )
 
-    def _run_callback(workflow, progress_callback):
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
         del workflow
+        assert callable(dask_client_lifecycle_callback)
         dialog = fake_dialog_cls.last_instance
         assert dialog is not None
         dialog.cancel_requested.emit()
@@ -1745,6 +1998,526 @@ def test_run_workflow_with_progress_slurm_cancels_without_error_dialog(
     assert dialog.rejected is True
     assert dialog.closed is True
     assert dialog.updates == [(1, "Starting analysis workflow...")]
+
+
+def test_run_workflow_with_progress_worker_forwards_lifecycle_callback(
+    monkeypatch,
+) -> None:
+    fake_app_cls, fake_dialog_cls = _install_fake_gui_runtime(monkeypatch)
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
+        ),
+    )
+
+    class _FakeRelayManager:
+        def __init__(self) -> None:
+            self.registered_clients: list[tuple[str, str, object]] = []
+            self.unregistered_client_ids: list[str] = []
+
+        def register_client(self, *, workload, backend_mode, client):
+            self.registered_clients.append((workload, backend_mode, client))
+            return f"{workload}-client"
+
+        def unregister_client(self, client_id: str) -> None:
+            self.unregistered_client_ids.append(client_id)
+
+        def has_available_client(self, *, workload=None):
+            del workload
+            return bool(self.registered_clients)
+
+        def open_dashboard(self, *, workload=None):
+            del workload
+            return "http://127.0.0.1:8787/status?token=relay"
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        app_module,
+        "get_dashboard_relay_manager",
+        lambda: _FakeRelayManager(),
+    )
+    seen_callbacks: list[object] = []
+    lifecycle_events: list[tuple[str, str, str, object]] = []
+
+    class _FakeSignal:
+        def __init__(self) -> None:
+            self._callbacks: list[object] = []
+
+        def connect(self, callback) -> None:
+            self._callbacks.append(callback)
+
+        def emit(self, *args, **kwargs) -> None:
+            for callback in list(self._callbacks):
+                callback(*args, **kwargs)
+
+    class _FakeWorker:
+        def __init__(
+            self,
+            *,
+            workflow,
+            run_callback,
+            dask_client_lifecycle_callback=None,
+        ) -> None:
+            self.workflow = workflow
+            self.run_callback = run_callback
+            self.dask_client_lifecycle_callback = dask_client_lifecycle_callback
+            self.progress_changed = _FakeSignal()
+            self.succeeded = _FakeSignal()
+            self.cancelled = _FakeSignal()
+            self.failed = _FakeSignal()
+
+        def cancel(self) -> None:
+            return None
+
+        def start(self) -> None:
+            seen_callbacks.append(self.dask_client_lifecycle_callback)
+            assert callable(self.dask_client_lifecycle_callback)
+
+            def _progress_callback(percent: int, message: str) -> None:
+                self.progress_changed.emit(percent, message)
+
+            self.run_callback(
+                self.workflow,
+                _progress_callback,
+                self.dask_client_lifecycle_callback,
+            )
+            self.succeeded.emit()
+
+        def wait(self) -> None:
+            return None
+
+    def _lifecycle_callback(event: str, workload: str, backend_mode: str, client):
+        lifecycle_events.append((event, workload, backend_mode, client))
+
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
+        del workflow
+        seen_callbacks.append(dask_client_lifecycle_callback)
+        assert callable(dask_client_lifecycle_callback)
+        dask_client_lifecycle_callback(
+            "started",
+            "analysis",
+            app_module.DASK_BACKEND_LOCAL_CLUSTER,
+            object(),
+        )
+        progress_callback(55, "running")
+
+    monkeypatch.setattr(
+        app_module, "AnalysisExecutionWorker", _FakeWorker, raising=False
+    )
+
+    workflow = app_module.WorkflowConfig(
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_LOCAL_CLUSTER
+        )
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+        dask_client_lifecycle_callback=_lifecycle_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert len(seen_callbacks) == 2
+    assert len(lifecycle_events) == 1
+
+    app_instance = fake_app_cls.instance()
+    assert app_instance is not None
+    assert app_instance.quit_calls == 1
+
+    dialog = fake_dialog_cls.last_instance
+    assert dialog is not None
+    assert dialog.shown is False
+    assert dialog.accepted is True
+    assert dialog.rejected is False
+    assert dialog.closed is False
+    assert dialog.updates[-1] == (55, "running")
+
+
+def test_run_workflow_with_progress_updates_dashboard_button_from_lifecycle_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_app_cls, fake_dialog_cls = _install_fake_gui_runtime(monkeypatch)
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
+        ),
+    )
+    browser_urls: list[str] = []
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open_new_tab",
+        lambda url: browser_urls.append(str(url)) or True,
+    )
+
+    class _FakeRelayManager:
+        def __init__(self) -> None:
+            self.registered_clients: list[tuple[str, str, object]] = []
+            self.unregistered_client_ids: list[str] = []
+            self.open_dashboard_calls: list[str | None] = []
+            self._next_id = 0
+            self._active = False
+
+        def register_client(self, *, workload, backend_mode, client):
+            self._next_id += 1
+            self.registered_clients.append((workload, backend_mode, client))
+            self._active = True
+            return f"client-{self._next_id}"
+
+        def unregister_client(self, client_id: str) -> None:
+            self.unregistered_client_ids.append(client_id)
+            self._active = False
+
+        def has_available_client(self, *, workload=None):
+            del workload
+            return self._active
+
+        def open_dashboard(self, *, workload=None):
+            self.open_dashboard_calls.append(workload)
+            if not self._active:
+                raise ValueError("No active client")
+            return "http://127.0.0.1:8787/status?token=relay"
+
+        def shutdown(self) -> None:
+            return None
+
+    relay_manager = _FakeRelayManager()
+    monkeypatch.setattr(
+        app_module,
+        "get_dashboard_relay_manager",
+        lambda: relay_manager,
+    )
+
+    lifecycle_events: list[tuple[str, str, str, object]] = []
+
+    def _lifecycle_callback(event: str, workload: str, backend_mode: str, client):
+        lifecycle_events.append((event, workload, backend_mode, client))
+
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
+        del workflow
+        assert callable(dask_client_lifecycle_callback)
+        client = object()
+        dask_client_lifecycle_callback(
+            "started",
+            "analysis",
+            app_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        )
+        dialog = fake_dialog_cls.last_instance
+        assert dialog is not None
+        dialog.dashboard_requested.emit()
+        progress_callback(55, "running")
+        dask_client_lifecycle_callback(
+            "stopped",
+            "analysis",
+            app_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        )
+
+    workflow = app_module.WorkflowConfig(
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_SLURM_CLUSTER
+        )
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+        dask_client_lifecycle_callback=_lifecycle_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert relay_manager.registered_clients
+    assert relay_manager.unregistered_client_ids == ["client-1"]
+    assert relay_manager.open_dashboard_calls == ["analysis"]
+    assert browser_urls == ["http://127.0.0.1:8787/status?token=relay"]
+    dialog = fake_dialog_cls.last_instance
+    assert dialog is not None
+    assert dialog.dashboard_enabled_states[0] == (
+        False,
+        "No active analysis Dask client is registered.",
+    )
+    assert (
+        True,
+        "Open the local Dask dashboard relay for analysis clients.",
+    ) in dialog.dashboard_enabled_states
+    assert dialog.dashboard_enabled_states[-1] == (
+        False,
+        "No active analysis Dask client is registered.",
+    )
+    assert lifecycle_events[0][0] == "started"
+    assert lifecycle_events[-1][0] == "stopped"
+
+    app_instance = fake_app_cls.instance()
+    assert app_instance is not None
+    assert app_instance.quit_calls == 1
+
+
+def test_run_workflow_with_progress_worker_routes_dashboard_updates_to_gui_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_apply_application_icon",
+        lambda _app: None,
+        raising=False,
+    )
+    monkeypatch.setattr(app_module, "_display_is_available", lambda: True)
+
+    class _RecordingProgressDialog(app_module.QDialog):
+        cancel_requested = app_module.pyqtSignal()
+        dashboard_requested = app_module.pyqtSignal()
+        last_instance = None
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+            type(self).last_instance = self
+            self.dashboard_enabled_states: list[tuple[bool, str]] = []
+            self.dashboard_thread_matches: list[bool] = []
+            self.updates: list[tuple[int, str]] = []
+
+        def update_progress(self, percent: int, message: str) -> None:
+            self.updates.append((int(percent), str(message)))
+
+        def set_dashboard_available(
+            self, available: bool, tooltip: str | None = None
+        ) -> None:
+            self.dashboard_thread_matches.append(
+                app_module.QThread.currentThread() is self.thread()
+            )
+            self.dashboard_enabled_states.append((bool(available), str(tooltip or "")))
+
+    class _FakeRelayManager:
+        def __init__(self) -> None:
+            self.registered_clients: list[tuple[str, str, object]] = []
+            self.unregistered_client_ids: list[str] = []
+
+        def register_client(self, *, workload, backend_mode, client):
+            self.registered_clients.append((str(workload), str(backend_mode), client))
+            return "client-1"
+
+        def unregister_client(self, client_id: str) -> None:
+            self.unregistered_client_ids.append(str(client_id))
+
+        def has_available_client(self, *, workload=None):
+            del workload
+            return bool(self.registered_clients) and not self.unregistered_client_ids
+
+        def open_dashboard(self, *, workload=None):
+            del workload
+            return "http://127.0.0.1:8787/status?token=relay"
+
+        def shutdown(self) -> None:
+            return None
+
+    relay_manager = _FakeRelayManager()
+    monkeypatch.setattr(
+        app_module,
+        "AnalysisExecutionProgressDialog",
+        _RecordingProgressDialog,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "get_dashboard_relay_manager",
+        lambda: relay_manager,
+    )
+
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
+        del workflow
+        assert callable(dask_client_lifecycle_callback)
+        client = object()
+        dask_client_lifecycle_callback(
+            "started",
+            "analysis",
+            app_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        )
+        progress_callback(55, "running")
+        dask_client_lifecycle_callback(
+            "stopped",
+            "analysis",
+            app_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        )
+
+    workflow = app_module.WorkflowConfig(
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_LOCAL_CLUSTER
+        )
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert relay_manager.registered_clients
+    assert relay_manager.unregistered_client_ids == ["client-1"]
+    dialog = _RecordingProgressDialog.last_instance
+    assert dialog is not None
+    assert dialog.dashboard_thread_matches
+    assert all(dialog.dashboard_thread_matches)
+    assert dialog.dashboard_enabled_states[0] == (
+        False,
+        "No active analysis Dask client is registered.",
+    )
+    assert (
+        True,
+        "Open the local Dask dashboard relay for analysis clients.",
+    ) in dialog.dashboard_enabled_states
+    assert dialog.dashboard_enabled_states[-1] == (
+        False,
+        "No active analysis Dask client is registered.",
+    )
+    dialog.close()
+
+
+def test_launch_gui_shuts_down_dashboard_relay_on_standalone_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"ensure": 0}
+    shutdown_calls: list[str] = []
+
+    class _FakeApplication:
+        _instance = None
+
+        def __init__(self, _argv) -> None:
+            type(self)._instance = self
+            self.quit_calls = 0
+
+        @classmethod
+        def instance(cls):
+            return cls._instance
+
+        def quit(self) -> None:
+            self.quit_calls += 1
+
+    class _FakeQDialog:
+        class DialogCode:
+            Accepted = 1
+            Rejected = 0
+
+    class _FakeSetupDialog:
+        def __init__(self, initial) -> None:
+            self.result_config = initial
+
+        def exec(self) -> int:
+            return _FakeQDialog.DialogCode.Accepted
+
+    class _FakeAnalysisDialog:
+        def __init__(self, initial) -> None:
+            self.result_config = initial
+
+        def exec(self) -> int:
+            return _FakeQDialog.DialogCode.Accepted
+
+    class _FakeRelayManager:
+        def shutdown(self) -> None:
+            shutdown_calls.append("shutdown")
+
+    monkeypatch.setattr(app_module, "HAS_PYQT6", True)
+    monkeypatch.setattr(app_module, "_display_is_available", lambda: True)
+    monkeypatch.setattr(
+        app_module,
+        "_ensure_clearex_settings_directory",
+        lambda path=None: (
+            calls.__setitem__("ensure", calls["ensure"] + 1) or Path("/tmp/.clearex")
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_load_last_used_dask_backend_config",
+        lambda settings_path=None: None,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_load_last_used_zarr_save_config",
+        lambda settings_path=None: None,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_apply_application_icon",
+        lambda _app: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_show_startup_splash",
+        lambda _app: None,
+        raising=False,
+    )
+    monkeypatch.setattr(app_module, "QApplication", _FakeApplication, raising=False)
+    monkeypatch.setattr(app_module, "QDialog", _FakeQDialog, raising=False)
+    monkeypatch.setattr(
+        app_module,
+        "ClearExSetupDialog",
+        _FakeSetupDialog,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "AnalysisSelectionDialog",
+        _FakeAnalysisDialog,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_dashboard_relay_manager_singleton",
+        _FakeRelayManager(),
+        raising=False,
+    )
+
+    selected = app_module.launch_gui(initial=app_module.WorkflowConfig())
+
+    assert selected is not None
+    assert calls["ensure"] == 1
+    assert shutdown_calls == ["shutdown"]
 
 
 def test_ensure_clearex_settings_directory_creates_target(tmp_path) -> None:
@@ -1969,6 +2742,7 @@ def test_launch_gui_persists_reset_state_after_successful_run(
         },
     )
     captured: dict[str, app_module.WorkflowConfig] = {}
+    lifecycle_callback = object()
 
     class _FakeApplication:
         _instance = None
@@ -2054,7 +2828,13 @@ def test_launch_gui_persists_reset_state_after_successful_run(
     monkeypatch.setattr(
         app_module,
         "run_workflow_with_progress",
-        lambda workflow, run_callback: True,
+        lambda workflow, run_callback, dask_client_lifecycle_callback=None: (
+            captured.__setitem__(
+                "lifecycle_callback",
+                dask_client_lifecycle_callback,
+            )
+            or True
+        ),
     )
     monkeypatch.setattr(
         app_module,
@@ -2064,10 +2844,12 @@ def test_launch_gui_persists_reset_state_after_successful_run(
 
     result = app_module.launch_gui(
         initial=selected_workflow,
-        run_callback=lambda workflow, progress_callback: None,
+        run_callback=lambda workflow, progress_callback, dask_client_lifecycle_callback=None: None,
+        dask_client_lifecycle_callback=lifecycle_callback,
     )
 
     assert result is None
+    assert captured["lifecycle_callback"] is lifecycle_callback
     assert captured["reset_workflow"].flatfield is False
     assert captured["reset_workflow"].fusion is False
     assert (

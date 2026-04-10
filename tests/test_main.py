@@ -5,9 +5,11 @@ from __future__ import annotations
 
 # Standard Library Imports
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import logging
+import sys
 
 # Third Party Imports
 import numpy as np
@@ -239,6 +241,212 @@ def test_configure_dask_backend_uses_threads_for_single_worker_io(monkeypatch) -
 
     assert client is not None
     assert captured["processes"] is False
+
+
+def test_configure_dask_backend_emits_client_lifecycle_callbacks(
+    monkeypatch,
+) -> None:
+    captured: list[object] = []
+
+    def _lifecycle_callback(
+        event: str,
+        workload: str,
+        backend_mode: str,
+        client: object,
+    ) -> None:
+        captured.append((event, workload, backend_mode, client))
+
+    class _DummyClient:
+        dashboard_link = "http://127.0.0.1:8787/status"
+
+        def retire_workers(self, *args, **kwargs) -> None:
+            del args, kwargs
+            captured.append("retire_workers")
+
+        def shutdown(self) -> None:
+            captured.append("shutdown")
+
+        def close(self) -> None:
+            captured.append("close")
+
+    def _fake_create_dask_client(**kwargs):
+        del kwargs
+        return _DummyClient()
+
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        dask_backend=DaskBackendConfig(
+            local_cluster=LocalClusterConfig(
+                n_workers=2,
+                threads_per_worker=1,
+                memory_limit="8GB",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(main_module, "create_dask_client", _fake_create_dask_client)
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.configure_lifecycle"),
+            exit_stack=stack,
+            workload="analysis",
+            dask_client_lifecycle_callback=_lifecycle_callback,
+        )
+
+        assert client is not None
+        assert captured == [
+            (
+                "started",
+                "analysis",
+                main_module.DASK_BACKEND_LOCAL_CLUSTER,
+                client,
+            )
+        ]
+
+    assert captured == [
+        (
+            "started",
+            "analysis",
+            main_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        ),
+        "retire_workers",
+        "shutdown",
+        (
+            "stopped",
+            "analysis",
+            main_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        ),
+    ]
+
+
+def test_configure_dask_backend_ignores_lifecycle_callback_failures(
+    monkeypatch,
+) -> None:
+    class _DummyClient:
+        dashboard_link = "http://127.0.0.1:8787/status"
+
+        def shutdown(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def _fake_create_dask_client(**kwargs):
+        del kwargs
+        return _DummyClient()
+
+    def _raising_callback(
+        event: str,
+        workload: str,
+        backend_mode: str,
+        client: object,
+    ) -> None:
+        del event, workload, backend_mode, client
+        raise RuntimeError("callback boom")
+
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        dask_backend=DaskBackendConfig(
+            local_cluster=LocalClusterConfig(
+                n_workers=2,
+                threads_per_worker=1,
+                memory_limit="8GB",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(main_module, "create_dask_client", _fake_create_dask_client)
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.configure_lifecycle_best_effort"),
+            exit_stack=stack,
+            workload="analysis",
+            dask_client_lifecycle_callback=_raising_callback,
+        )
+
+        assert client is not None
+
+
+def test_configure_dask_backend_slurm_runner_closes_client_on_wait_failure(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+
+    class _FakeRunner:
+        def __init__(self, *, scheduler_file: str) -> None:
+            events.append(("runner_init", scheduler_file))
+            self.n_workers = 1
+
+        def __enter__(self):
+            events.append("runner_enter")
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            events.append("runner_exit")
+
+    class _FakeClient:
+        def __init__(self, runner) -> None:
+            events.append(("client_init", runner))
+
+        def wait_for_workers(self, count: int) -> None:
+            events.append(("wait_for_workers", count))
+            raise RuntimeError("worker wait failed")
+
+        def close(self) -> None:
+            events.append("client_close")
+
+    fake_dask = ModuleType("dask")
+    fake_distributed = ModuleType("dask.distributed")
+    fake_distributed.Client = _FakeClient
+    fake_dask.distributed = fake_distributed
+    fake_jobqueue = ModuleType("dask_jobqueue")
+    fake_slurm = ModuleType("dask_jobqueue.slurm")
+    fake_slurm.SLURMRunner = _FakeRunner
+    fake_jobqueue.slurm = fake_slurm
+
+    monkeypatch.setitem(sys.modules, "dask", fake_dask)
+    monkeypatch.setitem(sys.modules, "dask.distributed", fake_distributed)
+    monkeypatch.setitem(sys.modules, "dask_jobqueue", fake_jobqueue)
+    monkeypatch.setitem(sys.modules, "dask_jobqueue.slurm", fake_slurm)
+
+    default_backend = DaskBackendConfig()
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        dask_backend=replace(
+            default_backend,
+            mode=main_module.DASK_BACKEND_SLURM_RUNNER,
+            slurm_runner=replace(
+                default_backend.slurm_runner,
+                scheduler_file="/tmp/scheduler.json",
+                wait_for_workers=1,
+            ),
+        ),
+    )
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=_test_logger("clearex.test.main.slurm_runner_wait_failure"),
+            exit_stack=stack,
+            workload="analysis",
+        )
+
+        assert client is None
+
+    assert events[0] == ("runner_init", "/tmp/scheduler.json")
+    assert events[1] == "runner_enter"
+    assert isinstance(events[2], tuple)
+    assert events[2][0] == "client_init"
+    assert events[3] == ("wait_for_workers", 1)
+    assert events[4] == "client_close"
+    assert events[5] == "runner_exit"
 
 
 def test_close_dask_client_prefers_shutdown_for_local_clusters() -> None:
@@ -489,6 +697,77 @@ def test_run_workflow_compile_movie_only_skips_analysis_dask_startup(
     )
 
     assert workloads == []
+
+
+def test_run_workflow_propagates_lifecycle_callback_to_analysis_backend(
+    monkeypatch,
+) -> None:
+    forwarded: list[tuple[str, str, str, object]] = []
+
+    def _lifecycle_callback(
+        event: str,
+        workload: str,
+        backend_mode: str,
+        client: object,
+    ) -> None:
+        forwarded.append((event, workload, backend_mode, client))
+
+    class _DummyClient:
+        dashboard_link = "http://127.0.0.1:8787/status"
+
+        def close(self) -> None:
+            return None
+
+    def _fake_configure_dask_backend(
+        *,
+        workflow,
+        logger,
+        exit_stack,
+        workload="io",
+        dask_client_lifecycle_callback=None,
+    ):
+        del workflow, logger, exit_stack
+        if workload == "analysis" and dask_client_lifecycle_callback is not None:
+            client = _DummyClient()
+            dask_client_lifecycle_callback(
+                "started",
+                workload,
+                main_module.DASK_BACKEND_LOCAL_CLUSTER,
+                client,
+            )
+            dask_client_lifecycle_callback(
+                "stopped",
+                workload,
+                main_module.DASK_BACKEND_LOCAL_CLUSTER,
+                client,
+            )
+            return client
+        return None
+
+    monkeypatch.setattr(
+        main_module, "_configure_dask_backend", _fake_configure_dask_backend
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_analysis_execution_requires_dask_client",
+        lambda sequence: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "resolve_analysis_execution_sequence",
+        lambda **kwargs: (),
+    )
+
+    workflow = WorkflowConfig(file=None, prefer_dask=True)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.workflow_lifecycle"),
+        dask_client_lifecycle_callback=_lifecycle_callback,
+    )
+
+    assert forwarded[0][:2] == ("started", "analysis")
+    assert forwarded[1][:2] == ("stopped", "analysis")
 
 
 def test_run_workflow_threads_volume_export_through_sequence_and_provenance(

@@ -56,8 +56,13 @@ This folder owns the PyQt6 UX in `app.py`.
     close, and run so reopening a store restores the previous GUI state
   - Left: operation selection, execution order, and `Configure` buttons
   - Right: operation parameter panels + parameter-help panel
-  - Analysis execution progress dialog includes a themed `Stop Analysis`
-    button that requests cooperative cancellation
+  - Analysis execution progress dialog includes themed `Open Dask Dashboard`
+    and `Stop Analysis` buttons
+    - dashboard launch is available only while the current run owns a live
+      ClearEx-managed analysis client
+    - relay startup failures show a warning and do not fall back to the raw
+      scheduler dashboard URL
+    - `Stop Analysis` still requests cooperative cancellation
 
 ## Analysis Dialog Invariants
 
