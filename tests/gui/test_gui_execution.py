@@ -1001,8 +1001,9 @@ def test_dask_dialog_keeps_footer_outside_scroll_area(monkeypatch) -> None:
     assert scroll is not None
     scroll_widget = scroll.widget()
     assert scroll_widget is not None
-    footer_frame = dialog.findChild(app_module.QFrame, "analysisFooterCard")
-    assert footer_frame is not None
+    footer_frames = dialog.findChildren(app_module.QFrame, "analysisFooterCard")
+    assert len(footer_frames) == 1
+    footer_frame = footer_frames[0]
 
     assert footer_frame.parentWidget() is dialog
     assert footer_frame.parentWidget() is not scroll_widget
@@ -1010,9 +1011,17 @@ def test_dask_dialog_keeps_footer_outside_scroll_area(monkeypatch) -> None:
     assert dialog._cancel_button.parentWidget() is footer_frame
     assert dialog._apply_button.parentWidget() is footer_frame
 
+    initial_footer_geometry = footer_frame.geometry()
+    assert initial_footer_geometry.top() >= 0
+    assert initial_footer_geometry.bottom() <= dialog.rect().bottom()
+
     scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
     app.processEvents()
 
+    assert footer_frame.isVisible()
+    assert footer_frame.geometry() == initial_footer_geometry
+    assert footer_frame.geometry().top() >= 0
+    assert footer_frame.geometry().bottom() <= dialog.rect().bottom()
     assert dialog._apply_button.isVisible()
     assert dialog._apply_button.geometry().height() >= 36
 
