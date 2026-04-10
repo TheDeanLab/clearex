@@ -63,6 +63,7 @@ from .spacing import (
     apply_stack_spacing,
     apply_window_root_spacing,
 )
+from .dask_dashboard_proxy import DashboardRelayManager
 from clearex.io.ome_store import (
     analysis_auxiliary_root,
     resolve_voxel_size_um_zyx_with_source,
@@ -870,6 +871,29 @@ def _display_is_available() -> bool:
     if sys.platform == "darwin":
         return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+_DASHBOARD_RELAY_MANAGER: Optional[DashboardRelayManager] = None
+
+
+def get_dashboard_relay_manager() -> DashboardRelayManager:
+    """Return the shared GUI dashboard relay manager singleton."""
+    global _DASHBOARD_RELAY_MANAGER
+    if _DASHBOARD_RELAY_MANAGER is None:
+        _DASHBOARD_RELAY_MANAGER = DashboardRelayManager()
+    return _DASHBOARD_RELAY_MANAGER
+
+
+def _shutdown_dashboard_relay_manager() -> None:
+    """Shut down the shared GUI dashboard relay manager."""
+    global _DASHBOARD_RELAY_MANAGER
+    manager = _DASHBOARD_RELAY_MANAGER
+    if manager is None:
+        return
+    try:
+        manager.shutdown()
+    finally:
+        _DASHBOARD_RELAY_MANAGER = None
 
 
 def _resolve_clearex_settings_directory() -> Path:
@@ -4883,6 +4907,7 @@ if HAS_PYQT6:
         """
 
         cancel_requested = pyqtSignal()
+        dashboard_requested = pyqtSignal()
 
         def __init__(self, parent: Optional[QDialog] = None) -> None:
             """Initialize analysis progress dialog widgets.
@@ -4923,6 +4948,12 @@ if HAS_PYQT6:
             button_row = QHBoxLayout()
             apply_footer_row_spacing(button_row)
             button_row.addStretch(1)
+            self._dashboard_button = QPushButton("Open Dask Dashboard")
+            self._dashboard_button.setEnabled(False)
+            self._dashboard_button.clicked.connect(
+                lambda: self.dashboard_requested.emit()
+            )
+            button_row.addWidget(self._dashboard_button)
             self._stop_button = QPushButton("Stop Analysis")
             self._stop_button.clicked.connect(self._on_cancel_requested)
             button_row.addWidget(self._stop_button)
@@ -4982,6 +5013,7 @@ if HAS_PYQT6:
                 preferred_size=_ANALYSIS_PROGRESS_DIALOG_PREFERRED_SIZE,
                 content_size_hint=(self.sizeHint().width(), self.sizeHint().height()),
             )
+            self.set_dashboard_available(False)
 
         def _on_cancel_requested(self) -> None:
             """Request cooperative cancellation of analysis execution.
@@ -5016,6 +5048,23 @@ if HAS_PYQT6:
             """
             self._progress.setValue(max(0, min(100, int(percent))))
             self._message_label.setText(str(message))
+
+        def set_dashboard_available(
+            self, available: bool, tooltip: Optional[str] = None
+        ) -> None:
+            """Update dashboard button availability and tooltip text."""
+            self._dashboard_button.setEnabled(bool(available))
+            if available:
+                self._dashboard_button.setToolTip(
+                    str(tooltip or "Open the local Dask dashboard relay.")
+                )
+            else:
+                self._dashboard_button.setToolTip(
+                    str(
+                        tooltip
+                        or "The Dask dashboard becomes available when an analysis client is active."
+                    )
+                )
 
     class ClearExSetupDialog(QDialog):
         """First-step GUI dialog for experiment setup and store readiness."""
@@ -8247,6 +8296,7 @@ if HAS_PYQT6:
             self._visualization_layer_table_button: Optional[QPushButton] = None
             self._visualization_layer_table_summary_label: Optional[QLabel] = None
             self._local_gpu_available = self._detect_local_gpu_available()
+            self._dashboard_relay_manager = get_dashboard_relay_manager()
 
             self._build_ui()
             self._apply_theme()
@@ -14080,20 +14130,22 @@ if HAS_PYQT6:
             """
             if self._dask_dashboard_button is None:
                 return
-
-            dashboard_url = self._resolve_dask_dashboard_url()
-            if dashboard_url is None:
+            available = self._dashboard_relay_manager.has_available_client(
+                workload="analysis"
+            )
+            if available:
+                self._dask_dashboard_button.setEnabled(True)
+                self._dask_dashboard_button.setToolTip(
+                    "Open the local Dask dashboard relay for analysis clients."
+                )
+            else:
                 self._dask_dashboard_button.setEnabled(False)
                 self._dask_dashboard_button.setToolTip(
-                    "Dashboard URL unavailable for the current backend settings."
+                    "No active analysis Dask client is registered."
                 )
-                return
-
-            self._dask_dashboard_button.setEnabled(True)
-            self._dask_dashboard_button.setToolTip(f"Open {dashboard_url}")
 
         def _on_open_dask_dashboard(self) -> None:
-            """Open the configured Dask dashboard URL in a web browser.
+            """Open the local relay URL for the analysis dashboard in a browser.
 
             Parameters
             ----------
@@ -14109,16 +14161,17 @@ if HAS_PYQT6:
             None
                 Launch errors are handled via GUI warnings.
             """
-            dashboard_url = self._resolve_dask_dashboard_url()
-            if dashboard_url is None:
-                QMessageBox.information(
+            try:
+                dashboard_url = self._dashboard_relay_manager.open_dashboard(
+                    workload="analysis"
+                )
+            except Exception as exc:
+                QMessageBox.warning(
                     self,
-                    "Dashboard URL Unavailable",
-                    "Could not determine a dashboard URL from current Dask backend settings.",
+                    "Dashboard Launch Failed",
+                    f"Could not open the dashboard relay.\n\n{exc}",
                 )
-                self._set_status(
-                    "Dashboard URL unavailable for current backend settings."
-                )
+                self._set_status("Failed to launch the Dask dashboard browser tab.")
                 return
 
             try:
@@ -17608,6 +17661,7 @@ def launch_gui(
     if app is None:
         app = QApplication(sys.argv)
     _apply_application_icon(app)
+    get_dashboard_relay_manager()
 
     _show_startup_splash(app)
 
@@ -17654,6 +17708,7 @@ def launch_gui(
 
     if owns_app:
         app.quit()
+        _shutdown_dashboard_relay_manager()
     return selected
 
 
@@ -17938,24 +17993,30 @@ def run_workflow_with_progress(
     if app is None:
         app = QApplication(sys.argv)
     _apply_application_icon(app)
+    logger = logging.getLogger(__name__)
 
     scoped_workflows = _workflows_for_selected_analysis_scope(workflow)
     execution_workflow = scoped_workflows[0]
-    effective_run_callback = run_callback
+    relay_lifecycle_callback: Optional[DaskClientLifecycleCallback] = None
 
     def _invoke_run_callback(
         workflow: WorkflowConfig,
         progress_callback: Callable[[int, str], None],
+        dask_client_lifecycle_callback: Optional[
+            DaskClientLifecycleCallback
+        ] = None,
     ) -> None:
-        if dask_client_lifecycle_callback is None:
+        lifecycle_callback = (
+            relay_lifecycle_callback
+            if relay_lifecycle_callback is not None
+            else dask_client_lifecycle_callback
+        )
+        if lifecycle_callback is None:
             run_callback(workflow, progress_callback)
         else:
-            run_callback(
-                workflow,
-                progress_callback,
-                dask_client_lifecycle_callback,
-            )
+            run_callback(workflow, progress_callback, lifecycle_callback)
 
+    effective_run_callback = _invoke_run_callback
     if len(scoped_workflows) > 1:
 
         def _batch_run_callback(
@@ -17980,19 +18041,7 @@ def run_workflow_with_progress(
                 Side-effect execution only.
             """
             del _workflow
-            if dask_client_lifecycle_callback is None:
-                callback = _invoke_run_callback
-            else:
-
-                def callback(
-                    workflow: WorkflowConfig,
-                    inner_progress_callback: Callable[[int, str], None],
-                ) -> None:
-                    run_callback(
-                        workflow,
-                        inner_progress_callback,
-                        dask_client_lifecycle_callback,
-                    )
+            callback = _invoke_run_callback
 
             total = len(scoped_workflows)
             for index, target_workflow in enumerate(scoped_workflows):
@@ -18056,6 +18105,126 @@ def run_workflow_with_progress(
     if cancel_signal is not None:
         cancel_signal.connect(_request_cancel)
 
+    relay_manager = get_dashboard_relay_manager()
+    active_analysis_client_ids: dict[int, str] = {}
+
+    def _set_progress_dashboard_available() -> None:
+        """Sync the progress dialog dashboard button to relay availability."""
+        setter = getattr(progress_dialog, "set_dashboard_available", None)
+        if not callable(setter):
+            return
+        if active_analysis_client_ids:
+            setter(
+                True,
+                "Open the local Dask dashboard relay for analysis clients.",
+            )
+        else:
+            setter(False, "No active analysis Dask client is registered.")
+
+    def _open_dashboard_from_relay() -> None:
+        """Open the local relay URL for the active analysis dashboard."""
+        try:
+            dashboard_url = relay_manager.open_dashboard(workload="analysis")
+        except Exception as exc:
+            QMessageBox.warning(
+                progress_dialog,
+                "Dashboard Launch Failed",
+                f"Could not open the dashboard relay.\n\n{exc}",
+            )
+            return
+
+        try:
+            opened = bool(webbrowser.open_new_tab(dashboard_url))
+        except Exception as exc:
+            QMessageBox.warning(
+                progress_dialog,
+                "Dashboard Launch Failed",
+                f"Could not open dashboard URL.\n\n{exc}",
+            )
+            return
+
+        if not opened:
+            QMessageBox.warning(
+                progress_dialog,
+                "Dashboard Launch Failed",
+                f"Browser did not confirm opening:\n{dashboard_url}",
+            )
+
+    def _relay_client_lifecycle_callback(
+        event: str,
+        workload: str,
+        backend_mode: str,
+        client: object,
+    ) -> None:
+        """Track analysis client lifecycle and forward user callbacks."""
+        normalized_event = str(event).strip().lower()
+        normalized_workload = str(workload).strip().lower()
+        client_key = id(client)
+        if normalized_workload == "analysis":
+            if normalized_event == "started":
+                try:
+                    registered_client_id = relay_manager.register_client(
+                        workload=workload,
+                        backend_mode=backend_mode,
+                        client=client,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to register analysis dashboard relay client: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    active_analysis_client_ids.pop(client_key, None)
+                else:
+                    active_analysis_client_ids[client_key] = registered_client_id
+            elif normalized_event == "stopped":
+                registered_client_id = active_analysis_client_ids.pop(
+                    client_key, None
+                )
+                if registered_client_id is not None:
+                    try:
+                        relay_manager.unregister_client(registered_client_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to unregister analysis dashboard relay client: %s: %s",
+                            type(exc).__name__,
+                            exc,
+                        )
+        _set_progress_dashboard_available()
+        if dask_client_lifecycle_callback is not None:
+            try:
+                dask_client_lifecycle_callback(event, workload, backend_mode, client)
+            except Exception as exc:
+                logger.warning(
+                    "Dask client lifecycle callback failed during %s "
+                    "(workload=%s, backend=%s): %s: %s",
+                    event,
+                    normalized_workload,
+                    backend_mode,
+                    type(exc).__name__,
+                    exc,
+                )
+
+    relay_lifecycle_callback = _relay_client_lifecycle_callback
+    dashboard_requested_signal = getattr(progress_dialog, "dashboard_requested", None)
+    if dashboard_requested_signal is not None:
+        dashboard_requested_signal.connect(_open_dashboard_from_relay)
+    _set_progress_dashboard_available()
+
+    def _cleanup_dashboard_relay_clients() -> None:
+        """Best-effort unregister any active analysis relay clients."""
+        for client_id in list(active_analysis_client_ids.values()):
+            try:
+                relay_manager.unregister_client(client_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to unregister active analysis relay client during cleanup: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+        active_analysis_client_ids.clear()
+        _set_progress_dashboard_available()
+
     use_main_thread_execution = execution_workflow.dask_backend.mode in {
         DASK_BACKEND_SLURM_RUNNER,
         DASK_BACKEND_SLURM_CLUSTER,
@@ -18094,14 +18263,11 @@ def run_workflow_with_progress(
                 )
             else:
                 _progress_with_events(1, "Starting analysis workflow...")
-            if dask_client_lifecycle_callback is None:
-                effective_run_callback(execution_workflow, _progress_with_events)
-            else:
-                effective_run_callback(
-                    execution_workflow,
-                    _progress_with_events,
-                    dask_client_lifecycle_callback,
-                )
+            effective_run_callback(
+                execution_workflow,
+                _progress_with_events,
+                relay_lifecycle_callback,
+            )
             if len(scoped_workflows) == 1:
                 _progress_with_events(100, "Analysis workflow completed.")
             completed["ok"] = True
@@ -18123,7 +18289,7 @@ def run_workflow_with_progress(
         worker = AnalysisExecutionWorker(
             workflow=execution_workflow,
             run_callback=effective_run_callback,
-            dask_client_lifecycle_callback=dask_client_lifecycle_callback,
+            dask_client_lifecycle_callback=relay_lifecycle_callback,
         )
         worker.progress_changed.connect(progress_dialog.update_progress)
         worker.succeeded.connect(lambda: completed.__setitem__("ok", True))
@@ -18145,6 +18311,7 @@ def run_workflow_with_progress(
         progress_dialog.exec()
         worker.wait()
 
+    _cleanup_dashboard_relay_clients()
     if failure_payload:
         _show_themed_error_dialog(
             progress_dialog,
@@ -18155,12 +18322,15 @@ def run_workflow_with_progress(
         )
         if owns_app:
             app.quit()
+            _shutdown_dashboard_relay_manager()
         return False
     if cancellation_payload:
         if owns_app:
             app.quit()
+            _shutdown_dashboard_relay_manager()
         return False
 
     if owns_app:
         app.quit()
+        _shutdown_dashboard_relay_manager()
     return bool(completed["ok"])
