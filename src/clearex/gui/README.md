@@ -56,6 +56,11 @@ This folder owns the PyQt6 UX in `app.py`.
     close, and run so reopening a store restores the previous GUI state
   - Left: operation selection, execution order, and `Configure` buttons
   - Right: operation parameter panels + parameter-help panel
+  - `Edit Dask Backend` popup:
+    - only the backend settings body scrolls
+    - `Reset Defaults`, `Cancel`, and `Apply` stay visible in a fixed bottom footer
+    - a fixed `Parameter Help` card appears below the scroll area when a backend control is hovered or focused
+    - help text is written in plain language for non-expert users
   - Analysis execution progress dialog includes themed `Open Dask Dashboard`
     and `Stop Analysis` buttons
     - dashboard launch is available only while the current run owns a live
