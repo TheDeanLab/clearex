@@ -18078,7 +18078,14 @@ def run_workflow_with_progress(
                 )
             else:
                 _progress_with_events(1, "Starting analysis workflow...")
-            _invoke_run_callback(execution_workflow, _progress_with_events)
+            if dask_client_lifecycle_callback is None:
+                effective_run_callback(execution_workflow, _progress_with_events)
+            else:
+                effective_run_callback(
+                    execution_workflow,
+                    _progress_with_events,
+                    dask_client_lifecycle_callback,
+                )
             if len(scoped_workflows) == 1:
                 _progress_with_events(100, "Analysis workflow completed.")
             completed["ok"] = True
