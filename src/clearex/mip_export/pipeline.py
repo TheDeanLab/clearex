@@ -489,6 +489,26 @@ def _resample_axis_linear_to_uint16(
         dst_moved[...] = dst_flat.reshape(dst_moved.shape)
 
 
+def _realized_tiff_axes(
+    *,
+    axes: tuple[str, ...],
+    realized_ndim: int,
+) -> tuple[str, ...]:
+    """Align symbolic output axes to the rank realized by ``tifffile``.
+
+    ``tifffile.memmap(...)`` can squeeze leading singleton non-spatial axes
+    from OME-TIFF outputs. This occurs for ``multi_position`` exports when the
+    leading ``p`` axis has length ``1``, so a planned ``(p, z, x)`` output is
+    reopened as a 2D ``(z, x)`` array. Resampling must target the realized
+    ``z`` axis, not the squeezed-out symbolic index.
+    """
+    labels = tuple(str(axis).strip().lower() for axis in axes)
+    ndim = max(0, int(realized_ndim))
+    if len(labels) <= ndim:
+        return labels
+    return labels[-ndim:]
+
+
 def _resample_tiff_projection_z_axis_if_needed(
     *,
     output_path: Path,
@@ -528,7 +548,6 @@ def _resample_tiff_projection_z_axis_if_needed(
     if "z" not in labels:
         return effective_voxel_size_um_zyx
 
-    z_axis_index = int(labels.index("z"))
     source_z_um = float(voxel_size_um_zyx[0])
     target_z_um = float(effective_voxel_size_um_zyx[0])
     if np.isclose(source_z_um, target_z_um, rtol=1e-6, atol=1e-6):
@@ -538,17 +557,22 @@ def _resample_tiff_projection_z_axis_if_needed(
     temp_path = output_path.with_name(f"{output_path.name}.tmp_resample.tif")
     try:
         source_shape = tuple(int(v) for v in np.asarray(source).shape)
+        realized_axes = _realized_tiff_axes(
+            axes=tuple(str(axis) for axis in axes),
+            realized_ndim=len(source_shape),
+        )
+        realized_z_axis_index = int(realized_axes.index("z"))
         output_z_len = _resampled_axis_length(
-            axis_length=int(source_shape[z_axis_index]),
+            axis_length=int(source_shape[int(realized_z_axis_index)]),
             source_spacing_um=float(source_z_um),
             target_spacing_um=float(target_z_um),
         )
-        if output_z_len == int(source_shape[z_axis_index]):
+        if output_z_len == int(source_shape[int(realized_z_axis_index)]):
             del source
             return effective_voxel_size_um_zyx
 
         output_shape = list(source_shape)
-        output_shape[z_axis_index] = int(output_z_len)
+        output_shape[int(realized_z_axis_index)] = int(output_z_len)
         if temp_path.exists():
             temp_path.unlink()
         target = tifffile.memmap(
@@ -560,7 +584,7 @@ def _resample_tiff_projection_z_axis_if_needed(
             ome=True,
             metadata=_ome_metadata_for_projection_output(
                 output_shape=tuple(int(v) for v in output_shape),
-                axes=tuple(str(axis) for axis in axes),
+                axes=tuple(str(axis) for axis in realized_axes),
                 voxel_size_um_zyx=tuple(float(v) for v in effective_voxel_size_um_zyx),
                 image_name=str(output_path.stem),
             ),
@@ -569,7 +593,7 @@ def _resample_tiff_projection_z_axis_if_needed(
             _resample_axis_linear_to_uint16(
                 source=np.asarray(source),
                 destination=target,
-                axis=int(z_axis_index),
+                axis=int(realized_z_axis_index),
             )
             target.flush()
         finally:
