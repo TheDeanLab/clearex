@@ -14,6 +14,7 @@ from clearex.visualization import (
     VolumeExportSummary,
     run_volume_export_analysis as lazy_run_volume_export_analysis,
 )
+from clearex.visualization import volume_export as volume_export_module
 from clearex.visualization.volume_export import run_volume_export_analysis
 
 
@@ -137,6 +138,73 @@ def test_run_volume_export_analysis_writes_current_selection_cache_and_publishab
     ]
     assert isinstance(published, zarr.Array)
     assert published.shape == (1, 1, 3, 4, 5)
+
+
+def test_run_volume_export_analysis_uses_client_for_generated_levels_and_cache_write(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store_path = tmp_path / "analysis_store_client.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(
+        2 * 2 * 2 * 3 * 4 * 5,
+        dtype=np.uint16,
+    ).reshape((2, 2, 2, 3, 4, 5))
+    _write_source_cache_volume(root, data)
+
+    store_calls: list[dict[str, Any]] = []
+
+    def _fake_store(source, target, *, lock=False, compute=True):
+        del lock
+        store_calls.append(
+            {
+                "compute": bool(compute),
+                "source_shape": tuple(int(v) for v in source.shape),
+                "target_shape": tuple(int(v) for v in target.shape),
+            }
+        )
+        if compute:
+            raise AssertionError(
+                "volume_export should defer Dask store execution to the provided client"
+            )
+        return {
+            "source_shape": tuple(int(v) for v in source.shape),
+            "target_shape": tuple(int(v) for v in target.shape),
+        }
+
+    monkeypatch.setattr(volume_export_module.da, "store", _fake_store)
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.compute_calls: list[Any] = []
+            self.gather_calls: list[Any] = []
+
+        def compute(self, graph: Any) -> dict[str, Any]:
+            self.compute_calls.append(graph)
+            return {"future": len(self.compute_calls), "graph": graph}
+
+        def gather(self, futures: Any) -> Any:
+            self.gather_calls.append(futures)
+            return futures
+
+    client = _FakeClient()
+
+    summary = run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "all_indices",
+            "resolution_level": 1,
+            "export_format": "ome-zarr",
+        },
+        client=client,
+    )
+
+    assert isinstance(summary, VolumeExportSummary)
+    assert summary.generated_resolution_level is True
+    assert [call["compute"] for call in store_calls] == [False, False]
+    assert len(client.compute_calls) == 2
+    assert len(client.gather_calls) == 2
 
 
 def test_run_volume_export_analysis_writes_current_selection_ome_tiff_with_calibration(

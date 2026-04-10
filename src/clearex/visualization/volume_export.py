@@ -6,6 +6,7 @@ from typing import Any, Callable, Mapping, Optional
 import json
 import shutil
 
+import dask
 import dask.array as da
 import numpy as np
 import tifffile
@@ -93,6 +94,7 @@ def _generate_missing_volume_export_resolution_components(
     root: zarr.Group,
     source_component: str,
     resolution_level: int,
+    client: Optional[Any] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> tuple[str, bool]:
     """Materialize missing source-adjacent levels up to ``resolution_level``."""
@@ -194,7 +196,8 @@ def _generate_missing_volume_export_resolution_components(
                 overwrite=True,
                 dimension_names=_AXES_TPCZYX,
             )
-            da.store(downsampled, target, lock=False, compute=True)
+            write_graph = da.store(downsampled, target, lock=False, compute=False)
+            _compute_dask_graph(write_graph, client=client)
         root[target_component].attrs.update(
             {
                 "axes": list(_AXES_TPCZYX),
@@ -233,6 +236,15 @@ def _generate_missing_volume_export_resolution_components(
     legacy_component_map[str(source_component)] = [str(item) for item in level_paths]
     root.attrs[_LEGACY_DISPLAY_PYRAMID_ROOT_MAP_ATTR] = legacy_component_map
     return str(level_paths[int(resolution_level)]), True
+
+
+def _compute_dask_graph(graph: Any, *, client: Optional[Any] = None) -> None:
+    """Execute one Dask graph via a configured client or local scheduler."""
+    if client is None:
+        dask.compute(graph, scheduler="threads")
+        return
+    futures = client.compute(graph)
+    client.gather(futures)
 
 
 def _resolve_volume_export_voxel_size_um_zyx(
@@ -344,6 +356,7 @@ def _resolve_volume_export_resolution_component(
     root: zarr.Group,
     source_component: str,
     resolution_level: int,
+    client: Optional[Any] = None,
     progress_callback: Optional[ProgressCallback] = None,
     run_id: Optional[str] = None,
 ) -> tuple[str, bool]:
@@ -364,6 +377,7 @@ def _resolve_volume_export_resolution_component(
         root=root,
         source_component=source_component,
         resolution_level=level_index,
+        client=client,
         progress_callback=progress_callback,
     )
 
@@ -541,7 +555,6 @@ def run_volume_export_analysis(
     run_id: Optional[str] = None,
 ) -> VolumeExportSummary:
     """Export the resolved source component into the runtime-cache volume."""
-    del client
     _emit(progress_callback, 0, "Normalizing volume export parameters")
     normalized = dict(
         normalize_analysis_operation_parameters({"volume_export": dict(parameters)})[
@@ -594,6 +607,7 @@ def run_volume_export_analysis(
             root=root,
             source_component=source_component,
             resolution_level=resolution_level,
+            client=client,
             progress_callback=progress_callback,
             run_id=run_id,
         )
@@ -683,7 +697,8 @@ def run_volume_export_analysis(
         dimension_names=_AXES_TPCZYX,
     )
 
-    da.store(export_array, target, lock=False, compute=True)
+    write_graph = da.store(export_array, target, lock=False, compute=False)
+    _compute_dask_graph(write_graph, client=client)
 
     voxel_size_um_zyx, voxel_size_source = _resolve_volume_export_voxel_size_um_zyx(
         root=root,

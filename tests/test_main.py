@@ -1784,6 +1784,84 @@ def test_run_workflow_dispatches_volume_export_and_publishes_collection(
     assert published["analysis_name"] == "volume_export"
 
 
+def test_run_workflow_starts_analysis_backend_for_volume_export(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_volume_export_dask.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name=main_module.SOURCE_CACHE_COMPONENT,
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        volume_export=True,
+        analysis_parameters={
+            "volume_export": {
+                "input_source": "data",
+                "export_scope": "current_selection",
+                "t_index": 0,
+                "p_index": 0,
+                "c_index": 0,
+                "resolution_level": 0,
+                "export_format": "ome-zarr",
+                "tiff_file_layout": "single_file",
+            }
+        },
+    )
+
+    workloads: list[str] = []
+    analysis_client = object()
+    seen: dict[str, object | None] = {"client": None}
+
+    def _fake_configure_backend(*, workflow, logger, exit_stack, workload="io"):
+        del workflow, logger, exit_stack
+        workloads.append(str(workload))
+        if workload == "analysis":
+            return analysis_client
+        return None
+
+    def _fake_volume_export(
+        *, zarr_path, parameters, progress_callback, run_id=None, client=None
+    ):
+        del zarr_path, parameters, progress_callback, run_id
+        seen["client"] = client
+        return SimpleNamespace(
+            component=main_module.analysis_auxiliary_root("volume_export"),
+            data_component="clearex/runtime_cache/results/volume_export/latest/data",
+            source_component=main_module.SOURCE_CACHE_COMPONENT,
+            resolved_resolution_component=main_module.SOURCE_CACHE_COMPONENT,
+            export_scope="current_selection",
+            resolution_level=0,
+            generated_resolution_level=False,
+            export_format="ome-zarr",
+            tiff_file_layout="single_file",
+            artifact_paths=(),
+        )
+
+    monkeypatch.setattr(main_module, "_configure_dask_backend", _fake_configure_backend)
+    monkeypatch.setattr(main_module, "run_volume_export_analysis", _fake_volume_export)
+    monkeypatch.setattr(
+        main_module,
+        "publish_analysis_collection_from_cache",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+    monkeypatch.setattr(main_module, "is_legacy_clearex_store", lambda path: False)
+
+    main_module._run_workflow(
+        workflow=workflow,
+        logger=_test_logger("clearex.test.main.volume_export_analysis_client"),
+    )
+
+    assert workloads == ["analysis"]
+    assert seen["client"] is analysis_client
+
+
 def test_run_workflow_dispatches_volume_export_tiff_without_public_publish(
     tmp_path: Path, monkeypatch
 ) -> None:

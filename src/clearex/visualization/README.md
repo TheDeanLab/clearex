@@ -387,6 +387,9 @@ image-producing source component.
   the selected source.
 - `resolution_level` reuses discovered source-adjacent pyramid levels when
   available and can generate deeper missing levels during export.
+- When an analysis Dask backend is active, missing-level generation and the
+  exported runtime-cache write execute through that client instead of the local
+  scheduler.
 
 ### Parameter reference
 

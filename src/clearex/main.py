@@ -221,6 +221,7 @@ _ANALYSIS_OPERATIONS_REQUIRING_DASK_CLIENT = frozenset(
         "registration",
         "fusion",
         "display_pyramid",
+        "volume_export",
         "mip_export",
     }
 )
