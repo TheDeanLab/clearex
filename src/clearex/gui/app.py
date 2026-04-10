@@ -17537,9 +17537,7 @@ if HAS_PYQT6:
 def launch_gui(
     initial: Optional[WorkflowConfig] = None,
     run_callback: Optional[GuiRunCallback] = None,
-    dask_client_lifecycle_callback: Optional[
-        DaskClientLifecycleCallback
-    ] = None,
+    dask_client_lifecycle_callback: Optional[DaskClientLifecycleCallback] = None,
 ) -> Optional[WorkflowConfig]:
     """Launch the PyQt GUI for workflow selection/execution.
 
