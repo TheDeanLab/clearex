@@ -1328,16 +1328,37 @@ def _run_workflow(
     runtime_spatial_calibration = workflow.spatial_calibration
     run_id: Optional[str] = None
 
+    def _configure_backend(
+        *,
+        workflow: WorkflowConfig,
+        logger: logging.Logger,
+        exit_stack: ExitStack,
+        workload: str,
+    ) -> Optional[Any]:
+        if dask_client_lifecycle_callback is None:
+            return _configure_dask_backend(
+                workflow=workflow,
+                logger=logger,
+                exit_stack=exit_stack,
+                workload=workload,
+            )
+        return _configure_dask_backend(
+            workflow=workflow,
+            logger=logger,
+            exit_stack=exit_stack,
+            workload=workload,
+            dask_client_lifecycle_callback=dask_client_lifecycle_callback,
+        )
+
     if workflow.file:
         is_experiment_input = is_navigate_experiment_file(workflow.file)
         with ExitStack() as io_stack:
             io_client = (
-                _configure_dask_backend(
+                _configure_backend(
                     workflow=workflow,
                     logger=logger,
                     exit_stack=io_stack,
                     workload="io",
-                    dask_client_lifecycle_callback=dask_client_lifecycle_callback,
                 )
                 if is_experiment_input
                 else None
@@ -1562,12 +1583,11 @@ def _run_workflow(
             _emit_analysis_progress(100, str(first_issue.message))
 
         analysis_client = (
-            _configure_dask_backend(
+            _configure_backend(
                 workflow=workflow,
                 logger=logger,
                 exit_stack=analysis_stack,
                 workload="analysis",
-                dask_client_lifecycle_callback=dask_client_lifecycle_callback,
             )
             if failure_exc is None
             and _analysis_execution_requires_dask_client(execution_sequence)

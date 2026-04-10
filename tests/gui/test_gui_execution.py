@@ -2174,6 +2174,7 @@ def test_launch_gui_persists_reset_state_after_successful_run(
         },
     )
     captured: dict[str, app_module.WorkflowConfig] = {}
+    lifecycle_callback = object()
 
     class _FakeApplication:
         _instance = None
@@ -2259,7 +2260,13 @@ def test_launch_gui_persists_reset_state_after_successful_run(
     monkeypatch.setattr(
         app_module,
         "run_workflow_with_progress",
-        lambda workflow, run_callback, dask_client_lifecycle_callback=None: True,
+        lambda workflow, run_callback, dask_client_lifecycle_callback=None: (
+            captured.__setitem__(
+                "lifecycle_callback",
+                dask_client_lifecycle_callback,
+            )
+            or True
+        ),
     )
     monkeypatch.setattr(
         app_module,
@@ -2269,10 +2276,12 @@ def test_launch_gui_persists_reset_state_after_successful_run(
 
     result = app_module.launch_gui(
         initial=selected_workflow,
-        run_callback=lambda workflow, progress_callback: None,
+        run_callback=lambda workflow, progress_callback, dask_client_lifecycle_callback=None: None,
+        dask_client_lifecycle_callback=lifecycle_callback,
     )
 
     assert result is None
+    assert captured["lifecycle_callback"] is lifecycle_callback
     assert captured["reset_workflow"].flatfield is False
     assert captured["reset_workflow"].fusion is False
     assert (

@@ -17537,6 +17537,9 @@ if HAS_PYQT6:
 def launch_gui(
     initial: Optional[WorkflowConfig] = None,
     run_callback: Optional[GuiRunCallback] = None,
+    dask_client_lifecycle_callback: Optional[
+        DaskClientLifecycleCallback
+    ] = None,
 ) -> Optional[WorkflowConfig]:
     """Launch the PyQt GUI for workflow selection/execution.
 
@@ -17548,7 +17551,10 @@ def launch_gui(
         Optional execution callback. When provided, the GUI runs in iterative
         mode: after each analysis run, the analysis-selection dialog is shown
         again so the user can select the next task. Signature must be
-        ``(workflow, progress_callback)``.
+        ``(workflow, progress_callback, dask_client_lifecycle_callback=None)``.
+    dask_client_lifecycle_callback : callable, optional
+        Optional lifecycle callback forwarded into
+        :func:`run_workflow_with_progress` during iterative GUI execution.
 
     Returns
     -------
@@ -17630,6 +17636,7 @@ def launch_gui(
                 completed = run_workflow_with_progress(
                     workflow=current,
                     run_callback=run_callback,
+                    dask_client_lifecycle_callback=dask_client_lifecycle_callback,
                 )
                 if not completed:
                     continue
