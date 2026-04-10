@@ -3811,6 +3811,12 @@ if HAS_PYQT6:
             widget.setToolTip(message)
             widget.installEventFilter(self)
             self._parameter_help_map[widget] = str(message)
+            viewport_getter = getattr(widget, "viewport", None)
+            if callable(viewport_getter):
+                viewport = viewport_getter()
+                if isinstance(viewport, QWidget) and viewport is not widget:
+                    viewport.installEventFilter(self)
+                    self._parameter_help_map[viewport] = str(message)
 
         @staticmethod
         def _dask_backend_help_texts() -> Dict[str, str]:

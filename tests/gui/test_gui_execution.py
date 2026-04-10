@@ -1020,6 +1020,49 @@ def test_dask_dialog_parameter_help_shows_on_hover() -> None:
     dialog.close()
 
 
+def test_dask_dialog_parameter_help_shows_on_plain_text_viewport_hover() -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.DaskBackendConfigDialog(
+        initial=app_module.DaskBackendConfig(),
+        recommendation_shape_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_chunks_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_dtype_itemsize=2,
+    )
+    dialog.show()
+    app.processEvents()
+
+    dialog._mode_combo.setCurrentIndex(
+        dialog._mode_combo.findData(app_module.DASK_BACKEND_SLURM_CLUSTER)
+    )
+    app.processEvents()
+
+    viewport = dialog._cluster_directives_input.viewport()
+    enter_event = app_module.QEvent(app_module.QEvent.Type.Enter)
+    leave_event = app_module.QEvent(app_module.QEvent.Type.Leave)
+
+    app.sendEvent(viewport, enter_event)
+    app.processEvents()
+
+    assert dialog._parameter_help_card.isVisible()
+    assert "extra Slurm directives" in dialog._parameter_help_label.text()
+
+    dialog._apply_button.setFocus()
+    app.processEvents()
+
+    app.sendEvent(viewport, leave_event)
+    app.processEvents()
+
+    assert dialog._parameter_help_card.isHidden()
+
+    dialog.close()
+
+
 def test_dask_dialog_registers_plain_language_help_for_all_backend_modes() -> None:
     if not app_module.HAS_PYQT6:
         return
