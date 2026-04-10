@@ -3855,9 +3855,7 @@ if HAS_PYQT6:
                     "Set it to auto to skip waiting."
                 ),
                 "cluster_workers": "Request this many Slurm worker jobs.",
-                "cluster_cores": (
-                    "Set how many CPU cores each worker job should use."
-                ),
+                "cluster_cores": ("Set how many CPU cores each worker job should use."),
                 "cluster_processes": (
                     "Choose how many worker processes each job should start."
                 ),

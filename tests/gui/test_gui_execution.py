@@ -1101,9 +1101,10 @@ def test_dask_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
     app.processEvents()
 
-    assert dialog._parameter_help_card.mapTo(
-        dialog, app_module.QPoint(0, 0)
-    ) == help_origin
+    assert (
+        dialog._parameter_help_card.mapTo(dialog, app_module.QPoint(0, 0))
+        == help_origin
+    )
     assert dialog._parameter_help_card.size() == help_size
     assert help_origin.y() >= 0
     assert help_origin.y() + help_size.height() <= dialog.rect().bottom() + 1
