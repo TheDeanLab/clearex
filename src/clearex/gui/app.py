@@ -48,7 +48,6 @@ from typing import (
     Tuple,
     cast,
 )
-from urllib.parse import urlparse
 
 # Local Imports
 from .spacing import (
@@ -8206,7 +8205,6 @@ if HAS_PYQT6:
             self._status_label: Optional[QLabel] = None
             self._dask_backend_summary_label: Optional[QLabel] = None
             self._dask_backend_button: Optional[QPushButton] = None
-            self._dask_dashboard_button: Optional[QPushButton] = None
             self._parameter_help_default = (
                 "Hover over a parameter to see a detailed explanation."
             )
@@ -8296,7 +8294,6 @@ if HAS_PYQT6:
             self._visualization_layer_table_button: Optional[QPushButton] = None
             self._visualization_layer_table_summary_label: Optional[QLabel] = None
             self._local_gpu_available = self._detect_local_gpu_available()
-            self._dashboard_relay_manager = get_dashboard_relay_manager()
 
             self._build_ui()
             self._apply_theme()
@@ -9225,13 +9222,11 @@ if HAS_PYQT6:
             status_stack.addWidget(self._dask_backend_summary_label)
             footer.addLayout(status_stack, 1)
             self._dask_backend_button = QPushButton("Edit Dask Backend")
-            self._dask_dashboard_button = QPushButton("Open Dask Dashboard")
             self._cancel_button = QPushButton("Cancel")
             self._run_button = QPushButton("Run")
             self._run_button.setObjectName("runButton")
             for button in (
                 self._dask_backend_button,
-                self._dask_dashboard_button,
                 self._cancel_button,
                 self._run_button,
             ):
@@ -9241,14 +9236,12 @@ if HAS_PYQT6:
                     QSizePolicy.Policy.Fixed,
                 )
             footer.addWidget(self._dask_backend_button)
-            footer.addWidget(self._dask_dashboard_button)
             footer.addWidget(self._cancel_button)
             footer.addWidget(self._run_button)
             footer_root.addLayout(footer)
             outer_root.addWidget(footer_frame)
 
             self._dask_backend_button.clicked.connect(self._on_edit_dask_backend)
-            self._dask_dashboard_button.clicked.connect(self._on_open_dask_dashboard)
             self._cancel_button.clicked.connect(self.reject)
             self._run_button.clicked.connect(self._on_run)
             content_widget.setMinimumHeight(root.sizeHint().height())
@@ -13861,7 +13854,6 @@ if HAS_PYQT6:
             text = f"Dask backend: {summary}"
             self._dask_backend_summary_label.setText(text)
             self._dask_backend_summary_label.setToolTip(text)
-            self._refresh_dask_dashboard_button_state()
 
         def _analysis_store_shape_tpczyx(
             self,
@@ -13961,240 +13953,6 @@ if HAS_PYQT6:
             _save_last_used_dask_backend_config(self._dask_backend_config)
             self._refresh_dask_backend_summary()
             self._set_status("Updated Dask backend settings.")
-
-        @staticmethod
-        def _normalize_dashboard_url(
-            raw_url: str,
-            *,
-            default_host: str = "127.0.0.1",
-        ) -> Optional[str]:
-            """Normalize dashboard address text into an HTTP/HTTPS URL.
-
-            Parameters
-            ----------
-            raw_url : str
-                Raw dashboard address text.
-            default_host : str, default="127.0.0.1"
-                Hostname used when only a port is supplied.
-
-            Returns
-            -------
-            str, optional
-                Normalized dashboard URL, or ``None`` when parsing fails.
-
-            Raises
-            ------
-            None
-                Invalid inputs are handled internally.
-            """
-            stripped = str(raw_url).strip()
-            if not stripped:
-                return None
-
-            if stripped.startswith("tcp://") or stripped.startswith("tls://"):
-                parsed_tcp = urlparse(stripped)
-                host = parsed_tcp.hostname
-                port = parsed_tcp.port
-                if host is None:
-                    return None
-                stripped = f"http://{host}:{port}" if port else f"http://{host}"
-            elif stripped.startswith(":"):
-                stripped = f"http://{default_host}{stripped}"
-            elif stripped.isdigit():
-                stripped = f"http://{default_host}:{stripped}"
-            elif "://" not in stripped:
-                stripped = f"http://{stripped}"
-
-            parsed = urlparse(stripped)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                return None
-
-            path = parsed.path
-            if not path or path == "/":
-                path = "/status"
-
-            normalized = f"{parsed.scheme}://{parsed.netloc}{path}"
-            if parsed.query:
-                normalized = f"{normalized}?{parsed.query}"
-            if parsed.fragment:
-                normalized = f"{normalized}#{parsed.fragment}"
-            return normalized
-
-        def _dashboard_url_from_scheduler_file(
-            self,
-            scheduler_file: str,
-        ) -> Optional[str]:
-            """Resolve dashboard URL from a Dask scheduler file payload.
-
-            Parameters
-            ----------
-            scheduler_file : str
-                Path to the scheduler JSON file.
-
-            Returns
-            -------
-            str, optional
-                Dashboard URL when host and port can be inferred.
-
-            Raises
-            ------
-            None
-                Read/parse failures are handled internally.
-            """
-            path = Path(str(scheduler_file)).expanduser()
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                return None
-            if not isinstance(payload, dict):
-                return None
-
-            services = payload.get("services")
-            dashboard_service = None
-            if isinstance(services, dict):
-                dashboard_service = services.get("dashboard")
-            if isinstance(dashboard_service, str):
-                direct_url = self._normalize_dashboard_url(dashboard_service)
-                if direct_url is not None:
-                    return direct_url
-
-            try:
-                dashboard_port = (
-                    int(dashboard_service) if dashboard_service is not None else None
-                )
-            except (TypeError, ValueError):
-                dashboard_port = None
-
-            address = str(payload.get("address") or "").strip()
-            parsed_address = urlparse(address) if address else None
-            host = (
-                (parsed_address.hostname if parsed_address is not None else None)
-                or str(payload.get("host") or "").strip()
-                or "127.0.0.1"
-            )
-
-            if dashboard_port is None:
-                return None
-            return self._normalize_dashboard_url(
-                f"{host}:{dashboard_port}",
-                default_host=host,
-            )
-
-        def _resolve_dask_dashboard_url(self) -> Optional[str]:
-            """Resolve dashboard URL for the currently selected backend mode.
-
-            Parameters
-            ----------
-            None
-
-            Returns
-            -------
-            str, optional
-                Resolved dashboard URL when it can be inferred from settings.
-
-            Raises
-            ------
-            None
-                Parsing failures are handled internally.
-            """
-            mode = str(self._dask_backend_config.mode).strip().lower()
-            if mode == DASK_BACKEND_LOCAL_CLUSTER:
-                return self._normalize_dashboard_url("127.0.0.1:8787")
-            if mode == DASK_BACKEND_SLURM_CLUSTER:
-                return self._normalize_dashboard_url(
-                    self._dask_backend_config.slurm_cluster.dashboard_address,
-                )
-            if mode == DASK_BACKEND_SLURM_RUNNER:
-                scheduler_file = self._dask_backend_config.slurm_runner.scheduler_file
-                if not scheduler_file:
-                    return None
-                return self._dashboard_url_from_scheduler_file(scheduler_file)
-            return None
-
-        def _refresh_dask_dashboard_button_state(self) -> None:
-            """Refresh dashboard-button enabled state and tooltip text.
-
-            Parameters
-            ----------
-            None
-
-            Returns
-            -------
-            None
-                Button state and tooltip are updated in-place.
-
-            Raises
-            ------
-            None
-                Errors are handled internally.
-            """
-            if self._dask_dashboard_button is None:
-                return
-            available = self._dashboard_relay_manager.has_available_client(
-                workload="analysis"
-            )
-            if available:
-                self._dask_dashboard_button.setEnabled(True)
-                self._dask_dashboard_button.setToolTip(
-                    "Open the local Dask dashboard relay for analysis clients."
-                )
-            else:
-                self._dask_dashboard_button.setEnabled(False)
-                self._dask_dashboard_button.setToolTip(
-                    "No active analysis Dask client is registered."
-                )
-
-        def _on_open_dask_dashboard(self) -> None:
-            """Open the local relay URL for the analysis dashboard in a browser.
-
-            Parameters
-            ----------
-            None
-
-            Returns
-            -------
-            None
-                Browser-launch side effects only.
-
-            Raises
-            ------
-            None
-                Launch errors are handled via GUI warnings.
-            """
-            try:
-                dashboard_url = self._dashboard_relay_manager.open_dashboard(
-                    workload="analysis"
-                )
-            except Exception as exc:
-                QMessageBox.warning(
-                    self,
-                    "Dashboard Launch Failed",
-                    f"Could not open the dashboard relay.\n\n{exc}",
-                )
-                self._set_status("Failed to launch the Dask dashboard browser tab.")
-                return
-
-            try:
-                opened = bool(webbrowser.open_new_tab(dashboard_url))
-            except Exception as exc:
-                QMessageBox.warning(
-                    self,
-                    "Dashboard Launch Failed",
-                    f"Could not open dashboard URL.\n\n{exc}",
-                )
-                self._set_status("Failed to launch the Dask dashboard browser tab.")
-                return
-
-            if not opened:
-                QMessageBox.warning(
-                    self,
-                    "Dashboard Launch Failed",
-                    f"Browser did not confirm opening:\n{dashboard_url}",
-                )
-                self._set_status("Browser did not confirm Dask dashboard launch.")
-                return
-
-            self._set_status(f"Opened Dask dashboard: {dashboard_url}")
 
         def _on_operation_selection_changed(self) -> None:
             """React to operation selection checkbox changes.

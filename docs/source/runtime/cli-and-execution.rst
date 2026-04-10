@@ -268,8 +268,8 @@ Execution progresses through these coarse stages:
 GUI execution uses explicit progress callbacks and per-run logging in the
 resolved workflow log directory.
 
-The analysis-selection footer and the ``Running Analysis`` dialog both expose
-an ``Open Dask Dashboard`` button. GUI dashboard launch behavior is:
+The ``Running Analysis`` dialog exposes an ``Open Dask Dashboard`` button.
+GUI dashboard launch behavior is:
 
 - ClearEx opens a localhost-only tokenized relay rather than the raw scheduler
   dashboard URL directly.

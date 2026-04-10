@@ -274,8 +274,8 @@ This directory contains the runtime orchestration surface for ClearEx.
   scheduler URL directly.
 - The relay is available only while a ClearEx-managed Dask client is alive and
   registered for the current GUI workload.
-- Both the main analysis dialog and the `Running Analysis` dialog can launch
-  the relay-backed dashboard.
+- The `Running Analysis` dialog can launch the relay-backed dashboard for the
+  active analysis client.
 - If ClearEx cannot reach the upstream dashboard or cannot start the relay,
   the GUI shows a warning and does not fall back to the raw dashboard URL.
 
