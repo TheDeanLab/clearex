@@ -873,27 +873,27 @@ def _display_is_available() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
-_DASHBOARD_RELAY_MANAGER: Optional[DashboardRelayManager] = None
+_dashboard_relay_manager_singleton: Optional[DashboardRelayManager] = None
 
 
 def get_dashboard_relay_manager() -> DashboardRelayManager:
     """Return the shared GUI dashboard relay manager singleton."""
-    global _DASHBOARD_RELAY_MANAGER
-    if _DASHBOARD_RELAY_MANAGER is None:
-        _DASHBOARD_RELAY_MANAGER = DashboardRelayManager()
-    return _DASHBOARD_RELAY_MANAGER
+    global _dashboard_relay_manager_singleton
+    if _dashboard_relay_manager_singleton is None:
+        _dashboard_relay_manager_singleton = DashboardRelayManager()
+    return _dashboard_relay_manager_singleton
 
 
 def _shutdown_dashboard_relay_manager() -> None:
     """Shut down the shared GUI dashboard relay manager."""
-    global _DASHBOARD_RELAY_MANAGER
-    manager = _DASHBOARD_RELAY_MANAGER
+    global _dashboard_relay_manager_singleton
+    manager = _dashboard_relay_manager_singleton
     if manager is None:
         return
     try:
         manager.shutdown()
     finally:
-        _DASHBOARD_RELAY_MANAGER = None
+        _dashboard_relay_manager_singleton = None
 
 
 def _resolve_clearex_settings_directory() -> Path:
@@ -18018,7 +18018,7 @@ def run_workflow_with_progress(
     if len(scoped_workflows) > 1:
 
         def _batch_run_callback(
-            _workflow: WorkflowConfig,
+            workflow: WorkflowConfig,
             progress_callback: Callable[[int, str], None],
             dask_client_lifecycle_callback: Optional[
                 DaskClientLifecycleCallback
@@ -18028,7 +18028,7 @@ def run_workflow_with_progress(
 
             Parameters
             ----------
-            _workflow : WorkflowConfig
+            workflow : WorkflowConfig
                 Ignored placeholder matching ``run_callback`` signature.
             progress_callback : callable
                 Batch-aware GUI progress callback.
@@ -18038,7 +18038,7 @@ def run_workflow_with_progress(
             None
                 Side-effect execution only.
             """
-            del _workflow
+            del workflow
             callback = _invoke_run_callback
 
             total = len(scoped_workflows)

@@ -3649,7 +3649,7 @@ def main() -> None:
             from clearex.gui import GuiUnavailableError, launch_gui
 
             def _run_from_gui(
-                selected_workflow: WorkflowConfig,
+                workflow: WorkflowConfig,
                 progress_callback: Callable[[int, str], None],
                 dask_client_lifecycle_callback: Optional[
                     DaskClientLifecycleCallback
@@ -3659,7 +3659,7 @@ def main() -> None:
 
                 Parameters
                 ----------
-                selected_workflow : WorkflowConfig
+                workflow : WorkflowConfig
                     Workflow selected in GUI.
                 progress_callback : callable
                     Progress callback used by GUI progress dialog.
@@ -3670,9 +3670,7 @@ def main() -> None:
                     Side-effect execution only.
                 """
                 try:
-                    run_log_directory = _resolve_log_directory_for_workflow(
-                        selected_workflow
-                    )
+                    run_log_directory = _resolve_log_directory_for_workflow(workflow)
                 except Exception as exc:
                     run_log_directory = Path.cwd().resolve()
                     bootstrap_logger.warning(
@@ -3685,7 +3683,7 @@ def main() -> None:
                 run_logger.info(f"Command line arguments: {args}")
                 run_logger.info(f"Log directory: {run_log_directory}")
                 _run_workflow(
-                    workflow=selected_workflow,
+                    workflow=workflow,
                     logger=run_logger,
                     analysis_progress_callback=progress_callback,
                     dask_client_lifecycle_callback=dask_client_lifecycle_callback,

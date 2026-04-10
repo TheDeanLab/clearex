@@ -268,6 +268,18 @@ Execution progresses through these coarse stages:
 GUI execution uses explicit progress callbacks and per-run logging in the
 resolved workflow log directory.
 
+The analysis-selection footer and the ``Running Analysis`` dialog both expose
+an ``Open Dask Dashboard`` button. GUI dashboard launch behavior is:
+
+- ClearEx opens a localhost-only tokenized relay rather than the raw scheduler
+  dashboard URL directly.
+- The relay is available only while a ClearEx-managed Dask client for the
+  active analysis workload is alive.
+- The ``Running Analysis`` dialog enables its dashboard button only while the
+  current run owns a live analysis client.
+- If ClearEx cannot reach the upstream dashboard or cannot start the relay,
+  the GUI shows a warning and does not open the raw dashboard URL.
+
 The ``Running Analysis`` dialog also includes a ``Stop Analysis`` button.
 Cancellation is cooperative: ClearEx stops at the next progress checkpoint and
 persists the interrupted run in provenance with ``status=cancelled``.

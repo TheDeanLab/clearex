@@ -2612,7 +2612,7 @@ def test_launch_gui_shuts_down_dashboard_relay_on_standalone_exit(
     )
     monkeypatch.setattr(
         app_module,
-        "_DASHBOARD_RELAY_MANAGER",
+        "_dashboard_relay_manager_singleton",
         _FakeRelayManager(),
         raising=False,
     )
