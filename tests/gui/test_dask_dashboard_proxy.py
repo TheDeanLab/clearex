@@ -364,6 +364,13 @@ class _UpstreamExternalRedirectHandler(web.RequestHandler):
         self.redirect("https://example.invalid/status")
 
 
+class _UpstreamSchemeRelativeRedirectHandler(web.RequestHandler):
+    def get(self) -> None:
+        self.set_status(302)
+        self.set_header("Location", "//example.invalid/status")
+        self.finish()
+
+
 class _UpstreamWebSocketHandler(websocket.WebSocketHandler):
     def open(self) -> None:
         return None
@@ -503,6 +510,40 @@ def test_dashboard_proxy_does_not_tokenize_external_redirects() -> None:
         assert response.code == 302
         assert location is not None
         assert location == "https://example.invalid/status"
+        assert "token=" not in location
+    finally:
+        manager.shutdown()
+        _stop_tornado_app(upstream_loop, upstream_thread)
+
+
+def test_dashboard_proxy_does_not_tokenize_scheme_relative_external_redirects() -> None:
+    upstream_loop, upstream_port, upstream_thread = _run_tornado_app(
+        web.Application(
+            [(r"/external-scheme-relative", _UpstreamSchemeRelativeRedirectHandler)]
+        )
+    )
+    manager = DashboardRelayManager()
+    client = SimpleNamespace(
+        dashboard_link=f"http://127.0.0.1:{upstream_port}/external-scheme-relative",
+        status="running",
+    )
+    manager.register_client(
+        workload="analysis", backend_mode="local_cluster", client=client
+    )
+    tokenized_url = manager.open_dashboard(workload="analysis")
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(),
+        _NoRedirectHandler(),
+    )
+
+    try:
+        response = opener.open(tokenized_url)
+        location = response.headers.get("Location")
+
+        assert response.code == 302
+        assert location is not None
+        assert location == "//example.invalid/status"
         assert "token=" not in location
     finally:
         manager.shutdown()

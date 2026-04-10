@@ -58,10 +58,10 @@ def _localize_redirect(
     parsed_local_origin = urlparse(local_origin)
     parsed_upstream_origin = urlparse(upstream_origin)
     attach_token = True
-    if parsed_redirect.scheme and parsed_redirect.netloc:
-        if (
-            parsed_redirect.scheme == parsed_upstream_origin.scheme
-            and parsed_redirect.netloc == parsed_upstream_origin.netloc
+    if parsed_redirect.scheme or parsed_redirect.netloc:
+        if parsed_redirect.netloc == parsed_upstream_origin.netloc and (
+            not parsed_redirect.scheme
+            or parsed_redirect.scheme == parsed_upstream_origin.scheme
         ):
             rewritten = parsed_redirect._replace(
                 scheme=parsed_local_origin.scheme,
