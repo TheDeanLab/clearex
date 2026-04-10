@@ -3739,6 +3739,10 @@ if HAS_PYQT6:
             for idx, (mode_key, mode_text) in enumerate(mode_specs):
                 self._mode_combo.addItem(mode_text, mode_key)
                 self._mode_index[mode_key] = idx
+            self._register_parameter_hint(
+                self._mode_combo,
+                self._dask_backend_help_texts()["mode"],
+            )
             mode_row.addWidget(mode_label)
             mode_row.addWidget(self._mode_combo, 1)
             root.addLayout(mode_row)
@@ -3808,6 +3812,97 @@ if HAS_PYQT6:
             widget.installEventFilter(self)
             self._parameter_help_map[widget] = str(message)
 
+        @staticmethod
+        def _dask_backend_help_texts() -> Dict[str, str]:
+            """Return plain-language help text for the backend dialog."""
+            return {
+                "mode": (
+                    "Choose LocalCluster to run everything on this machine, "
+                    "SLURMRunner to connect to a scheduler file that already exists, "
+                    "or SLURMCluster to let ClearEx submit worker jobs to Slurm directly."
+                ),
+                "local_workers": (
+                    "Leave this blank to let ClearEx choose a worker count automatically. "
+                    "Set a number when you want to cap or pin local parallelism."
+                ),
+                "local_threads": (
+                    "Choose how many threads each local worker should use. "
+                    "One thread per worker is a safe default for most runs."
+                ),
+                "local_memory": (
+                    "Set the maximum memory each local worker may use before Dask starts "
+                    "spilling data to disk."
+                ),
+                "local_directory": (
+                    "Pick a folder for local worker scratch files and spill files."
+                ),
+                "local_directory_browse": (
+                    "Choose the folder where local workers should write scratch files."
+                ),
+                "local_recommend": (
+                    "Fill the local worker settings with a suggested worker count, thread "
+                    "count, and memory limit based on the current dataset."
+                ),
+                "runner_scheduler_file": (
+                    "Select the scheduler file created by your Slurm launch script so "
+                    "ClearEx can connect to the existing workers."
+                ),
+                "runner_scheduler_file_browse": (
+                    "Choose the scheduler file for an already running Slurm-backed Dask cluster."
+                ),
+                "runner_wait_workers": (
+                    "Wait for this many workers before ClearEx begins work. "
+                    "Set it to auto to skip waiting."
+                ),
+                "cluster_workers": "Request this many Slurm worker jobs.",
+                "cluster_cores": (
+                    "Set how many CPU cores each worker job should use."
+                ),
+                "cluster_processes": (
+                    "Choose how many worker processes each job should start."
+                ),
+                "cluster_memory": (
+                    "Set the memory request for each worker job, such as 64GB."
+                ),
+                "cluster_local_directory": (
+                    "Pick a scratch directory for worker spill files on the cluster."
+                ),
+                "cluster_local_directory_browse": (
+                    "Choose the scratch directory that worker jobs should use for spill files."
+                ),
+                "cluster_interface": (
+                    "Enter the network interface workers should use to connect, such as eth0 or ib0."
+                ),
+                "cluster_walltime": (
+                    "Set the maximum run time for each worker job, such as 02:00:00."
+                ),
+                "cluster_job_name": "Set the Slurm job name shown in the queue.",
+                "cluster_queue": (
+                    "Choose the Slurm queue or partition that should receive the worker jobs."
+                ),
+                "cluster_death_timeout": (
+                    "Set how long ClearEx should keep retrying before it gives up on a worker that stopped responding."
+                ),
+                "cluster_mail_user": (
+                    "Enter an email address for Slurm job notifications."
+                ),
+                "cluster_directives": (
+                    "Add extra Slurm directives here, one per line."
+                ),
+                "cluster_dashboard": (
+                    "Set the address where the worker dashboard should listen, or leave it blank to let Dask choose."
+                ),
+                "cluster_scheduler_interface": (
+                    "Choose the network interface the scheduler should use to talk to workers."
+                ),
+                "cluster_idle_timeout": (
+                    "Set how long the cluster should stay alive with no work before shutting down."
+                ),
+                "cluster_allowed_failures": (
+                    "Choose how many worker failures to tolerate before Slurm stops the cluster."
+                ),
+            }
+
         def _set_parameter_help(self, text: str) -> None:
             """Update the fixed parameter-help label text."""
             if self._parameter_help_label is not None:
@@ -3842,26 +3937,43 @@ if HAS_PYQT6:
             form.setFieldGrowthPolicy(
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
             )
+            help_texts = self._dask_backend_help_texts()
 
             self._local_workers_input = QLineEdit()
             self._local_workers_input.setPlaceholderText("blank = auto")
             form.addRow("Workers", self._local_workers_input)
             self._register_parameter_hint(
                 self._local_workers_input,
-                "Specify how many separate Dask workers should run in the local cluster.",
+                help_texts["local_workers"],
             )
 
             self._local_threads_spin = QSpinBox()
             self._local_threads_spin.setRange(1, 1024)
             form.addRow("Threads per worker", self._local_threads_spin)
+            self._register_parameter_hint(
+                self._local_threads_spin,
+                help_texts["local_threads"],
+            )
 
             self._local_memory_input = QLineEdit()
             self._local_memory_input.setPlaceholderText("auto")
             form.addRow("Memory limit", self._local_memory_input)
+            self._register_parameter_hint(
+                self._local_memory_input,
+                help_texts["local_memory"],
+            )
 
             self._local_directory_input = QLineEdit()
+            self._register_parameter_hint(
+                self._local_directory_input,
+                help_texts["local_directory"],
+            )
             self._local_directory_browse = _configure_fixed_height_button(
                 QPushButton("Browse")
+            )
+            self._register_parameter_hint(
+                self._local_directory_browse,
+                help_texts["local_directory_browse"],
             )
             self._local_directory_browse.clicked.connect(
                 lambda: self._browse_directory(self._local_directory_input)
@@ -3876,6 +3988,10 @@ if HAS_PYQT6:
 
             self._local_recommend_button = _configure_fixed_height_button(
                 QPushButton("Recommend Settings")
+            )
+            self._register_parameter_hint(
+                self._local_recommend_button,
+                help_texts["local_recommend"],
             )
             self._local_recommend_button.clicked.connect(
                 self._on_recommend_local_cluster
@@ -3912,13 +4028,22 @@ if HAS_PYQT6:
             form.setFieldGrowthPolicy(
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
             )
+            help_texts = self._dask_backend_help_texts()
 
             self._runner_scheduler_file_input = QLineEdit()
             self._runner_scheduler_file_input.setPlaceholderText(
                 "Path to scheduler file"
             )
+            self._register_parameter_hint(
+                self._runner_scheduler_file_input,
+                help_texts["runner_scheduler_file"],
+            )
             self._runner_scheduler_file_browse = _configure_fixed_height_button(
                 QPushButton("Browse")
+            )
+            self._register_parameter_hint(
+                self._runner_scheduler_file_browse,
+                help_texts["runner_scheduler_file_browse"],
             )
             self._runner_scheduler_file_browse.clicked.connect(
                 self._on_browse_scheduler_file
@@ -3935,6 +4060,10 @@ if HAS_PYQT6:
             self._runner_wait_workers_spin.setRange(0, 100000)
             self._runner_wait_workers_spin.setSpecialValueText("auto")
             form.addRow("Wait for workers", self._runner_wait_workers_spin)
+            self._register_parameter_hint(
+                self._runner_wait_workers_spin,
+                help_texts["runner_wait_workers"],
+            )
             return page
 
         def _build_slurm_cluster_page(self) -> QWidget:
@@ -3959,25 +4088,50 @@ if HAS_PYQT6:
             worker_form.setFieldGrowthPolicy(
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
             )
+            help_texts = self._dask_backend_help_texts()
 
             self._cluster_workers_spin = QSpinBox()
             self._cluster_workers_spin.setRange(1, 100000)
             worker_form.addRow("Workers (jobs)", self._cluster_workers_spin)
+            self._register_parameter_hint(
+                self._cluster_workers_spin,
+                help_texts["cluster_workers"],
+            )
 
             self._cluster_cores_spin = QSpinBox()
             self._cluster_cores_spin.setRange(1, 1024)
             worker_form.addRow("Cores", self._cluster_cores_spin)
+            self._register_parameter_hint(
+                self._cluster_cores_spin,
+                help_texts["cluster_cores"],
+            )
 
             self._cluster_processes_spin = QSpinBox()
             self._cluster_processes_spin.setRange(1, 256)
             worker_form.addRow("Processes", self._cluster_processes_spin)
+            self._register_parameter_hint(
+                self._cluster_processes_spin,
+                help_texts["cluster_processes"],
+            )
 
             self._cluster_memory_input = QLineEdit()
             worker_form.addRow("Memory", self._cluster_memory_input)
+            self._register_parameter_hint(
+                self._cluster_memory_input,
+                help_texts["cluster_memory"],
+            )
 
             self._cluster_local_directory_input = QLineEdit()
+            self._register_parameter_hint(
+                self._cluster_local_directory_input,
+                help_texts["cluster_local_directory"],
+            )
             self._cluster_local_directory_browse = _configure_fixed_height_button(
                 QPushButton("Browse")
+            )
+            self._register_parameter_hint(
+                self._cluster_local_directory_browse,
+                help_texts["cluster_local_directory_browse"],
             )
             self._cluster_local_directory_browse.clicked.connect(
                 lambda: self._browse_directory(self._cluster_local_directory_input)
@@ -3992,22 +4146,46 @@ if HAS_PYQT6:
 
             self._cluster_interface_input = QLineEdit()
             worker_form.addRow("Interface", self._cluster_interface_input)
+            self._register_parameter_hint(
+                self._cluster_interface_input,
+                help_texts["cluster_interface"],
+            )
 
             self._cluster_walltime_input = QLineEdit()
             worker_form.addRow("Walltime", self._cluster_walltime_input)
+            self._register_parameter_hint(
+                self._cluster_walltime_input,
+                help_texts["cluster_walltime"],
+            )
 
             self._cluster_job_name_input = QLineEdit()
             worker_form.addRow("Job name", self._cluster_job_name_input)
+            self._register_parameter_hint(
+                self._cluster_job_name_input,
+                help_texts["cluster_job_name"],
+            )
 
             self._cluster_queue_input = QLineEdit()
             worker_form.addRow("Queue / partition", self._cluster_queue_input)
+            self._register_parameter_hint(
+                self._cluster_queue_input,
+                help_texts["cluster_queue"],
+            )
 
             self._cluster_death_timeout_input = QLineEdit()
             worker_form.addRow("Death timeout", self._cluster_death_timeout_input)
+            self._register_parameter_hint(
+                self._cluster_death_timeout_input,
+                help_texts["cluster_death_timeout"],
+            )
 
             self._cluster_mail_user_input = QLineEdit()
             self._cluster_mail_user_input.setPlaceholderText("name@institution.edu")
             worker_form.addRow("Mail user", self._cluster_mail_user_input)
+            self._register_parameter_hint(
+                self._cluster_mail_user_input,
+                help_texts["cluster_mail_user"],
+            )
 
             self._cluster_directives_input = QPlainTextEdit()
             self._cluster_directives_input.setPlaceholderText(
@@ -4015,6 +4193,10 @@ if HAS_PYQT6:
             )
             self._cluster_directives_input.setMinimumHeight(110)
             worker_form.addRow("Extra directives", self._cluster_directives_input)
+            self._register_parameter_hint(
+                self._cluster_directives_input,
+                help_texts["cluster_directives"],
+            )
 
             scheduler_group = QGroupBox("Scheduler Options")
             scheduler_form = QFormLayout(scheduler_group)
@@ -4025,17 +4207,33 @@ if HAS_PYQT6:
 
             self._cluster_dashboard_input = QLineEdit()
             scheduler_form.addRow("Dashboard address", self._cluster_dashboard_input)
+            self._register_parameter_hint(
+                self._cluster_dashboard_input,
+                help_texts["cluster_dashboard"],
+            )
 
             self._cluster_scheduler_interface_input = QLineEdit()
             scheduler_form.addRow("Interface", self._cluster_scheduler_interface_input)
+            self._register_parameter_hint(
+                self._cluster_scheduler_interface_input,
+                help_texts["cluster_scheduler_interface"],
+            )
 
             self._cluster_idle_timeout_input = QLineEdit()
             scheduler_form.addRow("Idle timeout", self._cluster_idle_timeout_input)
+            self._register_parameter_hint(
+                self._cluster_idle_timeout_input,
+                help_texts["cluster_idle_timeout"],
+            )
 
             self._cluster_allowed_failures_spin = QSpinBox()
             self._cluster_allowed_failures_spin.setRange(1, 100000)
             scheduler_form.addRow(
                 "Allowed failures", self._cluster_allowed_failures_spin
+            )
+            self._register_parameter_hint(
+                self._cluster_allowed_failures_spin,
+                help_texts["cluster_allowed_failures"],
             )
 
             root.addWidget(worker_group)

@@ -968,7 +968,7 @@ def test_dask_dialog_parameter_help_shows_on_focus_and_hides_on_blur() -> None:
     app.processEvents()
 
     assert dialog._parameter_help_card.isVisible()
-    assert "how many separate Dask workers" in dialog._parameter_help_label.text()
+    assert "worker count automatically" in dialog._parameter_help_label.text()
 
     dialog._apply_button.setFocus()
     app.processEvents()
@@ -976,6 +976,41 @@ def test_dask_dialog_parameter_help_shows_on_focus_and_hides_on_blur() -> None:
     assert dialog._parameter_help_card.isHidden()
 
     dialog.close()
+
+
+def test_dask_dialog_registers_plain_language_help_for_all_backend_modes() -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    dialog = app_module.DaskBackendConfigDialog(
+        initial=app_module.DaskBackendConfig(),
+        recommendation_shape_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_chunks_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_dtype_itemsize=2,
+    )
+
+    expected_widgets = [
+        dialog._mode_combo,
+        dialog._local_workers_input,
+        dialog._local_threads_spin,
+        dialog._local_memory_input,
+        dialog._runner_scheduler_file_input,
+        dialog._runner_wait_workers_spin,
+        dialog._cluster_workers_spin,
+        dialog._cluster_dashboard_input,
+        dialog._cluster_allowed_failures_spin,
+    ]
+
+    for widget in expected_widgets:
+        assert widget in dialog._parameter_help_map
+        message = dialog._parameter_help_map[widget]
+        assert isinstance(message, str)
+        assert message.strip()
+        assert widget.toolTip() == message
 
 
 def test_dask_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
