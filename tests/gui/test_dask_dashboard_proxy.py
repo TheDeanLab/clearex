@@ -372,11 +372,41 @@ class _UpstreamSchemeRelativeRedirectHandler(web.RequestHandler):
 
 
 class _UpstreamWebSocketHandler(websocket.WebSocketHandler):
-    def open(self) -> None:
+    def open(self, *args: str, **kwargs: str) -> None:
+        del args, kwargs
         return None
 
-    def on_message(self, message: str) -> None:
+    def on_message(self, message: str | bytes) -> None:
         self.write_message(f"echo:{message}")
+
+
+class _UpstreamSubprotocolWebSocketHandler(websocket.WebSocketHandler):
+    _negotiated_subprotocol: str | None = None
+
+    def select_subprotocol(self, subprotocols: list[str]) -> str | None:
+        if "bokeh" in subprotocols:
+            return "bokeh"
+        return None
+
+    def open(self, *args: str, **kwargs: str) -> None:
+        del args, kwargs
+        self._negotiated_subprotocol = self.selected_subprotocol
+        if self._negotiated_subprotocol != "bokeh":
+            self.close(code=1002, reason="missing bokeh subprotocol")
+
+    def on_message(self, message: str | bytes) -> None:
+        if self._negotiated_subprotocol == "bokeh":
+            self.write_message(f"{self._negotiated_subprotocol}:{message}")
+
+
+class _UpstreamLargeMessageWebSocketHandler(websocket.WebSocketHandler):
+    def open(self, *args: str, **kwargs: str) -> None:
+        del args, kwargs
+        return None
+
+    def on_message(self, message: str | bytes) -> None:
+        del message
+        self.write_message("x" * (11 * 1024 * 1024))
 
 
 def _run_tornado_app(
@@ -434,6 +464,35 @@ def test_dashboard_proxy_requires_token() -> None:
             opener.open(unauthorized)
 
         assert excinfo.value.code in {401, 403}
+    finally:
+        manager.shutdown()
+        _stop_tornado_app(upstream_loop, upstream_thread)
+
+
+def test_dashboard_proxy_normalizes_unreachable_advertised_host_to_loopback() -> None:
+    upstream_loop, upstream_port, upstream_thread = _run_tornado_app(
+        web.Application([(r"/status", _UpstreamStatusHandler)])
+    )
+    manager = DashboardRelayManager()
+    client = SimpleNamespace(
+        dashboard_link=f"http://127.0.0.2:{upstream_port}/status",
+        status="running",
+    )
+    manager.register_client(
+        workload="analysis", backend_mode="local_cluster", client=client
+    )
+    tokenized_url = manager.open_dashboard(workload="analysis")
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(),
+    )
+
+    try:
+        response = opener.open(tokenized_url)
+        payload = response.read().decode("utf-8")
+
+        assert response.code == 200
+        assert payload == "upstream-status-ok"
     finally:
         manager.shutdown()
         _stop_tornado_app(upstream_loop, upstream_thread)
@@ -581,6 +640,93 @@ def test_dashboard_proxy_forwards_websocket_messages() -> None:
         echoed = asyncio.run(_exercise())
 
         assert echoed == "echo:hello"
+    finally:
+        manager.shutdown()
+        _stop_tornado_app(upstream_loop, upstream_thread)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="websocket test uses POSIX event loop assumptions",
+)
+def test_dashboard_proxy_preserves_websocket_subprotocol_negotiation() -> None:
+    upstream_loop, upstream_port, upstream_thread = _run_tornado_app(
+        web.Application([(r"/status/ws", _UpstreamSubprotocolWebSocketHandler)])
+    )
+    manager = DashboardRelayManager()
+    client = SimpleNamespace(
+        dashboard_link=f"http://127.0.0.1:{upstream_port}/status",
+        status="running",
+    )
+    manager.register_client(
+        workload="analysis", backend_mode="local_cluster", client=client
+    )
+    tokenized_url = manager.open_dashboard(workload="analysis")
+    base_url, query = tokenized_url.split("?", 1)
+    ws_url = base_url.replace("http://", "ws://") + f"/ws?{query}"
+
+    async def _exercise() -> tuple[str | None, str | bytes | None]:
+        conn = await asyncio.wait_for(
+            websocket_connect(
+                ws_url,
+                subprotocols=["bokeh", "session-token"],
+            ),
+            timeout=2,
+        )
+        await conn.write_message("hello")
+        message = await asyncio.wait_for(conn.read_message(), timeout=2)
+        protocol = getattr(conn, "selected_subprotocol", None)
+        conn.close()
+        return protocol, message
+
+    try:
+        protocol, echoed = asyncio.run(_exercise())
+
+        assert protocol == "bokeh"
+        assert echoed == "bokeh:hello"
+    finally:
+        manager.shutdown()
+        _stop_tornado_app(upstream_loop, upstream_thread)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="websocket test uses POSIX event loop assumptions",
+)
+def test_dashboard_proxy_forwards_large_websocket_messages() -> None:
+    upstream_loop, upstream_port, upstream_thread = _run_tornado_app(
+        web.Application([(r"/status/ws", _UpstreamLargeMessageWebSocketHandler)])
+    )
+    manager = DashboardRelayManager()
+    client = SimpleNamespace(
+        dashboard_link=f"http://127.0.0.1:{upstream_port}/status",
+        status="running",
+    )
+    manager.register_client(
+        workload="analysis", backend_mode="local_cluster", client=client
+    )
+    tokenized_url = manager.open_dashboard(workload="analysis")
+    base_url, query = tokenized_url.split("?", 1)
+    ws_url = base_url.replace("http://", "ws://") + f"/ws?{query}"
+
+    async def _exercise() -> int:
+        conn = await asyncio.wait_for(
+            websocket_connect(
+                ws_url,
+                max_message_size=20 * 1024 * 1024,
+            ),
+            timeout=2,
+        )
+        await conn.write_message("hello")
+        message = await asyncio.wait_for(conn.read_message(), timeout=5)
+        conn.close()
+        assert isinstance(message, str)
+        return len(message)
+
+    try:
+        message_len = asyncio.run(_exercise())
+
+        assert message_len == 11 * 1024 * 1024
     finally:
         manager.shutdown()
         _stop_tornado_app(upstream_loop, upstream_thread)

@@ -4,12 +4,15 @@ import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
 import secrets
+import socket
 import threading
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 from uuid import uuid4
 
 from tornado import httpclient, httpserver, ioloop, netutil, web, websocket
+
+_RELAY_WEBSOCKET_MAX_MESSAGE_SIZE = 64 * 1024 * 1024
 
 
 def resolve_client_dashboard_url(client: Any) -> str:
@@ -20,6 +23,51 @@ def resolve_client_dashboard_url(client: Any) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"Invalid dashboard link: {raw!r}")
     return raw
+
+
+def _dashboard_url_host_port(url: str) -> tuple[str, int] | None:
+    parsed = urlparse(url)
+    host = str(parsed.hostname or "").strip()
+    if not host:
+        return None
+    if parsed.port is not None:
+        return host, int(parsed.port)
+    if parsed.scheme == "http":
+        return host, 80
+    if parsed.scheme == "https":
+        return host, 443
+    return None
+
+
+def _dashboard_url_is_reachable(url: str, *, timeout_s: float = 0.25) -> bool:
+    host_port = _dashboard_url_host_port(url)
+    if host_port is None:
+        return False
+    try:
+        with socket.create_connection(host_port, timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+def _replace_dashboard_url_host(url: str, host: str) -> str:
+    parsed = urlparse(url)
+    netloc = host if parsed.port is None else f"{host}:{int(parsed.port)}"
+    return parsed._replace(netloc=netloc).geturl()
+
+
+def normalize_dashboard_url_for_local_relay(url: str) -> str:
+    if _dashboard_url_is_reachable(url):
+        return url
+    parsed = urlparse(url)
+    original_host = str(parsed.hostname or "").strip()
+    for candidate_host in ("127.0.0.1", "localhost"):
+        if candidate_host == original_host:
+            continue
+        candidate_url = _replace_dashboard_url_host(url, candidate_host)
+        if _dashboard_url_is_reachable(candidate_url):
+            return candidate_url
+    return url
 
 
 @dataclass
@@ -195,8 +243,20 @@ class _ProxyRequestHandler(_ProxyBaseHandler):
 
 
 class _ProxyWebSocketHandler(_ProxyBaseHandler, websocket.WebSocketHandler):
-    async def open(self, proxied_path: str = "") -> None:
-        del proxied_path
+    _client_subprotocols: list[str] = []
+
+    def select_subprotocol(self, subprotocols: list[str]) -> str | None:
+        self._client_subprotocols = [
+            str(protocol) for protocol in subprotocols if protocol
+        ]
+        if "bokeh" in self._client_subprotocols:
+            return "bokeh"
+        if self._client_subprotocols:
+            return self._client_subprotocols[0]
+        return None
+
+    async def open(self, *args: str, **kwargs: str) -> None:
+        del args, kwargs
         request_path = self.request.path or "/"
         request_query = _request_token_from_query(self.request.query)
         websocket_origin = (
@@ -206,7 +266,11 @@ class _ProxyWebSocketHandler(_ProxyBaseHandler, websocket.WebSocketHandler):
         if request_query:
             upstream_url = f"{upstream_url}?{request_query}"
 
-        self._upstream = await websocket.websocket_connect(upstream_url)
+        self._upstream = await websocket.websocket_connect(
+            upstream_url,
+            subprotocols=list(getattr(self, "_client_subprotocols", [])),
+            max_message_size=_RELAY_WEBSOCKET_MAX_MESSAGE_SIZE,
+        )
         self._upstream_task = asyncio.create_task(self._pump_upstream())
 
     async def _pump_upstream(self) -> None:
@@ -221,7 +285,7 @@ class _ProxyWebSocketHandler(_ProxyBaseHandler, websocket.WebSocketHandler):
         except Exception:
             return
 
-    async def on_message(self, message: str) -> None:
+    async def on_message(self, message: str | bytes) -> None:
         await self._upstream.write_message(message)
 
     def on_close(self) -> None:
@@ -316,6 +380,7 @@ class DashboardRelayManager:
     def _start_session(
         self, *, client_id: str, upstream_url: str
     ) -> DashboardRelaySession:
+        upstream_url = normalize_dashboard_url_for_local_relay(upstream_url)
         token = secrets.token_urlsafe(24)
         parsed_upstream = urlparse(upstream_url)
         upstream_origin = f"{parsed_upstream.scheme}://{parsed_upstream.netloc}"
@@ -347,7 +412,8 @@ class DashboardRelayManager:
                         "upstream_path": upstream_path,
                     },
                 ),
-            ]
+            ],
+            websocket_max_message_size=_RELAY_WEBSOCKET_MAX_MESSAGE_SIZE,
         )
         server = httpserver.HTTPServer(application)
         started = threading.Event()

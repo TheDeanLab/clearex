@@ -5660,7 +5660,7 @@ if HAS_PYQT6:
                 QSizePolicy.Policy.Fixed,
             )
             footer_root = QVBoxLayout(footer_frame)
-            footer_root.setContentsMargins(0, 0, 0, 0)
+            footer_root.setContentsMargins(20, 0, 20, 20)
             footer_root.setSpacing(0)
 
             footer = QHBoxLayout()

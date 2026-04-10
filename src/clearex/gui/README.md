@@ -65,6 +65,9 @@ This folder owns the PyQt6 UX in `app.py`.
     and `Stop Analysis` buttons
     - dashboard launch is available only while the current run owns a live
       ClearEx-managed analysis client
+    - relay startup probes the advertised dashboard URL directly and falls back
+      to `127.0.0.1` / `localhost` when the same dashboard port is only
+      reachable via loopback from the GUI process
     - relay startup failures show a warning and do not fall back to the raw
       scheduler dashboard URL
     - `Stop Analysis` still requests cooperative cancellation
