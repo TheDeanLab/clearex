@@ -976,6 +976,49 @@ def test_dask_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     dialog.close()
 
 
+def test_dask_dialog_keeps_footer_outside_scroll_area(monkeypatch) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    monkeypatch.setattr(
+        app_module, "_primary_screen_available_size", lambda: (800, 800)
+    )
+
+    dialog = app_module.DaskBackendConfigDialog(
+        initial=app_module.DaskBackendConfig(),
+        recommendation_shape_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_chunks_tpczyx=(1, 1, 1, 64, 64, 64),
+        recommendation_dtype_itemsize=2,
+    )
+    dialog.show()
+    app.processEvents()
+
+    scroll = dialog.findChild(app_module.QScrollArea, "popupDialogScroll")
+    assert scroll is not None
+    scroll_widget = scroll.widget()
+    assert scroll_widget is not None
+    footer_frame = dialog.findChild(app_module.QFrame, "analysisFooterCard")
+    assert footer_frame is not None
+
+    assert footer_frame.parentWidget() is dialog
+    assert footer_frame.parentWidget() is not scroll_widget
+    assert dialog._defaults_button.parentWidget() is footer_frame
+    assert dialog._cancel_button.parentWidget() is footer_frame
+    assert dialog._apply_button.parentWidget() is footer_frame
+
+    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+    app.processEvents()
+
+    assert dialog._apply_button.isVisible()
+    assert dialog._apply_button.geometry().height() >= 36
+
+    dialog.close()
+
+
 def test_save_and_load_experiment_list_round_trip(tmp_path) -> None:
     first = tmp_path / "first" / "experiment.yml"
     second = tmp_path / "second" / "experiment.yaml"

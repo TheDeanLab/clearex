@@ -3680,19 +3680,18 @@ if HAS_PYQT6:
             outer_root.setContentsMargins(0, 0, 0, 0)
             outer_root.setSpacing(0)
 
-            content_scroll = QScrollArea(self)
-            content_scroll.setObjectName("popupDialogScroll")
-            content_scroll.setWidgetResizable(True)
-            content_scroll.setFrameShape(QFrame.Shape.NoFrame)
-            content_scroll.setHorizontalScrollBarPolicy(
+            self._content_scroll = QScrollArea(self)
+            self._content_scroll.setObjectName("popupDialogScroll")
+            self._content_scroll.setWidgetResizable(True)
+            self._content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self._content_scroll.setHorizontalScrollBarPolicy(
                 Qt.ScrollBarPolicy.ScrollBarAlwaysOff
             )
-            outer_root.addWidget(content_scroll, 1)
+            outer_root.addWidget(self._content_scroll, 1)
 
             content_widget = QWidget()
             content_widget.setObjectName("popupDialogContent")
-            content_scroll.setWidget(content_widget)
-
+            self._content_scroll.setWidget(content_widget)
             root = QVBoxLayout(content_widget)
             apply_popup_root_spacing(root)
 
@@ -3742,6 +3741,16 @@ if HAS_PYQT6:
             self._mode_stack.addWidget(self._build_slurm_cluster_page())
             root.addWidget(self._mode_stack, 1)
 
+            footer_frame = QFrame(self)
+            footer_frame.setObjectName("analysisFooterCard")
+            footer_frame.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Fixed,
+            )
+            footer_root = QVBoxLayout(footer_frame)
+            footer_root.setContentsMargins(0, 0, 0, 0)
+            footer_root.setSpacing(0)
+
             footer = QHBoxLayout()
             apply_footer_row_spacing(footer)
             self._defaults_button = _configure_fixed_height_button(
@@ -3754,7 +3763,8 @@ if HAS_PYQT6:
             footer.addStretch(1)
             footer.addWidget(self._cancel_button)
             footer.addWidget(self._apply_button)
-            root.addLayout(footer)
+            footer_root.addLayout(footer)
+            outer_root.addWidget(footer_frame, 0)
 
             self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
             self._defaults_button.clicked.connect(self._on_reset_defaults)
