@@ -3660,6 +3660,7 @@ if HAS_PYQT6:
             self.setWindowTitle("Dask Backend Settings")
             self.result_config: Optional[DaskBackendConfig] = None
             self._mode_index: Dict[str, int] = {}
+            self._parameter_help_map: Dict[QObject, str] = {}
             self._recommendation_shape_tpczyx = recommendation_shape_tpczyx
             self._recommendation_chunks_tpczyx = recommendation_chunks_tpczyx
             self._recommendation_dtype_itemsize = recommendation_dtype_itemsize
@@ -3943,6 +3944,8 @@ if HAS_PYQT6:
             )
             help_texts = self._dask_backend_help_texts()
 
+            help_texts = self._dask_backend_help_texts()
+
             self._local_workers_input = QLineEdit()
             self._local_workers_input.setPlaceholderText("blank = auto")
             form.addRow("Workers", self._local_workers_input)
@@ -4034,6 +4037,8 @@ if HAS_PYQT6:
             )
             help_texts = self._dask_backend_help_texts()
 
+            help_texts = self._dask_backend_help_texts()
+
             self._runner_scheduler_file_input = QLineEdit()
             self._runner_scheduler_file_input.setPlaceholderText(
                 "Path to scheduler file"
@@ -4092,6 +4097,8 @@ if HAS_PYQT6:
             worker_form.setFieldGrowthPolicy(
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
             )
+            help_texts = self._dask_backend_help_texts()
+
             help_texts = self._dask_backend_help_texts()
 
             self._cluster_workers_spin = QSpinBox()
@@ -4285,6 +4292,102 @@ if HAS_PYQT6:
             )
             if file_path:
                 self._runner_scheduler_file_input.setText(file_path)
+
+        def _register_parameter_hint(self, widget: QWidget, message: str) -> None:
+            """Register a tooltip and lookup entry for a backend control."""
+            widget.setToolTip(str(message))
+            self._parameter_help_map[widget] = str(message)
+
+        @staticmethod
+        def _dask_backend_help_texts() -> Dict[str, str]:
+            """Return plain-language help text for the backend dialog."""
+            return {
+                "mode": (
+                    "Choose LocalCluster to run everything on this machine, "
+                    "SLURMRunner to connect to a scheduler file that already exists, "
+                    "or SLURMCluster to let ClearEx submit worker jobs to Slurm directly."
+                ),
+                "local_workers": (
+                    "Leave this blank to let ClearEx choose a worker count automatically. "
+                    "Set a number when you want to cap or pin local parallelism."
+                ),
+                "local_threads": (
+                    "Choose how many threads each local worker should use. "
+                    "One thread per worker is a safe default for most runs."
+                ),
+                "local_memory": (
+                    "Set the maximum memory each local worker may use before Dask starts "
+                    "spilling data to disk."
+                ),
+                "local_directory": (
+                    "Pick a folder for local worker scratch files and spill files."
+                ),
+                "local_directory_browse": (
+                    "Choose the folder where local workers should write scratch files."
+                ),
+                "local_recommend": (
+                    "Fill the local worker settings with a suggested worker count, thread "
+                    "count, and memory limit based on the current dataset."
+                ),
+                "runner_scheduler_file": (
+                    "Select the scheduler file created by your Slurm launch script so "
+                    "ClearEx can connect to the existing workers."
+                ),
+                "runner_scheduler_file_browse": (
+                    "Choose the scheduler file for an already running Slurm-backed Dask cluster."
+                ),
+                "runner_wait_workers": (
+                    "Wait for this many workers before ClearEx begins work. "
+                    "Set it to auto to skip waiting."
+                ),
+                "cluster_workers": "Request this many Slurm worker jobs.",
+                "cluster_cores": (
+                    "Set how many CPU cores each worker job should use."
+                ),
+                "cluster_processes": (
+                    "Choose how many worker processes each job should start."
+                ),
+                "cluster_memory": (
+                    "Set the memory request for each worker job, such as 64GB."
+                ),
+                "cluster_local_directory": (
+                    "Pick a scratch directory for worker spill files on the cluster."
+                ),
+                "cluster_local_directory_browse": (
+                    "Choose the scratch directory that worker jobs should use for spill files."
+                ),
+                "cluster_interface": (
+                    "Enter the network interface workers should use to connect, such as eth0 or ib0."
+                ),
+                "cluster_walltime": (
+                    "Set the maximum run time for each worker job, such as 02:00:00."
+                ),
+                "cluster_job_name": "Set the Slurm job name shown in the queue.",
+                "cluster_queue": (
+                    "Choose the Slurm queue or partition that should receive the worker jobs."
+                ),
+                "cluster_death_timeout": (
+                    "Set how long ClearEx should keep retrying before it gives up on a worker that stopped responding."
+                ),
+                "cluster_mail_user": (
+                    "Enter an email address for Slurm job notifications."
+                ),
+                "cluster_directives": (
+                    "Add extra Slurm directives here, one per line."
+                ),
+                "cluster_dashboard": (
+                    "Set the address where the worker dashboard should listen, or leave it blank to let Dask choose."
+                ),
+                "cluster_scheduler_interface": (
+                    "Choose the network interface the scheduler should use to talk to workers."
+                ),
+                "cluster_idle_timeout": (
+                    "Set how long the cluster should stay alive with no work before shutting down."
+                ),
+                "cluster_allowed_failures": (
+                    "Choose how many worker failures to tolerate before Slurm stops the cluster."
+                ),
+            }
 
         def _on_mode_changed(self, _: int) -> None:
             """Update mode-specific page and help text after mode selection.

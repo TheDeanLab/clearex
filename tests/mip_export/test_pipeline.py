@@ -324,6 +324,76 @@ def test_run_mip_export_analysis_writes_multi_position_tiff_outputs_with_resampl
     np.testing.assert_array_equal(yz[:, -1, :], yz_expected[:, -1, :])
 
 
+def test_run_mip_export_analysis_resamples_true_z_axis_for_singleton_multi_position_tiff(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "mip_singleton_multi_tiff_store.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 3 * 4 * 5, dtype=np.float32).reshape(
+        (1, 1, 1, 3, 4, 5)
+    )
+    root.create_array(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 2, 2, 2),
+        overwrite=True,
+    )
+    root["data"].attrs["voxel_size_um_zyx"] = [5.0, 2.0, 3.0]
+
+    summary = run_mip_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "position_mode": "multi_position",
+            "export_format": "tiff",
+            "output_directory": str(tmp_path / "mip_singleton_multi_tiff_outputs"),
+        },
+        client=None,
+    )
+
+    output_directory = Path(summary.output_directory)
+    xz_path = output_directory / "mip_xz_t0000_c0000.tif"
+    yz_path = output_directory / "mip_yz_t0000_c0000.tif"
+    assert xz_path.exists()
+    assert yz_path.exists()
+
+    xz = np.asarray(tifffile.imread(str(xz_path)))
+    yz = np.asarray(tifffile.imread(str(yz_path)))
+    expected_source = data[0, 0, 0, :, :, :]
+    xz_expected = np.max(expected_source, axis=1).astype(np.uint16)
+    yz_expected = np.max(expected_source, axis=2).astype(np.uint16)
+
+    assert tuple(xz.shape) == (
+        pipeline._resampled_axis_length(
+            axis_length=int(xz_expected.shape[0]),
+            source_spacing_um=5.0,
+            target_spacing_um=3.0,
+        ),
+        5,
+    )
+    assert tuple(yz.shape) == (
+        pipeline._resampled_axis_length(
+            axis_length=int(yz_expected.shape[0]),
+            source_spacing_um=5.0,
+            target_spacing_um=2.0,
+        ),
+        4,
+    )
+    np.testing.assert_array_equal(xz[0, :], xz_expected[0, :])
+    np.testing.assert_array_equal(xz[-1, :], xz_expected[-1, :])
+    np.testing.assert_array_equal(yz[0, :], yz_expected[0, :])
+    np.testing.assert_array_equal(yz[-1, :], yz_expected[-1, :])
+
+    xz_pixels, xz_axes = _ome_pixels_metadata(xz_path)
+    yz_pixels, yz_axes = _ome_pixels_metadata(yz_path)
+    assert xz_axes == "YX"
+    assert yz_axes == "YX"
+    assert xz_pixels["PhysicalSizeX"] == "3.0"
+    assert xz_pixels["PhysicalSizeY"] == "3.0"
+    assert yz_pixels["PhysicalSizeX"] == "2.0"
+    assert yz_pixels["PhysicalSizeY"] == "2.0"
+
+
 def test_resample_axis_linear_to_uint16_writes_nonleading_axis() -> None:
     source = np.arange(2 * 3 * 4, dtype=np.uint16).reshape((2, 3, 4))
     destination = np.zeros((2, 7, 4), dtype=np.uint16)
