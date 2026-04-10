@@ -18002,9 +18002,7 @@ def run_workflow_with_progress(
     def _invoke_run_callback(
         workflow: WorkflowConfig,
         progress_callback: Callable[[int, str], None],
-        dask_client_lifecycle_callback: Optional[
-            DaskClientLifecycleCallback
-        ] = None,
+        dask_client_lifecycle_callback: Optional[DaskClientLifecycleCallback] = None,
     ) -> None:
         lifecycle_callback = (
             relay_lifecycle_callback
@@ -18086,6 +18084,21 @@ def run_workflow_with_progress(
     cancellation_payload: dict[str, str] = {}
     completed = {"ok": False}
     cancel_requested = {"value": False}
+    progress_dashboard_setter = getattr(
+        progress_dialog, "set_dashboard_available", None
+    )
+    progress_dashboard_bridge: Optional[QObject] = None
+
+    if callable(progress_dashboard_setter) and isinstance(progress_dialog, QObject):
+
+        class _ProgressDashboardBridge(QObject):
+            dashboard_available_changed = pyqtSignal(bool, str)
+
+        progress_dashboard_bridge = _ProgressDashboardBridge(progress_dialog)
+        progress_dashboard_bridge.dashboard_available_changed.connect(
+            progress_dialog.set_dashboard_available,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
     def _request_cancel() -> None:
         """Record a user-requested cancellation event.
@@ -18110,16 +18123,21 @@ def run_workflow_with_progress(
 
     def _set_progress_dashboard_available() -> None:
         """Sync the progress dialog dashboard button to relay availability."""
-        setter = getattr(progress_dialog, "set_dashboard_available", None)
-        if not callable(setter):
+        if not callable(progress_dashboard_setter):
             return
         if active_analysis_client_ids:
-            setter(
-                True,
-                "Open the local Dask dashboard relay for analysis clients.",
-            )
+            available = True
+            tooltip = "Open the local Dask dashboard relay for analysis clients."
         else:
-            setter(False, "No active analysis Dask client is registered.")
+            available = False
+            tooltip = "No active analysis Dask client is registered."
+        if progress_dashboard_bridge is not None:
+            progress_dashboard_bridge.dashboard_available_changed.emit(
+                available,
+                tooltip,
+            )
+            return
+        progress_dashboard_setter(available, tooltip)
 
     def _open_dashboard_from_relay() -> None:
         """Open the local relay URL for the active analysis dashboard."""
@@ -18178,9 +18196,7 @@ def run_workflow_with_progress(
                 else:
                     active_analysis_client_ids[client_key] = registered_client_id
             elif normalized_event == "stopped":
-                registered_client_id = active_analysis_client_ids.pop(
-                    client_key, None
-                )
+                registered_client_id = active_analysis_client_ids.pop(client_key, None)
                 if registered_client_id is not None:
                     try:
                         relay_manager.unregister_client(registered_client_id)

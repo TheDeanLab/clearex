@@ -1729,6 +1729,7 @@ def test_run_workflow_with_progress_slurm_forwards_lifecycle_callback(
             )
         ),
     )
+
     class _FakeRelayManager:
         def __init__(self) -> None:
             self.registered_clients: list[tuple[str, str, object]] = []
@@ -1895,6 +1896,7 @@ def test_run_workflow_with_progress_slurm_batches_forward_lifecycle_callback(
             )
         ),
     )
+
     class _FakeRelayManager:
         def __init__(self) -> None:
             self.registered_clients: list[tuple[str, str, object]] = []
@@ -2116,6 +2118,7 @@ def test_run_workflow_with_progress_worker_forwards_lifecycle_callback(
             )
         ),
     )
+
     class _FakeRelayManager:
         def __init__(self) -> None:
             self.registered_clients: list[tuple[str, str, object]] = []
@@ -2376,6 +2379,149 @@ def test_run_workflow_with_progress_updates_dashboard_button_from_lifecycle_even
     assert app_instance.quit_calls == 1
 
 
+def test_run_workflow_with_progress_worker_routes_dashboard_updates_to_gui_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    themed_error_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        app_module,
+        "_show_themed_error_dialog",
+        lambda _parent, _title, _message, *, summary=None, details=None: (
+            themed_error_calls.append(
+                {"summary": str(summary), "details": str(details)}
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_apply_application_icon",
+        lambda _app: None,
+        raising=False,
+    )
+    monkeypatch.setattr(app_module, "_display_is_available", lambda: True)
+
+    class _RecordingProgressDialog(app_module.QDialog):
+        cancel_requested = app_module.pyqtSignal()
+        dashboard_requested = app_module.pyqtSignal()
+        last_instance = None
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+            type(self).last_instance = self
+            self.dashboard_enabled_states: list[tuple[bool, str]] = []
+            self.dashboard_thread_matches: list[bool] = []
+            self.updates: list[tuple[int, str]] = []
+
+        def update_progress(self, percent: int, message: str) -> None:
+            self.updates.append((int(percent), str(message)))
+
+        def set_dashboard_available(
+            self, available: bool, tooltip: str | None = None
+        ) -> None:
+            self.dashboard_thread_matches.append(
+                app_module.QThread.currentThread() is self.thread()
+            )
+            self.dashboard_enabled_states.append((bool(available), str(tooltip or "")))
+
+    class _FakeRelayManager:
+        def __init__(self) -> None:
+            self.registered_clients: list[tuple[str, str, object]] = []
+            self.unregistered_client_ids: list[str] = []
+
+        def register_client(self, *, workload, backend_mode, client):
+            self.registered_clients.append((str(workload), str(backend_mode), client))
+            return "client-1"
+
+        def unregister_client(self, client_id: str) -> None:
+            self.unregistered_client_ids.append(str(client_id))
+
+        def has_available_client(self, *, workload=None):
+            del workload
+            return bool(self.registered_clients) and not self.unregistered_client_ids
+
+        def open_dashboard(self, *, workload=None):
+            del workload
+            return "http://127.0.0.1:8787/status?token=relay"
+
+        def shutdown(self) -> None:
+            return None
+
+    relay_manager = _FakeRelayManager()
+    monkeypatch.setattr(
+        app_module,
+        "AnalysisExecutionProgressDialog",
+        _RecordingProgressDialog,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "get_dashboard_relay_manager",
+        lambda: relay_manager,
+    )
+
+    def _run_callback(
+        workflow,
+        progress_callback,
+        dask_client_lifecycle_callback=None,
+    ):
+        del workflow
+        assert callable(dask_client_lifecycle_callback)
+        client = object()
+        dask_client_lifecycle_callback(
+            "started",
+            "analysis",
+            app_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        )
+        progress_callback(55, "running")
+        dask_client_lifecycle_callback(
+            "stopped",
+            "analysis",
+            app_module.DASK_BACKEND_LOCAL_CLUSTER,
+            client,
+        )
+
+    workflow = app_module.WorkflowConfig(
+        dask_backend=app_module.DaskBackendConfig(
+            mode=app_module.DASK_BACKEND_LOCAL_CLUSTER
+        )
+    )
+
+    ok = app_module.run_workflow_with_progress(
+        workflow=workflow,
+        run_callback=_run_callback,
+    )
+
+    assert ok is True
+    assert themed_error_calls == []
+    assert relay_manager.registered_clients
+    assert relay_manager.unregistered_client_ids == ["client-1"]
+    dialog = _RecordingProgressDialog.last_instance
+    assert dialog is not None
+    assert dialog.dashboard_thread_matches
+    assert all(dialog.dashboard_thread_matches)
+    assert dialog.dashboard_enabled_states[0] == (
+        False,
+        "No active analysis Dask client is registered.",
+    )
+    assert (
+        True,
+        "Open the local Dask dashboard relay for analysis clients.",
+    ) in dialog.dashboard_enabled_states
+    assert dialog.dashboard_enabled_states[-1] == (
+        False,
+        "No active analysis Dask client is registered.",
+    )
+    dialog.close()
+
+
 def test_launch_gui_shuts_down_dashboard_relay_on_standalone_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2425,8 +2571,7 @@ def test_launch_gui_shuts_down_dashboard_relay_on_standalone_exit(
         app_module,
         "_ensure_clearex_settings_directory",
         lambda path=None: (
-            calls.__setitem__("ensure", calls["ensure"] + 1)
-            or Path("/tmp/.clearex")
+            calls.__setitem__("ensure", calls["ensure"] + 1) or Path("/tmp/.clearex")
         ),
     )
     monkeypatch.setattr(
