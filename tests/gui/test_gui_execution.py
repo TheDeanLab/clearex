@@ -1079,6 +1079,11 @@ def test_dask_dialog_scrolls_body_on_short_screens(monkeypatch) -> None:
     scroll = dialog.findChild(app_module.QScrollArea, "popupDialogScroll")
     assert scroll is not None
     assert scroll.verticalScrollBar().maximum() > 0
+    assert dialog._parameter_help_card is not None
+    assert dialog._parameter_help_label is not None
+    assert dialog._parameter_help_card.parentWidget() is dialog
+    assert dialog._parameter_help_card.parentWidget() is not scroll.widget()
+    assert dialog._parameter_help_card.isHidden()
     assert dialog._defaults_button.geometry().height() >= 36
     assert dialog._cancel_button.geometry().height() >= 36
     assert dialog._apply_button.geometry().height() >= 36
