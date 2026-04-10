@@ -995,16 +995,24 @@ def test_dask_dialog_parameter_help_shows_on_hover() -> None:
     dialog.show()
     app.processEvents()
 
+    dialog._mode_combo.setCurrentIndex(
+        dialog._mode_combo.findData(app_module.DASK_BACKEND_SLURM_CLUSTER)
+    )
+    app.processEvents()
+
     enter_event = app_module.QEvent(app_module.QEvent.Type.Enter)
     leave_event = app_module.QEvent(app_module.QEvent.Type.Leave)
 
-    dialog.eventFilter(dialog._cluster_dashboard_input, enter_event)
+    app.sendEvent(dialog._cluster_dashboard_input, enter_event)
     app.processEvents()
 
     assert dialog._parameter_help_card.isVisible()
     assert "dashboard should listen" in dialog._parameter_help_label.text()
 
-    dialog.eventFilter(dialog._cluster_dashboard_input, leave_event)
+    dialog._apply_button.setFocus()
+    app.processEvents()
+
+    app.sendEvent(dialog._cluster_dashboard_input, leave_event)
     app.processEvents()
 
     assert dialog._parameter_help_card.isHidden()
