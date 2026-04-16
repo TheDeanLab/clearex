@@ -1156,6 +1156,18 @@ def _configure_dask_backend(
                 int(effective_n_workers) if effective_n_workers is not None else 1
             )
             use_processes = bool(requested_processes or effective_worker_count > 1)
+            if (
+                workload_name == "analysis"
+                and not use_gpu_local_cluster
+                and int(effective_threads_per_worker) > 1
+            ):
+                logger.warning(
+                    "Analysis LocalCluster is configured with threads_per_worker=%s. "
+                    "ClearEx analysis already runs process-based, but CPU-heavy "
+                    "analysis typically performs best with 1 thread per worker "
+                    "and more workers instead.",
+                    int(effective_threads_per_worker),
+                )
             if not requested_processes and use_processes:
                 logger.info(
                     "Using process-based LocalCluster for multi-worker I/O "

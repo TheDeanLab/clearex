@@ -6,6 +6,7 @@ from __future__ import annotations
 # Standard Library Imports
 from contextlib import ExitStack
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import logging
@@ -241,6 +242,55 @@ def test_configure_dask_backend_uses_threads_for_single_worker_io(monkeypatch) -
 
     assert client is not None
     assert captured["processes"] is False
+
+
+def test_configure_dask_backend_warns_for_analysis_threads_per_worker(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _DummyClient:
+        def close(self) -> None:
+            return None
+
+    def _fake_create_dask_client(**kwargs):
+        captured.update(kwargs)
+        return _DummyClient()
+
+    workflow = WorkflowConfig(
+        prefer_dask=True,
+        dask_backend=DaskBackendConfig(
+            local_cluster=LocalClusterConfig(
+                n_workers=1,
+                threads_per_worker=72,
+                memory_limit="500GiB",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(main_module, "create_dask_client", _fake_create_dask_client)
+
+    log_stream = StringIO()
+    logger = logging.getLogger("clearex.test.main.configure_analysis_threads_warning")
+    logger.handlers = []
+    handler = logging.StreamHandler(log_stream)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    with ExitStack() as stack:
+        client = main_module._configure_dask_backend(
+            workflow=workflow,
+            logger=logger,
+            exit_stack=stack,
+            workload="analysis",
+        )
+
+    assert client is not None
+    assert captured["processes"] is True
+    warning_text = log_stream.getvalue()
+    assert "threads_per_worker=72" in warning_text
+    assert "1 thread per worker" in warning_text
 
 
 def test_configure_dask_backend_emits_client_lifecycle_callbacks(

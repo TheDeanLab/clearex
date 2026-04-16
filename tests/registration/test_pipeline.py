@@ -676,6 +676,128 @@ def test_run_registration_analysis_gain_compensated_feather_corrects_overlap_int
     )
 
 
+def test_run_fusion_analysis_parallelizes_intensity_estimation_with_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = _create_registration_store(
+        tmp_path,
+        timepoints=1,
+        positions=2,
+        channels=1,
+        shape_zyx=(4, 4, 6),
+        include_pyramid=False,
+    )
+    root = zarr.open_group(str(store_path), mode="a")
+    data = root["data"]
+    data[0, 0, 0] = np.full((4, 4, 6), 10, dtype=np.uint16)
+    data[0, 1, 0] = np.full((4, 4, 6), 20, dtype=np.uint16)
+
+    def _sync_compute(*tasks, scheduler=None):
+        del scheduler
+        results = []
+        for task in tasks:
+            if hasattr(task, "compute"):
+                results.append(task.compute())
+            else:
+                results.append(task)
+        return tuple(results)
+
+    def _fake_pairwise(**kwargs):
+        edge = kwargs["edge"]
+        correction = np.eye(4, dtype=np.float64)
+        return _edge_result(edge, correction)
+
+    def _fake_intensity(**kwargs):
+        edge = kwargs["edge"]
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": True,
+            "overlap_voxels": int(edge.overlap_voxels),
+            "intensity_success": True,
+            "intensity_scale": 0.5,
+            "intensity_offset": 0.0,
+            "intensity_samples": int(edge.overlap_voxels),
+        }
+
+    monkeypatch.setattr(registration_pipeline.dask, "compute", _sync_compute)
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_register_pairwise_overlap",
+        _fake_pairwise,
+    )
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_estimate_pairwise_overlap_intensity",
+        _fake_intensity,
+    )
+
+    registration_pipeline.run_registration_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "registration_channel": 0,
+            "registration_type": "translation",
+            "input_resolution_level": 0,
+            "anchor_mode": "central",
+            "anchor_position": None,
+            "pairwise_overlap_zyx": [0, 0, 2],
+        },
+        client=None,
+    )
+
+    from dask.distributed import Client, LocalCluster
+
+    with LocalCluster(
+        n_workers=1,
+        threads_per_worker=1,
+        processes=False,
+        dashboard_address=None,
+    ) as cluster:
+        with Client(cluster) as client:
+            compute_calls: list[int] = []
+            original_compute = client.compute
+
+            def _counting_compute(*args, **kwargs):
+                compute_calls.append(len(args[0]) if args else 0)
+                return original_compute(*args, **kwargs)
+
+            client.compute = _counting_compute  # type: ignore[method-assign]
+
+            monkeypatch.setattr(
+                registration_pipeline,
+                "_estimate_worker_thread_capacity",
+                lambda _client: 1,
+            )
+            monkeypatch.setattr(
+                registration_pipeline,
+                "_process_and_write_registration_chunk",
+                lambda **kwargs: 1,
+            )
+
+            registration_pipeline.run_fusion_analysis(
+                zarr_path=store_path,
+                parameters={
+                    "input_source": "registration",
+                    "blend_mode": "gain_compensated_feather",
+                    "blend_overlap_zyx": [0, 0, 2],
+                    "blend_exponent": 1.0,
+                    "gain_clip_range": [0.25, 4.0],
+                },
+                client=client,
+            )
+
+    root = zarr.open_group(str(store_path), mode="r")
+    latest = root["clearex/results/fusion/latest"]
+    np.testing.assert_allclose(
+        latest["intensity_gains_tp"][:],
+        np.asarray([[1.0, 0.5]], dtype=np.float32),
+        atol=1e-6,
+    )
+    assert compute_calls == [1]
+
+
 def test_source_subvolume_for_overlap_returns_tighter_slices() -> None:
     """_source_subvolume_for_overlap should return slices narrower than the full tile."""
     transform = np.eye(4, dtype=np.float64)
@@ -876,6 +998,164 @@ def test_process_and_write_registration_chunk_skips_empty_source_subvolumes(
     )
 
 
+def test_process_and_write_registration_chunk_limits_nested_zarr_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fusion workers should bound nested Zarr I/O fan-out inside each task."""
+
+    class _ConfigAssertingArray:
+        def __init__(self, data: np.ndarray) -> None:
+            self._data = np.asarray(data)
+            self.shape = self._data.shape
+
+        def __getitem__(self, key: object) -> np.ndarray:
+            assert zarr.config.get("async.concurrency") == 1
+            assert zarr.config.get("threading.max_workers") == 1
+            return np.asarray(self._data[key])
+
+    class _ConfigAssertingTarget:
+        def __init__(self, shape: tuple[int, ...], dtype: np.dtype) -> None:
+            self._data = np.zeros(shape, dtype=dtype)
+            self.shape = self._data.shape
+
+        def __setitem__(self, key: object, value: object) -> None:
+            assert zarr.config.get("async.concurrency") == 1
+            assert zarr.config.get("threading.max_workers") == 1
+            self._data[key] = value
+
+    class _FakeGroup:
+        def __init__(
+            self, mapping: dict[str, object], attrs: dict[str, object]
+        ) -> None:
+            self._mapping = dict(mapping)
+            self.attrs = dict(attrs)
+
+        def __getitem__(self, key: str) -> object:
+            return self._mapping[key]
+
+    class _FakeRoot:
+        def __init__(self, mapping: dict[str, object]) -> None:
+            self._mapping = dict(mapping)
+
+        def __getitem__(self, key: str) -> object:
+            return self._mapping[key]
+
+    source = _ConfigAssertingArray(np.ones((1, 1, 1, 2, 3, 4), dtype=np.uint16))
+    affines = _ConfigAssertingArray(np.asarray([[np.eye(4, dtype=np.float64)]]))
+    transformed_bboxes = _ConfigAssertingArray(
+        np.asarray([[[0.0, 0.0, 0.0, 4.0, 3.0, 2.0]]], dtype=np.float64)
+    )
+    intensity_gains = _ConfigAssertingArray(np.ones((1, 1), dtype=np.float32))
+    intensity_offsets = _ConfigAssertingArray(np.zeros((1, 1), dtype=np.float32))
+    output = _ConfigAssertingTarget((1, 1, 1, 2, 3, 4), np.dtype(np.float32))
+    blend_group = _FakeGroup(
+        mapping={
+            "profile_z": _ConfigAssertingArray(np.ones((2,), dtype=np.float32)),
+            "profile_y": _ConfigAssertingArray(np.ones((3,), dtype=np.float32)),
+            "profile_x": _ConfigAssertingArray(np.ones((4,), dtype=np.float32)),
+        },
+        attrs={"blend_mode": "feather"},
+    )
+    fake_root = _FakeRoot(
+        {
+            "data": source,
+            "fusion/blend_weights": blend_group,
+            "fusion/intensity_gains_tp": intensity_gains,
+            "fusion/intensity_offsets_tp": intensity_offsets,
+            "registration/affines_tpx44": affines,
+            "registration/transformed_bboxes_tpx6": transformed_bboxes,
+            "fusion/output": output,
+        }
+    )
+
+    monkeypatch.setattr(
+        registration_pipeline.zarr, "open_group", lambda *args, **kwargs: fake_root
+    )
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_source_subvolume_for_overlap",
+        lambda *args, **kwargs: (
+            (slice(0, 2), slice(0, 3), slice(0, 4)),
+            np.eye(4, dtype=np.float64),
+        ),
+    )
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_resample_source_to_world_grid",
+        lambda source_volume, *args, **kwargs: np.asarray(
+            source_volume, dtype=np.float32
+        ),
+    )
+
+    written = registration_pipeline._process_and_write_registration_chunk(
+        zarr_path="ignored.ome.zarr",
+        source_component="data",
+        output_component="fusion/output",
+        affines_component="registration/affines_tpx44",
+        transformed_bboxes_component="registration/transformed_bboxes_tpx6",
+        blend_weights_component="fusion/blend_weights",
+        intensity_gains_component="fusion/intensity_gains_tp",
+        intensity_offsets_component="fusion/intensity_offsets_tp",
+        t_index=0,
+        c_index=0,
+        z_bounds=(0, 2),
+        y_bounds=(0, 3),
+        x_bounds=(0, 4),
+        output_origin_xyz=(0.0, 0.0, 0.0),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        output_dtype="float32",
+    )
+
+    assert written == 1
+    np.testing.assert_allclose(
+        output._data,
+        np.ones((1, 1, 1, 2, 3, 4), dtype=np.float32),
+    )
+
+
+def test_estimate_fusion_chunk_bytes_uses_overlap_bounded_source_subvolume() -> None:
+    """Fusion memory estimates should follow the clipped overlap crop, not full tile."""
+    chunk_bounds_zyx = ((10, 14), (20, 24), (30, 34))
+    chunk_shape_zyx = tuple(int(bounds[1] - bounds[0]) for bounds in chunk_bounds_zyx)
+    source_shape_zyx = (100, 100, 100)
+    affines_p44 = np.asarray([np.eye(4, dtype=np.float64)])
+    transformed_bboxes_px6 = np.asarray(
+        [[0.0, 0.0, 0.0, 100.0, 100.0, 100.0]],
+        dtype=np.float64,
+    )
+
+    estimated = registration_pipeline._estimate_fusion_chunk_bytes(
+        chunk_bounds_zyx=chunk_bounds_zyx,
+        output_origin_xyz=(0.0, 0.0, 0.0),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        source_shape_zyx=source_shape_zyx,
+        affines_p44=affines_p44,
+        transformed_bboxes_px6=transformed_bboxes_px6,
+    )
+
+    source_slices, _ = registration_pipeline._source_subvolume_for_overlap(
+        np.eye(4, dtype=np.float64),
+        reference_origin_xyz=np.asarray([30.0, 20.0, 10.0], dtype=np.float64),
+        reference_shape_zyx=chunk_shape_zyx,
+        source_shape_zyx=source_shape_zyx,
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+    )
+    bounded_source_voxels = int(
+        np.prod(
+            [
+                int(axis_slice.stop) - int(axis_slice.start)
+                for axis_slice in source_slices
+            ]
+        )
+    )
+    chunk_voxels = int(np.prod(chunk_shape_zyx))
+    expected = (2 * chunk_voxels + 4 * bounded_source_voxels) * 4
+    full_tile_estimate = (2 * chunk_voxels + 4 * int(np.prod(source_shape_zyx))) * 4
+
+    assert estimated == expected
+    assert estimated < full_tile_estimate
+
+
 def test_downsample_crop_for_registration_reduces_volume() -> None:
     """_downsample_crop_for_registration should reduce volume beyond the budget."""
     rng = np.random.default_rng(7)
@@ -1033,11 +1313,21 @@ class TestBlendWeightProfiles:
 
     def test_memory_estimate_positive(self):
         est = registration_pipeline._estimate_fusion_chunk_bytes(
-            chunk_shape_zyx=(64, 64, 64),
+            chunk_bounds_zyx=((0, 64), (0, 64), (0, 64)),
+            output_origin_xyz=(0.0, 0.0, 0.0),
+            voxel_size_um_zyx=(1.0, 1.0, 1.0),
             source_shape_zyx=(576, 30730, 5112),
-            n_positions=4,
+            affines_p44=np.repeat(
+                np.eye(4, dtype=np.float64)[None, :, :],
+                4,
+                axis=0,
+            ),
+            transformed_bboxes_px6=np.repeat(
+                np.asarray([[0.0, 0.0, 0.0, 64.0, 64.0, 64.0]], dtype=np.float64),
+                4,
+                axis=0,
+            ),
         )
         assert est > 0
-        # Should be dominated by source tile size (~337 GiB)
-        # but with only 4× source voxels it's much more reasonable
+        # Overlap-bounded estimates should remain well below the full-tile bound.
         assert est < 2_000_000_000_000  # < 2 TiB sanity check

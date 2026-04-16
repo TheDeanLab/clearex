@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import logging
@@ -65,6 +66,8 @@ _CONTENT_WEIGHT_FLOOR = np.float32(0.25)
 _CONTENT_WEIGHT_SIGMA = 1.0
 _MIN_INTENSITY_CORRECTION_SAMPLES = 128
 _MAX_INTENSITY_CORRECTION_SAMPLES = 250_000
+_ZARR_WORKER_IO_ASYNC_CONCURRENCY = 1
+_ZARR_WORKER_IO_MAX_THREADS = 1
 _PERMUTE_ZYX_TO_XYZ = np.asarray(
     [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64
 )
@@ -162,6 +165,15 @@ class _EdgeSpec:
     overlap_voxels: int
 
 
+@dataclass(frozen=True)
+class _FusionChunkMemoryEstimate:
+    """Upper-bound live-memory estimate for one fusion chunk task."""
+
+    estimated_bytes: int
+    chunk_shape_zyx: tuple[int, int, int]
+    source_subvolume_shape_zyx: tuple[int, int, int]
+
+
 def _emit(
     progress_callback: Optional[ProgressCallback], percent: int, message: str
 ) -> None:
@@ -177,6 +189,45 @@ def _safe_float(value: Any, *, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+@contextmanager
+def _bounded_zarr_worker_io() -> Any:
+    """Cap nested Zarr I/O concurrency inside one worker task.
+
+    Registration/fusion worker tasks already run under Dask-managed parallelism.
+    Leaving Zarr v3 at its default nested async/thread fan-out can create large
+    numbers of additional threads inside those worker tasks, especially on
+    high-thread-count local clusters. Bound Zarr's per-task concurrency so the
+    Dask worker remains the top-level scheduler.
+    """
+    with zarr.config.set(
+        {
+            "async.concurrency": int(_ZARR_WORKER_IO_ASYNC_CONCURRENCY),
+            "threading.max_workers": int(_ZARR_WORKER_IO_MAX_THREADS),
+        }
+    ):
+        yield
+
+
+def _worker_zarr_read(
+    array: Any,
+    selection: Any,
+    *,
+    dtype: Optional[Union[str, np.dtype[Any]]] = None,
+) -> np.ndarray:
+    """Read one Zarr selection under bounded nested worker-side concurrency."""
+    with _bounded_zarr_worker_io():
+        payload = array[selection]
+    if dtype is None:
+        return np.asarray(payload)
+    return np.asarray(payload, dtype=dtype)
+
+
+def _worker_zarr_write(array: Any, selection: Any, value: Any) -> None:
+    """Write one Zarr selection under bounded nested worker-side concurrency."""
+    with _bounded_zarr_worker_io():
+        array[selection] = value
 
 
 def _looks_like_multiposition_header(row: Any) -> bool:
@@ -1199,26 +1250,28 @@ def _register_pairwise_overlap(
             "intensity_samples": 0,
         }
 
-    fixed_source = np.asarray(
-        source[
+    fixed_source = _worker_zarr_read(
+        source,
+        (
             int(t_index),
             int(edge.fixed_position),
             int(registration_channel),
             fixed_slices[0],
             fixed_slices[1],
             fixed_slices[2],
-        ],
+        ),
         dtype=np.float32,
     )
-    moving_source = np.asarray(
-        source[
+    moving_source = _worker_zarr_read(
+        source,
+        (
             int(t_index),
             int(edge.moving_position),
             int(registration_channel),
             moving_slices[0],
             moving_slices[1],
             moving_slices[2],
-        ],
+        ),
         dtype=np.float32,
     )
 
@@ -1460,26 +1513,28 @@ def _estimate_pairwise_overlap_intensity(
             "intensity_samples": 0,
         }
 
-    fixed_source = np.asarray(
-        source[
+    fixed_source = _worker_zarr_read(
+        source,
+        (
             int(t_index),
             int(edge.fixed_position),
             int(registration_channel),
             fixed_slices[0],
             fixed_slices[1],
             fixed_slices[2],
-        ],
+        ),
         dtype=np.float32,
     )
-    moving_source = np.asarray(
-        source[
+    moving_source = _worker_zarr_read(
+        source,
+        (
             int(t_index),
             int(edge.moving_position),
             int(registration_channel),
             moving_slices[0],
             moving_slices[1],
             moving_slices[2],
-        ],
+        ),
         dtype=np.float32,
     )
     fixed_crop = _resample_source_to_world_grid(
@@ -2208,33 +2263,131 @@ def _axis_chunk_bounds(size: int, chunk_size: int) -> list[tuple[int, int]]:
 
 
 def _estimate_fusion_chunk_bytes(
-    chunk_shape_zyx: Sequence[int],
+    *,
+    chunk_bounds_zyx: tuple[tuple[int, int], tuple[int, int], tuple[int, int]],
+    output_origin_xyz: Sequence[float],
+    voxel_size_um_zyx: Sequence[float],
     source_shape_zyx: Sequence[int],
-    n_positions: int,
+    affines_p44: np.ndarray,
+    transformed_bboxes_px6: np.ndarray,
 ) -> int:
-    """Estimate peak memory for a single fusion-worker invocation.
+    """Estimate peak memory for one fusion-worker chunk invocation.
+
+    This follows the same overlap-clipped crop geometry used by
+    ``_process_and_write_registration_chunk(...)`` instead of assuming a full
+    source tile is always materialized.
+    """
+    return int(
+        _estimate_fusion_chunk_memory(
+            chunk_bounds_zyx=chunk_bounds_zyx,
+            output_origin_xyz=output_origin_xyz,
+            voxel_size_um_zyx=voxel_size_um_zyx,
+            source_shape_zyx=source_shape_zyx,
+            affines_p44=affines_p44,
+            transformed_bboxes_px6=transformed_bboxes_px6,
+        ).estimated_bytes
+    )
+
+
+def _estimate_fusion_chunk_memory(
+    *,
+    chunk_bounds_zyx: tuple[tuple[int, int], tuple[int, int], tuple[int, int]],
+    output_origin_xyz: Sequence[float],
+    voxel_size_um_zyx: Sequence[float],
+    source_shape_zyx: Sequence[int],
+    affines_p44: np.ndarray,
+    transformed_bboxes_px6: np.ndarray,
+) -> _FusionChunkMemoryEstimate:
+    """Estimate peak memory for one fusion-worker chunk invocation.
 
     The worker simultaneously holds:
 
     * Two float32 accumulation buffers (``chunk_sum``, ``chunk_weight``)
       sized to the output chunk.
-    * Per overlapping position (worst-case *n_positions*): a source sub-volume
-      read, a resampled volume, a weight sub-volume, and a resampled weight,
-      each up to source-tile-sized but more typically chunk-sized.  Only one
-      position is live at a time, so we estimate for one.
+    * For one overlapping position at a time: a source sub-volume read, a
+      resampled volume, a weight sub-volume, and a resampled weight. The
+      source/weight sub-volume bound is computed from the transformed-bbox
+      overlap and the same ``_source_subvolume_for_overlap(...)`` helper used
+      at execution time.
 
     Returns
     -------
-    int
-        Estimated bytes.
+    _FusionChunkMemoryEstimate
+        Estimated bytes plus the bounded chunk and source-subvolume shapes.
     """
+    z_bounds, y_bounds, x_bounds = chunk_bounds_zyx
+    z0, z1 = (int(z_bounds[0]), int(z_bounds[1]))
+    y0, y1 = (int(y_bounds[0]), int(y_bounds[1]))
+    x0, x1 = (int(x_bounds[0]), int(x_bounds[1]))
+    chunk_shape_zyx = (z1 - z0, y1 - y0, x1 - x0)
+    chunk_origin_xyz = np.asarray(
+        [
+            float(output_origin_xyz[0]) + (float(x0) * float(voxel_size_um_zyx[2])),
+            float(output_origin_xyz[1]) + (float(y0) * float(voxel_size_um_zyx[1])),
+            float(output_origin_xyz[2]) + (float(z0) * float(voxel_size_um_zyx[0])),
+        ],
+        dtype=np.float64,
+    )
+    chunk_bbox_xyz = np.asarray(
+        [
+            [
+                float(chunk_origin_xyz[0]),
+                float(chunk_origin_xyz[0])
+                + (float(chunk_shape_zyx[2]) * float(voxel_size_um_zyx[2])),
+            ],
+            [
+                float(chunk_origin_xyz[1]),
+                float(chunk_origin_xyz[1])
+                + (float(chunk_shape_zyx[1]) * float(voxel_size_um_zyx[1])),
+            ],
+            [
+                float(chunk_origin_xyz[2]),
+                float(chunk_origin_xyz[2])
+                + (float(chunk_shape_zyx[0]) * float(voxel_size_um_zyx[0])),
+            ],
+        ],
+        dtype=np.float64,
+    )
     chunk_voxels = int(np.prod(list(chunk_shape_zyx)))
-    # Worst-case sub-volume is full tile (clipped by _source_subvolume_for_overlap
-    # but for estimation purposes we use the full tile).
-    source_voxels = int(np.prod(list(source_shape_zyx)))
-    # Two accumulators + 4 transient arrays per position (only 1 position live).
+    max_source_voxels = 0
+    max_source_shape_zyx = (0, 0, 0)
+    position_count = min(
+        int(np.asarray(affines_p44).shape[0]),
+        int(np.asarray(transformed_bboxes_px6).shape[0]),
+    )
+    for position_index in range(position_count):
+        bbox_payload = np.asarray(
+            transformed_bboxes_px6[int(position_index)], dtype=np.float64
+        )
+        bbox_min = bbox_payload[:3]
+        bbox_max = bbox_payload[3:]
+        if np.any(bbox_max <= chunk_bbox_xyz[:, 0]) or np.any(
+            chunk_bbox_xyz[:, 1] <= bbox_min
+        ):
+            continue
+        src_slices, _ = _source_subvolume_for_overlap(
+            np.asarray(affines_p44[int(position_index)], dtype=np.float64),
+            reference_origin_xyz=chunk_origin_xyz,
+            reference_shape_zyx=chunk_shape_zyx,
+            source_shape_zyx=tuple(int(v) for v in source_shape_zyx),
+            voxel_size_um_zyx=voxel_size_um_zyx,
+        )
+        if _slices_zyx_are_empty(src_slices):
+            continue
+        source_shape = tuple(
+            int(axis_slice.stop) - int(axis_slice.start) for axis_slice in src_slices
+        )
+        source_voxels = int(np.prod(source_shape))
+        if source_voxels > max_source_voxels:
+            max_source_voxels = int(source_voxels)
+            max_source_shape_zyx = source_shape
+
     bytes_per_float32 = 4
-    return (2 * chunk_voxels + 4 * source_voxels) * bytes_per_float32
+    return _FusionChunkMemoryEstimate(
+        estimated_bytes=(2 * chunk_voxels + 4 * max_source_voxels) * bytes_per_float32,
+        chunk_shape_zyx=tuple(int(v) for v in chunk_shape_zyx),
+        source_subvolume_shape_zyx=tuple(int(v) for v in max_source_shape_zyx),
+    )
 
 
 def _process_and_write_registration_chunk(
@@ -2333,9 +2486,15 @@ def _process_and_write_registration_chunk(
     # Load the pre-computed 1D blend-weight profiles (tiny — sum of axis
     # lengths × 4 bytes) and reconstruct sub-volumes on-the-fly per tile.
     blend_group = root[blend_weights_component]
-    profile_z = np.asarray(blend_group["profile_z"][:], dtype=np.float32)
-    profile_y = np.asarray(blend_group["profile_y"][:], dtype=np.float32)
-    profile_x = np.asarray(blend_group["profile_x"][:], dtype=np.float32)
+    profile_z = _worker_zarr_read(
+        blend_group["profile_z"], slice(None), dtype=np.float32
+    )
+    profile_y = _worker_zarr_read(
+        blend_group["profile_y"], slice(None), dtype=np.float32
+    )
+    profile_x = _worker_zarr_read(
+        blend_group["profile_x"], slice(None), dtype=np.float32
+    )
     blend_mode = _normalized_blend_mode(blend_group.attrs.get("blend_mode", "feather"))
     intensity_gains = root[intensity_gains_component]
     intensity_offsets = root[intensity_offsets_component]
@@ -2346,8 +2505,10 @@ def _process_and_write_registration_chunk(
     affines = root[affines_component]
     transformed_bboxes = root[transformed_bboxes_component]
     for position_index in range(position_count):
-        bbox_payload = np.asarray(
-            transformed_bboxes[int(t_index), int(position_index)], dtype=np.float64
+        bbox_payload = _worker_zarr_read(
+            transformed_bboxes,
+            (int(t_index), int(position_index)),
+            dtype=np.float64,
         )
         bbox_min = bbox_payload[:3]
         bbox_max = bbox_payload[3:]
@@ -2355,8 +2516,10 @@ def _process_and_write_registration_chunk(
             chunk_bbox_xyz[:, 1] <= bbox_min
         ):
             continue
-        transform_xyz = np.asarray(
-            affines[int(t_index), int(position_index)], dtype=np.float64
+        transform_xyz = _worker_zarr_read(
+            affines,
+            (int(t_index), int(position_index)),
+            dtype=np.float64,
         )
 
         # Compute the minimal source sub-volume needed for this output chunk.
@@ -2369,15 +2532,16 @@ def _process_and_write_registration_chunk(
         )
         if _slices_zyx_are_empty(src_slices):
             continue
-        source_volume = np.asarray(
-            source[
+        source_volume = _worker_zarr_read(
+            source,
+            (
                 int(t_index),
                 int(position_index),
                 int(c_index),
                 src_slices[0],
                 src_slices[1],
                 src_slices[2],
-            ],
+            ),
             dtype=np.float32,
         )
         warped_volume = _resample_source_to_world_grid(
@@ -2389,8 +2553,18 @@ def _process_and_write_registration_chunk(
             order=1,
             cval=0.0,
         )
-        gain = float(intensity_gains[int(t_index), int(position_index)])
-        offset = float(intensity_offsets[int(t_index), int(position_index)])
+        gain = float(
+            _worker_zarr_read(
+                intensity_gains,
+                (int(t_index), int(position_index)),
+            )
+        )
+        offset = float(
+            _worker_zarr_read(
+                intensity_offsets,
+                (int(t_index), int(position_index)),
+            )
+        )
         if gain != 1.0 or offset != 0.0:
             warped_volume = (
                 np.array(warped_volume, dtype=np.float32, copy=False) * np.float32(gain)
@@ -2426,8 +2600,10 @@ def _process_and_write_registration_chunk(
         where=chunk_weight > 0,
     )
     write_root = zarr.open_group(str(zarr_path), mode="a")
-    write_root[output_component][int(t_index), 0, int(c_index), z0:z1, y0:y1, x0:x1] = (
-        _cast_to_dtype(normalized, np.dtype(output_dtype))
+    _worker_zarr_write(
+        write_root[output_component],
+        (int(t_index), 0, int(c_index), slice(z0, z1), slice(y0, y1), slice(x0, x1)),
+        _cast_to_dtype(normalized, np.dtype(output_dtype)),
     )
     return 1
 
@@ -3185,17 +3361,44 @@ def run_fusion_analysis(
 
     source_tile_shape_zyx = tuple(int(v) for v in source_shape_tpczyx[3:])
     chunk_shape_zyx = output_chunks_tpczyx[3:]
-    est_bytes = _estimate_fusion_chunk_bytes(
-        chunk_shape_zyx,
-        source_tile_shape_zyx,
-        n_positions=int(source_shape_tpczyx[1]),
+    affines = np.asarray(root[affines_component][:], dtype=np.float64)
+    transformed_bboxes = np.asarray(
+        root[transformed_bboxes_component][:], dtype=np.float64
     )
-    est_gib = est_bytes / (1024**3)
+    z_bounds = _axis_chunk_bounds(output_shape_tpczyx[3], output_chunks_tpczyx[3])
+    y_bounds = _axis_chunk_bounds(output_shape_tpczyx[4], output_chunks_tpczyx[4])
+    x_bounds = _axis_chunk_bounds(output_shape_tpczyx[5], output_chunks_tpczyx[5])
+    worst_estimate = _FusionChunkMemoryEstimate(
+        estimated_bytes=(2 * int(np.prod(chunk_shape_zyx)) * 4),
+        chunk_shape_zyx=tuple(int(v) for v in chunk_shape_zyx),
+        source_subvolume_shape_zyx=(0, 0, 0),
+    )
+    for t_index in range(
+        min(
+            int(output_shape_tpczyx[0]),
+            int(affines.shape[0]),
+            int(transformed_bboxes.shape[0]),
+        )
+    ):
+        for z_chunk in z_bounds:
+            for y_chunk in y_bounds:
+                for x_chunk in x_bounds:
+                    estimate = _estimate_fusion_chunk_memory(
+                        chunk_bounds_zyx=(z_chunk, y_chunk, x_chunk),
+                        output_origin_xyz=output_origin_xyz,
+                        voxel_size_um_zyx=full_voxel_size_um_zyx,
+                        source_shape_zyx=source_tile_shape_zyx,
+                        affines_p44=affines[int(t_index)],
+                        transformed_bboxes_px6=transformed_bboxes[int(t_index)],
+                    )
+                    if estimate.estimated_bytes > worst_estimate.estimated_bytes:
+                        worst_estimate = estimate
+    est_gib = float(worst_estimate.estimated_bytes) / (1024**3)
     logger.info(
-        "Fusion memory estimate: %.1f GiB per worker (chunk %s, tile %s)",
+        "Fusion memory estimate: %.1f GiB per worker (chunk %s, max overlap-bounded source subvolume %s)",
         est_gib,
-        chunk_shape_zyx,
-        source_tile_shape_zyx,
+        worst_estimate.chunk_shape_zyx,
+        worst_estimate.source_subvolume_shape_zyx,
     )
     if est_gib > 64:
         logger.warning(
@@ -3231,15 +3434,11 @@ def run_fusion_analysis(
         (int(source_shape_tpczyx[0]), int(source_shape_tpczyx[1])),
         dtype=np.float32,
     )
-    transformed_bboxes = np.asarray(
-        root[transformed_bboxes_component][:], dtype=np.float64
-    )
-    affines = np.asarray(root[affines_component][:], dtype=np.float64)
     if _blend_uses_gain_compensation(blend_mode) and edges_pe2.size > 0:
         _emit(progress_callback, 12, "Estimating fusion intensity corrections")
         for t_index in range(int(source_shape_tpczyx[0])):
             edge_specs: list[_EdgeSpec] = []
-            edge_results: list[Mapping[str, Any]] = []
+            delayed_intensity_edges: list[Any] = []
             for fixed_position, moving_position in edges_pe2:
                 fixed_bbox = transformed_bboxes[int(t_index), int(fixed_position)]
                 moving_bbox = transformed_bboxes[int(t_index), int(moving_position)]
@@ -3275,8 +3474,8 @@ def run_fusion_analysis(
                     ),
                 )
                 edge_specs.append(edge_spec)
-                edge_results.append(
-                    _estimate_pairwise_overlap_intensity(
+                delayed_intensity_edges.append(
+                    delayed(_estimate_pairwise_overlap_intensity)(
                         zarr_path=str(zarr_path),
                         source_component=source_component,
                         t_index=int(t_index),
@@ -3292,6 +3491,17 @@ def run_fusion_analysis(
                     )
                 )
             if edge_specs:
+                if client is None:
+                    edge_results = list(
+                        dask.compute(
+                            *delayed_intensity_edges,
+                            scheduler="processes",
+                        )
+                    )
+                else:
+                    edge_results = list(
+                        client.gather(client.compute(delayed_intensity_edges))
+                    )
                 gains, offsets = _solve_intensity_corrections(
                     positions=positions,
                     active_edge_indices=list(range(len(edge_specs))),
@@ -3322,9 +3532,6 @@ def run_fusion_analysis(
         overwrite=True,
     )
 
-    z_bounds = _axis_chunk_bounds(output_shape_tpczyx[3], output_chunks_tpczyx[3])
-    y_bounds = _axis_chunk_bounds(output_shape_tpczyx[4], output_chunks_tpczyx[4])
-    x_bounds = _axis_chunk_bounds(output_shape_tpczyx[5], output_chunks_tpczyx[5])
     fusion_tasks = [
         (int(t_index), int(c_index), z_chunk, y_chunk, x_chunk)
         for t_index in range(int(output_shape_tpczyx[0]))
