@@ -789,6 +789,79 @@ def test_resolve_data_store_path_uses_experiment_directory_for_non_zarr(tmp_path
     assert resolved == (experiment_dir / "data_store.ome.zarr").resolve()
 
 
+def test_materialize_experiment_data_store_persists_navigate_oblique_geometry(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    payload = {
+        "Saving": {
+            "save_directory": str(tmp_path),
+            "file_type": "TIFF",
+        },
+        "MicroscopeState": {
+            "microscope_name": "Macroscale",
+            "timepoints": 1,
+            "number_z_steps": 4,
+            "step_size": 5.0,
+            "primary_z_axis": "z",
+            "channels": {
+                "channel_1": {
+                    "is_selected": True,
+                    "laser": "488nm",
+                }
+            },
+        },
+        "CameraParameters": {
+            "img_x_pixels": 4,
+            "img_y_pixels": 3,
+            "Macroscale": {
+                "img_x_pixels": 4,
+                "img_y_pixels": 3,
+                "fov_x": 4.0,
+                "fov_y": 3.0,
+            },
+        },
+        "BDVParameters": {
+            "shear": {
+                "shear_data": True,
+                "shear_dimension": "YZ",
+            }
+        },
+    }
+    experiment_path.write_text(json.dumps(payload, indent=2))
+    experiment = load_navigate_experiment(experiment_path)
+
+    expected_geometry = {
+        "schema": "clearex.navigate_oblique_geometry.v1",
+        "mode": "stage_scan",
+        "scan_axis": "z",
+        "stage_axis": "y",
+        "scan_step_um": 5.0,
+        "shear_dimension": "yz",
+        "microscope_name": "Macroscale",
+    }
+
+    assert experiment.to_metadata_dict()["navigate_oblique_geometry"] == expected_geometry
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_path = tmp_path / "source.npy"
+    np.save(source_path, source_data)
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    metadata = root["clearex/metadata"].attrs
+    source_attrs = root[SOURCE_CACHE_COMPONENT].attrs
+
+    assert metadata["navigate_oblique_geometry"] == expected_geometry
+    assert source_attrs["navigate_oblique_geometry"] == expected_geometry
+
+
 def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(
     tmp_path: Path,
 ):

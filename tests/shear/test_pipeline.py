@@ -204,6 +204,47 @@ def test_run_shear_transform_identity_preserves_data(tmp_path: Path) -> None:
     np.testing.assert_array_equal(output, data)
 
 
+def test_run_shear_transform_navigate_geometry_preserves_stage_scan_extent(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "shear_navigate_stage_extent.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.ones((1, 1, 1, 5, 1, 2), dtype=np.float32)
+    root.create_array(
+        name="data",
+        data=data,
+        chunks=(1, 1, 1, 5, 1, 2),
+        overwrite=True,
+    )
+    root["data"].attrs["voxel_size_um_zyx"] = [5.0, 1.0, 1.0]
+    root["data"].attrs["navigate_oblique_geometry"] = {
+        "schema": "clearex.navigate_oblique_geometry.v1",
+        "mode": "stage_scan",
+        "scan_axis": "z",
+        "stage_axis": "y",
+        "scan_step_um": 5.0,
+        "shear_dimension": "yz",
+        "microscope_name": "Macroscale",
+    }
+
+    summary = run_shear_transform_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "shear_yz": 1.0,
+            "auto_rotate_from_shear": True,
+            "interpolation": "nearestneighbor",
+            "output_dtype": "float32",
+            "roi_padding_zyx": [1, 1, 1],
+        },
+        client=None,
+    )
+
+    expected_stage_extent_y = int(np.floor(((5 - 1) * 5.0) / 1.0)) + 1
+    assert summary.output_shape_tpczyx[4] == expected_stage_extent_y
+    assert np.isclose(summary.voxel_size_um_zyx[0], 5.0 / np.sqrt(2.0))
+
+
 def test_run_shear_transform_emits_larger_bounds_for_nonzero_shear(
     tmp_path: Path,
 ) -> None:
@@ -322,3 +363,108 @@ def test_run_shear_transform_identity_with_distributed_client(
     assert output.shape == data.shape
     assert summary.output_shape_tpczyx == data.shape
     np.testing.assert_array_equal(output, data)
+
+
+def test_process_and_write_tile_limits_nested_zarr_io(monkeypatch) -> None:
+    """Shear workers should bound nested Zarr I/O fan-out inside each task."""
+
+    class _ConfigAssertingArray:
+        def __init__(self, data: np.ndarray) -> None:
+            self._data = np.asarray(data)
+            self.shape = self._data.shape
+
+        def __getitem__(self, key: object) -> np.ndarray:
+            assert zarr.config.get("async.concurrency") == 1
+            assert zarr.config.get("threading.max_workers") == 1
+            return np.asarray(self._data[key])
+
+    class _ConfigAssertingTarget:
+        def __init__(self, shape: tuple[int, ...], dtype: np.dtype) -> None:
+            self._data = np.zeros(shape, dtype=dtype)
+            self.shape = self._data.shape
+
+        def __setitem__(self, key: object, value: object) -> None:
+            assert zarr.config.get("async.concurrency") == 1
+            assert zarr.config.get("threading.max_workers") == 1
+            self._data[key] = value
+
+    class _FakeGroup:
+        def __init__(self, mapping: dict[str, object]) -> None:
+            self._mapping = dict(mapping)
+
+        def __getitem__(self, key: str) -> object:
+            return self._mapping[key]
+
+    class _FakeImage:
+        def __init__(self, data: np.ndarray) -> None:
+            self._data = np.asarray(data, dtype=np.float32)
+
+        def set_spacing(self, spacing: tuple[float, float, float]) -> None:
+            _ = spacing
+
+        def set_origin(self, origin: tuple[float, float, float]) -> None:
+            _ = origin
+
+        def numpy(self) -> np.ndarray:
+            return np.asarray(self._data, dtype=np.float32)
+
+    class _FakeTransform:
+        def apply_to_image(
+            self,
+            source_image: _FakeImage,
+            *,
+            reference: _FakeImage,
+            interpolation: str,
+        ) -> _FakeImage:
+            _ = reference
+            _ = interpolation
+            return _FakeImage(source_image.numpy())
+
+    class _FakeAntsModule:
+        @staticmethod
+        def from_numpy(data: np.ndarray) -> _FakeImage:
+            return _FakeImage(data)
+
+        @staticmethod
+        def create_ants_transform(**kwargs: object) -> _FakeTransform:
+            _ = kwargs
+            return _FakeTransform()
+
+    source = _ConfigAssertingArray(np.ones((1, 1, 1, 2, 3, 4), dtype=np.uint16))
+    output = _ConfigAssertingTarget((1, 1, 1, 2, 3, 4), np.dtype(np.float32))
+    root = _FakeGroup({"data": source, "output": output})
+
+    monkeypatch.setattr(shear_pipeline.zarr, "open_group", lambda *args, **kwargs: root)
+    monkeypatch.setattr(
+        shear_pipeline,
+        "_source_bounds_for_output_region",
+        lambda **kwargs: ((0, 2), (0, 3), (0, 4)),
+    )
+    monkeypatch.setattr(shear_pipeline, "ants", _FakeAntsModule())
+
+    written = shear_pipeline._process_and_write_tile(
+        zarr_path="unused.zarr",
+        source_component="data",
+        output_component="output",
+        t_index=0,
+        p_index=0,
+        c_index=0,
+        output_bounds_zyx=((0, 2), (0, 3), (0, 4)),
+        output_origin_xyz=(0.0, 0.0, 0.0),
+        source_shape_zyx=(2, 3, 4),
+        roi_padding_zyx=(0, 0, 0),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        inverse_matrix_xyz=np.eye(3, dtype=np.float64),
+        inverse_offset_xyz=np.zeros(3, dtype=np.float64),
+        inverse_matrix_zyx=np.eye(3, dtype=np.float64),
+        inverse_offset_zyx=np.zeros(3, dtype=np.float64),
+        interpolation="nearestneighbor",
+        output_dtype="float32",
+        fill_value=0.0,
+    )
+
+    assert written == 1
+    np.testing.assert_array_equal(
+        output._data,
+        np.ones((1, 1, 1, 2, 3, 4), dtype=np.float32),
+    )

@@ -16,6 +16,10 @@ This `README.md` is the canonical subsystem reference for
 - Source data axes remain canonical `(t, p, c, z, y, x)`.
 - Voxel spacing is interpreted as `voxel_size_um_zyx` and used to map index
   space to physical space.
+- When Navigate source metadata provides `navigate_oblique_geometry`, shear
+  must treat source `z_step_um` as mechanical stage travel and derive an
+  effective transform-space scan-axis spacing from the configured affine so the
+  declared stage-aligned output axis preserves the recorded stage span.
 - `auto_rotate_from_shear` applies axis-coupled Euler adjustments:
   - `rotation_deg_x += -atan(shear_yz)`
   - `rotation_deg_y += +atan(shear_xz)`
@@ -42,6 +46,7 @@ Shear now relies on shared resolver logic in `clearex.io.ome_store`:
 
 - `resolve_voxel_size_um_zyx_with_source(...)`
 - `resolve_voxel_size_um_zyx(...)`
+- `resolve_navigate_oblique_geometry_with_source(...)`
 
 Resolution order:
 
@@ -75,6 +80,9 @@ When editing this subsystem:
 - Do not remove `voxel_size_um_zyx` persistence from shear outputs.
 - Do not replace shared voxel-size resolution with local single-source lookups.
 - Keep `voxel_size_resolution_source` on shear outputs for diagnostics.
+- Keep worker-side Zarr reads/writes under bounded nested concurrency so
+  Dask-managed tile parallelism does not explode into per-task thread fan-out
+  on large real datasets.
 - If output metadata keys change, update downstream readers and tests in the
   same change set.
 

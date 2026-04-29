@@ -11,6 +11,7 @@ import zarr
 from clearex.io.ome_store import (
     load_store_metadata,
     publish_analysis_collection_from_cache,
+    resolve_navigate_oblique_geometry_with_source,
     resolve_voxel_size_um_zyx_with_source,
     update_store_metadata,
 )
@@ -79,6 +80,32 @@ def test_resolve_voxel_size_uses_store_metadata_navigate_fallback(
 
     assert voxel_size_um_zyx == (3.5, 0.8, 0.8)
     assert source == "store_metadata_navigate"
+
+
+def test_resolve_navigate_oblique_geometry_uses_store_metadata_fallback(
+    tmp_path: Path,
+) -> None:
+    """Resolver should recover Navigate stage-geometry metadata from the store."""
+    store_path = tmp_path / "navigate_geometry_metadata_fallback.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    payload = {
+        "schema": "clearex.navigate_oblique_geometry.v1",
+        "mode": "stage_scan",
+        "scan_axis": "z",
+        "stage_axis": "y",
+        "scan_step_um": 5.0,
+        "shear_dimension": "yz",
+        "microscope_name": "Macroscale",
+    }
+    update_store_metadata(root, navigate_oblique_geometry=payload)
+
+    geometry, source = resolve_navigate_oblique_geometry_with_source(
+        root,
+        source_component="missing/component",
+    )
+
+    assert geometry == payload
+    assert source == "store_metadata"
 
 
 def test_load_store_metadata_read_only_missing_group_returns_schema_default(
