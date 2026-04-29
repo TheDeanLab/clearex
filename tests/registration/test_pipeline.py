@@ -1189,6 +1189,116 @@ def test_downsample_crop_for_registration_noop_when_small() -> None:
     assert eff_voxel == pytest.approx(voxel_size)
 
 
+def test_pairwise_registration_grid_downsample_bounds_voxel_budget() -> None:
+    """Pairwise registration should derive a coarse grid before allocation."""
+    shape, voxel_size, factor = (
+        registration_pipeline._registration_grid_for_pairwise_budget(
+            crop_shape_zyx=(1070, 22780, 768),
+            voxel_size_um_zyx=(3.5355, 1.0599, 1.0599),
+            max_pairwise_voxels=10_000_000,
+        )
+    )
+
+    assert factor > 1
+    assert int(np.prod(shape)) <= 10_000_000
+    assert shape == (83, 1753, 60)
+    assert voxel_size == pytest.approx(
+        (
+            3.5355 * factor,
+            1.0599 * factor,
+            1.0599 * factor,
+        )
+    )
+
+
+def test_register_pairwise_overlap_reads_strided_sources_for_large_crop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large pairwise crops should be downsampled at source read/resample time."""
+
+    class _FakeSource:
+        shape = (1, 2, 1, 100, 100, 100)
+
+    class _FakeRoot:
+        def __getitem__(self, key: str) -> _FakeSource:
+            assert key == "data"
+            return _FakeSource()
+
+    read_selections: list[object] = []
+    resample_calls: list[tuple[tuple[int, int, int], tuple[float, float, float]]] = []
+
+    def _fake_worker_read(array: object, selection: object, *, dtype: object = None):
+        _ = array
+        _ = dtype
+        read_selections.append(selection)
+        slices = selection[3:]
+        shape = tuple(len(range(s.start, s.stop, s.step or 1)) for s in slices)
+        return np.ones(shape, dtype=np.float32)
+
+    def _fake_resample(
+        source_zyx: np.ndarray,
+        local_to_world_xyz: np.ndarray,
+        *,
+        reference_origin_xyz: np.ndarray,
+        reference_shape_zyx: tuple[int, int, int],
+        voxel_size_um_zyx: tuple[float, float, float],
+        order: int,
+        cval: float,
+    ) -> np.ndarray:
+        _ = source_zyx
+        _ = local_to_world_xyz
+        _ = reference_origin_xyz
+        _ = order
+        _ = cval
+        resample_calls.append((reference_shape_zyx, voxel_size_um_zyx))
+        grid = np.indices(reference_shape_zyx, dtype=np.float32)
+        return np.asarray(grid[0] + grid[1] + grid[2] + 1.0, dtype=np.float32)
+
+    monkeypatch.setattr(registration_pipeline.zarr, "open_group", lambda *a, **k: _FakeRoot())
+    monkeypatch.setattr(registration_pipeline, "_worker_zarr_read", _fake_worker_read)
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_resample_source_to_world_grid",
+        _fake_resample,
+    )
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_phase_cross_correlation",
+        lambda *a, **k: (np.zeros(3, dtype=np.float64), 0.0, 0.0),
+    )
+
+    result = registration_pipeline._register_pairwise_overlap(
+        zarr_path="unused.zarr",
+        source_component="data",
+        t_index=0,
+        registration_channel=0,
+        edge=registration_pipeline._EdgeSpec(
+            fixed_position=0,
+            moving_position=1,
+            overlap_bbox_xyz=((0.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
+            overlap_voxels=40 * 40 * 40,
+        ),
+        nominal_fixed_transform_xyz=np.eye(4, dtype=np.float64),
+        nominal_moving_transform_xyz=np.eye(4, dtype=np.float64),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        overlap_zyx=(0, 0, 0),
+        registration_type="translation",
+        max_pairwise_voxels=1_000,
+        use_phase_correlation=True,
+    )
+
+    assert result["success"] is True
+    assert result["reason"] == "phase_correlation"
+    assert len(read_selections) == 2
+    assert all(selection[3].step == 4 for selection in read_selections)
+    assert all(selection[4].step == 4 for selection in read_selections)
+    assert all(selection[5].step == 4 for selection in read_selections)
+    assert resample_calls == [
+        ((10, 10, 10), (4.0, 4.0, 4.0)),
+        ((10, 10, 10), (4.0, 4.0, 4.0)),
+    ]
+
+
 def test_phase_correlation_translation_recovers_known_shift() -> None:
     """_phase_correlation_translation should recover a known translation."""
     pytest.importorskip("skimage")

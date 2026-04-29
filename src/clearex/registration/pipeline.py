@@ -904,6 +904,52 @@ def _downsample_crop_for_registration(
     return downsampled, effective_voxel
 
 
+def _registration_grid_for_pairwise_budget(
+    *,
+    crop_shape_zyx: Sequence[int],
+    voxel_size_um_zyx: Sequence[float],
+    max_pairwise_voxels: int,
+) -> tuple[tuple[int, int, int], tuple[float, float, float], int]:
+    """Resolve the registration grid before allocating overlap crops."""
+    shape_zyx = tuple(max(1, int(value)) for value in crop_shape_zyx)
+    voxel_size = tuple(float(value) for value in voxel_size_um_zyx)
+    budget = max(1, int(max_pairwise_voxels))
+    total = int(np.prod(shape_zyx))
+    if int(max_pairwise_voxels) <= 0 or total <= budget:
+        return shape_zyx, voxel_size, 1
+
+    factor = max(2, int(math.ceil((total / budget) ** (1.0 / 3.0))))
+    while True:
+        coarse_shape = tuple(
+            max(1, int(math.ceil(int(axis_size) / float(factor))))
+            for axis_size in shape_zyx
+        )
+        if int(np.prod(coarse_shape)) <= budget:
+            break
+        factor += 1
+
+    coarse_voxel_size = (
+        float(voxel_size[0]) * float(factor),
+        float(voxel_size[1]) * float(factor),
+        float(voxel_size[2]) * float(factor),
+    )
+    return coarse_shape, coarse_voxel_size, int(factor)
+
+
+def _stride_slices_zyx(
+    slices_zyx: tuple[slice, slice, slice],
+    factor: int,
+) -> tuple[slice, slice, slice]:
+    """Apply an integer read stride to ZYX source slices."""
+    stride = max(1, int(factor))
+    if stride <= 1:
+        return slices_zyx
+    return tuple(
+        slice(int(axis_slice.start), int(axis_slice.stop), stride)
+        for axis_slice in slices_zyx
+    )
+
+
 def _crop_from_overlap_bbox(
     overlap_bbox_xyz: tuple[
         tuple[float, float], tuple[float, float], tuple[float, float]
@@ -1219,6 +1265,13 @@ def _register_pairwise_overlap(
         voxel_size_um_zyx=voxel_size_um_zyx,
         overlap_zyx=overlap_zyx,
     )
+    reg_crop_shape_zyx, reg_voxel_size, read_stride = (
+        _registration_grid_for_pairwise_budget(
+            crop_shape_zyx=crop_shape_zyx,
+            voxel_size_um_zyx=voxel_size_um_zyx,
+            max_pairwise_voxels=int(max_pairwise_voxels),
+        )
+    )
 
     # Compute minimal source sub-volumes covering the overlap crop.
     fixed_slices, fixed_adj_transform = _source_subvolume_for_overlap(
@@ -1227,6 +1280,7 @@ def _register_pairwise_overlap(
         reference_shape_zyx=crop_shape_zyx,
         source_shape_zyx=source_shape_zyx,
         voxel_size_um_zyx=voxel_size_um_zyx,
+        padding=max(2, int(read_stride) * 2),
     )
     moving_slices, moving_adj_transform = _source_subvolume_for_overlap(
         nominal_moving_transform_xyz,
@@ -1234,6 +1288,7 @@ def _register_pairwise_overlap(
         reference_shape_zyx=crop_shape_zyx,
         source_shape_zyx=source_shape_zyx,
         voxel_size_um_zyx=voxel_size_um_zyx,
+        padding=max(2, int(read_stride) * 2),
     )
     if _slices_zyx_are_empty(fixed_slices) or _slices_zyx_are_empty(moving_slices):
         return {
@@ -1250,15 +1305,17 @@ def _register_pairwise_overlap(
             "intensity_samples": 0,
         }
 
+    fixed_read_slices = _stride_slices_zyx(fixed_slices, read_stride)
+    moving_read_slices = _stride_slices_zyx(moving_slices, read_stride)
     fixed_source = _worker_zarr_read(
         source,
         (
             int(t_index),
             int(edge.fixed_position),
             int(registration_channel),
-            fixed_slices[0],
-            fixed_slices[1],
-            fixed_slices[2],
+            fixed_read_slices[0],
+            fixed_read_slices[1],
+            fixed_read_slices[2],
         ),
         dtype=np.float32,
     )
@@ -1268,9 +1325,9 @@ def _register_pairwise_overlap(
             int(t_index),
             int(edge.moving_position),
             int(registration_channel),
-            moving_slices[0],
-            moving_slices[1],
-            moving_slices[2],
+            moving_read_slices[0],
+            moving_read_slices[1],
+            moving_read_slices[2],
         ),
         dtype=np.float32,
     )
@@ -1279,8 +1336,8 @@ def _register_pairwise_overlap(
         fixed_source,
         fixed_adj_transform,
         reference_origin_xyz=crop_origin_xyz,
-        reference_shape_zyx=crop_shape_zyx,
-        voxel_size_um_zyx=voxel_size_um_zyx,
+        reference_shape_zyx=reg_crop_shape_zyx,
+        voxel_size_um_zyx=reg_voxel_size,
         order=1,
         cval=0.0,
     )
@@ -1288,8 +1345,8 @@ def _register_pairwise_overlap(
         moving_source,
         moving_adj_transform,
         reference_origin_xyz=crop_origin_xyz,
-        reference_shape_zyx=crop_shape_zyx,
-        voxel_size_um_zyx=voxel_size_um_zyx,
+        reference_shape_zyx=reg_crop_shape_zyx,
+        voxel_size_um_zyx=reg_voxel_size,
         order=1,
         cval=0.0,
     )
@@ -1341,7 +1398,7 @@ def _register_pairwise_overlap(
             correction_matrix_xyz = _phase_correlation_translation(
                 fixed_crop,
                 moving_crop,
-                voxel_size_um_zyx=voxel_size_um_zyx,
+                voxel_size_um_zyx=reg_voxel_size,
             )
             return {
                 "fixed_position": int(edge.fixed_position),
@@ -1359,25 +1416,11 @@ def _register_pairwise_overlap(
         except Exception:
             pass  # Fall through to ANTs path.
 
-    # Sub-sample large crops to stay within the voxel budget.
-    reg_voxel_size: Sequence[float] = voxel_size_um_zyx
+    # Large crops have already been sampled onto the registration grid above.
     reg_fixed = fixed_crop
     reg_moving = moving_crop
     reg_fixed_mask = fixed_mask
     reg_moving_mask = moving_mask
-    if int(max_pairwise_voxels) > 0:
-        reg_fixed, reg_voxel_size = _downsample_crop_for_registration(
-            fixed_crop,
-            max_voxels=int(max_pairwise_voxels),
-            voxel_size_um_zyx=voxel_size_um_zyx,
-        )
-        reg_moving, reg_voxel_size = _downsample_crop_for_registration(
-            moving_crop,
-            max_voxels=int(max_pairwise_voxels),
-            voxel_size_um_zyx=voxel_size_um_zyx,
-        )
-        reg_fixed_mask = np.asarray(reg_fixed > 0, dtype=np.float32)
-        reg_moving_mask = np.asarray(reg_moving > 0, dtype=np.float32)
 
     # FFT initial alignment — pre-align moving crop before ANTs so ANTs
     # starts near the solution and converges with fewer iterations.

@@ -39,6 +39,10 @@ integration:
   - `intensity_offsets_tp`
 - Do not reintroduce `results/registration/latest/data` as a canonical image
   target. Registration no longer owns a reusable image output.
+- Pairwise registration must apply the `max_pairwise_voxels` budget before
+  source reads and overlap resampling. Large overlap crops should be sampled
+  onto a coarser registration grid instead of allocating the full-resolution
+  crop and downsampling afterward.
 
 ## Quick Start
 
