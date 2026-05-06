@@ -1565,7 +1565,7 @@ def summarize_navigate_bdv_n5_image_info(
         return None
 
     entries = _iter_navigate_bdv_n5_entries(source_path)
-    if len(entries) <= 1:
+    if not entries:
         return None
 
     setup_map = _parse_navigate_bdv_setup_index_map(source_path)
@@ -5381,7 +5381,9 @@ def _infer_navigate_oblique_geometry(
         return None
 
     bdv_parameters = (
-        raw.get("BDVParameters", {}) if isinstance(raw.get("BDVParameters"), dict) else {}
+        raw.get("BDVParameters", {})
+        if isinstance(raw.get("BDVParameters"), dict)
+        else {}
     )
     shear_payload = (
         bdv_parameters.get("shear", {})

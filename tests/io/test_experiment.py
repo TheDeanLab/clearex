@@ -841,7 +841,9 @@ def test_materialize_experiment_data_store_persists_navigate_oblique_geometry(
         "microscope_name": "Macroscale",
     }
 
-    assert experiment.to_metadata_dict()["navigate_oblique_geometry"] == expected_geometry
+    assert (
+        experiment.to_metadata_dict()["navigate_oblique_geometry"] == expected_geometry
+    )
 
     source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
     source_path = tmp_path / "source.npy"
@@ -1763,6 +1765,61 @@ def test_load_navigate_experiment_source_image_info_summarizes_bdv_n5(
     assert info.metadata["source_component"] == "setup0/timepoint0/s0"
     assert info.metadata["positions"] == 2
     assert info.metadata["channels"] == 2
+
+
+def test_load_navigate_experiment_source_image_info_accepts_single_setup_bdv_n5(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="N5",
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.n5"
+    expected = np.arange(2 * 3 * 4, dtype=np.uint16).reshape((2, 3, 4))
+    _write_real_n5_dataset(
+        source_path,
+        component="setup0/timepoint0/s0",
+        data_xyz=np.transpose(expected, (2, 1, 0)),
+        block_size_xyz=(4, 3, 1),
+    )
+    _write_real_n5_dataset(
+        source_path,
+        component="setup1/timepoint0/s0",
+        data_xyz=np.zeros((4, 3, 2), dtype=np.uint16),
+        block_size_xyz=(4, 3, 1),
+    )
+    _strip_n5_component_payload_files(source_path, component="setup1/timepoint0/s0")
+
+    _write_bdv_xml(
+        tmp_path / "CH00_000000.xml",
+        loader_format="bdv.n5",
+        data_file_name=source_path.name,
+        setup_channel_tile={0: (0, 0)},
+    )
+
+    class _FailingOpener:
+        def open(self, *args, **kwargs):
+            raise AssertionError("ImageOpener.open should not be used for BDV N5.")
+
+    info = load_navigate_experiment_source_image_info(
+        experiment=experiment,
+        source_path=source_path,
+        opener=_FailingOpener(),
+    )
+
+    assert info.path == source_path.resolve()
+    assert info.shape == (1, 1, 1, 2, 3, 4)
+    assert info.dtype == np.dtype(np.uint16)
+    assert info.axes == "TPCZYX"
+    assert info.metadata is not None
+    assert info.metadata["source_layout"] == "navigate_bdv_n5"
+    assert info.metadata["source_component"] == "setup0/timepoint0/s0"
+    assert info.metadata["positions"] == 1
+    assert info.metadata["channels"] == 1
 
 
 def test_load_navigate_experiment_source_image_info_reads_tiff_header_only(
