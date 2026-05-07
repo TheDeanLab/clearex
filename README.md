@@ -6,6 +6,101 @@
 
 ClearEx is an open source Python package for scalable analytics of cleared and expanded tissue imaging data.
 
+## Cyclic Immunofluorescence Resubmission Scope
+
+For the cyclic immunofluorescence resubmission, ClearEx is being supplied for
+the registration code used in that work. This workflow uses the Python
+registration API under `clearex.registration` and the registration examples
+under `examples/`; it is separate from the main ClearEx CLI and GUI workflows
+described later in this README.
+
+Do not use `clearex`, `clearex --registration`, or the GUI to reproduce the
+cyclic immunofluorescence registration workflow. Those entrypoints drive the
+newer OME-Zarr tile-registration and fusion runtime. The cyclic
+immunofluorescence registration path is accessed programmatically through the
+examples and module-level API.
+
+Features used for the cyclic immunofluorescence work:
+
+- Linear/affine and nonlinear/deformable registration of 3D TIFF image volumes
+  with ANTsPyX.
+- Round-to-reference registration through `ImageRegistration` and the
+  `register_round(...)` convenience function.
+- Reuse of saved transforms so interrupted or repeated runs can skip completed
+  registration stages unless `force_override=True`.
+- Optional chunked and parallel chunked registration classes for large volumes.
+- Transform application utilities for applying saved affine/nonlinear
+  transforms to additional channels or rounds.
+
+Reviewer-facing system requirements for this registration path:
+
+- Python `3.12`.
+- Tested ClearEx version: `0.1.1`.
+- Tested dependency set: the versions resolved in `uv.lock`; key registration
+  dependencies include `antspyx 0.6.2`, `numpy 1.26.4`, `scipy 1.12.0`,
+  `tifffile 2025.1.10`, and `scikit-image 0.26.0`.
+- Operating systems: macOS, Linux, or Windows where the Python dependencies
+  install successfully.
+- Non-standard hardware: none required. CPU core count and RAM determine
+  practical runtime for large volumes; a GPU is not required for the cyclic
+  immunofluorescence registration examples.
+
+Typical installation time on a normal desktop computer is about 5-15 minutes
+with `uv` when binary wheels are available. It may take longer on systems that
+must compile scientific Python dependencies from source.
+
+To install the software for reviewer use:
+
+```bash
+uv python install 3.12
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e .
+```
+
+On Windows PowerShell, activate with:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+To run a small registration demo on the supplied test dataset:
+
+```bash
+uv run python examples/scripts/registration/linear_registration.py
+```
+
+The demo downloads a small test dataset from Zenodo into `downloaded_data/`,
+runs affine registration, and writes a registered TIFF plus an ANTs transform
+file into that same directory. Expected terminal output includes the fixed and
+moving image paths, ANTs transform inspection, export messages, and `Done.`.
+Typical runtime for the small linear demo is minutes on a normal desktop after
+the dataset has downloaded. Full nonlinear or chunked registration of
+publication-scale volumes can take tens of minutes to hours depending on image
+size, registration accuracy, CPU count, RAM, and storage speed.
+
+To run the cyclic immunofluorescence registration API on your own data:
+
+```python
+from clearex.registration import register_round
+
+register_round(
+    fixed_image_path="path/to/reference_round.tif",
+    moving_image_path="path/to/moving_round.tif",
+    save_directory="path/to/registration_output",
+    imaging_round=1,
+    crop=False,
+    enable_logging=True,
+)
+```
+
+Expected outputs include `linear_transform_<round>.mat`,
+`nonlinear_warp_<round>.nii.gz`, registration metric text files, and log output
+in the selected save directory. See `examples/scripts/registration/` and
+`examples/notebooks/registration/` for the scripts and notebooks covering the
+class-based API, functional API, linear registration, nonlinear registration,
+transform application, and chunked registration.
+
 ## Current Functionality
 - GUI-first entrypoint with headless fallback.
 - Headless CLI for scripted runs.
