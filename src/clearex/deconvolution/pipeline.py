@@ -43,7 +43,10 @@ import tifffile
 import zarr
 
 # Local Imports
-from clearex.deconvolution.petakit import run_petakit_deconvolution
+from clearex.deconvolution.petakit import (
+    run_petakit_deconvolution,
+    validate_petakit_runtime,
+)
 from clearex.io.ome_store import (
     SOURCE_CACHE_COMPONENT,
     analysis_auxiliary_root,
@@ -1498,6 +1501,7 @@ def run_deconvolution_analysis(
         root=root,
         parameters=normalized,
     )
+    validate_petakit_runtime(mcc_mode=bool(normalized["mcc_mode"]))
     _emit(5, "Prepared deconvolution inputs and voxel metadata")
 
     component, data_component, shape_tpczyx, output_chunks = _prepare_output_array(

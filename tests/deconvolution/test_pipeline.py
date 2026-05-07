@@ -12,6 +12,10 @@ import zarr
 # Local Imports
 from clearex.deconvolution.pipeline import run_deconvolution_analysis
 import clearex.deconvolution.pipeline as decon_pipeline
+from clearex.deconvolution.petakit import (
+    MATLAB_RUNTIME_ROOT_ENV,
+    PETAKIT5D_ROOT_ENV,
+)
 
 _DECONV_PUBLIC_COMPONENT = "results/deconvolution/latest"
 _DECONV_CACHE_DATA = "clearex/runtime_cache/results/deconvolution/latest/data"
@@ -64,7 +68,7 @@ def test_run_deconvolution_analysis_schedules_all_tpc_volumes(
 
     summary = run_deconvolution_analysis(
         zarr_path=store_path,
-        parameters={"psf_mode": "measured"},
+        parameters={"psf_mode": "measured", "mcc_mode": False},
         client=None,
     )
 
@@ -100,6 +104,7 @@ def test_run_deconvolution_analysis_respects_channel_selection(
         parameters={
             "psf_mode": "measured",
             "channel_indices": [1],
+            "mcc_mode": False,
         },
         client=None,
     )
@@ -109,3 +114,29 @@ def test_run_deconvolution_analysis_respects_channel_selection(
     assert summary.channel_count == 1
     assert summary.output_chunks_tpczyx == (1, 1, 1, 3, 3, 3)
     assert summary.psf_mode == "measured"
+
+
+def test_run_deconvolution_analysis_preflights_mcc_runtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store.zarr"
+    _create_store(store_path=store_path, shape_tpczyx=(1, 1, 1, 3, 3, 3))
+    monkeypatch.delenv(PETAKIT5D_ROOT_ENV, raising=False)
+    monkeypatch.delenv(MATLAB_RUNTIME_ROOT_ENV, raising=False)
+
+    try:
+        run_deconvolution_analysis(
+            zarr_path=store_path,
+            parameters={"psf_mode": "measured"},
+            client=None,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("deconvolution should fail before submitting work.")
+
+    assert PETAKIT5D_ROOT_ENV in message
+    assert MATLAB_RUNTIME_ROOT_ENV in message
+
+    root = zarr.open_group(str(store_path), mode="r")
+    assert _DECONV_CACHE_DATA not in root

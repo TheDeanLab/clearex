@@ -87,9 +87,5 @@ docs = [
 [project.urls]
 Source = "https://github.com/TheDeanLab/clearex"
 
-[tool.uv]
-no-binary-package = ["PyPetaKit5D"]   # Always build from sdist
-reinstall-package = ["PyPetaKit5D"] # Similar to --force-reinstall, would run each uv sync
-
 [project.scripts]
 clearex = "clearex.main:main"
