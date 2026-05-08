@@ -789,6 +789,81 @@ def test_resolve_data_store_path_uses_experiment_directory_for_non_zarr(tmp_path
     assert resolved == (experiment_dir / "data_store.ome.zarr").resolve()
 
 
+def test_materialize_experiment_data_store_persists_navigate_oblique_geometry(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    payload = {
+        "Saving": {
+            "save_directory": str(tmp_path),
+            "file_type": "TIFF",
+        },
+        "MicroscopeState": {
+            "microscope_name": "Macroscale",
+            "timepoints": 1,
+            "number_z_steps": 4,
+            "step_size": 5.0,
+            "primary_z_axis": "z",
+            "channels": {
+                "channel_1": {
+                    "is_selected": True,
+                    "laser": "488nm",
+                }
+            },
+        },
+        "CameraParameters": {
+            "img_x_pixels": 4,
+            "img_y_pixels": 3,
+            "Macroscale": {
+                "img_x_pixels": 4,
+                "img_y_pixels": 3,
+                "fov_x": 4.0,
+                "fov_y": 3.0,
+            },
+        },
+        "BDVParameters": {
+            "shear": {
+                "shear_data": True,
+                "shear_dimension": "YZ",
+            }
+        },
+    }
+    experiment_path.write_text(json.dumps(payload, indent=2))
+    experiment = load_navigate_experiment(experiment_path)
+
+    expected_geometry = {
+        "schema": "clearex.navigate_oblique_geometry.v1",
+        "mode": "stage_scan",
+        "scan_axis": "z",
+        "stage_axis": "y",
+        "scan_step_um": 5.0,
+        "shear_dimension": "yz",
+        "microscope_name": "Macroscale",
+    }
+
+    assert (
+        experiment.to_metadata_dict()["navigate_oblique_geometry"] == expected_geometry
+    )
+
+    source_data = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    source_path = tmp_path / "source.npy"
+    np.save(source_path, source_data)
+
+    materialized = materialize_experiment_data_store(
+        experiment=experiment,
+        source_path=source_path,
+        chunks=(1, 1, 1, 2, 2, 2),
+        pyramid_factors=((1,), (1,), (1,), (1,), (1,), (1,)),
+    )
+
+    root = zarr.open_group(str(materialized.store_path), mode="r")
+    metadata = root["clearex/metadata"].attrs
+    source_attrs = root[SOURCE_CACHE_COMPONENT].attrs
+
+    assert metadata["navigate_oblique_geometry"] == expected_geometry
+    assert source_attrs["navigate_oblique_geometry"] == expected_geometry
+
+
 def test_materialize_experiment_data_store_creates_data_store_for_non_zarr(
     tmp_path: Path,
 ):
@@ -1690,6 +1765,61 @@ def test_load_navigate_experiment_source_image_info_summarizes_bdv_n5(
     assert info.metadata["source_component"] == "setup0/timepoint0/s0"
     assert info.metadata["positions"] == 2
     assert info.metadata["channels"] == 2
+
+
+def test_load_navigate_experiment_source_image_info_accepts_single_setup_bdv_n5(
+    tmp_path: Path,
+) -> None:
+    experiment_path = tmp_path / "experiment.yml"
+    _write_minimal_experiment(
+        experiment_path,
+        save_directory=tmp_path,
+        file_type="N5",
+    )
+    experiment = load_navigate_experiment(experiment_path)
+
+    source_path = tmp_path / "CH00_000000.n5"
+    expected = np.arange(2 * 3 * 4, dtype=np.uint16).reshape((2, 3, 4))
+    _write_real_n5_dataset(
+        source_path,
+        component="setup0/timepoint0/s0",
+        data_xyz=np.transpose(expected, (2, 1, 0)),
+        block_size_xyz=(4, 3, 1),
+    )
+    _write_real_n5_dataset(
+        source_path,
+        component="setup1/timepoint0/s0",
+        data_xyz=np.zeros((4, 3, 2), dtype=np.uint16),
+        block_size_xyz=(4, 3, 1),
+    )
+    _strip_n5_component_payload_files(source_path, component="setup1/timepoint0/s0")
+
+    _write_bdv_xml(
+        tmp_path / "CH00_000000.xml",
+        loader_format="bdv.n5",
+        data_file_name=source_path.name,
+        setup_channel_tile={0: (0, 0)},
+    )
+
+    class _FailingOpener:
+        def open(self, *args, **kwargs):
+            raise AssertionError("ImageOpener.open should not be used for BDV N5.")
+
+    info = load_navigate_experiment_source_image_info(
+        experiment=experiment,
+        source_path=source_path,
+        opener=_FailingOpener(),
+    )
+
+    assert info.path == source_path.resolve()
+    assert info.shape == (1, 1, 1, 2, 3, 4)
+    assert info.dtype == np.dtype(np.uint16)
+    assert info.axes == "TPCZYX"
+    assert info.metadata is not None
+    assert info.metadata["source_layout"] == "navigate_bdv_n5"
+    assert info.metadata["source_component"] == "setup0/timepoint0/s0"
+    assert info.metadata["positions"] == 1
+    assert info.metadata["channels"] == 1
 
 
 def test_load_navigate_experiment_source_image_info_reads_tiff_header_only(

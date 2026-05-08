@@ -13,7 +13,8 @@ ClearEx uses:
 - **Python 3.12** (`>=3.12,<3.13`)
 - **uv** as the package manager and virtual environment tool
 - A number of scientific Python libraries (Dask, Zarr, SimpleITK, etc.)
-- **PyPetaKit5D**, which installs and uses the **MATLAB Runtime** (~5 GB download)
+- **PyPetaKit5D** Python wrappers, plus separately installed **PetaKit5D MCC
+  assets** and **MATLAB Runtime** for deconvolution
 
 Python `3.13` is intentionally not supported right now. Flatfield correction
 depends on BaSiCPy, and BaSiCPy currently pins `scipy<1.13`. On Linux clusters,
@@ -23,10 +24,38 @@ which then requires a working OpenBLAS toolchain on the node.
 Because of this, there are a few important rules:
 
 1. The **uv cache** and your **Python virtual environment** must live on the **same filesystem** (e.g., both under `/project/...`) for best performance.
-2. The cluster’s **HTTP/HTTPS proxy** must be available so that PyPetaKit5D can download the MATLAB Runtime.
+2. The PetaKit5D/MATLAB Runtime install should live under `/project`, not
+   `$HOME`, because it is large and must be visible to compute workers.
 3. SOCKS proxies (`ALL_PROXY`) should **not** be used during installation; they can interfere with tools like `uv` and PyCharm on GPU nodes.
 
 Once the environment is configured, most users only need to run a few commands to install ClearEx and its dependencies.
+
+### Deconvolution runtime assets
+
+`uv pip install -e ".[decon]"` installs the Python wrappers used by ClearEx.
+ClearEx intentionally does not force the upstream PyPetaKit5D `setup.py`
+runtime download during `uv` installation. Install the PetaKit5D MCC launcher
+and MATLAB Runtime assets once on `/project`:
+
+```bash
+cd /project/bioinformatics/Danuser_lab/Dean/dean/git/clearex
+scripts/install_petakit_runtime.sh
+source /project/bioinformatics/Danuser_lab/Dean/dean/matlab_runtime/clearex_petakit_env.sh
+```
+
+The installer follows the upstream PyPetaKit5D `setup.py` convention: it
+downloads PetaKit5D and MATLAB Runtime R2023a, then writes an environment file
+that exports:
+
+```bash
+export CLEAREX_PETAKIT5D_ROOT=/project/bioinformatics/Danuser_lab/Dean/dean/matlab_runtime/PetaKit5D
+export CLEAREX_MATLAB_RUNTIME_ROOT=/project/bioinformatics/Danuser_lab/Dean/dean/matlab_runtime/MATLAB_Runtime/R2023a
+```
+
+Add the `source .../clearex_petakit_env.sh` line to your shell startup or job
+script when running `--deconvolution`. If either path is missing, ClearEx stops
+at deconvolution preflight before starting Dask tasks and prints a message that
+points back to `scripts/install_petakit_runtime.sh`.
 
 ---
 

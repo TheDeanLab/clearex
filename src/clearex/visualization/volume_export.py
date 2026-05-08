@@ -247,6 +247,20 @@ def _compute_dask_graph(graph: Any, *, client: Optional[Any] = None) -> None:
     client.gather(futures)
 
 
+def _export_chunks_from_dask_array(
+    array: da.Array,
+    shape_tpczyx: tuple[int, int, int, int, int, int],
+) -> tuple[int, int, int, int, int, int]:
+    """Return Zarr chunks aligned to a selected Dask export array."""
+    chunksize = tuple(int(value) for value in array.chunksize)
+    if len(chunksize) != 6:
+        return tuple(int(value) for value in shape_tpczyx)
+    return tuple(
+        max(1, min(int(size), int(chunk)))
+        for size, chunk in zip(shape_tpczyx, chunksize, strict=True)
+    )
+
+
 def _resolve_volume_export_voxel_size_um_zyx(
     *,
     root: zarr.Group,
@@ -679,14 +693,7 @@ def run_volume_export_analysis(
             resolved_shape[4],
             resolved_shape[5],
         )
-        export_chunks = (
-            1,
-            1,
-            1,
-            resolved_shape[3],
-            resolved_shape[4],
-            resolved_shape[5],
-        )
+        export_chunks = _export_chunks_from_dask_array(export_array, export_shape)
         _emit(progress_callback, 40, "Writing current-selection volume to cache")
     target = parent_group.create_array(
         leaf,

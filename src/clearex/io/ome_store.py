@@ -267,6 +267,70 @@ def _coerce_voxel_size_um_zyx_from_navigate_payload(
     return (float(z_um), float(xy_um), float(xy_um))
 
 
+def _coerce_navigate_oblique_geometry_payload(
+    payload: Any,
+) -> Optional[dict[str, Any]]:
+    """Normalize Navigate stage-geometry payload when present."""
+    if not isinstance(payload, Mapping):
+        return None
+    mode = str(payload.get("mode", "")).strip().lower()
+    scan_axis = str(payload.get("scan_axis", "")).strip().lower()
+    stage_axis = str(payload.get("stage_axis", "")).strip().lower()
+    shear_dimension_value = payload.get("shear_dimension")
+    shear_dimension = (
+        str(shear_dimension_value).strip().lower()
+        if shear_dimension_value is not None
+        else None
+    )
+    microscope_value = payload.get("microscope_name")
+    microscope_name = (
+        str(microscope_value).strip() if microscope_value is not None else None
+    )
+    try:
+        scan_step_um = float(payload.get("scan_step_um"))
+    except Exception:
+        return None
+    if mode != "stage_scan":
+        return None
+    if scan_axis not in {"x", "y", "z"}:
+        return None
+    if stage_axis not in {"x", "y", "z"}:
+        return None
+    if not np.isfinite(scan_step_um) or scan_step_um <= 0.0:
+        return None
+    return {
+        "schema": str(
+            payload.get("schema", "clearex.navigate_oblique_geometry.v1")
+        ).strip()
+        or "clearex.navigate_oblique_geometry.v1",
+        "mode": mode,
+        "scan_axis": scan_axis,
+        "stage_axis": stage_axis,
+        "scan_step_um": float(scan_step_um),
+        "shear_dimension": shear_dimension,
+        "microscope_name": microscope_name,
+    }
+
+
+def _coerce_navigate_oblique_geometry_from_attrs(
+    attrs: Mapping[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Resolve Navigate stage geometry from one attribute mapping."""
+    direct = _coerce_navigate_oblique_geometry_payload(
+        attrs.get("navigate_oblique_geometry")
+    )
+    if direct is not None:
+        return direct
+    navigate_payload = attrs.get("navigate_experiment")
+    if isinstance(navigate_payload, Mapping):
+        nested = _coerce_navigate_oblique_geometry_payload(
+            navigate_payload.get("navigate_oblique_geometry")
+        )
+        if nested is not None:
+            return nested
+    return None
+
+
 def _iter_component_attr_chain(
     root: zarr.Group,
     source_component: Optional[str],
@@ -373,6 +437,37 @@ def resolve_voxel_size_um_zyx(
         source_component=source_component,
     )
     return voxel
+
+
+def resolve_navigate_oblique_geometry_with_source(
+    path_or_root: str | Path | zarr.Group,
+    *,
+    source_component: Optional[str] = None,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """Resolve Navigate stage-geometry metadata with provenance."""
+    root = (
+        path_or_root
+        if isinstance(path_or_root, zarr.Group)
+        else zarr.open_group(str(Path(path_or_root).expanduser().resolve()), mode="r")
+    )
+    store_metadata = load_store_metadata(root)
+    root_attrs = dict(root.attrs)
+    component_chain = _iter_component_attr_chain(root, source_component)
+
+    for component, attrs in component_chain:
+        payload = _coerce_navigate_oblique_geometry_from_attrs(attrs)
+        if payload is not None:
+            return payload, f"component:{component}"
+
+    metadata_payload = _coerce_navigate_oblique_geometry_from_attrs(store_metadata)
+    if metadata_payload is not None:
+        return metadata_payload, "store_metadata"
+
+    root_payload = _coerce_navigate_oblique_geometry_from_attrs(root_attrs)
+    if root_payload is not None:
+        return root_payload, "root_attrs"
+
+    return None, None
 
 
 def update_store_metadata(

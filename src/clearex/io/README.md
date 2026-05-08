@@ -89,6 +89,10 @@ This folder contains ingestion, CLI, logging, and provenance logic.
   stores without rewriting canonical source data.
 - Updating spatial calibration is metadata-only; never rewrite the canonical
   source array to express placement changes.
+- Navigate oblique stage-scan acquisitions must persist a compact
+  `navigate_oblique_geometry` payload on both `clearex/metadata` and
+  `clearex/runtime_cache/source/data` attrs so downstream deskew logic can
+  distinguish mechanical stage travel from reconstructed affine spacing.
 - If ingestion-progress metadata is stale (for example `status=in_progress`
   after an interrupted run) but runtime-cache arrays and public OME metadata
   validate, treat the store as reusable instead of rematerializing source data.

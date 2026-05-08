@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 # Standard Library Imports
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
@@ -56,6 +57,7 @@ from clearex.io.ome_store import (
     analysis_cache_data_component,
     analysis_cache_root,
     public_analysis_root,
+    resolve_navigate_oblique_geometry_with_source,
     resolve_voxel_size_um_zyx_with_source,
 )
 from clearex.io.provenance import register_latest_output_reference
@@ -80,6 +82,8 @@ _AUTO_ESTIMATE_SIGNAL_FRACTION_DEFAULT = 0.10
 _AUTO_ESTIMATE_MIN_VALID_COLUMNS = 16
 _AUTO_ESTIMATE_MIN_FOREGROUND_PIXELS = 64
 _RESAMPLE_SUPPORT_EPS = np.float32(1e-3)
+_ZARR_WORKER_IO_ASYNC_CONCURRENCY = 1
+_ZARR_WORKER_IO_MAX_THREADS = 1
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -320,6 +324,45 @@ def _estimate_worker_thread_capacity(client: "Client") -> int:
         except (TypeError, ValueError):
             capacity += 1
     return max(1, int(capacity))
+
+
+@contextmanager
+def _bounded_zarr_worker_io() -> Any:
+    """Cap nested Zarr I/O concurrency inside one worker task.
+
+    Shear worker tasks already run under Dask-managed parallelism. Leaving
+    Zarr v3 at its default nested async/thread fan-out can create large
+    numbers of additional threads inside those worker tasks, especially on
+    high-thread-count local clusters. Bound Zarr's per-task concurrency so the
+    Dask worker remains the top-level scheduler.
+    """
+    with zarr.config.set(
+        {
+            "async.concurrency": int(_ZARR_WORKER_IO_ASYNC_CONCURRENCY),
+            "threading.max_workers": int(_ZARR_WORKER_IO_MAX_THREADS),
+        }
+    ):
+        yield
+
+
+def _worker_zarr_read(
+    array: Any,
+    selection: Any,
+    *,
+    dtype: Optional[Union[str, np.dtype[Any]]] = None,
+) -> np.ndarray:
+    """Read one Zarr selection under bounded nested worker-side concurrency."""
+    with _bounded_zarr_worker_io():
+        payload = array[selection]
+    if dtype is None:
+        return np.asarray(payload)
+    return np.asarray(payload, dtype=dtype)
+
+
+def _worker_zarr_write(array: Any, selection: Any, value: Any) -> None:
+    """Write one Zarr selection under bounded nested worker-side concurrency."""
+    with _bounded_zarr_worker_io():
+        array[selection] = value
 
 
 def _normalize_roi_padding(value: Any) -> tuple[int, int, int]:
@@ -734,6 +777,86 @@ def _rotation_matrix_xyz(*, deg_x: float, deg_y: float, deg_z: float) -> np.ndar
     return rz @ ry @ rx
 
 
+def _resolve_applied_rotation_deg_xyz(
+    parameters: Mapping[str, Any],
+) -> tuple[float, float, float]:
+    """Resolve effective XYZ Euler angles after auto-rotation adjustments."""
+    shear_xy = float(parameters.get("shear_xy", 0.0))
+    shear_xz = float(parameters.get("shear_xz", 0.0))
+    shear_yz = float(parameters.get("shear_yz", 0.0))
+    rotation_deg_x = float(parameters.get("rotation_deg_x", 0.0))
+    rotation_deg_y = float(parameters.get("rotation_deg_y", 0.0))
+    rotation_deg_z = float(parameters.get("rotation_deg_z", 0.0))
+    if bool(parameters.get("auto_rotate_from_shear", False)):
+        rotation_deg_x += -float(np.rad2deg(np.arctan(shear_yz)))
+        rotation_deg_y += float(np.rad2deg(np.arctan(shear_xz)))
+        rotation_deg_z += -float(np.rad2deg(np.arctan(shear_xy)))
+    return (float(rotation_deg_x), float(rotation_deg_y), float(rotation_deg_z))
+
+
+def _resolve_linear_transform_matrix_xyz(
+    parameters: Mapping[str, Any],
+) -> tuple[np.ndarray, tuple[float, float, float]]:
+    """Build the shear/rotation linear transform matrix in physical XYZ space."""
+    shear_xy = float(parameters.get("shear_xy", 0.0))
+    shear_xz = float(parameters.get("shear_xz", 0.0))
+    shear_yz = float(parameters.get("shear_yz", 0.0))
+    rotation_deg_x, rotation_deg_y, rotation_deg_z = _resolve_applied_rotation_deg_xyz(
+        parameters
+    )
+    shear_matrix = np.array(
+        [
+            [1.0, shear_xy, shear_xz],
+            [0.0, 1.0, shear_yz],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    rotation_matrix = _rotation_matrix_xyz(
+        deg_x=rotation_deg_x,
+        deg_y=rotation_deg_y,
+        deg_z=rotation_deg_z,
+    )
+    return (
+        rotation_matrix @ shear_matrix,
+        (rotation_deg_x, rotation_deg_y, rotation_deg_z),
+    )
+
+
+def _resolve_affine_voxel_size_um_zyx(
+    *,
+    voxel_size_um_zyx: tuple[float, float, float],
+    parameters: Mapping[str, Any],
+    navigate_oblique_geometry: Optional[Mapping[str, Any]],
+) -> tuple[float, float, float]:
+    """Adjust scan-axis spacing when Navigate stage geometry is available."""
+    if not isinstance(navigate_oblique_geometry, Mapping):
+        return tuple(float(v) for v in voxel_size_um_zyx)
+    if str(navigate_oblique_geometry.get("mode", "")).strip().lower() != "stage_scan":
+        return tuple(float(v) for v in voxel_size_um_zyx)
+    scan_axis = str(navigate_oblique_geometry.get("scan_axis", "")).strip().lower()
+    stage_axis = str(navigate_oblique_geometry.get("stage_axis", "")).strip().lower()
+    if scan_axis != "z" or stage_axis != "y":
+        return tuple(float(v) for v in voxel_size_um_zyx)
+    try:
+        scan_step_um = float(navigate_oblique_geometry.get("scan_step_um"))
+    except Exception:
+        return tuple(float(v) for v in voxel_size_um_zyx)
+    if not np.isfinite(scan_step_um) or scan_step_um <= 0.0:
+        return tuple(float(v) for v in voxel_size_um_zyx)
+
+    matrix_xyz, _ = _resolve_linear_transform_matrix_xyz(parameters)
+    stage_from_scan = float(matrix_xyz[1, 2])
+    if not np.isfinite(stage_from_scan) or abs(stage_from_scan) <= 1.0e-8:
+        return tuple(float(v) for v in voxel_size_um_zyx)
+
+    adjusted = [float(v) for v in voxel_size_um_zyx]
+    adjusted[0] = float(scan_step_um / abs(stage_from_scan))
+    if not np.isfinite(adjusted[0]) or adjusted[0] <= 0.0:
+        return tuple(float(v) for v in voxel_size_um_zyx)
+    return (float(adjusted[0]), float(adjusted[1]), float(adjusted[2]))
+
+
 def _resolve_affine_geometry(
     *,
     source_shape_zyx: tuple[int, int, int],
@@ -767,31 +890,9 @@ def _resolve_affine_geometry(
         dtype=np.float64,
     )
 
-    shear_xy = float(parameters.get("shear_xy", 0.0))
-    shear_xz = float(parameters.get("shear_xz", 0.0))
-    shear_yz = float(parameters.get("shear_yz", 0.0))
-    rotation_deg_x = float(parameters.get("rotation_deg_x", 0.0))
-    rotation_deg_y = float(parameters.get("rotation_deg_y", 0.0))
-    rotation_deg_z = float(parameters.get("rotation_deg_z", 0.0))
-    if bool(parameters.get("auto_rotate_from_shear", False)):
-        rotation_deg_x += -float(np.rad2deg(np.arctan(shear_yz)))
-        rotation_deg_y += float(np.rad2deg(np.arctan(shear_xz)))
-        rotation_deg_z += -float(np.rad2deg(np.arctan(shear_xy)))
-
-    shear_matrix = np.array(
-        [
-            [1.0, shear_xy, shear_xz],
-            [0.0, 1.0, shear_yz],
-            [0.0, 0.0, 1.0],
-        ],
-        dtype=np.float64,
+    matrix_xyz, applied_rotation_deg_xyz = _resolve_linear_transform_matrix_xyz(
+        parameters
     )
-    rotation_matrix = _rotation_matrix_xyz(
-        deg_x=rotation_deg_x,
-        deg_y=rotation_deg_y,
-        deg_z=rotation_deg_z,
-    )
-    matrix_xyz = rotation_matrix @ shear_matrix
     offset_xyz = center_xyz - (matrix_xyz @ center_xyz)
 
     x_max = (x_size - 1) * x_um
@@ -827,11 +928,7 @@ def _resolve_affine_geometry(
         inverse_offset_xyz=inverse_offset_xyz,
         output_origin_xyz=output_origin_xyz,
         output_shape_zyx=output_shape_zyx,
-        applied_rotation_deg_xyz=(
-            float(rotation_deg_x),
-            float(rotation_deg_y),
-            float(rotation_deg_z),
-        ),
+        applied_rotation_deg_xyz=applied_rotation_deg_xyz,
     )
 
 
@@ -1053,7 +1150,11 @@ def _process_and_write_tile(
 
     if source_bounds_zyx is None:
         tile_data = np.full(out_shape_zyx, fill_value, dtype=target_dtype)
-        output_array[out_slices] = tile_data[np.newaxis, np.newaxis, np.newaxis, ...]
+        _worker_zarr_write(
+            output_array,
+            out_slices,
+            tile_data[np.newaxis, np.newaxis, np.newaxis, ...],
+        )
         return 1
 
     source_array = root[source_component]
@@ -1066,10 +1167,14 @@ def _process_and_write_tile(
         slice(int(src_y0), int(src_y1)),
         slice(int(src_x0), int(src_x1)),
     )
-    source_chunk = np.asarray(source_array[src_slices])
+    source_chunk = _worker_zarr_read(source_array, src_slices)
     if source_chunk.size == 0:
         tile_data = np.full(out_shape_zyx, fill_value, dtype=target_dtype)
-        output_array[out_slices] = tile_data[np.newaxis, np.newaxis, np.newaxis, ...]
+        _worker_zarr_write(
+            output_array,
+            out_slices,
+            tile_data[np.newaxis, np.newaxis, np.newaxis, ...],
+        )
         return 1
 
     source_zyx = np.asarray(source_chunk[0, 0, 0, :, :, :], dtype=np.float32)
@@ -1124,7 +1229,11 @@ def _process_and_write_tile(
         where=valid_support,
     )
     tile_data = _cast_output_dtype(normalized_data, dtype=target_dtype)
-    output_array[out_slices] = tile_data[np.newaxis, np.newaxis, np.newaxis, ...]
+    _worker_zarr_write(
+        output_array,
+        out_slices,
+        tile_data[np.newaxis, np.newaxis, np.newaxis, ...],
+    )
     return 1
 
 
@@ -1188,6 +1297,12 @@ def run_shear_transform_analysis(
             source_component=source_component,
         )
     )
+    navigate_oblique_geometry, navigate_oblique_geometry_source = (
+        resolve_navigate_oblique_geometry_with_source(
+            root,
+            source_component=source_component,
+        )
+    )
     if bool(normalized.get("auto_estimate_shear_yz", False)):
         _emit(3, "Estimating shear_yz_deg from x-extreme source slabs")
         estimated_shear_yz_deg = _estimate_shear_yz_deg_from_source_extremes(
@@ -1204,13 +1319,18 @@ def run_shear_transform_analysis(
             )
         else:
             _emit(4, "Auto-estimation failed; using configured shear parameters")
+    affine_voxel_size_um_zyx = _resolve_affine_voxel_size_um_zyx(
+        voxel_size_um_zyx=tuple(float(v) for v in voxel_size_um_zyx),
+        parameters=normalized,
+        navigate_oblique_geometry=navigate_oblique_geometry,
+    )
     geometry = _resolve_affine_geometry(
         source_shape_zyx=(
             source_shape_tpczyx[3],
             source_shape_tpczyx[4],
             source_shape_tpczyx[5],
         ),
-        voxel_size_um_zyx=voxel_size_um_zyx,
+        voxel_size_um_zyx=affine_voxel_size_um_zyx,
         parameters=normalized,
     )
     inverse_matrix_zyx, inverse_offset_zyx = _convert_affine_xyz_to_zyx(
@@ -1258,9 +1378,11 @@ def run_shear_transform_analysis(
     latest_group["data"].attrs.update(
         {
             "axes": ["t", "p", "c", "z", "y", "x"],
-            "voxel_size_um_zyx": [float(v) for v in voxel_size_um_zyx],
+            "voxel_size_um_zyx": [float(v) for v in affine_voxel_size_um_zyx],
             "voxel_size_resolution_source": str(voxel_size_resolution_source),
             "source_component": source_component,
+            "navigate_oblique_geometry": navigate_oblique_geometry,
+            "navigate_oblique_geometry_source": navigate_oblique_geometry_source,
             "output_origin_xyz_um": [float(v) for v in geometry.output_origin_xyz],
             "affine_matrix_xyz": geometry.matrix_xyz.tolist(),
             "affine_offset_xyz_um": geometry.offset_xyz.tolist(),
@@ -1280,8 +1402,10 @@ def run_shear_transform_analysis(
             "output_shape_tpczyx": [int(v) for v in output_shape_tpczyx],
             "output_chunks_tpczyx": [int(v) for v in output_chunks_tpczyx],
             "output_origin_xyz_um": [float(v) for v in geometry.output_origin_xyz],
-            "voxel_size_um_zyx": [float(v) for v in voxel_size_um_zyx],
+            "voxel_size_um_zyx": [float(v) for v in affine_voxel_size_um_zyx],
             "voxel_size_resolution_source": str(voxel_size_resolution_source),
+            "navigate_oblique_geometry": navigate_oblique_geometry,
+            "navigate_oblique_geometry_source": navigate_oblique_geometry_source,
         }
     )
     root_w.require_group(auxiliary_root).attrs.update(dict(latest_group.attrs))
@@ -1319,7 +1443,7 @@ def run_shear_transform_analysis(
                 output_origin_xyz=geometry.output_origin_xyz,
                 source_shape_zyx=source_shape_zyx,
                 roi_padding_zyx=roi_padding_zyx,
-                voxel_size_um_zyx=voxel_size_um_zyx,
+                voxel_size_um_zyx=affine_voxel_size_um_zyx,
                 inverse_matrix_xyz=geometry.inverse_matrix_xyz,
                 inverse_offset_xyz=geometry.inverse_offset_xyz,
                 inverse_matrix_zyx=inverse_matrix_zyx,
@@ -1375,7 +1499,7 @@ def run_shear_transform_analysis(
                     output_origin_xyz=geometry.output_origin_xyz,
                     source_shape_zyx=source_shape_zyx,
                     roi_padding_zyx=roi_padding_zyx,
-                    voxel_size_um_zyx=voxel_size_um_zyx,
+                    voxel_size_um_zyx=affine_voxel_size_um_zyx,
                     inverse_matrix_xyz=geometry.inverse_matrix_xyz,
                     inverse_offset_xyz=geometry.inverse_offset_xyz,
                     inverse_matrix_zyx=inverse_matrix_zyx,
@@ -1411,8 +1535,10 @@ def run_shear_transform_analysis(
             "source_component": source_component,
             "output_shape_tpczyx": [int(v) for v in output_shape_tpczyx],
             "output_chunks_tpczyx": [int(v) for v in output_chunks_tpczyx],
-            "voxel_size_um_zyx": [float(v) for v in voxel_size_um_zyx],
+            "voxel_size_um_zyx": [float(v) for v in affine_voxel_size_um_zyx],
             "voxel_size_resolution_source": str(voxel_size_resolution_source),
+            "navigate_oblique_geometry": navigate_oblique_geometry,
+            "navigate_oblique_geometry_source": navigate_oblique_geometry_source,
             "output_origin_xyz_um": [float(v) for v in geometry.output_origin_xyz],
             "applied_shear": {
                 "xy": float(normalized["shear_xy"]),
@@ -1435,7 +1561,7 @@ def run_shear_transform_analysis(
         ),
         output_shape_tpczyx=output_shape_tpczyx,
         output_chunks_tpczyx=output_chunks_tpczyx,
-        voxel_size_um_zyx=voxel_size_um_zyx,
+        voxel_size_um_zyx=affine_voxel_size_um_zyx,
         applied_shear_xy=float(normalized["shear_xy"]),
         applied_shear_xz=float(normalized["shear_xz"]),
         applied_shear_yz=float(normalized["shear_yz"]),

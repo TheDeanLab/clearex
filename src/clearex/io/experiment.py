@@ -40,6 +40,7 @@ from typing import (
     Callable,
     Dict,
     Iterator,
+    Mapping,
     Optional,
     Sequence,
     Union,
@@ -1564,7 +1565,7 @@ def summarize_navigate_bdv_n5_image_info(
         return None
 
     entries = _iter_navigate_bdv_n5_entries(source_path)
-    if len(entries) <= 1:
+    if not entries:
         return None
 
     setup_map = _parse_navigate_bdv_setup_index_map(source_path)
@@ -4578,6 +4579,7 @@ def materialize_experiment_data_store(
     source_axes_attr = list(source_axes) if source_axes is not None else None
     source_metadata_path = str(source_meta.get("source_path", source_resolved))
     voxel_size_um_zyx = None
+    navigate_oblique_geometry = experiment.navigate_oblique_geometry
     if (
         experiment.z_step_um is not None
         and experiment.xy_pixel_size_um is not None
@@ -4599,6 +4601,7 @@ def materialize_experiment_data_store(
             "source_path": source_metadata_path,
             "source_axes": source_axes_attr,
             "voxel_size_um_zyx": voxel_size_um_zyx,
+            "navigate_oblique_geometry": navigate_oblique_geometry,
             "materialization_write_strategy": write_strategy,
             "source_aligned_z_batch_depth": (
                 int(source_aligned_z_batch_depth)
@@ -4638,6 +4641,7 @@ def materialize_experiment_data_store(
         source_data_axes=source_axes_attr,
         source_data_component=source_component,
         voxel_size_um_zyx=voxel_size_um_zyx,
+        navigate_oblique_geometry=navigate_oblique_geometry,
         materialization_write_strategy=write_strategy,
         source_aligned_z_batch_depth=(
             int(source_aligned_z_batch_depth)
@@ -4752,6 +4756,8 @@ class NavigateExperiment:
         Estimated sample-space XY pixel size in microns.
     z_step_um : float, optional
         Z-step size in microns.
+    navigate_oblique_geometry : dict[str, Any], optional
+        Navigate stage-scan geometry payload for deskew-aware transforms.
     """
 
     path: Path
@@ -4768,6 +4774,7 @@ class NavigateExperiment:
     selected_channels: list[NavigateChannel]
     xy_pixel_size_um: Optional[float] = None
     z_step_um: Optional[float] = None
+    navigate_oblique_geometry: Optional[Dict[str, Any]] = None
 
     @property
     def channel_count(self) -> int:
@@ -4800,6 +4807,7 @@ class NavigateExperiment:
             "channel_count": self.channel_count,
             "xy_pixel_size_um": self.xy_pixel_size_um,
             "z_step_um": self.z_step_um,
+            "navigate_oblique_geometry": self.navigate_oblique_geometry,
             "selected_channels": [
                 {
                     "name": channel.name,
@@ -5340,6 +5348,71 @@ def _infer_xy_pixel_size_um(
     return None
 
 
+def _infer_navigate_oblique_geometry(
+    *,
+    raw: Mapping[str, Any],
+    microscope_name: Optional[str],
+    z_step_um: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """Infer Navigate oblique stage-scan geometry metadata when advertised.
+
+    Parameters
+    ----------
+    raw : mapping[str, Any]
+        Full parsed experiment mapping.
+    microscope_name : str, optional
+        Active microscope profile name.
+    z_step_um : float, optional
+        Stage step size in microns.
+
+    Returns
+    -------
+    dict[str, Any], optional
+        Compact geometry payload, or ``None`` when the experiment does not
+        declare oblique/sheared acquisition metadata.
+    """
+    if z_step_um is None:
+        return None
+    try:
+        scan_step_um = float(z_step_um)
+    except Exception:
+        return None
+    if not np.isfinite(scan_step_um) or scan_step_um <= 0.0:
+        return None
+
+    bdv_parameters = (
+        raw.get("BDVParameters", {})
+        if isinstance(raw.get("BDVParameters"), dict)
+        else {}
+    )
+    shear_payload = (
+        bdv_parameters.get("shear", {})
+        if isinstance(bdv_parameters.get("shear"), dict)
+        else {}
+    )
+    shear_data = bool(shear_payload.get("shear_data", False))
+    shear_dimension = (
+        str(shear_payload.get("shear_dimension", "")).strip().lower()
+        if shear_payload.get("shear_dimension") is not None
+        else ""
+    )
+    if not shear_data and not shear_dimension:
+        return None
+    normalized_dimension = shear_dimension or "yz"
+    if normalized_dimension != "yz":
+        return None
+
+    return {
+        "schema": "clearex.navigate_oblique_geometry.v1",
+        "mode": "stage_scan",
+        "scan_axis": "z",
+        "stage_axis": "y",
+        "scan_step_um": float(scan_step_um),
+        "shear_dimension": normalized_dimension,
+        "microscope_name": microscope_name,
+    }
+
+
 def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
     """Load and normalize Navigate ``experiment.yml`` metadata.
 
@@ -5431,6 +5504,11 @@ def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
         microscope_state=state,
     )
     z_step_um = _safe_optional_float(state.get("step_size"))
+    navigate_oblique_geometry = _infer_navigate_oblique_geometry(
+        raw=raw,
+        microscope_name=microscope_name,
+        z_step_um=z_step_um,
+    )
 
     return NavigateExperiment(
         path=experiment_path,
@@ -5447,6 +5525,7 @@ def load_navigate_experiment(path: Union[str, Path]) -> NavigateExperiment:
         selected_channels=selected_channels,
         xy_pixel_size_um=xy_pixel_size_um,
         z_step_um=z_step_um,
+        navigate_oblique_geometry=navigate_oblique_geometry,
     )
 
 
@@ -5834,6 +5913,7 @@ def initialize_analysis_store(
     )
     pyramid_payload = [list(levels) for levels in normalized_pyramid]
     voxel_size_um_zyx = None
+    navigate_oblique_geometry = experiment.navigate_oblique_geometry
     if (
         experiment.z_step_um is not None
         and experiment.xy_pixel_size_um is not None
@@ -5874,12 +5954,14 @@ def initialize_analysis_store(
                     ],
                     "resolution_pyramid_factors_tpczyx": pyramid_payload,
                     "voxel_size_um_zyx": voxel_size_um_zyx,
+                    "navigate_oblique_geometry": navigate_oblique_geometry,
                 }
             )
             update_store_metadata(
                 root,
                 source_experiment=str(experiment.path),
                 navigate_experiment=experiment.to_metadata_dict(),
+                navigate_oblique_geometry=navigate_oblique_geometry,
                 storage_policy_analysis_outputs="latest_only",
                 storage_policy_provenance="append_only",
                 chunk_shape_tpczyx=existing_chunks,
@@ -5905,6 +5987,7 @@ def initialize_analysis_store(
             "configured_chunks_tpczyx": [int(chunk) for chunk in requested_chunks],
             "resolution_pyramid_factors_tpczyx": pyramid_payload,
             "voxel_size_um_zyx": voxel_size_um_zyx,
+            "navigate_oblique_geometry": navigate_oblique_geometry,
             "pyramid_levels": _expected_pyramid_components(
                 _normalize_pyramid_level_factors(pyramid_factors)
             ),
@@ -5914,6 +5997,7 @@ def initialize_analysis_store(
         root,
         source_experiment=str(experiment.path),
         navigate_experiment=experiment.to_metadata_dict(),
+        navigate_oblique_geometry=navigate_oblique_geometry,
         storage_policy_analysis_outputs="latest_only",
         storage_policy_provenance="append_only",
         chunk_shape_tpczyx=[int(chunk) for chunk in normalized_chunks],

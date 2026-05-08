@@ -182,12 +182,33 @@ source .venv/bin/activate
 uv pip install -e .
 
 # Optional extras
-uv pip install -e ".[decon]"      # deconvolution stack (PyPetaKit5D + PSFmodels)
+uv pip install -e ".[decon]"      # deconvolution Python wrappers (PyPetaKit5D + PSFmodels)
 uv pip install -e ".[usegment3d]" # uSegment3D segmentation stack
 uv pip install -e ".[dev]"        # tests/lint/dev tools
 uv pip install -e ".[docs]"       # docs build stack
 uv pip install -e ".[dev,docs,decon,usegment3d]"
 ```
+
+The `decon` extra installs the Python wrappers only. ClearEx intentionally does
+not run the upstream PyPetaKit5D `setup.py` runtime download during `uv`
+installation. Deconvolution also requires PetaKit5D MCC assets and MATLAB
+Runtime installed on a shared filesystem. On BioHPC, install them once under
+`/project` and source the generated environment file before launching ClearEx:
+
+```bash
+scripts/install_petakit_runtime.sh
+source /project/bioinformatics/Danuser_lab/Dean/dean/matlab_runtime/clearex_petakit_env.sh
+```
+
+That file exports:
+
+```bash
+export CLEAREX_PETAKIT5D_ROOT=/project/bioinformatics/Danuser_lab/Dean/dean/matlab_runtime/PetaKit5D
+export CLEAREX_MATLAB_RUNTIME_ROOT=/project/bioinformatics/Danuser_lab/Dean/dean/matlab_runtime/MATLAB_Runtime/R2023a
+```
+
+If these variables or files are missing, ClearEx fails deconvolution preflight
+before submitting Dask work and points back to `scripts/install_petakit_runtime.sh`.
 
 #### Windows (PowerShell)
 

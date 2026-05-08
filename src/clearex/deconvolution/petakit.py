@@ -29,8 +29,225 @@
 from __future__ import annotations
 
 # Standard Library Imports
+from dataclasses import dataclass
+import os
 from pathlib import Path
-from typing import Sequence, Tuple, Union
+import subprocess
+from typing import Sequence, Tuple, Union, cast
+
+PETAKIT5D_ROOT_ENV = "CLEAREX_PETAKIT5D_ROOT"
+MATLAB_RUNTIME_ROOT_ENV = "CLEAREX_MATLAB_RUNTIME_ROOT"
+PETAKIT_INSTALL_SCRIPT = "scripts/install_petakit_runtime.sh"
+PETAKIT_MCC_FUNCTION_NAME = "XR_decon_data_wrapper"
+
+
+@dataclass(frozen=True)
+class PetakitRuntimePaths:
+    """Resolved paths required for PyPetaKit5D MCC execution."""
+
+    petakit5d_root: Path
+    matlab_runtime_root: Path
+    mcc_master_launcher: Path
+
+
+def _runtime_install_hint() -> str:
+    """Return a concise installation hint for missing runtime assets."""
+    return (
+        "Install the runtime assets with "
+        f"`bash {PETAKIT_INSTALL_SCRIPT}` and source the generated "
+        "`clearex_petakit_env.sh` file before running deconvolution."
+    )
+
+
+def _resolve_required_env_path(env_name: str) -> Path:
+    """Resolve one required runtime path from the environment."""
+    raw_value = str(os.environ.get(env_name, "")).strip()
+    if not raw_value:
+        raise RuntimeError(
+            "PyPetaKit5D MCC runtime is not configured. "
+            f"Set {PETAKIT5D_ROOT_ENV} and {MATLAB_RUNTIME_ROOT_ENV}. "
+            f"{_runtime_install_hint()}"
+        )
+    return Path(raw_value).expanduser().resolve()
+
+
+def resolve_petakit_runtime_paths() -> PetakitRuntimePaths:
+    """Resolve and validate PyPetaKit5D MCC runtime paths from env vars.
+
+    Returns
+    -------
+    PetakitRuntimePaths
+        Existing runtime root paths and MCC launcher path.
+
+    Raises
+    ------
+    RuntimeError
+        If required environment variables or runtime files are missing.
+    """
+    petakit_root = _resolve_required_env_path(PETAKIT5D_ROOT_ENV)
+    matlab_runtime_root = _resolve_required_env_path(MATLAB_RUNTIME_ROOT_ENV)
+    launcher = petakit_root / "mcc" / "linux" / "run_mccMaster.sh"
+    mcc_binary = petakit_root / "mcc" / "linux" / "mccMaster"
+
+    missing: list[str] = []
+    if not petakit_root.is_dir():
+        missing.append(f"{PETAKIT5D_ROOT_ENV} directory: {petakit_root}")
+    if not matlab_runtime_root.is_dir():
+        missing.append(f"{MATLAB_RUNTIME_ROOT_ENV} directory: {matlab_runtime_root}")
+    if not launcher.is_file():
+        missing.append(f"MCC launcher: {launcher}")
+    elif not os.access(launcher, os.X_OK):
+        missing.append(f"executable MCC launcher: {launcher}")
+    if not mcc_binary.is_file():
+        missing.append(f"MCC executable: {mcc_binary}")
+    elif not os.access(mcc_binary, os.X_OK):
+        missing.append(f"executable MCC executable: {mcc_binary}")
+    if missing:
+        details = "\n- ".join(missing)
+        raise RuntimeError(
+            "PyPetaKit5D MCC runtime files are missing:\n"
+            f"- {details}\n"
+            f"{_runtime_install_hint()}"
+        )
+
+    return PetakitRuntimePaths(
+        petakit5d_root=petakit_root,
+        matlab_runtime_root=matlab_runtime_root,
+        mcc_master_launcher=launcher,
+    )
+
+
+def validate_petakit_runtime(*, mcc_mode: bool = True) -> None:
+    """Fail early when PyPetaKit5D MCC runtime assets are unavailable."""
+    if not mcc_mode:
+        return
+    resolve_petakit_runtime_paths()
+
+
+def _format_mcc_cell(values: Sequence[Union[str, Path]]) -> str:
+    """Format a Python sequence as the MATLAB cell string wrapper expects."""
+    return "{" + ",".join(f"'{str(value)}'" for value in values) + "}"
+
+
+def _format_mcc_numeric_array(values: Sequence[Union[int, float]]) -> str:
+    """Format a numeric sequence as the MATLAB vector string wrapper expects."""
+    return "[" + ",".join(str(value) for value in values) + "]"
+
+
+def _append_petakit_param(
+    command: list[str],
+    *,
+    name: str,
+    value: object,
+    value_type: str,
+) -> None:
+    """Append one PyPetaKit5D wrapper-style parameter to an MCC command."""
+    if value_type == "char":
+        if not value:
+            return
+        command.extend([name, str(value)])
+        return
+    if value_type == "cell":
+        if not value:
+            return
+        command.extend(
+            [name, _format_mcc_cell(cast(Sequence[Union[str, Path]], value))]
+        )
+        return
+    if value_type == "logical":
+        if isinstance(value, (list, tuple)) and not value:
+            command.extend([name, "[]"])
+            return
+        command.extend([name, str(bool(value)).lower()])
+        return
+    if value_type == "numericArr":
+        if isinstance(value, (list, tuple)):
+            values = tuple(value)
+        else:
+            values = (value,)
+        if not values:
+            return
+        command.extend(
+            [name, _format_mcc_numeric_array(cast(Sequence[Union[int, float]], values))]
+        )
+        return
+    if value_type == "numericScalar":
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return
+            value = value[0]
+        command.extend([name, str(value)])
+
+
+def _run_petakit_mcc_deconvolution(
+    *,
+    data_paths: Sequence[Union[str, Path]],
+    params: dict[str, object],
+) -> None:
+    """Run PyPetaKit5D deconvolution through configured MCC runtime paths."""
+    runtime_paths = resolve_petakit_runtime_paths()
+    command = [
+        str(runtime_paths.mcc_master_launcher),
+        str(runtime_paths.matlab_runtime_root),
+        PETAKIT_MCC_FUNCTION_NAME,
+        _format_mcc_cell([str(Path(item).expanduser()) for item in data_paths]),
+    ]
+    param_types = {
+        "resultDirName": "char",
+        "overwrite": "logical",
+        "channelPatterns": "cell",
+        "skewAngle": "numericScalar",
+        "dz": "numericScalar",
+        "xyPixelSize": "numericArr",
+        "save16bit": "logical",
+        "parseSettingFile": "logical",
+        "flipZstack": "logical",
+        "background": "numericScalar",
+        "dzPSF": "numericScalar",
+        "edgeErosion": "numericScalar",
+        "erodeByFTP": "logical",
+        "psfFullpaths": "cell",
+        "deconIter": "numericScalar",
+        "RLMethod": "char",
+        "wienerAlpha": "numericScalar",
+        "OTFCumThresh": "numericScalar",
+        "hannWinBounds": "numericArr",
+        "skewed": "logical",
+        "debug": "logical",
+        "saveStep": "numericScalar",
+        "psfGen": "logical",
+        "GPUJob": "logical",
+        "deconRotate": "logical",
+        "batchSize": "numericArr",
+        "blockSize": "numericArr",
+        "largeFile": "logical",
+        "largeMethod": "char",
+        "zarrFile": "logical",
+        "saveZarr": "logical",
+        "dampFactor": "numericScalar",
+        "scaleFactor": "numericScalar",
+        "deconOffset": "numericScalar",
+        "maskFullpaths": "cell",
+        "parseCluster": "logical",
+        "parseParfor": "logical",
+        "masterCompute": "logical",
+        "jobLogDir": "char",
+        "cpusPerTask": "numericScalar",
+        "uuid": "char",
+        "unitWaitTime": "numericScalar",
+        "maxTrialNum": "numericScalar",
+        "mccMode": "logical",
+        "configFile": "char",
+        "GPUConfigFile": "char",
+    }
+    for name, value_type in param_types.items():
+        _append_petakit_param(
+            command,
+            name=name,
+            value=params.get(name),
+            value_type=value_type,
+        )
+    subprocess.run(command, check=True)
 
 
 def run_petakit_deconvolution(
@@ -150,6 +367,58 @@ def run_petakit_deconvolution(
     if len(batch_size_zyx) != 3:
         raise ValueError("batch_size_zyx must contain exactly three values.")
 
+    params = {
+        "resultDirName": str(result_dir_name),
+        "overwrite": bool(overwrite),
+        "channelPatterns": [str(item) for item in channel_patterns],
+        "skewAngle": 32.45,
+        "dz": float(dz_um),
+        "xyPixelSize": float(xy_pixel_size_um),
+        "save16bit": bool(save_16bit),
+        "parseSettingFile": False,
+        "flipZstack": False,
+        "background": float(background),
+        "dzPSF": float(dz_psf_um),
+        "edgeErosion": 0,
+        "erodeByFTP": True,
+        "psfFullpaths": [str(Path(item).expanduser()) for item in psf_fullpaths],
+        "deconIter": int(decon_iter),
+        "RLMethod": str(rl_method),
+        "wienerAlpha": float(wiener_alpha),
+        "OTFCumThresh": float(otf_cum_thresh),
+        "hannWinBounds": [float(hann_win_bounds[0]), float(hann_win_bounds[1])],
+        "skewed": [],
+        "debug": bool(debug),
+        "saveStep": 5,
+        "psfGen": bool(psf_gen),
+        "GPUJob": bool(gpu_job),
+        "deconRotate": False,
+        "batchSize": [int(v) for v in batch_size_zyx],
+        "blockSize": [int(v) for v in block_size_zyx],
+        "largeFile": bool(large_file),
+        "largeMethod": "inmemory",
+        "zarrFile": bool(zarr_file),
+        "saveZarr": bool(save_zarr),
+        "dampFactor": 1,
+        "scaleFactor": [],
+        "deconOffset": 0,
+        "maskFullpaths": [],
+        "parseCluster": bool(parse_cluster),
+        "parseParfor": False,
+        "masterCompute": True,
+        "jobLogDir": "../job_logs",
+        "cpusPerTask": int(cpus_per_task),
+        "uuid": "",
+        "unitWaitTime": 1,
+        "maxTrialNum": 3,
+        "mccMode": bool(mcc_mode),
+        "configFile": str(config_file),
+        "GPUConfigFile": str(gpu_config_file),
+    }
+    if mcc_mode:
+        _run_petakit_mcc_deconvolution(data_paths=data_paths, params=params)
+        return
+
     try:
         from PyPetaKit5D import XR_decon_data_wrapper
     except Exception as exc:  # pragma: no cover - environment-dependent dependency
@@ -157,37 +426,6 @@ def run_petakit_deconvolution(
             "PyPetaKit5D is unavailable. Install with `pip install clearex[decon]`."
         ) from exc
 
-    params = {
-        "channelPatterns": [str(item) for item in channel_patterns],
-        "resultDirName": str(result_dir_name),
-        "xyPixelSize": float(xy_pixel_size_um),
-        "dz": float(dz_um),
-        "dzPSF": float(dz_psf_um),
-        "hannWinBounds": [float(hann_win_bounds[0]), float(hann_win_bounds[1])],
-        "psfFullpaths": [str(Path(item).expanduser()) for item in psf_fullpaths],
-        "parseSettingFile": False,
-        "RLMethod": str(rl_method),
-        "wienerAlpha": float(wiener_alpha),
-        "OTFCumThresh": float(otf_cum_thresh),
-        "edgeErosion": 0,
-        "background": float(background),
-        "deconIter": int(decon_iter),
-        "save16bit": bool(save_16bit),
-        "zarrFile": bool(zarr_file),
-        "saveZarr": bool(save_zarr),
-        "parseCluster": bool(parse_cluster),
-        "largeFile": bool(large_file),
-        "GPUJob": bool(gpu_job),
-        "debug": bool(debug),
-        "cpusPerTask": int(cpus_per_task),
-        "mccMode": bool(mcc_mode),
-        "GPUConfigFile": str(gpu_config_file),
-        "configFile": str(config_file),
-        "psfGen": bool(psf_gen),
-        "blockSize": [int(v) for v in block_size_zyx],
-        "batchSize": [int(v) for v in batch_size_zyx],
-        "overwrite": bool(overwrite),
-    }
     XR_decon_data_wrapper(
         [str(Path(item).expanduser()) for item in data_paths],
         **params,
