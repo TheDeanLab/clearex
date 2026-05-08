@@ -18,13 +18,18 @@ from clearex.visualization import volume_export as volume_export_module
 from clearex.visualization.volume_export import run_volume_export_analysis
 
 
-def _write_source_cache_volume(root: zarr.Group, data: np.ndarray[Any, Any]) -> str:
+def _write_source_cache_volume(
+    root: zarr.Group,
+    data: np.ndarray[Any, Any],
+    *,
+    chunks: tuple[int, int, int, int, int, int] = (1, 1, 1, 3, 4, 5),
+) -> str:
     source_component = source_cache_component()
     source_parent = root.require_group(source_component.rsplit("/", 1)[0])
     source_parent.create_dataset(
         name=source_component.rsplit("/", 1)[1],
         data=data,
-        chunks=(1, 1, 1, 3, 4, 5),
+        chunks=chunks,
         overwrite=True,
     )
     source_node = root[source_component]
@@ -138,6 +143,35 @@ def test_run_volume_export_analysis_writes_current_selection_cache_and_publishab
     ]
     assert isinstance(published, zarr.Array)
     assert published.shape == (1, 1, 3, 4, 5)
+
+
+def test_run_volume_export_analysis_current_selection_preserves_source_spatial_chunks(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "analysis_store_chunked_selection.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = np.arange(1 * 1 * 1 * 4 * 6 * 8, dtype=np.uint16).reshape((1, 1, 1, 4, 6, 8))
+    _write_source_cache_volume(root, data, chunks=(1, 1, 1, 2, 3, 4))
+
+    run_volume_export_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "export_scope": "current_selection",
+            "t_index": 0,
+            "p_index": 0,
+            "c_index": 0,
+            "resolution_level": 0,
+            "export_format": "ome-zarr",
+        },
+    )
+
+    runtime_cache = zarr.open_group(str(store_path), mode="r")
+    exported = runtime_cache["clearex/runtime_cache/results/volume_export/latest/data"]
+    assert isinstance(exported, zarr.Array)
+    assert exported.shape == (1, 1, 1, 4, 6, 8)
+    assert exported.chunks == (1, 1, 1, 2, 3, 4)
+    np.testing.assert_array_equal(exported[...], data)
 
 
 def test_run_volume_export_analysis_uses_client_for_generated_levels_and_cache_write(

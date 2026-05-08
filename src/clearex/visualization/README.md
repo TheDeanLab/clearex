@@ -390,6 +390,11 @@ image-producing source component.
 - When an analysis Dask backend is active, missing-level generation and the
   exported runtime-cache write execute through that client instead of the local
   scheduler.
+- `current_selection` cache writes preserve the selected source Dask chunk
+  geometry, clamped to the selected `(1, 1, 1, z, y, x)` shape. Do not collapse
+  the selected volume into one full-spatial target chunk; partial writes into a
+  huge target chunk can force large read/modify/write operations and kill Dask
+  workers.
 
 ### Parameter reference
 
