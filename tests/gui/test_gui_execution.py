@@ -2177,6 +2177,72 @@ def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
     assert dialog.closed is True
 
 
+def test_prompt_repair_multiposition_stage_metadata_repairs_and_retries(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Repair prompt should call the metadata repair helper and request retry."""
+    store_path = tmp_path / "data_store.ome.zarr"
+    experiment_path = tmp_path / "experiment.yml"
+    question_calls: list[tuple[str, str]] = []
+    repair_calls: list[tuple[Path, Path]] = []
+
+    class _FakeStandardButton:
+        Yes = 1
+        No = 2
+
+    class _FakeMessageBox:
+        StandardButton = _FakeStandardButton
+
+        @staticmethod
+        def question(_parent, title, message, _buttons, _default):
+            question_calls.append((str(title), str(message)))
+            return _FakeStandardButton.Yes
+
+    class _FakeFileDialog:
+        @staticmethod
+        def getOpenFileName(_parent, title, start_dir, file_filter):
+            assert "experiment.yml" in str(title)
+            assert str(start_dir) == str(tmp_path)
+            assert "Navigate Experiment" in str(file_filter)
+            return (str(experiment_path), "")
+
+    def _fake_repair(path: Path, selected_experiment: Path):
+        repair_calls.append((Path(path), Path(selected_experiment)))
+        return SimpleNamespace(
+            experiment_path=Path(selected_experiment),
+            stage_row_count=2,
+            position_count=2,
+        )
+
+    monkeypatch.setattr(app_module, "QMessageBox", _FakeMessageBox)
+    monkeypatch.setattr(app_module, "QFileDialog", _FakeFileDialog)
+    monkeypatch.setattr(
+        app_module,
+        "repair_multiposition_stage_metadata",
+        _fake_repair,
+    )
+    error = app_module.MissingMultipositionStageMetadataError(
+        store_path=store_path,
+        position_count=2,
+        source_experiment="/old/location/experiment.yml",
+    )
+
+    should_retry = app_module._prompt_repair_multiposition_stage_metadata(
+        None,
+        workflow=app_module.WorkflowConfig(file=str(store_path)),
+        error=error,
+    )
+
+    assert should_retry is True
+    assert repair_calls == [(store_path, experiment_path)]
+    assert [title for title, _message in question_calls] == [
+        "Repair Multiposition Metadata",
+        "Metadata Repaired",
+    ]
+    assert "/old/location/experiment.yml" in question_calls[0][1]
+
+
 def test_run_workflow_with_progress_slurm_cancels_without_error_dialog(
     monkeypatch,
 ) -> None:
@@ -3075,7 +3141,9 @@ def test_launch_gui_persists_reset_state_after_successful_run(
 
     result = app_module.launch_gui(
         initial=selected_workflow,
-        run_callback=lambda workflow, progress_callback, dask_client_lifecycle_callback=None: None,
+        run_callback=lambda workflow, progress_callback, dask_client_lifecycle_callback=None: (
+            None
+        ),
         dask_client_lifecycle_callback=lifecycle_callback,
     )
 

@@ -43,6 +43,11 @@ integration:
   source reads and overlap resampling. Large overlap crops should be sampled
   onto a coarser registration grid instead of allocating the full-resolution
   crop and downsampling afterward.
+- Multiposition registration requires `clearex/metadata["stage_rows"]` and the
+  derived `position_translations_zyx_um` metadata. If a copied or relocated
+  store has more than one position but no persisted stage rows, `pipeline.py`
+  must raise `MissingMultipositionStageMetadataError` so the GUI can offer a
+  metadata-only repair from the current Navigate `experiment.yml`.
 
 ## Quick Start
 
@@ -617,6 +622,11 @@ Practical notes:
 - Leave `use_fft_initial_alignment=True` unless you have a specific reason to disable it.
 - Use `use_phase_correlation=True` only for translation-only preview runs or when ANTs is unnecessary. It is not a substitute for `rigid` or `similarity`.
 - If a seam remains visible, it is usually better to increase overlap and pairwise fidelity before jumping directly to much more expensive transform models.
+- If registration fails before pairwise work starts because multiposition stage
+  metadata is missing, repair the store from the relocated `experiment.yml`
+  instead of rematerializing image data. The repair updates only
+  `clearex/metadata` and then registration can be retried with the same
+  analysis parameters.
 
 ### Recommended Starting Presets
 

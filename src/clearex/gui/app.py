@@ -68,6 +68,7 @@ from clearex.io.ome_store import (
     resolve_voxel_size_um_zyx_with_source,
     source_cache_component,
 )
+from clearex.io.stage_metadata_repair import repair_multiposition_stage_metadata
 from clearex.io.experiment import (
     ExperimentDataResolutionError,
     NavigateExperiment,
@@ -91,6 +92,7 @@ from clearex.io.provenance import (
     summarize_analysis_history,
 )
 from clearex.io.read import ImageInfo, ImageOpener
+from clearex.registration.pipeline import MissingMultipositionStageMetadataError
 from clearex.workflow import (
     ANALYSIS_CHAINABLE_OUTPUT_COMPONENTS,
     AnalysisInputDependencyIssue,
@@ -2471,7 +2473,7 @@ def _format_spatial_calibration_summary(config: SpatialCalibrationConfig) -> str
         strict=False,
     ):
         lines.append(
-            f"World {axis_name.upper()}: " f"{binding_labels.get(binding, binding)}"
+            f"World {axis_name.upper()}: {binding_labels.get(binding, binding)}"
         )
     lines.append("Theta: Rotate Z/Y about world X")
     return "\n".join(lines)
@@ -2699,7 +2701,9 @@ def _show_themed_error_dialog(
         dialog.setDetailedText(str(details))
 
     dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
-    dialog.setStyleSheet(_popup_dialog_stylesheet() + """
+    dialog.setStyleSheet(
+        _popup_dialog_stylesheet()
+        + """
         QMessageBox {
             background-color: #0c1118;
             color: #e6edf3;
@@ -2712,7 +2716,8 @@ def _show_themed_error_dialog(
             color: #e6edf3;
             selection-background-color: #2f81f7;
         }
-        """)
+        """
+    )
     dialog.exec()
 
 
@@ -5116,6 +5121,7 @@ if HAS_PYQT6:
             self._run_callback = run_callback
             self._dask_client_lifecycle_callback = dask_client_lifecycle_callback
             self._cancel_requested = False
+            self.failure_exception: Optional[BaseException] = None
 
         def cancel(self) -> None:
             """Request cooperative cancellation of the running workflow.
@@ -5179,6 +5185,7 @@ if HAS_PYQT6:
             except WorkflowExecutionCancelled as exc:
                 self.cancelled.emit(str(exc) or "Analysis cancelled by user.")
             except Exception as exc:
+                self.failure_exception = exc
                 self.failed.emit(
                     f"{type(exc).__name__}: {exc}",
                     traceback.format_exc(),
@@ -6897,7 +6904,7 @@ if HAS_PYQT6:
                 Experiment list is replaced in-place.
             """
             file_filter = (
-                "ClearEx Experiment List " f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
+                f"ClearEx Experiment List (*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
             )
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
@@ -6959,7 +6966,7 @@ if HAS_PYQT6:
                 default_directory / f"experiments{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX}"
             )
             file_filter = (
-                "ClearEx Experiment List " f"(*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
+                f"ClearEx Experiment List (*{_CLEAREX_EXPERIMENT_LIST_FILE_SUFFIX})"
             )
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
@@ -12743,9 +12750,11 @@ if HAS_PYQT6:
                     ),
                 )
                 button.clicked.connect(
-                    lambda _checked=False, anchor=button, combo=component_combo: _open_channel_selector_dialog(
-                        anchor=anchor,
-                        component_combo=combo,
+                    lambda _checked=False, anchor=button, combo=component_combo: (
+                        _open_channel_selector_dialog(
+                            anchor=anchor,
+                            component_combo=combo,
+                        )
                     )
                 )
                 return button
@@ -12810,15 +12819,19 @@ if HAS_PYQT6:
                     component_combo=component_combo,
                 )
                 component_combo.currentIndexChanged.connect(
-                    lambda _index, combo=component_combo, selector=channels_selector: _sync_channel_selector_for_component(
-                        component_combo=combo,
-                        channel_selector=selector,
+                    lambda _index, combo=component_combo, selector=channels_selector: (
+                        _sync_channel_selector_for_component(
+                            component_combo=combo,
+                            channel_selector=selector,
+                        )
                     )
                 )
                 component_combo.editTextChanged.connect(
-                    lambda _text, combo=component_combo, selector=channels_selector: _sync_channel_selector_for_component(
-                        component_combo=combo,
-                        channel_selector=selector,
+                    lambda _text, combo=component_combo, selector=channels_selector: (
+                        _sync_channel_selector_for_component(
+                            component_combo=combo,
+                            channel_selector=selector,
+                        )
                     )
                 )
                 table.setCellWidget(
@@ -17990,6 +18003,76 @@ def _workflows_for_selected_analysis_scope(
     )
 
 
+def _prompt_repair_multiposition_stage_metadata(
+    parent: Optional["QWidget"],
+    *,
+    workflow: WorkflowConfig,
+    error: MissingMultipositionStageMetadataError,
+) -> bool:
+    """Prompt for a relocated experiment and repair store stage metadata."""
+    source_hint = (
+        f"\n\nRecorded source experiment:\n{error.source_experiment}"
+        if error.source_experiment
+        else ""
+    )
+    answer = QMessageBox.question(
+        parent,
+        "Repair Multiposition Metadata",
+        (
+            "Registration found multiple positions but could not resolve "
+            "multiposition stage coordinates for this copied or relocated store."
+            f"{source_hint}\n\nSelect the relocated Navigate experiment.yml to "
+            "repair only the store metadata?"
+        ),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+    )
+    if answer != QMessageBox.StandardButton.Yes:
+        return False
+
+    start_dir = Path(str(workflow.file or error.store_path)).expanduser()
+    if start_dir.is_file() or start_dir.suffix:
+        start_dir = start_dir.parent
+    file_path, _ = QFileDialog.getOpenFileName(
+        parent,
+        "Select Relocated Navigate experiment.yml",
+        str(start_dir),
+        "Navigate Experiment (experiment.yml experiment.yaml *.yml *.yaml)",
+    )
+    if not file_path:
+        return False
+
+    try:
+        summary = repair_multiposition_stage_metadata(
+            error.store_path,
+            Path(file_path),
+        )
+    except Exception as exc:
+        _show_themed_error_dialog(
+            parent,
+            "Metadata Repair Failed",
+            "ClearEx could not repair multiposition stage metadata.",
+            summary=f"{type(exc).__name__}: {exc}",
+            details=traceback.format_exc(),
+        )
+        return False
+
+    retry_answer = QMessageBox.question(
+        parent,
+        "Metadata Repaired",
+        (
+            "Updated store metadata from:\n"
+            f"{summary.experiment_path}\n\n"
+            f"Stage rows written: {summary.stage_row_count}\n"
+            f"Store positions: {summary.position_count}\n\n"
+            "Retry the analysis workflow now?"
+        ),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+    )
+    return retry_answer == QMessageBox.StandardButton.Yes
+
+
 def run_workflow_with_progress(
     *,
     workflow: WorkflowConfig,
@@ -18126,7 +18209,7 @@ def run_workflow_with_progress(
         effective_run_callback = _batch_run_callback
 
     progress_dialog = AnalysisExecutionProgressDialog(parent=None)
-    failure_payload: dict[str, str] = {}
+    failure_payload: dict[str, Any] = {}
     cancellation_payload: dict[str, str] = {}
     completed = {"ok": False}
     cancel_requested = {"value": False}
@@ -18342,6 +18425,7 @@ def run_workflow_with_progress(
                 {
                     "summary": f"{type(exc).__name__}: {exc}",
                     "details": traceback.format_exc(),
+                    "exception": exc,
                 }
             )
             progress_dialog.reject()
@@ -18372,9 +18456,28 @@ def run_workflow_with_progress(
         worker.start()
         progress_dialog.exec()
         worker.wait()
+        if failure_payload and worker.failure_exception is not None:
+            failure_payload["exception"] = worker.failure_exception
 
     _cleanup_dashboard_relay_clients()
     if failure_payload:
+        failure_exception = failure_payload.get("exception")
+        if isinstance(failure_exception, MissingMultipositionStageMetadataError):
+            retry_after_repair = _prompt_repair_multiposition_stage_metadata(
+                progress_dialog,
+                workflow=execution_workflow,
+                error=failure_exception,
+            )
+            if retry_after_repair:
+                retry_ok = run_workflow_with_progress(
+                    workflow=workflow,
+                    run_callback=run_callback,
+                    dask_client_lifecycle_callback=dask_client_lifecycle_callback,
+                )
+                if owns_app:
+                    app.quit()
+                    _shutdown_dashboard_relay_manager()
+                return retry_ok
         _show_themed_error_dialog(
             progress_dialog,
             "Analysis Failed",

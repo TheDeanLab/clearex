@@ -93,6 +93,10 @@ from clearex.io.ome_store import (
     update_store_metadata,
 )
 from clearex.io.read import ImageInfo, ImageOpener, open_tiff_as_dask
+from clearex.io.stage_metadata import (
+    load_multiposition_stage_rows_from_directory,
+    parse_multiposition_stage_rows,
+)
 from clearex.workflow import (
     SpatialCalibrationConfig,
     spatial_calibration_to_dict,
@@ -4623,12 +4627,7 @@ def materialize_experiment_data_store(
     if source_component is not None:
         root[SOURCE_CACHE_COMPONENT].attrs["source_component"] = source_component
 
-    stage_rows_payload = _load_multiposition_rows(experiment.save_directory)
-    stage_rows = (
-        [row for row in stage_rows_payload if isinstance(row, dict)]
-        if isinstance(stage_rows_payload, list)
-        else []
-    )
+    stage_rows = _load_experiment_multiposition_stage_rows(experiment)
     spatial_calibration = load_store_spatial_calibration(store_path)
     position_translations_zyx_um = compute_position_translations_zyx_um(
         stage_rows if stage_rows else None,
@@ -5097,16 +5096,27 @@ def _load_multiposition_rows(save_directory: Path) -> Optional[list[Any]]:
         Parsed position rows without header row when available; otherwise
         ``None`` if file is missing or not parseable.
     """
-    path = save_directory / "multi_positions.yml"
-    if not path.exists():
-        return None
     try:
-        payload = _parse_serialized_text(
-            text=path.read_text(), context="multi_positions.yml"
-        )
-        return _extract_position_rows_from_payload(payload)
+        rows = load_multiposition_stage_rows_from_directory(save_directory)
     except Exception:
         return None
+    return rows if rows else None
+
+
+def _load_experiment_multiposition_stage_rows(
+    experiment: NavigateExperiment,
+) -> list[dict[str, float]]:
+    """Load canonical stage rows from the experiment sidecar or raw payload."""
+    seen: set[str] = set()
+    for directory in (experiment.save_directory, experiment.path.parent):
+        identity = _search_directory_identity(directory)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rows = _load_multiposition_rows(directory)
+        if rows:
+            return [row for row in rows if isinstance(row, dict)]
+    return parse_multiposition_stage_rows(experiment.raw.get("MultiPositions"))
 
 
 def _infer_multiposition_count(

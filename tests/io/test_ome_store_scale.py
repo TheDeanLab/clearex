@@ -15,6 +15,8 @@ from clearex.io.ome_store import (
     resolve_voxel_size_um_zyx_with_source,
     update_store_metadata,
 )
+from clearex.io.stage_metadata_repair import repair_multiposition_stage_metadata
+from clearex.workflow import SPATIAL_CALIBRATION_SCHEMA
 
 
 def test_resolve_voxel_size_uses_source_component_chain(tmp_path: Path) -> None:
@@ -126,6 +128,91 @@ def test_load_store_metadata_read_only_missing_group_returns_schema_default(
     payload = load_store_metadata(read_only_root)
     assert payload == {"schema": "clearex.ome_store.v1"}
     assert "clearex" not in read_only_root
+
+
+def test_repair_multiposition_stage_metadata_from_relocated_experiment(
+    tmp_path: Path,
+) -> None:
+    """Repair should patch only store metadata from a relocated sidecar."""
+    store_path = tmp_path / "relocated_store.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    root.create_array(
+        "clearex/runtime_cache/source/data",
+        shape=(1, 2, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype=np.uint16,
+        overwrite=True,
+    )
+    update_store_metadata(
+        root,
+        source_experiment="/missing/original/experiment.yml",
+        navigate_experiment={"experiment_path": "/missing/original/experiment.yml"},
+        spatial_calibration={
+            "schema": SPATIAL_CALIBRATION_SCHEMA,
+            "stage_axis_map_zyx": {"z": "+z", "y": "+x", "x": "-y"},
+            "theta_mode": "rotate_zy_about_x",
+        },
+        stage_rows=None,
+        position_translations_zyx_um=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    )
+    experiment_path = tmp_path / "experiment.yml"
+    experiment_path.write_text(
+        """
+Saving:
+  save_directory: .
+  file_type: N5
+MicroscopeState:
+  is_multiposition: true
+  timepoints: 1
+  number_z_steps: 2
+  step_size: 5.0
+  channels:
+    channel_1:
+      is_selected: true
+CameraParameters:
+  img_x_pixels: 2
+  img_y_pixels: 2
+""".strip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "multi_positions.yml").write_text(
+        """
+- [X, Y, Z, THETA, F]
+- [3901.21, -9594.1, -19588.2, 0.0, -9411.6]
+- [3901.21, -4717.9, -19588.2, 0.0, -9411.6]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    summary = repair_multiposition_stage_metadata(store_path, experiment_path)
+    payload = load_store_metadata(store_path)
+
+    assert summary.position_count == 2
+    assert summary.stage_row_count == 2
+    assert payload["source_experiment"] == str(experiment_path.resolve())
+    assert payload["navigate_experiment"]["experiment_path"] == str(
+        experiment_path.resolve()
+    )
+    assert payload["stage_rows"] == [
+        {
+            "x": 3901.21,
+            "y": -9594.1,
+            "z": -19588.2,
+            "theta": 0.0,
+            "f": -9411.6,
+        },
+        {
+            "x": 3901.21,
+            "y": -4717.9,
+            "z": -19588.2,
+            "theta": 0.0,
+            "f": -9411.6,
+        },
+    ]
+    assert payload["position_translations_zyx_um"] == [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, -4876.200000000001],
+    ]
 
 
 def test_publish_analysis_collection_uses_resolved_voxel_size(tmp_path: Path) -> None:
