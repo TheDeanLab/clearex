@@ -25,11 +25,13 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 # Standard Library Imports
+from typing import Any, cast
 
 # Third Party Imports
 from scipy import ndimage
 import cv2
 import numpy as np
+import numpy.typing as npt
 from skimage import filters as skfilters
 
 # Local Imports
@@ -52,7 +54,10 @@ def fwhm_to_sigma(fwhm_px: float) -> float:
     return float(fwhm_px) / 2.354820045
 
 
-def dog(sigma_high: float, sigma_low: float, vol: np.ndarray[...]) -> np.ndarray[...]:
+_CV2 = cast(Any, cv2)
+
+
+def dog(sigma_high: float, sigma_low: float, vol: npt.NDArray[Any]) -> npt.NDArray[Any]:
     """Difference of Gaussian (DoG) filter.
 
     Parameters
@@ -99,13 +104,28 @@ def dog_cv2(sigma_high: float, sigma_low: float, vol: np.ndarray) -> np.ndarray:
     ksize_high = int(6 * sigma_high + 1) | 1  # ensure odd
     ksize_low = int(6 * sigma_low + 1) | 1  # ensure odd
 
-    # Apply Gaussian blur with the high sigma value.
-    high_blurred = cv2.GaussianBlur(
-        vol, (ksize_high, ksize_high), sigmaX=sigma_high, borderType=cv2.BORDER_REFLECT
-    )
-    low_blurred = cv2.GaussianBlur(
-        vol, (ksize_low, ksize_low), sigmaX=sigma_low, borderType=cv2.BORDER_REFLECT
-    )
+    gaussian_blur = getattr(_CV2, "GaussianBlur", None)
+    border_reflect = getattr(_CV2, "BORDER_REFLECT", None)
+    if callable(gaussian_blur) and border_reflect is not None:
+        high_blurred = np.asarray(
+            gaussian_blur(
+                vol,
+                (ksize_high, ksize_high),
+                sigmaX=sigma_high,
+                borderType=border_reflect,
+            )
+        )
+        low_blurred = np.asarray(
+            gaussian_blur(
+                vol,
+                (ksize_low, ksize_low),
+                sigmaX=sigma_low,
+                borderType=border_reflect,
+            )
+        )
+    else:
+        high_blurred = ndimage.gaussian_filter(vol, sigma=sigma_high, mode="nearest")
+        low_blurred = ndimage.gaussian_filter(vol, sigma=sigma_low, mode="nearest")
     dog_result = low_blurred - high_blurred
     print("min/max high:", np.min(high_blurred), np.max(high_blurred))
     print("min/max low:", np.min(low_blurred), np.max(low_blurred))

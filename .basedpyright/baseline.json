@@ -18,16 +18,6 @@
                 }
             }
         ],
-        "./src/clearex/deconvolution/petakit.py": [
-            {
-                "code": "reportMissingImports",
-                "range": {
-                    "startColumn": 13,
-                    "endColumn": 24,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./src/clearex/deconvolution/pipeline.py": [
             {
                 "code": "reportPrivateImportUsage",
@@ -98,14 +88,6 @@
                 "range": {
                     "startColumn": 38,
                     "endColumn": 45,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportMissingImports",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 24,
                     "lineCount": 1
                 }
             },
@@ -389,38 +371,6 @@
             }
         ],
         "./src/clearex/filter/filters.py": [
-            {
-                "code": "reportInvalidTypeArguments",
-                "range": {
-                    "startColumn": 61,
-                    "endColumn": 64,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportInvalidTypeForm",
-                "range": {
-                    "startColumn": 61,
-                    "endColumn": 64,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportInvalidTypeArguments",
-                "range": {
-                    "startColumn": 81,
-                    "endColumn": 84,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportInvalidTypeForm",
-                "range": {
-                    "startColumn": 81,
-                    "endColumn": 84,
-                    "lineCount": 1
-                }
-            },
             {
                 "code": "reportArgumentType",
                 "range": {
