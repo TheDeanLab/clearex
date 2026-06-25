@@ -17468,9 +17468,18 @@ if HAS_PYQT6:
                 self._set_status("Select at least one analysis routine.")
                 return
 
-            analysis_parameters = normalize_analysis_operation_parameters(
-                self._base_config.analysis_parameters
-            )
+            try:
+                analysis_parameters = normalize_analysis_operation_parameters(
+                    self._base_config.analysis_parameters
+                )
+            except ValueError as exc:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Operation Parameters",
+                    f"Invalid saved analysis parameters.\n\n{exc}",
+                )
+                self._set_status("Invalid analysis parameters.")
+                return
             for operation_name in self._OPERATION_KEYS:
                 try:
                     analysis_parameters[operation_name] = (
@@ -17486,9 +17495,18 @@ if HAS_PYQT6:
                         f"Invalid {self._OPERATION_LABELS[operation_name]} parameters."
                     )
                     return
-            analysis_parameters = normalize_analysis_operation_parameters(
-                analysis_parameters
-            )
+            try:
+                analysis_parameters = normalize_analysis_operation_parameters(
+                    analysis_parameters
+                )
+            except ValueError as exc:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Operation Parameters",
+                    f"Invalid analysis parameter values.\n\n{exc}",
+                )
+                self._set_status("Invalid analysis parameters.")
+                return
             dependency_issues = self._validate_selected_analysis_dependencies(
                 analysis_parameters
             )

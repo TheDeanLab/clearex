@@ -816,6 +816,21 @@ class TestWorkflowConfig:
         assert fusion["blend_overlap_zyx"] == [2, 6, 10]
         assert params["force_rerun"] is True
 
+    def test_normalizes_registration_and_fusion_zero_overlap_padding(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "registration": {"pairwise_overlap_zyx": [0, 0, 0]},
+                "fusion": {"blend_overlap_zyx": [0, 0, 0]},
+            }
+        )
+
+        assert cfg.analysis_parameters["registration"]["pairwise_overlap_zyx"] == [
+            0,
+            0,
+            0,
+        ]
+        assert cfg.analysis_parameters["fusion"]["blend_overlap_zyx"] == [0, 0, 0]
+
     def test_rejects_invalid_registration_resolution_level(self):
         with pytest.raises(ValueError):
             WorkflowConfig(

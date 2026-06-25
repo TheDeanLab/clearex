@@ -3882,6 +3882,119 @@ def test_on_run_propagates_display_pyramid_flag_into_workflow(
     assert dialog.result_config.visualization is False
 
 
+def test_on_run_warns_when_saved_analysis_parameters_are_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    class _FakeCheckbox:
+        def __init__(self, checked: bool) -> None:
+            self._checked = bool(checked)
+
+        def isChecked(self) -> bool:
+            return bool(self._checked)
+
+    class _FakeMessageBox:
+        @staticmethod
+        def warning(_parent, title, message):
+            warnings.append((str(title), str(message)))
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    base_config = app_module.WorkflowConfig(file="/tmp/data_store.zarr")
+    base_config.analysis_parameters["registration"]["pairwise_overlap_zyx"] = [0, 0]
+    dialog._base_config = base_config
+    dialog._refresh_operation_provenance_statuses = lambda: None
+    status_messages: list[str] = []
+    dialog._set_status = status_messages.append
+    dialog.accept = lambda: pytest.fail("dialog should not launch with invalid params")
+
+    selected = {
+        operation_name: _FakeCheckbox(False)
+        for operation_name in dialog._OPERATION_KEYS
+    }
+    selected["registration"] = _FakeCheckbox(True)
+    dialog._operation_checkboxes = selected
+
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(app_module, "QMessageBox", _FakeMessageBox)
+
+    app_module.AnalysisSelectionDialog._on_run(dialog)
+
+    assert warnings
+    assert warnings[0][0] == "Invalid Operation Parameters"
+    warning_message = warnings[0][1]
+    assert (
+        "registration pairwise_overlap_zyx must define exactly three values"
+        in warning_message
+    )
+    assert status_messages == ["Invalid analysis parameters."]
+
+
+def test_on_run_warns_when_collected_analysis_parameters_are_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    class _FakeCheckbox:
+        def __init__(self, checked: bool) -> None:
+            self._checked = bool(checked)
+
+        def isChecked(self) -> bool:
+            return bool(self._checked)
+
+    class _FakeMessageBox:
+        @staticmethod
+        def warning(_parent, title, message):
+            warnings.append((str(title), str(message)))
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    base_config = app_module.WorkflowConfig(file="/tmp/data_store.zarr")
+    dialog._base_config = base_config
+    dialog._refresh_operation_provenance_statuses = lambda: None
+    status_messages: list[str] = []
+    dialog._set_status = status_messages.append
+    dialog.accept = lambda: pytest.fail("dialog should not launch with invalid params")
+
+    selected = {
+        operation_name: _FakeCheckbox(False)
+        for operation_name in dialog._OPERATION_KEYS
+    }
+    selected["registration"] = _FakeCheckbox(True)
+    dialog._operation_checkboxes = selected
+
+    normalized_defaults = app_module.normalize_analysis_operation_parameters(
+        base_config.analysis_parameters
+    )
+
+    def _collect_operation_parameters(operation_name: str) -> dict[str, object]:
+        params = dict(normalized_defaults.get(operation_name, {}))
+        if operation_name == "registration":
+            params["pairwise_overlap_zyx"] = [0, 0]
+        return params
+
+    dialog._collect_operation_parameters = _collect_operation_parameters
+
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(app_module, "QMessageBox", _FakeMessageBox)
+
+    app_module.AnalysisSelectionDialog._on_run(dialog)
+
+    assert warnings
+    assert warnings[0][0] == "Invalid Operation Parameters"
+    warning_message = warnings[0][1]
+    assert (
+        "registration pairwise_overlap_zyx must define exactly three values"
+        in warning_message
+    )
+    assert status_messages == ["Invalid analysis parameters."]
+
+
 def test_validate_selected_analysis_dependencies_rejects_later_scheduled_producer() -> (
     None
 ):
