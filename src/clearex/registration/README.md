@@ -29,6 +29,9 @@ integration:
   - `edge_status_te`
   - `edge_residual_te`
   - `transformed_bboxes_tpx6`
+  - optional `deformable_lattice_tpzyx3`
+  - optional `pairwise_deformable_status_te`
+  - optional `pairwise_deformable_residual_te`
 - `fusion` consumes the latest registration result and writes stitched image
   data to `clearex/runtime_cache/results/fusion/latest/data`.
 - `fusion` publishes its public image result as the OME collection
@@ -39,6 +42,12 @@ integration:
   - `intensity_offsets_tp`
 - Do not reintroduce `results/registration/latest/data` as a canonical image
   target. Registration no longer owns a reusable image output.
+- Deformable registration is an opt-in follow-up after the affine graph solve.
+  `registration_type` remains the affine initializer (`translation`, `rigid`,
+  or `similarity`). Do not add `syn` as a `registration_type`.
+- Do not persist raw ANTs deformation files as the fusion contract. Pairwise
+  SyN fields cover only overlaps; production fusion consumes the solved
+  coarse world-space displacement lattice at `deformable_lattice_tpzyx3`.
 - Pairwise registration must apply the `max_pairwise_voxels` budget before
   source reads and overlap resampling. Large overlap crops should be sampled
   onto a coarser registration grid instead of allocating the full-resolution
@@ -489,6 +498,11 @@ executions with different Dask worker counts and memory limits.
   pre-computed once during fusion and stored under
   `clearex/results/fusion/latest/blend_weights` in the analysis store.
   Fusion workers lazily reconstruct only the sub-volume they need.
+- **Optional nonlinear sampling.** When registration metadata includes
+  `deformable_lattice_tpzyx3`, fusion renders chunks with affine placement
+  plus interpolated lattice displacement using `scipy.ndimage.map_coordinates`.
+  The same sampling is applied to blend weights, and source reads are padded by
+  the recorded `deformable_max_displacement_um`.
 
 ### Registration Parameters
 
@@ -507,6 +521,13 @@ These parameters belong to the `registration` operation.
 | `ants_iterations` | `(200, 100, 50, 25)` | ANTsPy multi-resolution iteration schedule. Smaller values are faster; the legacy schedule `(2000, 1000, 500, 250)` is available as `_ANTS_AFF_ITERATIONS_LEGACY`. |
 | `ants_sampling_rate` | `0.20` | ANTsPy random voxel sampling rate. Reducing this saves per-iteration cost with minimal accuracy impact for tile registration. |
 | `use_phase_correlation` | `False` | When `True` and `registration_type` is `"translation"`, skip ANTs entirely and use FFT phase correlation only. Falls back to ANTs on failure. |
+| `deformable_enabled` | `False` | Run an experimental SyN/SyNOnly residual pass after the affine solve and persist a coarse deformation lattice for fusion. Disabled by default and not needed for normal stage-offset stitching. |
+| `deformable_transform` | `"syn"` | ANTsPy deformable transform family for overlap residual estimation: `syn` or `synonly`. |
+| `deformable_iterations` | `(40, 20, 0)` | ANTsPy iteration schedule for the residual deformable pass. |
+| `deformable_lattice_spacing_um_zyx` | `(64.0, 64.0, 64.0)` | Coarse world-space lattice spacing in microns in `(z, y, x)` order. Smaller spacing models more local variation but increases store size and fusion cost. |
+| `deformable_regularization_weight` | `0.10` | L2 regularization weight pulling unconstrained lattice nodes toward zero displacement. |
+| `deformable_max_displacement_um` | `20.0` | Maximum allowed solved lattice displacement in microns. Fusion also uses this value as source-subvolume padding. |
+| `deformable_sample_count_per_edge` | `5` | Number of sample points per overlap edge axis used to convert pairwise residual fields into lattice constraints. |
 
 ### Fusion Parameters
 
@@ -536,6 +557,27 @@ These parameters belong to the `fusion` operation.
   Use when the seam suggests a small residual rotation in addition to translation. This is usually the best quality-throughput tradeoff for real stitched volumes.
 - `similarity`
   Use when the overlap suggests slight scale drift in addition to rotation and translation. This is slower and should usually be reserved for difficult seams.
+
+#### Choosing deformable registration
+
+Keep `deformable_enabled: false` unless affine registration has been tuned and
+stage calibration has been confirmed. Deformable registration changes local
+geometry, runs a second pairwise residual pass, and makes fusion more expensive
+because every output chunk needs nonlinear coordinate sampling.
+
+When enabled, the flow is:
+
+1. Solve affine pairwise transforms and the global affine graph as usual.
+2. Use the solved affine geometry to crop overlap residuals.
+3. Estimate pairwise SyN/SyNOnly residual displacement on those overlaps.
+4. Convert successful residual samples into constraints on one smooth,
+   anchored lattice per `(timepoint, position)`.
+5. Persist the world-space sampling displacement lattice beside the affine
+   arrays so fusion can apply affine plus deformable placement chunk by chunk.
+
+The anchor position always receives zero deformation. Failed or outlier
+pairwise deformable edges are recorded in `pairwise_deformable_status_te` /
+`pairwise_deformable_residual_te` and do not invalidate the affine output.
 
 #### Choosing the registration resolution
 
@@ -617,6 +659,9 @@ Practical notes:
 - Leave `use_fft_initial_alignment=True` unless you have a specific reason to disable it.
 - Use `use_phase_correlation=True` only for translation-only preview runs or when ANTs is unnecessary. It is not a substitute for `rigid` or `similarity`.
 - If a seam remains visible, it is usually better to increase overlap and pairwise fidelity before jumping directly to much more expensive transform models.
+- Try deformable registration only after affine settings and stage calibration
+  have been checked. It is slower, experimental, and intentionally
+  geometry-altering.
 
 ### Recommended Starting Presets
 
@@ -705,11 +750,40 @@ fusion:
   blend_exponent: 1.0
 ```
 
+#### Experimental deformable follow-up
+
+Use this only when affine registration leaves local residual mismatch after
+the stage calibration and affine parameters have been checked.
+
+```yaml
+registration:
+  registration_type: rigid
+  input_resolution_level: 0
+  pairwise_overlap_zyx: [16, 96, 96]
+  max_pairwise_voxels: 2000000
+  ants_sampling_rate: 0.35
+  ants_iterations: [1000, 500, 250, 100]
+  use_fft_initial_alignment: true
+  use_phase_correlation: false
+  deformable_enabled: true
+  deformable_transform: syn
+  deformable_iterations: [40, 20, 0]
+  deformable_lattice_spacing_um_zyx: [64.0, 64.0, 64.0]
+  deformable_regularization_weight: 0.10
+  deformable_max_displacement_um: 20.0
+  deformable_sample_count_per_edge: 5
+fusion:
+  input_source: registration
+  blend_overlap_zyx: [24, 192, 192]
+  blend_mode: content_aware
+  blend_exponent: 1.0
+```
+
 ### GPU Acceleration (future)
 
-The core resampling function `_resample_source_to_world_grid` uses
-`scipy.ndimage.affine_transform`, which is single-threaded CPU code.  A
-drop-in GPU replacement via `cupyx.scipy.ndimage.affine_transform` is marked
-as a TODO for future integration.  This would benefit both pairwise
-registration and fusion.  The deconvolution subsystem already supports
+The core affine resampling path in `_resample_source_to_world_grid` uses
+`scipy.ndimage.affine_transform`; the deformable path uses
+`scipy.ndimage.map_coordinates`. Both are CPU code today. GPU replacements via
+CuPy-backed affine and coordinate sampling are future work for both pairwise
+registration and fusion. The deconvolution subsystem already supports
 GPU-pinned `LocalCluster` workers; registration would reuse the same backend.

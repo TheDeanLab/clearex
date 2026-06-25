@@ -81,11 +81,13 @@ The following operations are wired into ``clearex.main``:
      - Integrated and executable with runtime-cache output publication.
    * - Registration
      - ``clearex.registration.pipeline``
-     - Integrated and executable; writes transform/layout metadata under
+     - Integrated and executable; writes affine transform/layout metadata and
+       optional deformable lattice metadata under
        ``clearex/results/registration/latest`` for downstream fusion.
    * - Fusion
      - ``clearex.registration.pipeline``
      - Integrated and executable; consumes the latest registration result,
+       applies affine-only or affine-plus-deformable sampling as available,
        writes stitched runtime-cache outputs, and publishes public OME fusion
        results.
    * - uSegment3D

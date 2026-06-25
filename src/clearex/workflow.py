@@ -670,6 +670,13 @@ DEFAULT_ANALYSIS_OPERATION_PARAMETERS: Dict[str, Dict[str, Any]] = {
         "ants_sampling_rate": 0.20,
         "use_phase_correlation": False,
         "use_fft_initial_alignment": True,
+        "deformable_enabled": False,
+        "deformable_transform": "syn",
+        "deformable_iterations": [40, 20, 0],
+        "deformable_lattice_spacing_um_zyx": [64.0, 64.0, 64.0],
+        "deformable_regularization_weight": 0.10,
+        "deformable_max_displacement_um": 20.0,
+        "deformable_sample_count_per_edge": 5,
     },
     "fusion": {
         "execution_order": 5,
@@ -1029,6 +1036,24 @@ def _normalize_parameter_int_triplet(
         raise ValueError(f"{field_name} must define exactly three values.")
     parsed = [int(tokens[0]), int(tokens[1]), int(tokens[2])]
     if any(item <= 0 for item in parsed):
+        raise ValueError(f"{field_name} values must be greater than zero.")
+    return parsed
+
+
+def _normalize_parameter_positive_float_triplet(
+    value: Any,
+    *,
+    field_name: str,
+    default: tuple[float, float, float],
+) -> list[float]:
+    """Normalize parameter value into a positive float triplet."""
+    tokens = _normalize_parameter_string_list(value)
+    if not tokens:
+        return [float(default[0]), float(default[1]), float(default[2])]
+    if len(tokens) != 3:
+        raise ValueError(f"{field_name} must define exactly three values.")
+    parsed = [float(tokens[0]), float(tokens[1]), float(tokens[2])]
+    if any(item <= 0.0 for item in parsed):
         raise ValueError(f"{field_name} values must be greater than zero.")
     return parsed
 
@@ -1977,6 +2002,65 @@ def _normalize_registration_parameters(
     normalized["use_fft_initial_alignment"] = bool(
         normalized.get("use_fft_initial_alignment", True)
     )
+
+    normalized["deformable_enabled"] = bool(normalized.get("deformable_enabled", False))
+    deformable_transform = (
+        str(normalized.get("deformable_transform", "syn")).strip().lower() or "syn"
+    )
+    if deformable_transform not in {"syn", "synonly"}:
+        raise ValueError(
+            "registration deformable_transform must be 'syn' or 'synonly'."
+        )
+    normalized["deformable_transform"] = deformable_transform
+
+    raw_deformable_iterations = normalized.get("deformable_iterations", [40, 20, 0])
+    deformable_iteration_tokens = _normalize_parameter_string_list(
+        raw_deformable_iterations
+    )
+    if not deformable_iteration_tokens:
+        deformable_iterations = [40, 20, 0]
+    else:
+        deformable_iterations = [int(value) for value in deformable_iteration_tokens]
+    if any(value < 0 for value in deformable_iterations):
+        raise ValueError(
+            "registration deformable_iterations values must be greater than or equal to zero."
+        )
+    normalized["deformable_iterations"] = deformable_iterations
+
+    normalized["deformable_lattice_spacing_um_zyx"] = (
+        _normalize_parameter_positive_float_triplet(
+            normalized.get("deformable_lattice_spacing_um_zyx", [64.0, 64.0, 64.0]),
+            field_name="registration deformable_lattice_spacing_um_zyx",
+            default=(64.0, 64.0, 64.0),
+        )
+    )
+
+    deformable_regularization_weight = float(
+        normalized.get("deformable_regularization_weight", 0.10)
+    )
+    if deformable_regularization_weight < 0.0:
+        raise ValueError(
+            "registration deformable_regularization_weight must be greater than or equal to zero."
+        )
+    normalized["deformable_regularization_weight"] = deformable_regularization_weight
+
+    deformable_max_displacement_um = float(
+        normalized.get("deformable_max_displacement_um", 20.0)
+    )
+    if deformable_max_displacement_um <= 0.0:
+        raise ValueError(
+            "registration deformable_max_displacement_um must be greater than zero."
+        )
+    normalized["deformable_max_displacement_um"] = deformable_max_displacement_um
+
+    deformable_sample_count_per_edge = int(
+        normalized.get("deformable_sample_count_per_edge", 5)
+    )
+    if deformable_sample_count_per_edge < 2:
+        raise ValueError(
+            "registration deformable_sample_count_per_edge must be at least two."
+        )
+    normalized["deformable_sample_count_per_edge"] = deformable_sample_count_per_edge
     return normalized
 
 

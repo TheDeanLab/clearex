@@ -200,6 +200,28 @@ class TestWorkflowConfig:
         assert cfg.analysis_parameters["registration"]["input_resolution_level"] == 0
         assert cfg.analysis_parameters["registration"]["anchor_mode"] == "central"
         assert cfg.analysis_parameters["registration"]["anchor_position"] is None
+        assert cfg.analysis_parameters["registration"]["deformable_enabled"] is False
+        assert cfg.analysis_parameters["registration"]["deformable_transform"] == "syn"
+        assert cfg.analysis_parameters["registration"]["deformable_iterations"] == [
+            40,
+            20,
+            0,
+        ]
+        assert cfg.analysis_parameters["registration"][
+            "deformable_lattice_spacing_um_zyx"
+        ] == [64.0, 64.0, 64.0]
+        assert (
+            cfg.analysis_parameters["registration"]["deformable_regularization_weight"]
+            == 0.10
+        )
+        assert (
+            cfg.analysis_parameters["registration"]["deformable_max_displacement_um"]
+            == 20.0
+        )
+        assert (
+            cfg.analysis_parameters["registration"]["deformable_sample_count_per_edge"]
+            == 5
+        )
         assert "blend_mode" not in cfg.analysis_parameters["registration"]
         assert "fusion" in cfg.analysis_parameters
         assert cfg.analysis_parameters["fusion"]["execution_order"] == 5
@@ -795,6 +817,13 @@ class TestWorkflowConfig:
                     "blend_exponent": "1.75",
                     "gain_clip_range": [0.5, 2.5],
                     "force_rerun": 1,
+                    "deformable_enabled": 1,
+                    "deformable_transform": "SyNOnly",
+                    "deformable_iterations": ["80", "40", "0"],
+                    "deformable_lattice_spacing_um_zyx": ["12.5", 20, 40],
+                    "deformable_regularization_weight": "0.25",
+                    "deformable_max_displacement_um": "8.5",
+                    "deformable_sample_count_per_edge": "7",
                 }
             }
         )
@@ -815,6 +844,13 @@ class TestWorkflowConfig:
         assert fusion["gain_clip_range"] == [0.5, 2.5]
         assert fusion["blend_overlap_zyx"] == [2, 6, 10]
         assert params["force_rerun"] is True
+        assert params["deformable_enabled"] is True
+        assert params["deformable_transform"] == "synonly"
+        assert params["deformable_iterations"] == [80, 40, 0]
+        assert params["deformable_lattice_spacing_um_zyx"] == [12.5, 20.0, 40.0]
+        assert params["deformable_regularization_weight"] == pytest.approx(0.25)
+        assert params["deformable_max_displacement_um"] == pytest.approx(8.5)
+        assert params["deformable_sample_count_per_edge"] == 7
 
     def test_rejects_invalid_registration_resolution_level(self):
         with pytest.raises(ValueError):
@@ -827,6 +863,49 @@ class TestWorkflowConfig:
             WorkflowConfig(
                 analysis_parameters={"registration": {"registration_type": "affine"}}
             )
+
+    def test_rejects_invalid_deformable_transform(self):
+        with pytest.raises(ValueError, match="deformable_transform"):
+            WorkflowConfig(
+                analysis_parameters={
+                    "registration": {
+                        "deformable_enabled": True,
+                        "deformable_transform": "bspline",
+                    }
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "field,value,match",
+        [
+            ("deformable_iterations", [40, -1, 0], "deformable_iterations"),
+            (
+                "deformable_lattice_spacing_um_zyx",
+                [64.0, 0.0, 64.0],
+                "deformable_lattice_spacing_um_zyx",
+            ),
+            (
+                "deformable_regularization_weight",
+                -0.1,
+                "deformable_regularization_weight",
+            ),
+            (
+                "deformable_max_displacement_um",
+                0.0,
+                "deformable_max_displacement_um",
+            ),
+            (
+                "deformable_sample_count_per_edge",
+                1,
+                "deformable_sample_count_per_edge",
+            ),
+        ],
+    )
+    def test_rejects_invalid_deformable_registration_values(
+        self, field: str, value: object, match: str
+    ):
+        with pytest.raises(ValueError, match=match):
+            WorkflowConfig(analysis_parameters={"registration": {field: value}})
 
     def test_rejects_invalid_registration_blend_exponent(self):
         with pytest.raises(ValueError):

@@ -68,6 +68,12 @@ Latest Output References
 This decouples large arrays from the append-only provenance history while
 keeping latest output pointers searchable.
 
+Registration latest output references point to metadata-only results under
+``clearex/results/registration/latest``. Affine transform/layout arrays remain
+the stable compatibility contract; opt-in deformable runs also record the
+deformable parameter payload and the optional displacement-lattice metadata
+needed for reproducible fusion.
+
 Spatial Placement Reproducibility
 ---------------------------------
 

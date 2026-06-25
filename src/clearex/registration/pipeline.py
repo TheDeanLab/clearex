@@ -60,6 +60,11 @@ _RELATIVE_RESIDUAL_THRESHOLD = 2.5
 _DEFAULT_MAX_PAIRWISE_VOXELS = 500_000
 _DEFAULT_BLEND_EXPONENT = 1.0
 _DEFAULT_GAIN_CLIP_RANGE = (0.25, 4.0)
+_DEFAULT_DEFORMABLE_ITERATIONS = (40, 20, 0)
+_DEFAULT_DEFORMABLE_LATTICE_SPACING_UM_ZYX = (64.0, 64.0, 64.0)
+_DEFAULT_DEFORMABLE_REGULARIZATION_WEIGHT = 0.10
+_DEFAULT_DEFORMABLE_MAX_DISPLACEMENT_UM = 20.0
+_DEFAULT_DEFORMABLE_SAMPLE_COUNT_PER_EDGE = 5
 _PHASE_CORRELATION_UPSAMPLE_FACTOR = 10
 _WEIGHT_EPS = np.float32(1e-6)
 _CONTENT_WEIGHT_FLOOR = np.float32(0.25)
@@ -172,6 +177,18 @@ class _FusionChunkMemoryEstimate:
     estimated_bytes: int
     chunk_shape_zyx: tuple[int, int, int]
     source_subvolume_shape_zyx: tuple[int, int, int]
+
+
+@dataclass(frozen=True)
+class _DeformableConstraintSample:
+    """One residual displacement constraint for a deformation lattice node."""
+
+    fixed_position: int
+    moving_position: int
+    lattice_index_zyx: tuple[int, int, int]
+    displacement_xyz_um: tuple[float, float, float]
+    weight: float = 1.0
+    success: bool = True
 
 
 def _emit(
@@ -723,8 +740,99 @@ def _resample_source_to_world_grid(
     voxel_size_um_zyx: Sequence[float],
     order: int,
     cval: float,
+    deformable_lattice_zyx3: Optional[np.ndarray] = None,
+    deformable_lattice_origin_xyz: Optional[np.ndarray] = None,
+    deformable_lattice_spacing_um_zyx: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
     """Resample one source volume onto a world-aligned crop/output grid."""
+    if deformable_lattice_zyx3 is not None:
+        lattice = np.asarray(deformable_lattice_zyx3, dtype=np.float32)
+        if lattice.ndim != 4 or lattice.shape[-1] != 3:
+            raise ValueError("deformable_lattice_zyx3 must have shape (z, y, x, 3).")
+        lattice_origin_xyz = np.asarray(
+            (
+                deformable_lattice_origin_xyz
+                if deformable_lattice_origin_xyz is not None
+                else np.zeros(3, dtype=np.float64)
+            ),
+            dtype=np.float64,
+        )
+        lattice_spacing_zyx = tuple(
+            float(value)
+            for value in (
+                deformable_lattice_spacing_um_zyx
+                if deformable_lattice_spacing_um_zyx is not None
+                else voxel_size_um_zyx
+            )
+        )
+        grid_z, grid_y, grid_x = np.indices(reference_shape_zyx, dtype=np.float64)
+        world_x = float(reference_origin_xyz[0]) + (
+            grid_x * float(voxel_size_um_zyx[2])
+        )
+        world_y = float(reference_origin_xyz[1]) + (
+            grid_y * float(voxel_size_um_zyx[1])
+        )
+        world_z = float(reference_origin_xyz[2]) + (
+            grid_z * float(voxel_size_um_zyx[0])
+        )
+        lattice_coords = [
+            (world_z - float(lattice_origin_xyz[2]))
+            / max(lattice_spacing_zyx[0], 1e-6),
+            (world_y - float(lattice_origin_xyz[1]))
+            / max(lattice_spacing_zyx[1], 1e-6),
+            (world_x - float(lattice_origin_xyz[0]))
+            / max(lattice_spacing_zyx[2], 1e-6),
+        ]
+        displacement_xyz = np.stack(
+            [
+                ndimage.map_coordinates(
+                    lattice[..., component],
+                    lattice_coords,
+                    order=1,
+                    mode="nearest",
+                    prefilter=False,
+                )
+                for component in range(3)
+            ],
+            axis=0,
+        ).astype(np.float64, copy=False)
+        sample_world_x = world_x + displacement_xyz[0]
+        sample_world_y = world_y + displacement_xyz[1]
+        sample_world_z = world_z + displacement_xyz[2]
+
+        world_to_local_xyz = np.linalg.inv(local_to_world_xyz)
+        local_x = (
+            world_to_local_xyz[0, 0] * sample_world_x
+            + world_to_local_xyz[0, 1] * sample_world_y
+            + world_to_local_xyz[0, 2] * sample_world_z
+            + world_to_local_xyz[0, 3]
+        )
+        local_y = (
+            world_to_local_xyz[1, 0] * sample_world_x
+            + world_to_local_xyz[1, 1] * sample_world_y
+            + world_to_local_xyz[1, 2] * sample_world_z
+            + world_to_local_xyz[1, 3]
+        )
+        local_z = (
+            world_to_local_xyz[2, 0] * sample_world_x
+            + world_to_local_xyz[2, 1] * sample_world_y
+            + world_to_local_xyz[2, 2] * sample_world_z
+            + world_to_local_xyz[2, 3]
+        )
+        source_coords = [
+            local_z / max(float(voxel_size_um_zyx[0]), 1e-6),
+            local_y / max(float(voxel_size_um_zyx[1]), 1e-6),
+            local_x / max(float(voxel_size_um_zyx[2]), 1e-6),
+        ]
+        return ndimage.map_coordinates(
+            np.asarray(source_zyx),
+            source_coords,
+            order=int(order),
+            mode="constant",
+            cval=float(cval),
+            prefilter=bool(order > 1),
+        ).astype(np.float32, copy=False)
+
     matrix, offset = _world_to_input_affine_zyx(
         local_to_world_xyz,
         reference_origin_xyz=reference_origin_xyz,
@@ -756,6 +864,7 @@ def _source_subvolume_for_overlap(
     source_shape_zyx: tuple[int, int, int],
     voxel_size_um_zyx: Sequence[float],
     padding: int = 2,
+    deformation_padding_um: float = 0.0,
 ) -> tuple[tuple[slice, slice, slice], np.ndarray]:
     """Compute the minimal source sub-volume that covers a world-grid crop.
 
@@ -811,6 +920,24 @@ def _source_subvolume_for_overlap(
     source_indices = (matrix @ output_corners.T).T + offset[np.newaxis, :]
     src_min = np.floor(np.min(source_indices, axis=0)).astype(int) - int(padding)
     src_max = np.ceil(np.max(source_indices, axis=0)).astype(int) + int(padding)
+    extra_padding_um = max(0.0, float(deformation_padding_um))
+    if extra_padding_um > 0.0:
+        deformation_padding_zyx = np.asarray(
+            [
+                int(
+                    math.ceil(extra_padding_um / max(float(voxel_size_um_zyx[0]), 1e-6))
+                ),
+                int(
+                    math.ceil(extra_padding_um / max(float(voxel_size_um_zyx[1]), 1e-6))
+                ),
+                int(
+                    math.ceil(extra_padding_um / max(float(voxel_size_um_zyx[2]), 1e-6))
+                ),
+            ],
+            dtype=int,
+        )
+        src_min = src_min - deformation_padding_zyx
+        src_max = src_max + deformation_padding_zyx
 
     sz, sy, sx = (
         int(source_shape_zyx[0]),
@@ -1040,6 +1167,36 @@ def _registration_type_to_ants(value: str) -> str:
         "similarity": "Similarity",
     }
     return mapping[str(value).strip().lower()]
+
+
+def _deformable_transform_to_ants(value: str) -> str:
+    """Map normalized deformable transform token to ANTsPy value."""
+    mapping = {
+        "syn": "SyN",
+        "synonly": "SyNOnly",
+    }
+    return mapping[str(value).strip().lower()]
+
+
+def _deformable_lattice_geometry(
+    *,
+    output_min_xyz: np.ndarray,
+    output_max_xyz: np.ndarray,
+    lattice_spacing_um_zyx: Sequence[float],
+) -> tuple[np.ndarray, tuple[int, int, int]]:
+    """Return world-space deformation lattice origin and ZYX shape."""
+    spacing = tuple(max(1e-6, float(value)) for value in lattice_spacing_um_zyx)
+    extent_xyz = np.maximum(
+        np.asarray(output_max_xyz, dtype=np.float64)
+        - np.asarray(output_min_xyz, dtype=np.float64),
+        0.0,
+    )
+    shape_zyx = (
+        max(1, int(math.ceil(float(extent_xyz[2]) / spacing[0])) + 1),
+        max(1, int(math.ceil(float(extent_xyz[1]) / spacing[1])) + 1),
+        max(1, int(math.ceil(float(extent_xyz[0]) / spacing[2])) + 1),
+    )
+    return np.asarray(output_min_xyz, dtype=np.float64), shape_zyx
 
 
 def _phase_correlation_translation(
@@ -1507,6 +1664,266 @@ def _register_pairwise_overlap(
     }
 
 
+def _register_pairwise_deformable_overlap(
+    *,
+    zarr_path: str,
+    source_component: str,
+    t_index: int,
+    registration_channel: int,
+    edge: _EdgeSpec,
+    fixed_transform_xyz: np.ndarray,
+    moving_transform_xyz: np.ndarray,
+    voxel_size_um_zyx: Sequence[float],
+    overlap_zyx: Sequence[int],
+    deformable_transform: str,
+    deformable_iterations: Sequence[int],
+    lattice_origin_xyz: Sequence[float],
+    lattice_spacing_um_zyx: Sequence[float],
+    lattice_shape_zyx: tuple[int, int, int],
+    sample_count_per_edge: int,
+    max_pairwise_voxels: int = _DEFAULT_MAX_PAIRWISE_VOXELS,
+) -> dict[str, Any]:
+    """Estimate residual deformable samples for one affine-aligned overlap."""
+    if ants is None:
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": False,
+            "reason": "ants_unavailable",
+            "constraint_samples": [],
+            "residual_rms_um": np.nan,
+        }
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    source = root[source_component]
+    source_shape_zyx = tuple(int(v) for v in source.shape[3:])
+    crop_origin_xyz, crop_shape_zyx = _crop_from_overlap_bbox(
+        edge.overlap_bbox_xyz,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        overlap_zyx=overlap_zyx,
+    )
+    reg_crop_shape_zyx, reg_voxel_size, read_stride = (
+        _registration_grid_for_pairwise_budget(
+            crop_shape_zyx=crop_shape_zyx,
+            voxel_size_um_zyx=voxel_size_um_zyx,
+            max_pairwise_voxels=int(max_pairwise_voxels),
+        )
+    )
+    fixed_slices, fixed_adj_transform = _source_subvolume_for_overlap(
+        fixed_transform_xyz,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=crop_shape_zyx,
+        source_shape_zyx=source_shape_zyx,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        padding=max(2, int(read_stride) * 2),
+    )
+    moving_slices, moving_adj_transform = _source_subvolume_for_overlap(
+        moving_transform_xyz,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=crop_shape_zyx,
+        source_shape_zyx=source_shape_zyx,
+        voxel_size_um_zyx=voxel_size_um_zyx,
+        padding=max(2, int(read_stride) * 2),
+    )
+    if _slices_zyx_are_empty(fixed_slices) or _slices_zyx_are_empty(moving_slices):
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": False,
+            "reason": "overlap_outside_source_bounds",
+            "constraint_samples": [],
+            "residual_rms_um": np.nan,
+        }
+
+    fixed_source = _worker_zarr_read(
+        source,
+        (
+            int(t_index),
+            int(edge.fixed_position),
+            int(registration_channel),
+            _stride_slices_zyx(fixed_slices, read_stride)[0],
+            _stride_slices_zyx(fixed_slices, read_stride)[1],
+            _stride_slices_zyx(fixed_slices, read_stride)[2],
+        ),
+        dtype=np.float32,
+    )
+    moving_source = _worker_zarr_read(
+        source,
+        (
+            int(t_index),
+            int(edge.moving_position),
+            int(registration_channel),
+            _stride_slices_zyx(moving_slices, read_stride)[0],
+            _stride_slices_zyx(moving_slices, read_stride)[1],
+            _stride_slices_zyx(moving_slices, read_stride)[2],
+        ),
+        dtype=np.float32,
+    )
+    fixed_crop = _resample_source_to_world_grid(
+        fixed_source,
+        fixed_adj_transform,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=reg_crop_shape_zyx,
+        voxel_size_um_zyx=reg_voxel_size,
+        order=1,
+        cval=0.0,
+    )
+    moving_crop = _resample_source_to_world_grid(
+        moving_source,
+        moving_adj_transform,
+        reference_origin_xyz=crop_origin_xyz,
+        reference_shape_zyx=reg_crop_shape_zyx,
+        voxel_size_um_zyx=reg_voxel_size,
+        order=1,
+        cval=0.0,
+    )
+    overlap_pixels = int(np.count_nonzero((fixed_crop > 0) & (moving_crop > 0)))
+    if (
+        overlap_pixels <= 0
+        or float(np.std(fixed_crop)) <= 1e-6
+        or float(np.std(moving_crop)) <= 1e-6
+    ):
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": False,
+            "reason": "insufficient_overlap_signal",
+            "constraint_samples": [],
+            "residual_rms_um": np.nan,
+        }
+
+    try:
+        fixed_image = _ants_image_from_zyx(fixed_crop, voxel_size_um_zyx=reg_voxel_size)
+        moving_image = _ants_image_from_zyx(
+            moving_crop, voxel_size_um_zyx=reg_voxel_size
+        )
+        registration = ants.registration(
+            fixed=fixed_image,
+            moving=moving_image,
+            type_of_transform=_deformable_transform_to_ants(deformable_transform),
+            initial_transform="Identity",
+            reg_iterations=tuple(int(value) for value in deformable_iterations),
+            mask_all_stages=True,
+            verbose=False,
+        )
+        transform_list = list(registration.get("invtransforms", ()))
+        if not transform_list:
+            raise RuntimeError("ANTs did not return inverse deformable transforms.")
+
+        import pandas as pd
+
+        sample_count = max(2, int(sample_count_per_edge))
+        bbox_min = np.asarray(
+            [
+                edge.overlap_bbox_xyz[0][0],
+                edge.overlap_bbox_xyz[1][0],
+                edge.overlap_bbox_xyz[2][0],
+            ],
+            dtype=np.float64,
+        )
+        bbox_max = np.asarray(
+            [
+                edge.overlap_bbox_xyz[0][1],
+                edge.overlap_bbox_xyz[1][1],
+                edge.overlap_bbox_xyz[2][1],
+            ],
+            dtype=np.float64,
+        )
+        axes = [
+            np.linspace(float(bbox_min[axis]), float(bbox_max[axis]), sample_count)
+            for axis in range(3)
+        ]
+        world_samples = np.asarray(
+            [[x, y, z] for x in axes[0] for y in axes[1] for z in axes[2]],
+            dtype=np.float64,
+        )
+        local_samples = world_samples - np.asarray(crop_origin_xyz, dtype=np.float64)
+        fixed_points = pd.DataFrame(
+            {
+                "x": local_samples[:, 0],
+                "y": local_samples[:, 1],
+                "z": local_samples[:, 2],
+            }
+        )
+        moving_points = ants.apply_transforms_to_points(
+            3,
+            fixed_points,
+            transformlist=transform_list,
+        )
+        moving_xyz = moving_points[["x", "y", "z"]].to_numpy(dtype=np.float64)
+        displacement_xyz = moving_xyz - local_samples
+        lattice_origin = np.asarray(lattice_origin_xyz, dtype=np.float64)
+        lattice_spacing = tuple(float(value) for value in lattice_spacing_um_zyx)
+        samples: list[_DeformableConstraintSample] = []
+        for world_xyz, displacement in zip(world_samples, displacement_xyz):
+            lattice_index = (
+                int(
+                    np.clip(
+                        round(
+                            (float(world_xyz[2]) - float(lattice_origin[2]))
+                            / max(float(lattice_spacing[0]), 1e-6)
+                        ),
+                        0,
+                        int(lattice_shape_zyx[0]) - 1,
+                    )
+                ),
+                int(
+                    np.clip(
+                        round(
+                            (float(world_xyz[1]) - float(lattice_origin[1]))
+                            / max(float(lattice_spacing[1]), 1e-6)
+                        ),
+                        0,
+                        int(lattice_shape_zyx[1]) - 1,
+                    )
+                ),
+                int(
+                    np.clip(
+                        round(
+                            (float(world_xyz[0]) - float(lattice_origin[0]))
+                            / max(float(lattice_spacing[2]), 1e-6)
+                        ),
+                        0,
+                        int(lattice_shape_zyx[2]) - 1,
+                    )
+                ),
+            )
+            samples.append(
+                _DeformableConstraintSample(
+                    fixed_position=int(edge.fixed_position),
+                    moving_position=int(edge.moving_position),
+                    lattice_index_zyx=lattice_index,
+                    displacement_xyz_um=(
+                        float(displacement[0]),
+                        float(displacement[1]),
+                        float(displacement[2]),
+                    ),
+                    weight=1.0,
+                    success=True,
+                )
+            )
+        residual_rms = float(
+            np.sqrt(np.mean(np.sum(np.square(displacement_xyz), axis=1)))
+        )
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": bool(samples),
+            "reason": "",
+            "constraint_samples": samples,
+            "residual_rms_um": residual_rms,
+        }
+    except Exception as exc:
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": False,
+            "reason": str(exc),
+            "constraint_samples": [],
+            "residual_rms_um": np.nan,
+        }
+
+
 def _estimate_pairwise_overlap_intensity(
     *,
     zarr_path: str,
@@ -1884,6 +2301,129 @@ def _solve_nonlinear_component(
         solved[int(position)] = _matrix_from_pose(
             result.x[base : base + pose_size], registration_type
         )
+    return solved
+
+
+def _solve_deformable_lattice_constraints(
+    *,
+    positions: Sequence[int],
+    anchor_position: int,
+    lattice_shape_zyx: tuple[int, int, int],
+    samples: Sequence[Union[_DeformableConstraintSample, Mapping[str, Any]]],
+    regularization_weight: float,
+    max_displacement_um: float,
+) -> np.ndarray:
+    """Solve anchored per-position displacement lattices from residual samples."""
+    ordered_positions = tuple(int(position) for position in positions)
+    position_to_output = {
+        int(position): int(index) for index, position in enumerate(ordered_positions)
+    }
+    anchor = int(anchor_position)
+    variable_positions = [
+        int(position) for position in ordered_positions if int(position) != anchor
+    ]
+    variable_index = {
+        int(position): int(index) for index, position in enumerate(variable_positions)
+    }
+    lattice_shape = tuple(max(1, int(value)) for value in lattice_shape_zyx)
+    solved = np.zeros((len(ordered_positions), *lattice_shape, 3), dtype=np.float32)
+    if not variable_positions:
+        return solved
+
+    samples_by_node: dict[tuple[int, int, int], list[_DeformableConstraintSample]] = {}
+    for sample in samples:
+        if isinstance(sample, _DeformableConstraintSample):
+            parsed = sample
+        else:
+            lattice_index = tuple(int(value) for value in sample["lattice_index_zyx"])
+            displacement = tuple(
+                float(value) for value in sample["displacement_xyz_um"]
+            )
+            parsed = _DeformableConstraintSample(
+                fixed_position=int(sample["fixed_position"]),
+                moving_position=int(sample["moving_position"]),
+                lattice_index_zyx=(
+                    int(lattice_index[0]),
+                    int(lattice_index[1]),
+                    int(lattice_index[2]),
+                ),
+                displacement_xyz_um=(
+                    float(displacement[0]),
+                    float(displacement[1]),
+                    float(displacement[2]),
+                ),
+                weight=float(sample.get("weight", 1.0)),
+                success=bool(sample.get("success", True)),
+            )
+        if not bool(parsed.success):
+            continue
+        if (
+            int(parsed.fixed_position) not in position_to_output
+            or int(parsed.moving_position) not in position_to_output
+        ):
+            continue
+        iz, iy, ix = (int(value) for value in parsed.lattice_index_zyx)
+        if (
+            iz < 0
+            or iy < 0
+            or ix < 0
+            or iz >= lattice_shape[0]
+            or iy >= lattice_shape[1]
+            or ix >= lattice_shape[2]
+        ):
+            continue
+        if float(parsed.weight) <= 0.0:
+            continue
+        samples_by_node.setdefault((iz, iy, ix), []).append(parsed)
+
+    reg = max(0.0, float(regularization_weight))
+    displacement_limit = max(0.0, float(max_displacement_um))
+    variable_count = len(variable_positions)
+    for lattice_index, node_samples in samples_by_node.items():
+        for component in range(3):
+            rows: list[np.ndarray] = []
+            values: list[float] = []
+            for sample in node_samples:
+                row = np.zeros(variable_count, dtype=np.float64)
+                if int(sample.moving_position) != anchor:
+                    row[variable_index[int(sample.moving_position)]] += 1.0
+                if int(sample.fixed_position) != anchor:
+                    row[variable_index[int(sample.fixed_position)]] -= 1.0
+                if not np.any(row):
+                    continue
+                weight = math.sqrt(max(1e-6, float(sample.weight)))
+                rows.append(row * weight)
+                values.append(float(sample.displacement_xyz_um[component]) * weight)
+            if reg > 0.0:
+                for var_index in range(variable_count):
+                    row = np.zeros(variable_count, dtype=np.float64)
+                    row[var_index] = reg
+                    rows.append(row)
+                    values.append(0.0)
+            if not rows:
+                continue
+            matrix = np.vstack(rows)
+            target = np.asarray(values, dtype=np.float64)
+            solution, *_unused = np.linalg.lstsq(matrix, target, rcond=None)
+            for position in variable_positions:
+                out_index = position_to_output[int(position)]
+                solved[
+                    out_index,
+                    lattice_index[0],
+                    lattice_index[1],
+                    lattice_index[2],
+                    component,
+                ] = np.float32(solution[variable_index[int(position)]])
+
+    if displacement_limit > 0.0:
+        norms = np.linalg.norm(solved.astype(np.float64), axis=-1)
+        mask = norms > displacement_limit
+        if np.any(mask):
+            scale = np.ones(norms.shape, dtype=np.float64)
+            scale[mask] = displacement_limit / np.maximum(norms[mask], 1e-12)
+            solved = (solved.astype(np.float64) * scale[..., np.newaxis]).astype(
+                np.float32
+            )
     return solved
 
 
@@ -2313,6 +2853,7 @@ def _estimate_fusion_chunk_bytes(
     source_shape_zyx: Sequence[int],
     affines_p44: np.ndarray,
     transformed_bboxes_px6: np.ndarray,
+    deformation_padding_um: float = 0.0,
 ) -> int:
     """Estimate peak memory for one fusion-worker chunk invocation.
 
@@ -2328,6 +2869,7 @@ def _estimate_fusion_chunk_bytes(
             source_shape_zyx=source_shape_zyx,
             affines_p44=affines_p44,
             transformed_bboxes_px6=transformed_bboxes_px6,
+            deformation_padding_um=float(deformation_padding_um),
         ).estimated_bytes
     )
 
@@ -2340,6 +2882,7 @@ def _estimate_fusion_chunk_memory(
     source_shape_zyx: Sequence[int],
     affines_p44: np.ndarray,
     transformed_bboxes_px6: np.ndarray,
+    deformation_padding_um: float = 0.0,
 ) -> _FusionChunkMemoryEstimate:
     """Estimate peak memory for one fusion-worker chunk invocation.
 
@@ -2414,6 +2957,7 @@ def _estimate_fusion_chunk_memory(
             reference_shape_zyx=chunk_shape_zyx,
             source_shape_zyx=tuple(int(v) for v in source_shape_zyx),
             voxel_size_um_zyx=voxel_size_um_zyx,
+            deformation_padding_um=max(0.0, float(deformation_padding_um)),
         )
         if _slices_zyx_are_empty(src_slices):
             continue
@@ -2451,6 +2995,10 @@ def _process_and_write_registration_chunk(
     output_origin_xyz: Sequence[float],
     voxel_size_um_zyx: Sequence[float],
     output_dtype: str,
+    deformable_lattice_component: Optional[str] = None,
+    deformable_lattice_origin_xyz_um: Optional[Sequence[float]] = None,
+    deformable_lattice_spacing_um_zyx: Optional[Sequence[float]] = None,
+    deformable_max_displacement_um: float = 0.0,
 ) -> int:
     """Render one fused output chunk into the registration result store.
 
@@ -2541,6 +3089,33 @@ def _process_and_write_registration_chunk(
     blend_mode = _normalized_blend_mode(blend_group.attrs.get("blend_mode", "feather"))
     intensity_gains = root[intensity_gains_component]
     intensity_offsets = root[intensity_offsets_component]
+    deformable_lattice = None
+    if deformable_lattice_component:
+        try:
+            deformable_lattice = root[str(deformable_lattice_component)]
+        except Exception:
+            deformable_lattice = None
+    deformable_origin_xyz = np.asarray(
+        (
+            deformable_lattice_origin_xyz_um
+            if deformable_lattice_origin_xyz_um is not None
+            else output_origin_xyz
+        ),
+        dtype=np.float64,
+    )
+    deformable_spacing_zyx = tuple(
+        float(value)
+        for value in (
+            deformable_lattice_spacing_um_zyx
+            if deformable_lattice_spacing_um_zyx is not None
+            else voxel_size_um_zyx
+        )
+    )
+    deformable_padding_um = (
+        max(0.0, float(deformable_max_displacement_um))
+        if deformable_lattice is not None
+        else 0.0
+    )
 
     chunk_sum = np.zeros(chunk_shape_zyx, dtype=np.float32)
     chunk_weight = np.zeros(chunk_shape_zyx, dtype=np.float32)
@@ -2572,9 +3147,24 @@ def _process_and_write_registration_chunk(
             reference_shape_zyx=chunk_shape_zyx,
             source_shape_zyx=source_shape_zyx,
             voxel_size_um_zyx=voxel_size_um_zyx,
+            deformation_padding_um=deformable_padding_um,
         )
         if _slices_zyx_are_empty(src_slices):
             continue
+        position_lattice = None
+        if deformable_lattice is not None:
+            position_lattice = _worker_zarr_read(
+                deformable_lattice,
+                (
+                    int(t_index),
+                    int(position_index),
+                    slice(None),
+                    slice(None),
+                    slice(None),
+                    slice(None),
+                ),
+                dtype=np.float32,
+            )
         source_volume = _worker_zarr_read(
             source,
             (
@@ -2595,6 +3185,9 @@ def _process_and_write_registration_chunk(
             voxel_size_um_zyx=voxel_size_um_zyx,
             order=1,
             cval=0.0,
+            deformable_lattice_zyx3=position_lattice,
+            deformable_lattice_origin_xyz=deformable_origin_xyz,
+            deformable_lattice_spacing_um_zyx=deformable_spacing_zyx,
         )
         gain = float(
             _worker_zarr_read(
@@ -2629,6 +3222,9 @@ def _process_and_write_registration_chunk(
             voxel_size_um_zyx=voxel_size_um_zyx,
             order=1,
             cval=0.0,
+            deformable_lattice_zyx3=position_lattice,
+            deformable_lattice_origin_xyz=deformable_origin_xyz,
+            deformable_lattice_spacing_um_zyx=deformable_spacing_zyx,
         )
         if _blend_uses_content_aware_weights(blend_mode):
             warped_weight *= _content_aware_weight_volume(warped_volume)
@@ -2964,6 +3560,41 @@ def run_registration_analysis(
         float(_DEFAULT_GAIN_CLIP_RANGE[0]),
         float(_DEFAULT_GAIN_CLIP_RANGE[1]),
     )
+    effective_deformable_enabled = bool(parameters.get("deformable_enabled", False))
+    effective_deformable_transform = (
+        str(parameters.get("deformable_transform", "syn")).strip().lower() or "syn"
+    )
+    effective_deformable_iterations = tuple(
+        int(value)
+        for value in parameters.get(
+            "deformable_iterations", _DEFAULT_DEFORMABLE_ITERATIONS
+        )
+    )
+    effective_deformable_lattice_spacing_um_zyx = tuple(
+        float(value)
+        for value in parameters.get(
+            "deformable_lattice_spacing_um_zyx",
+            _DEFAULT_DEFORMABLE_LATTICE_SPACING_UM_ZYX,
+        )
+    )
+    effective_deformable_regularization_weight = float(
+        parameters.get(
+            "deformable_regularization_weight",
+            _DEFAULT_DEFORMABLE_REGULARIZATION_WEIGHT,
+        )
+    )
+    effective_deformable_max_displacement_um = float(
+        parameters.get(
+            "deformable_max_displacement_um",
+            _DEFAULT_DEFORMABLE_MAX_DISPLACEMENT_UM,
+        )
+    )
+    effective_deformable_sample_count_per_edge = int(
+        parameters.get(
+            "deformable_sample_count_per_edge",
+            _DEFAULT_DEFORMABLE_SAMPLE_COUNT_PER_EDGE,
+        )
+    )
 
     for t_index in range(int(source_shape_tpczyx[0])):
         anchor_positions.append(int(anchor_position))
@@ -3131,6 +3762,127 @@ def run_registration_analysis(
         max(1, min(int(source_chunks[5]), int(output_shape_tpczyx[5]))),
     )
     component = analysis_auxiliary_root("registration")
+    deformable_lattice_component = f"{component}/deformable_lattice_tpzyx3"
+    deformable_status_te: Optional[np.ndarray] = None
+    deformable_residual_te: Optional[np.ndarray] = None
+    deformable_lattice_tpzyx3: Optional[np.ndarray] = None
+    deformable_lattice_origin_xyz = np.asarray(output_min_xyz, dtype=np.float64)
+    deformable_lattice_shape_zyx = (0, 0, 0)
+    if effective_deformable_enabled:
+        _emit(progress_callback, 44, "Estimating residual deformable registration")
+        deformable_lattice_origin_xyz, deformable_lattice_shape_zyx = (
+            _deformable_lattice_geometry(
+                output_min_xyz=output_min_xyz,
+                output_max_xyz=output_max_xyz,
+                lattice_spacing_um_zyx=effective_deformable_lattice_spacing_um_zyx,
+            )
+        )
+        deformable_status_te = np.zeros(
+            (int(source_shape_tpczyx[0]), int(edge_count)), dtype=np.uint8
+        )
+        deformable_residual_te = np.full(
+            (int(source_shape_tpczyx[0]), int(edge_count)), np.nan, dtype=np.float32
+        )
+        deformable_lattice_tpzyx3 = np.zeros(
+            (
+                int(source_shape_tpczyx[0]),
+                int(source_shape_tpczyx[1]),
+                int(deformable_lattice_shape_zyx[0]),
+                int(deformable_lattice_shape_zyx[1]),
+                int(deformable_lattice_shape_zyx[2]),
+                3,
+            ),
+            dtype=np.float32,
+        )
+        for t_index in range(int(source_shape_tpczyx[0])):
+            delayed_deformable_edges: list[Any] = []
+            deformable_edge_indices: list[int] = []
+            for edge_index, edge in enumerate(edge_specs):
+                if int(edge_status_te[int(t_index), int(edge_index)]) != 1:
+                    continue
+                fixed_bbox = _tile_bbox_xyz(
+                    effective_transforms_tpx44[int(t_index), int(edge.fixed_position)],
+                    pairwise_tile_extent_xyz,
+                )
+                moving_bbox = _tile_bbox_xyz(
+                    effective_transforms_tpx44[int(t_index), int(edge.moving_position)],
+                    pairwise_tile_extent_xyz,
+                )
+                overlap = _bbox_intersection_xyz(fixed_bbox, moving_bbox)
+                if overlap is None:
+                    continue
+                deformable_edge = _EdgeSpec(
+                    fixed_position=int(edge.fixed_position),
+                    moving_position=int(edge.moving_position),
+                    overlap_bbox_xyz=(
+                        (float(overlap[0][0]), float(overlap[1][0])),
+                        (float(overlap[0][1]), float(overlap[1][1])),
+                        (float(overlap[0][2]), float(overlap[1][2])),
+                    ),
+                    overlap_voxels=_bbox_volume_voxels(
+                        overlap[0], overlap[1], pairwise_voxel_size_um_zyx
+                    ),
+                )
+                deformable_edge_indices.append(int(edge_index))
+                delayed_deformable_edges.append(
+                    delayed(_register_pairwise_deformable_overlap)(
+                        zarr_path=str(zarr_path),
+                        source_component=pairwise_source_component,
+                        t_index=int(t_index),
+                        registration_channel=int(registration_channel),
+                        edge=deformable_edge,
+                        fixed_transform_xyz=effective_transforms_tpx44[
+                            int(t_index), int(edge.fixed_position)
+                        ],
+                        moving_transform_xyz=effective_transforms_tpx44[
+                            int(t_index), int(edge.moving_position)
+                        ],
+                        voxel_size_um_zyx=pairwise_voxel_size_um_zyx,
+                        overlap_zyx=effective_pairwise_overlap_zyx,
+                        deformable_transform=effective_deformable_transform,
+                        deformable_iterations=effective_deformable_iterations,
+                        lattice_origin_xyz=deformable_lattice_origin_xyz,
+                        lattice_spacing_um_zyx=(
+                            effective_deformable_lattice_spacing_um_zyx
+                        ),
+                        lattice_shape_zyx=deformable_lattice_shape_zyx,
+                        sample_count_per_edge=(
+                            effective_deformable_sample_count_per_edge
+                        ),
+                        max_pairwise_voxels=effective_max_pairwise_voxels,
+                    )
+                )
+            if not delayed_deformable_edges:
+                continue
+            if client is None:
+                deformable_results = list(
+                    dask.compute(*delayed_deformable_edges, scheduler="processes")
+                )
+            else:
+                deformable_results = list(
+                    client.gather(client.compute(delayed_deformable_edges))
+                )
+            constraint_samples: list[_DeformableConstraintSample] = []
+            for edge_index, result in zip(deformable_edge_indices, deformable_results):
+                if bool(result.get("success", False)):
+                    deformable_status_te[int(t_index), int(edge_index)] = 1
+                    constraint_samples.extend(
+                        result.get("constraint_samples", [])  # type: ignore[arg-type]
+                    )
+                deformable_residual_te[int(t_index), int(edge_index)] = float(
+                    result.get("residual_rms_um", np.nan)
+                )
+            deformable_lattice_tpzyx3[int(t_index)] = (
+                _solve_deformable_lattice_constraints(
+                    positions=positions,
+                    anchor_position=int(anchor_positions[int(t_index)]),
+                    lattice_shape_zyx=deformable_lattice_shape_zyx,
+                    samples=constraint_samples,
+                    regularization_weight=(effective_deformable_regularization_weight),
+                    max_displacement_um=effective_deformable_max_displacement_um,
+                )
+            )
+
     affines_component = f"{component}/affines_tpx44"
     transformed_bboxes_component = f"{component}/transformed_bboxes_tpx6"
     write_root = zarr.open_group(str(zarr_path), mode="a")
@@ -3180,6 +3932,27 @@ def run_registration_analysis(
         data=transformed_bboxes_tpx6,
         overwrite=True,
     )
+    if (
+        effective_deformable_enabled
+        and deformable_lattice_tpzyx3 is not None
+        and deformable_status_te is not None
+        and deformable_residual_te is not None
+    ):
+        latest_group.create_array(
+            name="deformable_lattice_tpzyx3",
+            data=deformable_lattice_tpzyx3,
+            overwrite=True,
+        )
+        latest_group.create_array(
+            name="pairwise_deformable_status_te",
+            data=deformable_status_te,
+            overwrite=True,
+        )
+        latest_group.create_array(
+            name="pairwise_deformable_residual_te",
+            data=deformable_residual_te,
+            overwrite=True,
+        )
     _emit(progress_callback, 96, "Writing registration metadata and provenance")
     active_edge_count = int(np.count_nonzero(edge_status_te))
     dropped_edge_count = max(0, int(successful_edge_count) - int(active_edge_count))
@@ -3203,6 +3976,33 @@ def run_registration_analysis(
             "dropped_edge_count": int(dropped_edge_count),
             "affines_component": affines_component,
             "transformed_bboxes_component": transformed_bboxes_component,
+            "deformable_enabled": bool(effective_deformable_enabled),
+            "deformable_transform": str(effective_deformable_transform),
+            "deformable_iterations": [
+                int(value) for value in effective_deformable_iterations
+            ],
+            "deformable_lattice_component": (
+                deformable_lattice_component if effective_deformable_enabled else ""
+            ),
+            "deformable_lattice_origin_xyz_um": [
+                float(value) for value in deformable_lattice_origin_xyz
+            ],
+            "deformable_lattice_spacing_um_zyx": [
+                float(value) for value in effective_deformable_lattice_spacing_um_zyx
+            ],
+            "deformable_lattice_direction": "world_xyz_sampling_displacement_um",
+            "deformable_lattice_shape_zyx": [
+                int(value) for value in deformable_lattice_shape_zyx
+            ],
+            "deformable_regularization_weight": float(
+                effective_deformable_regularization_weight
+            ),
+            "deformable_max_displacement_um": float(
+                effective_deformable_max_displacement_um
+            ),
+            "deformable_sample_count_per_edge": int(
+                effective_deformable_sample_count_per_edge
+            ),
             "max_pairwise_voxels": int(effective_max_pairwise_voxels),
             "ants_iterations": [int(v) for v in effective_ants_iterations],
             "ants_sampling_rate": float(effective_ants_sampling_rate),
@@ -3239,6 +4039,33 @@ def run_registration_analysis(
             "edge_count": int(edge_count),
             "active_edge_count": int(active_edge_count),
             "dropped_edge_count": int(dropped_edge_count),
+            "deformable_enabled": bool(effective_deformable_enabled),
+            "deformable_transform": str(effective_deformable_transform),
+            "deformable_iterations": [
+                int(value) for value in effective_deformable_iterations
+            ],
+            "deformable_lattice_component": (
+                deformable_lattice_component if effective_deformable_enabled else ""
+            ),
+            "deformable_lattice_origin_xyz_um": [
+                float(value) for value in deformable_lattice_origin_xyz
+            ],
+            "deformable_lattice_spacing_um_zyx": [
+                float(value) for value in effective_deformable_lattice_spacing_um_zyx
+            ],
+            "deformable_lattice_direction": "world_xyz_sampling_displacement_um",
+            "deformable_lattice_shape_zyx": [
+                int(value) for value in deformable_lattice_shape_zyx
+            ],
+            "deformable_regularization_weight": float(
+                effective_deformable_regularization_weight
+            ),
+            "deformable_max_displacement_um": float(
+                effective_deformable_max_displacement_um
+            ),
+            "deformable_sample_count_per_edge": int(
+                effective_deformable_sample_count_per_edge
+            ),
             "max_pairwise_voxels": int(effective_max_pairwise_voxels),
             "ants_iterations": [int(v) for v in effective_ants_iterations],
             "ants_sampling_rate": float(effective_ants_sampling_rate),
@@ -3371,6 +4198,39 @@ def run_fusion_analysis(
         raise ValueError(
             "fusion requires completed registration affines and transformed bounding boxes."
         )
+    deformable_lattice_component: Optional[str] = (
+        str(registration_group.attrs.get("deformable_lattice_component", "")).strip()
+        or None
+    )
+    if (
+        deformable_lattice_component is not None
+        and deformable_lattice_component not in root
+    ):
+        deformable_lattice_component = None
+    deformable_lattice_origin_xyz_um = tuple(
+        float(value)
+        for value in registration_group.attrs.get(
+            "deformable_lattice_origin_xyz_um",
+            registration_group.attrs.get("output_origin_xyz_um", [0.0, 0.0, 0.0]),
+        )
+    )
+    deformable_lattice_spacing_um_zyx = tuple(
+        float(value)
+        for value in registration_group.attrs.get(
+            "deformable_lattice_spacing_um_zyx",
+            _DEFAULT_DEFORMABLE_LATTICE_SPACING_UM_ZYX,
+        )
+    )
+    deformable_max_displacement_um = (
+        float(
+            registration_group.attrs.get(
+                "deformable_max_displacement_um",
+                _DEFAULT_DEFORMABLE_MAX_DISPLACEMENT_UM,
+            )
+        )
+        if deformable_lattice_component is not None
+        else 0.0
+    )
     edges_component = f"{registration_component}/edges_pe2"
     edges_pe2 = (
         np.asarray(root[edges_component][:], dtype=np.int32)
@@ -3433,6 +4293,7 @@ def run_fusion_analysis(
                         source_shape_zyx=source_tile_shape_zyx,
                         affines_p44=affines[int(t_index)],
                         transformed_bboxes_px6=transformed_bboxes[int(t_index)],
+                        deformation_padding_um=deformable_max_displacement_um,
                     )
                     if estimate.estimated_bytes > worst_estimate.estimated_bytes:
                         worst_estimate = estimate
@@ -3602,6 +4463,10 @@ def run_fusion_analysis(
             output_origin_xyz=output_origin_xyz,
             voxel_size_um_zyx=full_voxel_size_um_zyx,
             output_dtype=str(source.dtype),
+            deformable_lattice_component=deformable_lattice_component,
+            deformable_lattice_origin_xyz_um=deformable_lattice_origin_xyz_um,
+            deformable_lattice_spacing_um_zyx=deformable_lattice_spacing_um_zyx,
+            deformable_max_displacement_um=deformable_max_displacement_um,
         )
         for t_index, c_index, z_chunk, y_chunk, x_chunk in fusion_tasks
     ]
@@ -3671,6 +4536,14 @@ def run_fusion_analysis(
             "gain_clip_range": [float(v) for v in effective_gain_clip_range],
             "intensity_gains_component": f"{analysis_auxiliary_root('fusion')}/intensity_gains_tp",
             "intensity_offsets_component": f"{analysis_auxiliary_root('fusion')}/intensity_offsets_tp",
+            "deformable_lattice_component": str(deformable_lattice_component or ""),
+            "deformable_lattice_origin_xyz_um": [
+                float(value) for value in deformable_lattice_origin_xyz_um
+            ],
+            "deformable_lattice_spacing_um_zyx": [
+                float(value) for value in deformable_lattice_spacing_um_zyx
+            ],
+            "deformable_max_displacement_um": float(deformable_max_displacement_um),
             "output_shape_tpczyx": [int(value) for value in output_shape_tpczyx],
             "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
             "voxel_size_um_zyx": [float(value) for value in full_voxel_size_um_zyx],
@@ -3692,6 +4565,14 @@ def run_fusion_analysis(
             "gain_clip_range": [float(v) for v in effective_gain_clip_range],
             "intensity_gains_component": f"{analysis_auxiliary_root('fusion')}/intensity_gains_tp",
             "intensity_offsets_component": f"{analysis_auxiliary_root('fusion')}/intensity_offsets_tp",
+            "deformable_lattice_component": str(deformable_lattice_component or ""),
+            "deformable_lattice_origin_xyz_um": [
+                float(value) for value in deformable_lattice_origin_xyz_um
+            ],
+            "deformable_lattice_spacing_um_zyx": [
+                float(value) for value in deformable_lattice_spacing_um_zyx
+            ],
+            "deformable_max_displacement_um": float(deformable_max_displacement_um),
             "output_shape_tpczyx": [int(value) for value in output_shape_tpczyx],
             "output_chunks_tpczyx": [int(value) for value in output_chunks_tpczyx],
             "voxel_size_um_zyx": [float(value) for value in full_voxel_size_um_zyx],

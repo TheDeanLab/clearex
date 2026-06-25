@@ -74,6 +74,10 @@ These contracts are stable and expected by multiple modules:
 - ``volume_export`` is hybrid: OME-Zarr runs publish
   ``results/volume_export/latest``; OME-TIFF runs keep artifacts under
   ``clearex/results/volume_export/latest/files``.
+- Registration is metadata-only under
+  ``clearex/results/registration/latest``. Affine arrays remain the
+  compatibility contract, and optional deformable lattices are ClearEx-owned
+  non-image artifacts consumed by fusion.
 - ClearEx-owned metadata, provenance, GUI state, and non-image artifacts live
   under ``clearex/...``.
 - Store-level placement metadata is persisted in

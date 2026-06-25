@@ -388,6 +388,287 @@ def test_solve_with_pruning_recovers_similarity_transform() -> None:
     assert solved[1] == pytest.approx(measured, abs=1e-5)
 
 
+def test_solve_deformable_lattice_constraints_anchors_and_ignores_failed_samples() -> (
+    None
+):
+    """Residual samples should solve into per-position anchored displacement lattices."""
+    samples = [
+        registration_pipeline._DeformableConstraintSample(
+            fixed_position=0,
+            moving_position=1,
+            lattice_index_zyx=(0, 0, 0),
+            displacement_xyz_um=(2.0, 0.0, 0.0),
+            weight=1.0,
+            success=True,
+        ),
+        registration_pipeline._DeformableConstraintSample(
+            fixed_position=0,
+            moving_position=1,
+            lattice_index_zyx=(0, 0, 1),
+            displacement_xyz_um=(2.0, 0.0, 0.0),
+            weight=1.0,
+            success=True,
+        ),
+        registration_pipeline._DeformableConstraintSample(
+            fixed_position=0,
+            moving_position=1,
+            lattice_index_zyx=(0, 0, 0),
+            displacement_xyz_um=(99.0, 0.0, 0.0),
+            weight=1.0,
+            success=False,
+        ),
+    ]
+
+    lattice = registration_pipeline._solve_deformable_lattice_constraints(
+        positions=(0, 1),
+        anchor_position=0,
+        lattice_shape_zyx=(1, 1, 2),
+        samples=samples,
+        regularization_weight=0.0,
+        max_displacement_um=10.0,
+    )
+
+    assert lattice.shape == (2, 1, 1, 2, 3)
+    np.testing.assert_array_equal(lattice[0], np.zeros((1, 1, 2, 3), dtype=np.float32))
+    np.testing.assert_allclose(
+        lattice[1, 0, 0, :, 0],
+        np.asarray([2.0, 2.0], dtype=np.float32),
+        atol=1e-6,
+    )
+
+
+def test_source_subvolume_for_overlap_includes_deformable_padding_um() -> None:
+    """Fusion crops should include max displacement padding for nonlinear sampling."""
+    slices, _ = registration_pipeline._source_subvolume_for_overlap(
+        np.eye(4, dtype=np.float64),
+        reference_origin_xyz=np.asarray([10.0, 10.0, 10.0], dtype=np.float64),
+        reference_shape_zyx=(4, 4, 4),
+        source_shape_zyx=(30, 30, 30),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        padding=0,
+        deformation_padding_um=3.0,
+    )
+
+    assert slices == (slice(7, 17), slice(7, 17), slice(7, 17))
+
+
+def test_resample_source_to_world_grid_applies_deformable_sampling_displacement() -> (
+    None
+):
+    """A positive X lattice displacement should sample from the next source X voxel."""
+    source = np.broadcast_to(
+        np.arange(6, dtype=np.float32)[np.newaxis, np.newaxis, :],
+        (1, 1, 6),
+    )
+    lattice = np.zeros((1, 1, 2, 3), dtype=np.float32)
+    lattice[..., 0] = 1.0
+
+    warped = registration_pipeline._resample_source_to_world_grid(
+        source,
+        np.eye(4, dtype=np.float64),
+        reference_origin_xyz=np.asarray([0.0, 0.0, 0.0], dtype=np.float64),
+        reference_shape_zyx=(1, 1, 6),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        order=0,
+        cval=0.0,
+        deformable_lattice_zyx3=lattice,
+        deformable_lattice_origin_xyz=np.asarray([0.0, 0.0, 0.0], dtype=np.float64),
+        deformable_lattice_spacing_um_zyx=(1.0, 1.0, 5.0),
+    )
+
+    np.testing.assert_allclose(
+        warped[0, 0],
+        np.asarray([1.0, 2.0, 3.0, 4.0, 5.0, 0.0], dtype=np.float32),
+        atol=1e-6,
+    )
+
+
+def test_run_registration_analysis_persists_deformable_lattice_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opt-in deformable registration should persist a coarse anchored lattice."""
+    store_path = _create_registration_store(
+        tmp_path,
+        timepoints=1,
+        positions=2,
+        channels=1,
+        shape_zyx=(4, 4, 6),
+        include_pyramid=False,
+    )
+
+    def _sync_compute(*tasks, scheduler=None):
+        del scheduler
+        results = []
+        for task in tasks:
+            results.append(task.compute() if hasattr(task, "compute") else task)
+        return tuple(results)
+
+    def _fake_pairwise(**kwargs):
+        edge = kwargs["edge"]
+        return _edge_result(edge, np.eye(4, dtype=np.float64))
+
+    def _fake_deformable(**kwargs):
+        edge = kwargs["edge"]
+        lattice_shape = tuple(int(v) for v in kwargs["lattice_shape_zyx"])
+        samples = [
+            registration_pipeline._DeformableConstraintSample(
+                fixed_position=int(edge.fixed_position),
+                moving_position=int(edge.moving_position),
+                lattice_index_zyx=(iz, iy, ix),
+                displacement_xyz_um=(1.0, 0.0, 0.0),
+                weight=1.0,
+                success=True,
+            )
+            for iz in range(lattice_shape[0])
+            for iy in range(lattice_shape[1])
+            for ix in range(lattice_shape[2])
+        ]
+        return {
+            "fixed_position": int(edge.fixed_position),
+            "moving_position": int(edge.moving_position),
+            "success": True,
+            "reason": "",
+            "constraint_samples": samples,
+            "residual_rms_um": 0.25,
+        }
+
+    monkeypatch.setattr(registration_pipeline.dask, "compute", _sync_compute)
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_register_pairwise_overlap",
+        _fake_pairwise,
+    )
+    monkeypatch.setattr(
+        registration_pipeline,
+        "_register_pairwise_deformable_overlap",
+        _fake_deformable,
+    )
+
+    registration_pipeline.run_registration_analysis(
+        zarr_path=store_path,
+        parameters={
+            "input_source": "data",
+            "registration_channel": 0,
+            "registration_type": "translation",
+            "input_resolution_level": 0,
+            "anchor_mode": "central",
+            "anchor_position": 0,
+            "pairwise_overlap_zyx": [0, 0, 2],
+            "deformable_enabled": True,
+            "deformable_transform": "syn",
+            "deformable_iterations": [40, 20, 0],
+            "deformable_lattice_spacing_um_zyx": [4.0, 4.0, 5.0],
+            "deformable_regularization_weight": 0.0,
+            "deformable_max_displacement_um": 5.0,
+            "deformable_sample_count_per_edge": 3,
+        },
+        client=None,
+    )
+
+    root = zarr.open_group(str(store_path), mode="r")
+    latest = root["clearex/results/registration/latest"]
+    assert "deformable_lattice_tpzyx3" in latest
+    lattice = np.asarray(latest["deformable_lattice_tpzyx3"][:], dtype=np.float32)
+    assert lattice.shape[:2] == (1, 2)
+    np.testing.assert_allclose(lattice[0, 0], 0.0, atol=1e-6)
+    np.testing.assert_allclose(lattice[0, 1, ..., 0], 1.0, atol=1e-6)
+    assert latest["pairwise_deformable_status_te"][0, 0] == 1
+    assert latest["pairwise_deformable_residual_te"][0, 0] == pytest.approx(0.25)
+    assert latest.attrs["deformable_enabled"] is True
+    assert latest.attrs["deformable_lattice_component"].endswith(
+        "/deformable_lattice_tpzyx3"
+    )
+    assert latest.attrs["deformable_lattice_spacing_um_zyx"] == [4.0, 4.0, 5.0]
+    assert latest.attrs["deformable_max_displacement_um"] == pytest.approx(5.0)
+
+
+def test_process_and_write_registration_chunk_applies_deformable_lattice(
+    tmp_path: Path,
+) -> None:
+    """Fusion chunk rendering should apply affine plus deformable displacement."""
+    store_path = _create_registration_store(
+        tmp_path,
+        timepoints=1,
+        positions=1,
+        channels=1,
+        shape_zyx=(1, 1, 6),
+        include_pyramid=False,
+    )
+    root = zarr.open_group(str(store_path), mode="a")
+    root["data"][0, 0, 0] = np.arange(6, dtype=np.uint16).reshape(1, 1, 6)
+    _, output_component, affines_component, blend_weights_component = (
+        registration_pipeline._prepare_output_group(
+            analysis_name="fusion",
+            zarr_path=store_path,
+            source_component="data",
+            parameters={"input_source": "registration", "blend_mode": "average"},
+            output_shape_tpczyx=(1, 1, 1, 1, 1, 6),
+            output_chunks_tpczyx=(1, 1, 1, 1, 1, 6),
+            voxel_size_um_zyx=(1.0, 1.0, 1.0),
+            voxel_size_resolution_source="data",
+            output_origin_xyz=(0.0, 0.0, 0.0),
+            source_tile_shape_zyx=(1, 1, 6),
+            blend_mode="average",
+            overlap_zyx=(0, 0, 0),
+            blend_exponent=1.0,
+        )
+    )
+    auxiliary_root = registration_pipeline.analysis_auxiliary_root("fusion")
+    root[affines_component][0, 0] = np.eye(4, dtype=np.float64)
+    auxiliary_group = root[auxiliary_root]
+    auxiliary_group.create_array(
+        name="transformed_bboxes_tpx6",
+        data=np.asarray([[[0.0, 0.0, 0.0, 6.0, 1.0, 1.0]]], dtype=np.float64),
+        overwrite=True,
+    )
+    auxiliary_group.create_array(
+        name="intensity_gains_tp",
+        data=np.ones((1, 1), dtype=np.float32),
+        overwrite=True,
+    )
+    auxiliary_group.create_array(
+        name="intensity_offsets_tp",
+        data=np.zeros((1, 1), dtype=np.float32),
+        overwrite=True,
+    )
+    lattice = np.zeros((1, 1, 1, 1, 2, 3), dtype=np.float32)
+    lattice[..., 0] = 1.0
+    auxiliary_group.create_array(
+        name="deformable_lattice_tpzyx3",
+        data=lattice,
+        overwrite=True,
+    )
+
+    written = registration_pipeline._process_and_write_registration_chunk(
+        zarr_path=str(store_path),
+        source_component="data",
+        output_component=output_component,
+        affines_component=affines_component,
+        transformed_bboxes_component=f"{auxiliary_root}/transformed_bboxes_tpx6",
+        blend_weights_component=blend_weights_component,
+        intensity_gains_component=f"{auxiliary_root}/intensity_gains_tp",
+        intensity_offsets_component=f"{auxiliary_root}/intensity_offsets_tp",
+        deformable_lattice_component=f"{auxiliary_root}/deformable_lattice_tpzyx3",
+        deformable_lattice_origin_xyz_um=(0.0, 0.0, 0.0),
+        deformable_lattice_spacing_um_zyx=(1.0, 1.0, 5.0),
+        deformable_max_displacement_um=1.0,
+        t_index=0,
+        c_index=0,
+        z_bounds=(0, 1),
+        y_bounds=(0, 1),
+        x_bounds=(0, 6),
+        output_origin_xyz=(0.0, 0.0, 0.0),
+        voxel_size_um_zyx=(1.0, 1.0, 1.0),
+        output_dtype="uint16",
+    )
+
+    assert written == 1
+    np.testing.assert_array_equal(
+        np.asarray(root[output_component][0, 0, 0, 0, 0], dtype=np.uint16),
+        np.asarray([1, 2, 3, 4, 5, 0], dtype=np.uint16),
+    )
+
+
 def test_run_registration_analysis_fuses_output_and_writes_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1254,7 +1535,9 @@ def test_register_pairwise_overlap_reads_strided_sources_for_large_crop(
         grid = np.indices(reference_shape_zyx, dtype=np.float32)
         return np.asarray(grid[0] + grid[1] + grid[2] + 1.0, dtype=np.float32)
 
-    monkeypatch.setattr(registration_pipeline.zarr, "open_group", lambda *a, **k: _FakeRoot())
+    monkeypatch.setattr(
+        registration_pipeline.zarr, "open_group", lambda *a, **k: _FakeRoot()
+    )
     monkeypatch.setattr(registration_pipeline, "_worker_zarr_read", _fake_worker_read)
     monkeypatch.setattr(
         registration_pipeline,
