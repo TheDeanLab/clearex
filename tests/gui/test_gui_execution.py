@@ -2288,8 +2288,8 @@ def test_prompt_repair_multiposition_stage_metadata_repairs_and_retries(
             position_count=2,
         )
 
-    monkeypatch.setattr(app_module, "QMessageBox", _FakeMessageBox)
-    monkeypatch.setattr(app_module, "QFileDialog", _FakeFileDialog)
+    monkeypatch.setattr(app_module, "QMessageBox", _FakeMessageBox, raising=False)
+    monkeypatch.setattr(app_module, "QFileDialog", _FakeFileDialog, raising=False)
     monkeypatch.setattr(
         app_module,
         "repair_multiposition_stage_metadata",
