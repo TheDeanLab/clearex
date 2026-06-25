@@ -67,6 +67,7 @@ dev = [
     "ruff>=0.14.8",
     "pandas-stubs~=2.3.3",
     "scipy-stubs~=1.16.3",
+    "basedpyright==1.38.3",
 ]
 
 docs = [
@@ -89,3 +90,23 @@ Source = "https://github.com/TheDeanLab/clearex"
 
 [project.scripts]
 clearex = "clearex.main:main"
+
+[tool.basedpyright]
+include = ["src/clearex"]
+exclude = [
+    "**/__pycache__",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    ".worktrees",
+    "build",
+    "dist",
+    "docs/_build",
+    "downloaded_data",
+]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+baselineFile = ".basedpyright/baseline.json"
+reportMissingTypeStubs = "none"

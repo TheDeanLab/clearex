@@ -136,4 +136,4 @@ def compare_intensity(
     print(f"KS D = {D:.4f} | p = {p:.3g} | {verdict}")
     print(f"Wasserstein distance = {emd:.2f} ADU\n")
 
-    return D, p, emd
+    return float(D), float(p), float(emd)
