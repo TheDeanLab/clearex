@@ -852,6 +852,21 @@ class TestWorkflowConfig:
         assert params["deformable_max_displacement_um"] == pytest.approx(8.5)
         assert params["deformable_sample_count_per_edge"] == 7
 
+    def test_normalizes_registration_and_fusion_zero_overlap_padding(self):
+        cfg = WorkflowConfig(
+            analysis_parameters={
+                "registration": {"pairwise_overlap_zyx": [0, 0, 0]},
+                "fusion": {"blend_overlap_zyx": [0, 0, 0]},
+            }
+        )
+
+        assert cfg.analysis_parameters["registration"]["pairwise_overlap_zyx"] == [
+            0,
+            0,
+            0,
+        ]
+        assert cfg.analysis_parameters["fusion"]["blend_overlap_zyx"] == [0, 0, 0]
+
     def test_rejects_invalid_registration_resolution_level(self):
         with pytest.raises(ValueError):
             WorkflowConfig(

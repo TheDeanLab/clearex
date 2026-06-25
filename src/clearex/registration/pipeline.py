@@ -8,7 +8,6 @@ from __future__ import annotations
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-import json
 import logging
 import math
 from pathlib import Path
@@ -41,6 +40,10 @@ from clearex.io.ome_store import (
     resolve_voxel_size_um_zyx_with_source,
 )
 from clearex.io.provenance import register_latest_output_reference
+from clearex.io.stage_metadata import (
+    load_multiposition_stage_rows_from_directory,
+    parse_multiposition_stage_rows,
+)
 from clearex.workflow import SpatialCalibrationConfig, spatial_calibration_from_dict
 
 logger = logging.getLogger(__name__)
@@ -158,6 +161,32 @@ class FusionSummary:
     output_chunks_tpczyx: tuple[int, int, int, int, int, int]
 
 
+class MissingMultipositionStageMetadataError(ValueError):
+    """Raised when a multiposition store cannot resolve stage coordinates."""
+
+    def __init__(
+        self,
+        *,
+        store_path: str | Path,
+        position_count: int,
+        source_experiment: str | None,
+    ) -> None:
+        """Initialize missing-stage-metadata context."""
+        self.store_path = Path(store_path).expanduser()
+        self.position_count = max(1, int(position_count))
+        self.source_experiment = source_experiment
+        source_text = (
+            f" Recorded source_experiment: {source_experiment}."
+            if source_experiment
+            else ""
+        )
+        super().__init__(
+            "registration requires multiposition stage metadata when more "
+            f"than one position is present; found {self.position_count} "
+            f"positions but no usable stage rows.{source_text}"
+        )
+
+
 @dataclass(frozen=True)
 class _EdgeSpec:
     """Nominal overlap edge between two positions."""
@@ -200,14 +229,6 @@ def _emit(
     progress_callback(int(percent), str(message))
 
 
-def _safe_float(value: Any, *, default: float = 0.0) -> float:
-    """Parse a float with fallback."""
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
-
-
 @contextmanager
 def _bounded_zarr_worker_io() -> Any:
     """Cap nested Zarr I/O concurrency inside one worker task.
@@ -247,62 +268,9 @@ def _worker_zarr_write(array: Any, selection: Any, value: Any) -> None:
         array[selection] = value
 
 
-def _looks_like_multiposition_header(row: Any) -> bool:
-    """Return whether a row resembles a Navigate multiposition header."""
-    if not isinstance(row, (list, tuple)) or not row:
-        return False
-    labels = {str(value).strip().upper() for value in row}
-    return {"X", "Y", "Z"}.issubset(labels)
-
-
 def _parse_multiposition_stage_rows(payload: Any) -> list[dict[str, float]]:
     """Parse stage-coordinate rows from multiposition payloads."""
-    if not isinstance(payload, list):
-        return []
-
-    rows = list(payload)
-    header_index: dict[str, int] = {}
-    if rows and _looks_like_multiposition_header(rows[0]):
-        header = rows.pop(0)
-        if isinstance(header, (list, tuple)):
-            for idx, value in enumerate(header):
-                header_index[str(value).strip().upper()] = int(idx)
-
-    parsed: list[dict[str, float]] = []
-    for row in rows:
-        if isinstance(row, Mapping):
-            parsed.append(
-                {
-                    "x": _safe_float(row.get("x", row.get("X")), default=0.0),
-                    "y": _safe_float(row.get("y", row.get("Y")), default=0.0),
-                    "z": _safe_float(row.get("z", row.get("Z")), default=0.0),
-                    "theta": _safe_float(
-                        row.get("theta", row.get("THETA")), default=0.0
-                    ),
-                    "f": _safe_float(row.get("f", row.get("F")), default=0.0),
-                }
-            )
-            continue
-
-        if not isinstance(row, (list, tuple)):
-            continue
-
-        def _value(field: str, fallback_index: int) -> float:
-            index = header_index.get(field, fallback_index)
-            if index < 0 or index >= len(row):
-                return 0.0
-            return _safe_float(row[index], default=0.0)
-
-        parsed.append(
-            {
-                "x": _value("X", 0),
-                "y": _value("Y", 1),
-                "z": _value("Z", 2),
-                "theta": _value("THETA", 3),
-                "f": _value("F", 4),
-            }
-        )
-    return parsed
+    return parse_multiposition_stage_rows(payload)
 
 
 def _load_stage_rows(root_attrs: Mapping[str, Any]) -> list[dict[str, float]]:
@@ -328,17 +296,9 @@ def _load_stage_rows(root_attrs: Mapping[str, Any]) -> list[dict[str, float]]:
     sidecar_path = experiment_path.parent / "multi_positions.yml"
     if sidecar_path.exists():
         try:
-            text = sidecar_path.read_text()
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
-                try:
-                    import yaml  # type: ignore[import-not-found]
-
-                    payload = yaml.safe_load(text)
-                except Exception:
-                    payload = None
-            parsed = _parse_multiposition_stage_rows(payload)
+            parsed = load_multiposition_stage_rows_from_directory(
+                experiment_path.parent
+            )
             if parsed:
                 return parsed
         except Exception:
@@ -3454,8 +3414,15 @@ def run_registration_analysis(
     )
     stage_rows = _load_stage_rows(merged_metadata)
     if len(positions) > 1 and len(stage_rows) < len(positions):
-        raise ValueError(
-            "registration requires multiposition stage metadata when more than one position is present."
+        source_experiment = merged_metadata.get("source_experiment")
+        raise MissingMultipositionStageMetadataError(
+            store_path=zarr_path,
+            position_count=len(positions),
+            source_experiment=(
+                str(source_experiment)
+                if isinstance(source_experiment, str) and source_experiment.strip()
+                else None
+            ),
         )
     if not stage_rows:
         stage_rows = [

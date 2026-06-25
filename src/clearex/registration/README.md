@@ -52,6 +52,11 @@ integration:
   source reads and overlap resampling. Large overlap crops should be sampled
   onto a coarser registration grid instead of allocating the full-resolution
   crop and downsampling afterward.
+- Multiposition registration requires `clearex/metadata["stage_rows"]` and the
+  derived `position_translations_zyx_um` metadata. If a copied or relocated
+  store has more than one position but no persisted stage rows, `pipeline.py`
+  must raise `MissingMultipositionStageMetadataError` so the GUI can offer a
+  metadata-only repair from the current Navigate `experiment.yml`.
 
 ## Quick Start
 
@@ -513,7 +518,7 @@ These parameters belong to the `registration` operation.
 | `registration_channel` | `0` | Channel index used for pairwise overlap registration. Choose a structurally stable, high-SNR channel that is present in every tile; avoid sparse labels or channels with strong bleaching. |
 | `registration_type` | `"translation"` | Pairwise ANTsPy transform family: `translation` (fastest), `rigid`, or `similarity`. Translation is the default for maximum throughput; combined with FFT initial alignment this converges in very few iterations. |
 | `input_resolution_level` | `0` | Pyramid level used only for pairwise overlap registration (`0` = full resolution). Final fusion always resamples the full-resolution source tiles. |
-| `pairwise_overlap_zyx` | `(8, 32, 32)` | Overlap crop padding in `(z, y, x)` order used for pairwise registration. Larger values give ANTs more shared context, but they increase I/O and registration cost. |
+| `pairwise_overlap_zyx` | `(8, 32, 32)` | Overlap crop padding in `(z, y, x)` order used for pairwise registration. Values may be zero on axes where no extra padding is desired. Larger values give ANTs more shared context, but they increase I/O and registration cost. |
 | `anchor_mode` | `"central"` | Global graph anchor policy. `central` fixes the most central tile automatically; `manual` uses `anchor_position`. |
 | `anchor_position` | `None` | Tile index held fixed when `anchor_mode="manual"`. Use this only when you need a specific reference tile. |
 | `use_fft_initial_alignment` | `True` | Run FFT phase correlation to pre-align the moving crop before ANTs. Gives ANTs a much better starting point so it converges faster with fewer iterations. |
@@ -536,7 +541,7 @@ These parameters belong to the `fusion` operation.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `input_source` | `"registration"` | Registration result consumed by fusion. In the normal workflow this is the latest `registration` output. |
-| `blend_overlap_zyx` | `(8, 32, 32)` | Blend-ramp width in `(z, y, x)` order. Larger values widen the fusion transition and usually hide seams better, but they spread mismatch over a larger region. |
+| `blend_overlap_zyx` | `(8, 32, 32)` | Blend-ramp width in `(z, y, x)` order. Values may be zero on axes where no blend ramp is desired. Larger values widen the fusion transition and usually hide seams better, but they spread mismatch over a larger region. |
 | `blend_mode` | `"feather"` | Fusion mode for overlapping tiles. `average` uses uniform weights, `feather` uses cosine edge ramps, `center_weighted` steepens the feather falloff, `content_aware` modulates feather weights by local gradient content, and `gain_compensated_feather` estimates a moving-to-fixed intensity match before feather blending. |
 | `blend_exponent` | `1.0` | Exponent applied to the spatial blend profile. Values above `1.0` make the edge transition steeper; values below `1.0` make it gentler. |
 | `gain_clip_range` | `(0.25, 4.0)` | Minimum and maximum allowed multiplicative gain for gain-compensated feather. The fitted overlap gain is clipped into this range before fusion. |
@@ -662,6 +667,11 @@ Practical notes:
 - Try deformable registration only after affine settings and stage calibration
   have been checked. It is slower, experimental, and intentionally
   geometry-altering.
+- If registration fails before pairwise work starts because multiposition stage
+  metadata is missing, repair the store from the relocated `experiment.yml`
+  instead of rematerializing image data. The repair updates only
+  `clearex/metadata` and then registration can be retried with the same
+  analysis parameters.
 
 ### Recommended Starting Presets
 

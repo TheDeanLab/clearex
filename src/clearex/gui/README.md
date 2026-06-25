@@ -71,6 +71,9 @@ This folder owns the PyQt6 UX in `app.py`.
     - relay startup failures show a warning and do not fall back to the raw
       scheduler dashboard URL
     - `Stop Analysis` still requests cooperative cancellation
+    - missing multiposition stage metadata is recoverable: the GUI prompts for
+      the current Navigate `experiment.yml`, repairs only `clearex/metadata`
+      in the existing store, and offers to retry the failed workflow
 
 ## Analysis Dialog Invariants
 

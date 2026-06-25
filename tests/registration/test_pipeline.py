@@ -851,6 +851,54 @@ def test_run_registration_analysis_uses_namespaced_stage_metadata(
         )
 
 
+def test_run_registration_analysis_raises_typed_missing_stage_metadata(
+    tmp_path: Path,
+) -> None:
+    """Relocated multiposition stores should expose repair context to callers."""
+    store_path = tmp_path / "missing_stage_metadata.ome.zarr"
+    root = zarr.open_group(str(store_path), mode="w")
+    data = root.create_array(
+        "clearex/runtime_cache/results/shear_transform/latest/data",
+        shape=(1, 2, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype=np.float32,
+        overwrite=True,
+    )
+    data.attrs["voxel_size_um_zyx"] = [5.0, 1.0, 1.0]
+    metadata_group = root.require_group("clearex/metadata")
+    metadata_group.attrs.update(
+        {
+            "source_experiment": "/missing/original/experiment.yml",
+            "stage_rows": None,
+            "spatial_calibration": {
+                "schema": SPATIAL_CALIBRATION_SCHEMA,
+                "stage_axis_map_zyx": {"z": "+z", "y": "+x", "x": "-y"},
+                "theta_mode": "rotate_zy_about_x",
+            },
+        }
+    )
+
+    with pytest.raises(
+        registration_pipeline.MissingMultipositionStageMetadataError
+    ) as exc_info:
+        registration_pipeline.run_registration_analysis(
+            zarr_path=store_path,
+            parameters={
+                "input_source": "clearex/runtime_cache/results/shear_transform/latest/data",
+                "registration_channel": 0,
+                "registration_type": "rigid",
+                "input_resolution_level": 0,
+                "anchor_mode": "central",
+                "blend_mode": "feather",
+            },
+            client=None,
+        )
+
+    assert exc_info.value.store_path == store_path
+    assert exc_info.value.position_count == 2
+    assert exc_info.value.source_experiment == "/missing/original/experiment.yml"
+
+
 def test_run_registration_analysis_gain_compensated_feather_corrects_overlap_intensity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -733,6 +733,41 @@ def test_load_uses_experiment_dir_multi_positions_sidecar_when_save_directory_is
     assert experiment.multiposition_count == 2
 
 
+def test_load_multiposition_rows_returns_stage_row_dicts_for_list_sidecar(
+    tmp_path: Path,
+) -> None:
+    """Materialization should persist list-style sidecar coordinates."""
+    (tmp_path / "multi_positions.yml").write_text(
+        json.dumps(
+            [
+                ["X", "Y", "Z", "THETA", "F"],
+                [3901.21, -9594.1, -19588.2, 0.0, -9411.6],
+                [3901.21, -4717.9, -19588.2, 0.0, -9411.6],
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    rows = experiment_module._load_multiposition_rows(tmp_path)
+
+    assert rows == [
+        {
+            "x": 3901.21,
+            "y": -9594.1,
+            "z": -19588.2,
+            "theta": 0.0,
+            "f": -9411.6,
+        },
+        {
+            "x": 3901.21,
+            "y": -4717.9,
+            "z": -19588.2,
+            "theta": 0.0,
+            "f": -9411.6,
+        },
+    ]
+
+
 def test_load_infers_xy_pixel_size_from_zoom_and_binning(tmp_path: Path):
     experiment_path = tmp_path / "experiment.yml"
     payload = {

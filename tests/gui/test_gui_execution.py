@@ -2250,6 +2250,72 @@ def test_run_workflow_with_progress_slurm_shows_error_dialog_on_failure(
     assert dialog.closed is True
 
 
+def test_prompt_repair_multiposition_stage_metadata_repairs_and_retries(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Repair prompt should call the metadata repair helper and request retry."""
+    store_path = tmp_path / "data_store.ome.zarr"
+    experiment_path = tmp_path / "experiment.yml"
+    question_calls: list[tuple[str, str]] = []
+    repair_calls: list[tuple[Path, Path]] = []
+
+    class _FakeStandardButton:
+        Yes = 1
+        No = 2
+
+    class _FakeMessageBox:
+        StandardButton = _FakeStandardButton
+
+        @staticmethod
+        def question(_parent, title, message, _buttons, _default):
+            question_calls.append((str(title), str(message)))
+            return _FakeStandardButton.Yes
+
+    class _FakeFileDialog:
+        @staticmethod
+        def getOpenFileName(_parent, title, start_dir, file_filter):
+            assert "experiment.yml" in str(title)
+            assert str(start_dir) == str(tmp_path)
+            assert "Navigate Experiment" in str(file_filter)
+            return (str(experiment_path), "")
+
+    def _fake_repair(path: Path, selected_experiment: Path):
+        repair_calls.append((Path(path), Path(selected_experiment)))
+        return SimpleNamespace(
+            experiment_path=Path(selected_experiment),
+            stage_row_count=2,
+            position_count=2,
+        )
+
+    monkeypatch.setattr(app_module, "QMessageBox", _FakeMessageBox)
+    monkeypatch.setattr(app_module, "QFileDialog", _FakeFileDialog)
+    monkeypatch.setattr(
+        app_module,
+        "repair_multiposition_stage_metadata",
+        _fake_repair,
+    )
+    error = app_module.MissingMultipositionStageMetadataError(
+        store_path=store_path,
+        position_count=2,
+        source_experiment="/old/location/experiment.yml",
+    )
+
+    should_retry = app_module._prompt_repair_multiposition_stage_metadata(
+        None,
+        workflow=app_module.WorkflowConfig(file=str(store_path)),
+        error=error,
+    )
+
+    assert should_retry is True
+    assert repair_calls == [(store_path, experiment_path)]
+    assert [title for title, _message in question_calls] == [
+        "Repair Multiposition Metadata",
+        "Metadata Repaired",
+    ]
+    assert "/old/location/experiment.yml" in question_calls[0][1]
+
+
 def test_run_workflow_with_progress_slurm_cancels_without_error_dialog(
     monkeypatch,
 ) -> None:
@@ -3148,7 +3214,9 @@ def test_launch_gui_persists_reset_state_after_successful_run(
 
     result = app_module.launch_gui(
         initial=selected_workflow,
-        run_callback=lambda workflow, progress_callback, dask_client_lifecycle_callback=None: None,
+        run_callback=lambda workflow, progress_callback, dask_client_lifecycle_callback=None: (
+            None
+        ),
         dask_client_lifecycle_callback=lifecycle_callback,
     )
 
@@ -3885,6 +3953,119 @@ def test_on_run_propagates_display_pyramid_flag_into_workflow(
     assert accept_state["called"] is True
     assert dialog.result_config.display_pyramid is True
     assert dialog.result_config.visualization is False
+
+
+def test_on_run_warns_when_saved_analysis_parameters_are_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    class _FakeCheckbox:
+        def __init__(self, checked: bool) -> None:
+            self._checked = bool(checked)
+
+        def isChecked(self) -> bool:
+            return bool(self._checked)
+
+    class _FakeMessageBox:
+        @staticmethod
+        def warning(_parent, title, message):
+            warnings.append((str(title), str(message)))
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    base_config = app_module.WorkflowConfig(file="/tmp/data_store.zarr")
+    base_config.analysis_parameters["registration"]["pairwise_overlap_zyx"] = [0, 0]
+    dialog._base_config = base_config
+    dialog._refresh_operation_provenance_statuses = lambda: None
+    status_messages: list[str] = []
+    dialog._set_status = status_messages.append
+    dialog.accept = lambda: pytest.fail("dialog should not launch with invalid params")
+
+    selected = {
+        operation_name: _FakeCheckbox(False)
+        for operation_name in dialog._OPERATION_KEYS
+    }
+    selected["registration"] = _FakeCheckbox(True)
+    dialog._operation_checkboxes = selected
+
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(app_module, "QMessageBox", _FakeMessageBox)
+
+    app_module.AnalysisSelectionDialog._on_run(dialog)
+
+    assert warnings
+    assert warnings[0][0] == "Invalid Operation Parameters"
+    warning_message = warnings[0][1]
+    assert (
+        "registration pairwise_overlap_zyx must define exactly three values"
+        in warning_message
+    )
+    assert status_messages == ["Invalid analysis parameters."]
+
+
+def test_on_run_warns_when_collected_analysis_parameters_are_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(app_module, "AnalysisSelectionDialog"):
+        return
+
+    class _FakeCheckbox:
+        def __init__(self, checked: bool) -> None:
+            self._checked = bool(checked)
+
+        def isChecked(self) -> bool:
+            return bool(self._checked)
+
+    class _FakeMessageBox:
+        @staticmethod
+        def warning(_parent, title, message):
+            warnings.append((str(title), str(message)))
+
+    dialog = app_module.AnalysisSelectionDialog.__new__(
+        app_module.AnalysisSelectionDialog
+    )
+    base_config = app_module.WorkflowConfig(file="/tmp/data_store.zarr")
+    dialog._base_config = base_config
+    dialog._refresh_operation_provenance_statuses = lambda: None
+    status_messages: list[str] = []
+    dialog._set_status = status_messages.append
+    dialog.accept = lambda: pytest.fail("dialog should not launch with invalid params")
+
+    selected = {
+        operation_name: _FakeCheckbox(False)
+        for operation_name in dialog._OPERATION_KEYS
+    }
+    selected["registration"] = _FakeCheckbox(True)
+    dialog._operation_checkboxes = selected
+
+    normalized_defaults = app_module.normalize_analysis_operation_parameters(
+        base_config.analysis_parameters
+    )
+
+    def _collect_operation_parameters(operation_name: str) -> dict[str, object]:
+        params = dict(normalized_defaults.get(operation_name, {}))
+        if operation_name == "registration":
+            params["pairwise_overlap_zyx"] = [0, 0]
+        return params
+
+    dialog._collect_operation_parameters = _collect_operation_parameters
+
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(app_module, "QMessageBox", _FakeMessageBox)
+
+    app_module.AnalysisSelectionDialog._on_run(dialog)
+
+    assert warnings
+    assert warnings[0][0] == "Invalid Operation Parameters"
+    warning_message = warnings[0][1]
+    assert (
+        "registration pairwise_overlap_zyx must define exactly three values"
+        in warning_message
+    )
+    assert status_messages == ["Invalid analysis parameters."]
 
 
 def test_validate_selected_analysis_dependencies_rejects_later_scheduled_producer() -> (

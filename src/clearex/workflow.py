@@ -1058,6 +1058,24 @@ def _normalize_parameter_positive_float_triplet(
     return parsed
 
 
+def _normalize_parameter_nonnegative_int_triplet(
+    value: Any,
+    *,
+    field_name: str,
+    default: tuple[int, int, int],
+) -> list[int]:
+    """Normalize parameter value into a non-negative integer triplet."""
+    tokens = _normalize_parameter_string_list(value)
+    if not tokens:
+        return [int(default[0]), int(default[1]), int(default[2])]
+    if len(tokens) != 3:
+        raise ValueError(f"{field_name} must define exactly three values.")
+    parsed = [int(tokens[0]), int(tokens[1]), int(tokens[2])]
+    if any(item < 0 for item in parsed):
+        raise ValueError(f"{field_name} values must be greater than or equal to zero.")
+    return parsed
+
+
 def _normalize_parameter_int_pair(
     value: Any,
     *,
@@ -1931,7 +1949,7 @@ def _normalize_registration_parameters(
         "registration",
         normalized.get("input_source", "data"),
     )
-    normalized["pairwise_overlap_zyx"] = _normalize_parameter_int_triplet(
+    normalized["pairwise_overlap_zyx"] = _normalize_parameter_nonnegative_int_triplet(
         normalized.get(
             "pairwise_overlap_zyx",
             normalized.get("overlap_zyx", [8, 32, 32]),
@@ -2081,7 +2099,7 @@ def _normalize_fusion_parameters(
         ).strip()
         or "registration"
     )
-    normalized["blend_overlap_zyx"] = _normalize_parameter_int_triplet(
+    normalized["blend_overlap_zyx"] = _normalize_parameter_nonnegative_int_triplet(
         normalized.get(
             "blend_overlap_zyx",
             normalized.get("overlap_zyx", [8, 32, 32]),
