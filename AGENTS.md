@@ -78,6 +78,12 @@ workflow behavior for ClearEx lives in `src/clearex/AGENTS.md`.
 - For changes under `src/clearex`, follow the validation steps in
   `src/clearex/AGENTS.md` and any touched subsystem `README.md`.
 - If a change spans multiple subsystems, run the union of the relevant checks.
+- `uv run --extra dev basedpyright` is configured as a source-wide type-check
+  ratchet for `src/clearex`. Existing diagnostics are tracked in
+  `.basedpyright/baseline.json`; do not refresh this baseline broadly just to
+  make a run pass.
+- When intentionally paying down type debt, verify the affected module first,
+  then update the baseline only after confirming the diagnostic count decreases.
 
 ## Dependency Guidance
 

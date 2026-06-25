@@ -159,26 +159,27 @@ def gamma_otsu(
     np.ndarray
         The thresholded image data.
     """
+    gamma_value = 1.0 if gamma is None else float(gamma)
+    gaussian_sigma = 0.0 if gaussian_kernel is None else float(gaussian_kernel)
+    sampling = 1 if down_sampling is None else int(down_sampling)
 
     if isinstance(image_data, np.ndarray):
         image_data = da.from_array(image_data)
 
     # Gamma Correction
-    image_data = image_data**gamma
+    image_data = image_data**gamma_value
 
     # Gaussian Blur
     blurred = image_data.map_overlap(
         lambda x: ndimage.gaussian_filter(
-            x, sigma=gaussian_kernel, order=0, mode="nearest"
+            x, sigma=gaussian_sigma, order=0, mode="nearest"
         ),
         depth=10,
     )
     blur_image = blurred.compute()
 
     # Otsu Threshold
-    image_threshold = threshold_otsu(
-        blur_image[::down_sampling, ::down_sampling, ::down_sampling]
-    )
+    image_threshold = threshold_otsu(blur_image[::sampling, ::sampling, ::sampling])
     image_binary = blurred.map_blocks(lambda block: block > image_threshold, dtype=bool)
 
     # Dilation Operation

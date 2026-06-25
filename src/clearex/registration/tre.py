@@ -463,10 +463,13 @@ def mutual_nn_pairs(
     tree_moving = cKDTree(moving_rc)
 
     # For each moving point, find nearest fixed point
-    d_m2f, idx_m2f = tree_fixed.query(moving_rc, k=1)
+    d_m2f_raw, idx_m2f_raw = tree_fixed.query(moving_rc, k=1)
+    d_m2f = np.asarray(d_m2f_raw, dtype=float)
+    idx_m2f = np.asarray(idx_m2f_raw, dtype=np.intp)
 
     # For each fixed point, find nearest moving point
-    d_f2m, idx_f2m = tree_moving.query(fixed_rc, k=1)
+    _d_f2m, idx_f2m_raw = tree_moving.query(fixed_rc, k=1)
+    idx_f2m = np.asarray(idx_f2m_raw, dtype=np.intp)
 
     # Find mutual matches: moving[i] -> fixed[j] AND fixed[j] -> moving[i]
     idx_moving = np.arange(len(moving_rc))

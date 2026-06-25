@@ -11,7 +11,17 @@ from dataclasses import dataclass
 import logging
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+    cast,
+)
 
 import dask
 from dask import delayed
@@ -53,6 +63,7 @@ if TYPE_CHECKING:
 
 
 ProgressCallback = Callable[[int, str], None]
+_ScipyInterpolationOrder = Literal[0, 1, 2, 3, 4, 5]
 _ANTS_AFF_ITERATIONS_LEGACY = (2000, 1000, 500, 250)
 _ANTS_AFF_ITERATIONS = (200, 100, 50, 25)
 _ANTS_AFF_SHRINK_FACTORS = (8, 4, 2, 1)
@@ -79,6 +90,14 @@ _ZARR_WORKER_IO_MAX_THREADS = 1
 _PERMUTE_ZYX_TO_XYZ = np.asarray(
     [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64
 )
+
+
+def _scipy_interpolation_order(order: int) -> _ScipyInterpolationOrder:
+    """Normalize interpolation order for SciPy ndimage calls."""
+    normalized = int(order)
+    if normalized not in (0, 1, 2, 3, 4, 5):
+        raise ValueError("Interpolation order must be between 0 and 5.")
+    return cast(_ScipyInterpolationOrder, normalized)
 
 
 @dataclass(frozen=True)
@@ -705,6 +724,7 @@ def _resample_source_to_world_grid(
     deformable_lattice_spacing_um_zyx: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
     """Resample one source volume onto a world-aligned crop/output grid."""
+    interpolation_order = _scipy_interpolation_order(order)
     if deformable_lattice_zyx3 is not None:
         lattice = np.asarray(deformable_lattice_zyx3, dtype=np.float32)
         if lattice.ndim != 4 or lattice.shape[-1] != 3:
@@ -735,14 +755,17 @@ def _resample_source_to_world_grid(
         world_z = float(reference_origin_xyz[2]) + (
             grid_z * float(voxel_size_um_zyx[0])
         )
-        lattice_coords = [
-            (world_z - float(lattice_origin_xyz[2]))
-            / max(lattice_spacing_zyx[0], 1e-6),
-            (world_y - float(lattice_origin_xyz[1]))
-            / max(lattice_spacing_zyx[1], 1e-6),
-            (world_x - float(lattice_origin_xyz[0]))
-            / max(lattice_spacing_zyx[2], 1e-6),
-        ]
+        lattice_coords = np.asarray(
+            [
+                (world_z - float(lattice_origin_xyz[2]))
+                / max(lattice_spacing_zyx[0], 1e-6),
+                (world_y - float(lattice_origin_xyz[1]))
+                / max(lattice_spacing_zyx[1], 1e-6),
+                (world_x - float(lattice_origin_xyz[0]))
+                / max(lattice_spacing_zyx[2], 1e-6),
+            ],
+            dtype=np.float64,
+        )
         displacement_xyz = np.stack(
             [
                 ndimage.map_coordinates(
@@ -779,18 +802,21 @@ def _resample_source_to_world_grid(
             + world_to_local_xyz[2, 2] * sample_world_z
             + world_to_local_xyz[2, 3]
         )
-        source_coords = [
-            local_z / max(float(voxel_size_um_zyx[0]), 1e-6),
-            local_y / max(float(voxel_size_um_zyx[1]), 1e-6),
-            local_x / max(float(voxel_size_um_zyx[2]), 1e-6),
-        ]
+        source_coords = np.asarray(
+            [
+                local_z / max(float(voxel_size_um_zyx[0]), 1e-6),
+                local_y / max(float(voxel_size_um_zyx[1]), 1e-6),
+                local_x / max(float(voxel_size_um_zyx[2]), 1e-6),
+            ],
+            dtype=np.float64,
+        )
         return ndimage.map_coordinates(
             np.asarray(source_zyx),
             source_coords,
-            order=int(order),
+            order=interpolation_order,
             mode="constant",
             cval=float(cval),
-            prefilter=bool(order > 1),
+            prefilter=bool(interpolation_order > 1),
         ).astype(np.float32, copy=False)
 
     matrix, offset = _world_to_input_affine_zyx(
@@ -809,10 +835,10 @@ def _resample_source_to_world_grid(
         matrix=matrix,
         offset=offset,
         output_shape=reference_shape_zyx,
-        order=int(order),
+        order=interpolation_order,
         mode="constant",
         cval=float(cval),
-        prefilter=bool(order > 1),
+        prefilter=bool(interpolation_order > 1),
     ).astype(np.float32, copy=False)
 
 
