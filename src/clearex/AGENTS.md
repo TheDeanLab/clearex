@@ -39,6 +39,11 @@ This directory contains the runtime orchestration surface for ClearEx.
   `shear_transform`, `usegment3d`, and `registration` are logical names that
   resolve to runtime-cache components. New runtime code must not hard-code old
   public array paths.
+- Registration metadata must keep affine arrays (`affines_tpx44`,
+  `transformed_bboxes_tpx6`) as the compatibility contract. Optional
+  deformable registration persists a coarse world-space lattice under
+  `deformable_lattice_tpzyx3`; fusion must default to affine-only when this
+  lattice is absent and must not depend on raw ANTs overlap transform files.
 - Provenance records are append-only and include workflow + runtime parameters.
 - Store-level spatial calibration is persisted in `clearex/metadata` and
   missing values resolve to the identity mapping.
@@ -266,6 +271,26 @@ This directory contains the runtime orchestration surface for ClearEx.
 - `render_movie` and `compile_movie` are metadata/export analyses only. They do
   not publish public OME image collections and they do not become chainable
   scientific image sources for downstream analysis.
+
+## Recent Runtime Updates (2026-06-25)
+
+- Registration now supports an opt-in deformable follow-up after the affine
+  pairwise/global solve:
+  - `registration_type` remains the affine initializer (`translation`, `rigid`,
+    or `similarity`); deformable behavior is controlled by
+    `deformable_enabled` and related `deformable_*` parameters,
+  - successful pairwise residual SyN/SyNOnly samples are solved into one
+    anchored, regularized displacement lattice per `(timepoint, position)`,
+  - registration metadata may include `deformable_lattice_tpzyx3`,
+    `pairwise_deformable_status_te`, and `pairwise_deformable_residual_te`,
+  - fusion automatically applies affine-only placement for old stores and
+    affine-plus-lattice sampling when the deformable lattice is present,
+  - nonlinear source reads are padded by `deformable_max_displacement_um` and
+    blend weights are sampled with the same deformation as image data.
+- The GUI exposes deformable registration in the advanced registration
+  controls, defaulting disabled.
+- Detailed operational guidance remains in
+  `src/clearex/registration/README.md`.
 
 ## Recent Runtime Updates (2026-04-09)
 

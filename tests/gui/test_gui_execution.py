@@ -755,6 +755,17 @@ def test_analysis_dialog_persists_registration_parameters(
     dialog._registration_pairwise_overlap_z_spin.setValue(5)
     dialog._registration_pairwise_overlap_y_spin.setValue(12)
     dialog._registration_pairwise_overlap_x_spin.setValue(20)
+    dialog._registration_deformable_enabled_check.setChecked(True)
+    dialog._registration_deformable_transform_combo.setCurrentIndex(
+        dialog._registration_deformable_transform_combo.findData("synonly")
+    )
+    dialog._registration_deformable_lattice_spacing_z_spin.setValue(9.0)
+    dialog._registration_deformable_lattice_spacing_y_spin.setValue(10.5)
+    dialog._registration_deformable_lattice_spacing_x_spin.setValue(12.0)
+    dialog._registration_deformable_iterations_edit.setText("30, 15, 0")
+    dialog._registration_deformable_regularization_spin.setValue(0.35)
+    dialog._registration_deformable_max_displacement_spin.setValue(7.5)
+    dialog._registration_deformable_sample_count_spin.setValue(6)
     dialog._fusion_overlap_z_spin.setValue(6)
     dialog._fusion_overlap_y_spin.setValue(14)
     dialog._fusion_overlap_x_spin.setValue(22)
@@ -792,10 +803,72 @@ def test_analysis_dialog_persists_registration_parameters(
     assert params["pairwise_overlap_zyx"] == [5, 12, 20]
     assert params["registration_channel"] == 1
     assert params["input_resolution_level"] == expected_resolution_level
+    assert params["deformable_enabled"] is True
+    assert params["deformable_transform"] == "synonly"
+    assert params["deformable_iterations"] == [30, 15, 0]
+    assert params["deformable_lattice_spacing_um_zyx"] == [9.0, 10.5, 12.0]
+    assert params["deformable_regularization_weight"] == pytest.approx(0.35)
+    assert params["deformable_max_displacement_um"] == pytest.approx(7.5)
+    assert params["deformable_sample_count_per_edge"] == 6
     assert fusion["blend_overlap_zyx"] == [6, 14, 22]
     assert fusion["blend_mode"] == "gain_compensated_feather"
     assert fusion["blend_exponent"] == pytest.approx(1.8)
     assert fusion["gain_clip_range"] == pytest.approx([0.6, 2.4])
+
+
+def test_analysis_dialog_hydrates_deformable_registration_parameters(
+    tmp_path: Path,
+) -> None:
+    if not app_module.HAS_PYQT6:
+        return
+
+    app = app_module.QApplication.instance()
+    if app is None:
+        app = app_module.QApplication([])
+
+    store_path = _create_gui_analysis_store(tmp_path)
+    dialog = app_module.AnalysisSelectionDialog(
+        initial=app_module.WorkflowConfig(
+            file=str(store_path),
+            analysis_parameters={
+                "registration": {
+                    "deformable_enabled": True,
+                    "deformable_transform": "synonly",
+                    "deformable_iterations": [25, 10, 0],
+                    "deformable_lattice_spacing_um_zyx": [11.0, 12.0, 13.0],
+                    "deformable_regularization_weight": 0.45,
+                    "deformable_max_displacement_um": 6.5,
+                    "deformable_sample_count_per_edge": 8,
+                }
+            },
+        )
+    )
+
+    assert dialog._registration_deformable_enabled_check.isChecked() is True
+    assert dialog._registration_deformable_transform_combo.currentData() == "synonly"
+    assert dialog._registration_deformable_iterations_edit.text() == "25,10,0"
+    assert (
+        dialog._registration_deformable_lattice_spacing_z_spin.value()
+        == pytest.approx(11.0)
+    )
+    assert (
+        dialog._registration_deformable_lattice_spacing_y_spin.value()
+        == pytest.approx(12.0)
+    )
+    assert (
+        dialog._registration_deformable_lattice_spacing_x_spin.value()
+        == pytest.approx(13.0)
+    )
+    assert dialog._registration_deformable_regularization_spin.value() == pytest.approx(
+        0.45
+    )
+    assert (
+        dialog._registration_deformable_max_displacement_spin.value()
+        == pytest.approx(6.5)
+    )
+    assert dialog._registration_deformable_sample_count_spin.value() == 8
+
+    dialog.close()
 
 
 def test_registration_resolution_levels_follow_selected_input_source(

@@ -185,7 +185,11 @@ chains without changing the code path in ``main.py``.
 
 ``registration`` and ``fusion`` are intentionally split so operators can run
 transform estimation and final stitched rendering in separate executions with
-different backend sizing or worker-memory limits.
+different backend sizing or worker-memory limits. ``registration`` always
+persists affine transform/layout metadata; when the experimental deformable
+follow-up is enabled it also persists a coarse displacement lattice that
+``fusion`` consumes automatically. Older affine-only registration results
+remain valid fusion inputs.
 
 Input Source Resolution
 -----------------------
@@ -199,7 +203,7 @@ Runtime source aliases currently include:
 - ``fusion`` -> ``clearex/runtime_cache/results/fusion/latest/data``
 - ``usegment3d`` -> ``clearex/runtime_cache/results/usegment3d/latest/data``
 - ``registration`` -> ``clearex/results/registration/latest`` (metadata-only;
-  consumed by ``fusion``)
+  consumed by ``fusion``; may include optional deformable lattice metadata)
 - ``visualization`` -> ``clearex/results/visualization/latest`` (metadata-only;
   consumed by ``render_movie``)
 - ``render_movie`` -> ``clearex/results/render_movie/latest`` (metadata-only;

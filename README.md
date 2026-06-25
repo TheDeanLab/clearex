@@ -131,7 +131,8 @@ transform application, and chunked registration.
 - `data_store.ome.zarr` is the canonical materialized store beside `experiment.yml`.
 - The public source image collection is a synthetic single-well HCS layout at the store root: `A/1/<field>/<level>`.
 - Public image-producing analysis outputs are sibling HCS collections under `results/<analysis>/latest`.
-- `registration` is metadata-only under `clearex/results/registration/latest`; `fusion` owns the stitched image output under `results/fusion/latest`.
+- `registration` is metadata-only under `clearex/results/registration/latest`; it stores affine transforms/layout metadata and, when opt-in deformable registration is enabled, a coarse world-space displacement lattice for fusion.
+- `fusion` owns the stitched image output under `results/fusion/latest`; it uses affine-only placement for older registration results and affine-plus-deformable sampling when a deformable lattice is present.
 - `volume_export` writes canonical cache data under `clearex/runtime_cache/results/volume_export/latest/data`; OME-Zarr exports also publish `results/volume_export/latest`, while OME-TIFF artifacts stay in-store under `clearex/results/volume_export/latest/files`.
 - Standalone projection exports from `mip_export` are written outside the store as OME-TIFF (`.tif`) or standalone OME-Zarr (`.ome.zarr`) files.
 - ClearEx internal execution data lives under:
@@ -336,7 +337,9 @@ clearex --headless \
 ```
 
 Run registration and fusion as separate headless passes so each phase can use a
-different Dask worker profile:
+different Dask worker profile. If registration is configured with the
+experimental deformable follow-up, the fusion pass consumes the persisted
+deformation lattice automatically:
 
 ```bash
 clearex --headless \
@@ -426,7 +429,7 @@ clearex --migrate-store /path/to/legacy_store.zarr
 - In the setup window, `Spatial Calibration` is configured per listed experiment. Draft mappings are tracked per experiment while the dialog is open, existing stores prefill the control, and `Next` writes the resolved mapping to every reused or newly prepared store before analysis selection opens.
 - In headless mode, `--stage-axis-map` writes the supplied mapping to materialized experiment stores and existing canonical OME-Zarr stores before analysis starts. If the flag is omitted, existing store calibration is preserved.
 - Deconvolution, particle detection, uSegment3D, fusion, and visualization operations run against canonical OME-Zarr stores.
-- Registration and fusion can be run in separate executions. `registration` writes transform/layout metadata only, while `fusion` consumes that metadata and writes the stitched image result.
+- Registration and fusion can be run in separate executions. `registration` writes transform/layout metadata only, including optional `deformable_lattice_tpzyx3` when deformable registration is enabled, while `fusion` consumes that metadata and writes the stitched image result.
 - Visualization supports multi-volume overlays using logical sources and/or public OME image collections (for example source data plus `results/usegment3d/latest`) with per-layer image/labels display controls.
 - Multiposition visualization placement now resolves world `z/y/x` translations from the store-level spatial calibration. Bindings support `X`, `Y`, `Z`, and Navigate focus axis `F` with sign inversion or `none`; `THETA` remains a rotation of the `z/y` plane about world `x`.
 - Visualization now probes napari OpenGL renderer info (`vendor`/`renderer`/`version`) and can fail fast when software rendering is detected or GPU rendering cannot be confirmed (`require_gpu_rendering=True`).
@@ -574,6 +577,8 @@ clearex --migrate-store /path/to/legacy_store.zarr
   - `clearex/provenance/latest_outputs/<analysis>`
   - `clearex/gui_state`
   - `clearex/results/registration/latest`
+    - required affine/layout arrays such as `affines_tpx44` and `transformed_bboxes_tpx6`
+    - optional deformable arrays such as `deformable_lattice_tpzyx3`
   - `clearex/results/render_movie/latest`
   - `clearex/results/compile_movie/latest`
   - `clearex/runtime_cache/source/data`

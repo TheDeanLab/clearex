@@ -7953,6 +7953,13 @@ if HAS_PYQT6:
             "ants_sampling_rate": 0.20,
             "use_phase_correlation": False,
             "use_fft_initial_alignment": True,
+            "deformable_enabled": False,
+            "deformable_transform": "syn",
+            "deformable_iterations": [40, 20, 0],
+            "deformable_lattice_spacing_um_zyx": [64.0, 64.0, 64.0],
+            "deformable_regularization_weight": 0.10,
+            "deformable_max_displacement_um": 20.0,
+            "deformable_sample_count_per_edge": 5,
         }
         _DEFAULT_FUSION_PARAMETERS: Dict[str, Any] = {
             "execution_order": 5,
@@ -8242,6 +8249,34 @@ if HAS_PYQT6:
                 "Use FFT phase correlation to pre-align the moving crop "
                 "before ANTs optimization. This provides a better starting "
                 "point and reduces the iterations ANTs needs to converge."
+            ),
+            "registration_deformable_enabled": (
+                "Run an experimental deformable SyN follow-up after affine "
+                "registration and persist a coarse displacement lattice for fusion."
+            ),
+            "registration_deformable_transform": (
+                "ANTsPy deformable transform family used for the residual "
+                "overlap pass: SyN or SyNOnly."
+            ),
+            "registration_deformable_iterations": (
+                "Comma-separated ANTs deformable iteration schedule for the "
+                "residual pass."
+            ),
+            "registration_deformable_lattice_spacing_um_zyx": (
+                "Coarse deformation lattice spacing in microns in (z, y, x). "
+                "Smaller values can model local mismatch but increase cost."
+            ),
+            "registration_deformable_regularization_weight": (
+                "L2 regularization weight anchoring the solved displacement "
+                "lattice toward zero."
+            ),
+            "registration_deformable_max_displacement_um": (
+                "Maximum allowed lattice displacement in microns and extra "
+                "source-crop padding used by fusion."
+            ),
+            "registration_deformable_sample_count_per_edge": (
+                "Number of sample points per edge axis used to convert overlap "
+                "deformation fields into lattice constraints."
             ),
             "usegment3d_output_reference_space": (
                 "Choose whether final labels are stored at level 0 (original "
@@ -9561,6 +9596,9 @@ if HAS_PYQT6:
                 self._set_usegment3d_parameter_enabled_state
             )
             self._registration_anchor_mode_combo.currentIndexChanged.connect(
+                self._set_registration_parameter_enabled_state
+            )
+            self._registration_deformable_enabled_check.stateChanged.connect(
                 self._set_registration_parameter_enabled_state
             )
             self._fusion_blend_mode_combo.currentIndexChanged.connect(
@@ -11016,6 +11054,119 @@ if HAS_PYQT6:
                 self._PARAMETER_HINTS["registration_anchor_position"],
             )
             form.addRow(global_section)
+
+            deformable_section, deformable_form = self._build_parameter_section_card(
+                "Deformable Registration"
+            )
+            self._registration_deformable_enabled_check = QCheckBox(
+                "Enable deformable follow-up"
+            )
+            deformable_form.addRow(self._registration_deformable_enabled_check)
+            self._register_parameter_hint(
+                self._registration_deformable_enabled_check,
+                self._PARAMETER_HINTS["registration_deformable_enabled"],
+            )
+
+            self._registration_deformable_transform_combo = QComboBox()
+            self._registration_deformable_transform_combo.addItem("SyN", "syn")
+            self._registration_deformable_transform_combo.addItem("SyNOnly", "synonly")
+            deformable_form.addRow(
+                "transform",
+                self._registration_deformable_transform_combo,
+            )
+            self._register_parameter_hint(
+                self._registration_deformable_transform_combo,
+                self._PARAMETER_HINTS["registration_deformable_transform"],
+            )
+
+            self._registration_deformable_iterations_edit = QLineEdit()
+            self._registration_deformable_iterations_edit.setText("40,20,0")
+            deformable_form.addRow(
+                "iterations",
+                self._registration_deformable_iterations_edit,
+            )
+            self._register_parameter_hint(
+                self._registration_deformable_iterations_edit,
+                self._PARAMETER_HINTS["registration_deformable_iterations"],
+            )
+
+            spacing_row = QHBoxLayout()
+            apply_compact_row_spacing(spacing_row)
+            self._registration_deformable_lattice_spacing_z_spin = QDoubleSpinBox()
+            self._registration_deformable_lattice_spacing_z_spin.setDecimals(2)
+            self._registration_deformable_lattice_spacing_z_spin.setRange(
+                0.01, 1_000_000.0
+            )
+            self._registration_deformable_lattice_spacing_y_spin = QDoubleSpinBox()
+            self._registration_deformable_lattice_spacing_y_spin.setDecimals(2)
+            self._registration_deformable_lattice_spacing_y_spin.setRange(
+                0.01, 1_000_000.0
+            )
+            self._registration_deformable_lattice_spacing_x_spin = QDoubleSpinBox()
+            self._registration_deformable_lattice_spacing_x_spin.setDecimals(2)
+            self._registration_deformable_lattice_spacing_x_spin.setRange(
+                0.01, 1_000_000.0
+            )
+            spacing_row.addWidget(QLabel("z"))
+            spacing_row.addWidget(self._registration_deformable_lattice_spacing_z_spin)
+            spacing_row.addWidget(QLabel("y"))
+            spacing_row.addWidget(self._registration_deformable_lattice_spacing_y_spin)
+            spacing_row.addWidget(QLabel("x"))
+            spacing_row.addWidget(self._registration_deformable_lattice_spacing_x_spin)
+            spacing_widget = QWidget()
+            spacing_widget.setLayout(spacing_row)
+            deformable_form.addRow("lattice spacing", spacing_widget)
+            for widget in (
+                self._registration_deformable_lattice_spacing_z_spin,
+                self._registration_deformable_lattice_spacing_y_spin,
+                self._registration_deformable_lattice_spacing_x_spin,
+            ):
+                self._register_parameter_hint(
+                    widget,
+                    self._PARAMETER_HINTS[
+                        "registration_deformable_lattice_spacing_um_zyx"
+                    ],
+                )
+
+            self._registration_deformable_regularization_spin = QDoubleSpinBox()
+            self._registration_deformable_regularization_spin.setDecimals(3)
+            self._registration_deformable_regularization_spin.setRange(0.0, 1_000_000.0)
+            self._registration_deformable_regularization_spin.setSingleStep(0.05)
+            deformable_form.addRow(
+                "regularization",
+                self._registration_deformable_regularization_spin,
+            )
+            self._register_parameter_hint(
+                self._registration_deformable_regularization_spin,
+                self._PARAMETER_HINTS["registration_deformable_regularization_weight"],
+            )
+
+            self._registration_deformable_max_displacement_spin = QDoubleSpinBox()
+            self._registration_deformable_max_displacement_spin.setDecimals(2)
+            self._registration_deformable_max_displacement_spin.setRange(
+                0.01, 1_000_000.0
+            )
+            self._registration_deformable_max_displacement_spin.setSingleStep(1.0)
+            deformable_form.addRow(
+                "max displacement",
+                self._registration_deformable_max_displacement_spin,
+            )
+            self._register_parameter_hint(
+                self._registration_deformable_max_displacement_spin,
+                self._PARAMETER_HINTS["registration_deformable_max_displacement_um"],
+            )
+
+            self._registration_deformable_sample_count_spin = QSpinBox()
+            self._registration_deformable_sample_count_spin.setRange(2, 100)
+            deformable_form.addRow(
+                "samples per edge",
+                self._registration_deformable_sample_count_spin,
+            )
+            self._register_parameter_hint(
+                self._registration_deformable_sample_count_spin,
+                self._PARAMETER_HINTS["registration_deformable_sample_count_per_edge"],
+            )
+            form.addRow(deformable_section)
 
             perf_section, perf_form = self._build_parameter_section_card("Performance")
             self._registration_max_pairwise_voxels_spin = QSpinBox()
@@ -14746,12 +14897,30 @@ if HAS_PYQT6:
                 self._registration_pairwise_overlap_z_spin,
                 self._registration_pairwise_overlap_y_spin,
                 self._registration_pairwise_overlap_x_spin,
+                self._registration_deformable_enabled_check,
                 self._registration_max_pairwise_voxels_spin,
                 self._registration_use_phase_correlation_check,
                 self._registration_use_fft_initial_alignment_check,
             )
             for widget in widgets:
                 widget.setEnabled(registration_enabled)
+
+            deformable_enabled = (
+                registration_enabled
+                and self._registration_deformable_enabled_check.isChecked()
+            )
+            deformable_widgets = (
+                self._registration_deformable_transform_combo,
+                self._registration_deformable_iterations_edit,
+                self._registration_deformable_lattice_spacing_z_spin,
+                self._registration_deformable_lattice_spacing_y_spin,
+                self._registration_deformable_lattice_spacing_x_spin,
+                self._registration_deformable_regularization_spin,
+                self._registration_deformable_max_displacement_spin,
+                self._registration_deformable_sample_count_spin,
+            )
+            for widget in deformable_widgets:
+                widget.setEnabled(deformable_enabled)
 
             anchor_mode = (
                 str(self._registration_anchor_mode_combo.currentData() or "central")
@@ -15930,6 +16099,132 @@ if HAS_PYQT6:
             self._registration_use_fft_initial_alignment_check.setChecked(
                 bool(registration_params.get("use_fft_initial_alignment", True))
             )
+            self._registration_deformable_enabled_check.setChecked(
+                bool(registration_params.get("deformable_enabled", False))
+            )
+            deformable_transform = (
+                str(
+                    registration_params.get(
+                        "deformable_transform",
+                        self._registration_defaults.get("deformable_transform", "syn"),
+                    )
+                )
+                .strip()
+                .lower()
+                or "syn"
+            )
+            if deformable_transform == "syn_only":
+                deformable_transform = "synonly"
+            if deformable_transform not in {"syn", "synonly"}:
+                deformable_transform = "syn"
+            deformable_transform_index = (
+                self._registration_deformable_transform_combo.findData(
+                    deformable_transform
+                )
+            )
+            if deformable_transform_index < 0:
+                deformable_transform_index = (
+                    self._registration_deformable_transform_combo.findData("syn")
+                )
+            if deformable_transform_index < 0:
+                deformable_transform_index = 0
+            self._registration_deformable_transform_combo.setCurrentIndex(
+                deformable_transform_index
+            )
+
+            deformable_iterations = registration_params.get(
+                "deformable_iterations",
+                self._registration_defaults.get("deformable_iterations", [40, 20, 0]),
+            )
+            if isinstance(deformable_iterations, str):
+                iteration_values = [
+                    value.strip()
+                    for value in deformable_iterations.replace(";", ",").split(",")
+                    if value.strip()
+                ]
+            elif isinstance(deformable_iterations, (tuple, list)):
+                iteration_values = list(deformable_iterations)
+            else:
+                iteration_values = []
+            parsed_iterations: list[int] = []
+            for value in iteration_values:
+                try:
+                    parsed_iterations.append(max(0, int(value)))
+                except (TypeError, ValueError):
+                    parsed_iterations = []
+                    break
+            if not parsed_iterations:
+                parsed_iterations = [
+                    max(0, int(value))
+                    for value in self._registration_defaults.get(
+                        "deformable_iterations", [40, 20, 0]
+                    )
+                ]
+            self._registration_deformable_iterations_edit.setText(
+                ",".join(str(value) for value in parsed_iterations)
+            )
+
+            deformable_spacing = registration_params.get(
+                "deformable_lattice_spacing_um_zyx",
+                self._registration_defaults.get(
+                    "deformable_lattice_spacing_um_zyx", [64.0, 64.0, 64.0]
+                ),
+            )
+            if (
+                not isinstance(deformable_spacing, (tuple, list))
+                or len(deformable_spacing) != 3
+            ):
+                deformable_spacing = self._registration_defaults.get(
+                    "deformable_lattice_spacing_um_zyx", [64.0, 64.0, 64.0]
+                )
+            self._registration_deformable_lattice_spacing_z_spin.setValue(
+                max(0.01, float(deformable_spacing[0]))
+            )
+            self._registration_deformable_lattice_spacing_y_spin.setValue(
+                max(0.01, float(deformable_spacing[1]))
+            )
+            self._registration_deformable_lattice_spacing_x_spin.setValue(
+                max(0.01, float(deformable_spacing[2]))
+            )
+            self._registration_deformable_regularization_spin.setValue(
+                max(
+                    0.0,
+                    float(
+                        registration_params.get(
+                            "deformable_regularization_weight",
+                            self._registration_defaults.get(
+                                "deformable_regularization_weight", 0.10
+                            ),
+                        )
+                    ),
+                )
+            )
+            self._registration_deformable_max_displacement_spin.setValue(
+                max(
+                    0.01,
+                    float(
+                        registration_params.get(
+                            "deformable_max_displacement_um",
+                            self._registration_defaults.get(
+                                "deformable_max_displacement_um", 20.0
+                            ),
+                        )
+                    ),
+                )
+            )
+            self._registration_deformable_sample_count_spin.setValue(
+                max(
+                    2,
+                    int(
+                        registration_params.get(
+                            "deformable_sample_count_per_edge",
+                            self._registration_defaults.get(
+                                "deformable_sample_count_per_edge", 5
+                            ),
+                        )
+                    ),
+                )
+            )
 
             self._visualization_show_all_positions_checkbox.setChecked(
                 bool(visualization_params.get("show_all_positions", False))
@@ -17059,6 +17354,32 @@ if HAS_PYQT6:
             except (TypeError, ValueError):
                 registration_channel = 0
 
+            deformable_iteration_text = (
+                self._registration_deformable_iterations_edit.text().strip()
+            )
+            deformable_iteration_tokens = [
+                token.strip()
+                for token in deformable_iteration_text.replace(";", ",").split(",")
+                if token.strip()
+            ]
+            if not deformable_iteration_tokens:
+                raise ValueError(
+                    "Deformable iterations must contain at least one non-negative integer."
+                )
+            deformable_iterations: list[int] = []
+            for token in deformable_iteration_tokens:
+                try:
+                    iteration_count = int(token)
+                except ValueError as exc:
+                    raise ValueError(
+                        "Deformable iterations must be comma-separated non-negative integers."
+                    ) from exc
+                if iteration_count < 0:
+                    raise ValueError(
+                        "Deformable iterations must be comma-separated non-negative integers."
+                    )
+                deformable_iterations.append(iteration_count)
+
             return {
                 "chunk_basis": "3d",
                 "detect_2d_per_slice": False,
@@ -17095,6 +17416,28 @@ if HAS_PYQT6:
                 ),
                 "use_fft_initial_alignment": bool(
                     self._registration_use_fft_initial_alignment_check.isChecked()
+                ),
+                "deformable_enabled": bool(
+                    self._registration_deformable_enabled_check.isChecked()
+                ),
+                "deformable_transform": str(
+                    self._registration_deformable_transform_combo.currentData() or "syn"
+                ).strip()
+                or "syn",
+                "deformable_iterations": deformable_iterations,
+                "deformable_lattice_spacing_um_zyx": [
+                    float(self._registration_deformable_lattice_spacing_z_spin.value()),
+                    float(self._registration_deformable_lattice_spacing_y_spin.value()),
+                    float(self._registration_deformable_lattice_spacing_x_spin.value()),
+                ],
+                "deformable_regularization_weight": float(
+                    self._registration_deformable_regularization_spin.value()
+                ),
+                "deformable_max_displacement_um": float(
+                    self._registration_deformable_max_displacement_spin.value()
+                ),
+                "deformable_sample_count_per_edge": int(
+                    self._registration_deformable_sample_count_spin.value()
                 ),
             }
 
