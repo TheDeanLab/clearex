@@ -270,7 +270,13 @@ Execution progresses through these coarse stages:
 4. Publish latest outputs and append provenance run record.
 
 GUI execution uses explicit progress callbacks and per-run logging in the
-resolved workflow log directory.
+resolved workflow log directory. File-backed runs also write a sibling
+``*.events.jsonl`` structured audit log containing chronological workflow,
+input, analysis-step, progress, skip, failure, cancellation, and provenance
+events. Credential-like metadata keys are redacted before writing. When a run
+persists provenance in a canonical store, the final JSONL log is copied to
+``clearex/provenance/event_logs/<run_id>.jsonl`` and the run record stores its
+manifest, event count, checksum, execution id, and redaction policy.
 
 The ``Running Analysis`` dialog exposes an ``Open Dask Dashboard`` button.
 GUI dashboard launch behavior is:

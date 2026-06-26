@@ -292,6 +292,22 @@ This directory contains the runtime orchestration surface for ClearEx.
 - Detailed operational guidance remains in
   `src/clearex/registration/README.md`.
 
+## Recent Runtime Updates (2026-06-26)
+
+- Workflow execution now writes a structured JSONL audit event log beside the
+  plain text run log when a file-backed logger is active.
+- Audit events cover workflow start/end, input resolution, store
+  materialization, analysis sequence resolution, per-operation
+  start/progress/skip/complete/failure/cancel events, and provenance
+  persistence.
+- Audit metadata is redacted for credential-like keys before writing. Do not
+  add code that logs raw tokens, passwords, secrets, API keys, or authorization
+  headers.
+- Completed audit logs are copied into canonical stores under
+  `clearex/provenance/event_logs/<run_id>.jsonl` and linked from the
+  provenance run record with event count, checksum, execution id, and redaction
+  policy.
+
 ## Recent Runtime Updates (2026-04-09)
 
 - GUI-triggered Dask dashboard launch now uses a localhost-only tokenized

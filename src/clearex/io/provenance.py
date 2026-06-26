@@ -966,6 +966,8 @@ def persist_run_provenance(
     started_at_utc: Optional[datetime] = None,
     ended_at_utc: Optional[datetime] = None,
     repo_root: Optional[Union[str, Path]] = None,
+    run_id: Optional[str] = None,
+    audit_log: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Append a provenance run record to a Zarr/N5 store.
 
@@ -991,6 +993,11 @@ def persist_run_provenance(
         Run end timestamp in UTC.
     repo_root : str or pathlib.Path, optional
         Repository root for Git/environment metadata resolution.
+    run_id : str, optional
+        Run identifier to use. A new UUID hex identifier is generated when
+        omitted.
+    audit_log : mapping, optional
+        Structured audit-log manifest to embed in the run record.
 
     Returns
     -------
@@ -1013,7 +1020,7 @@ def persist_run_provenance(
     provenance_group = _provenance_group(root)
     runs_group = provenance_group.require_group("runs")
 
-    run_id = uuid.uuid4().hex
+    resolved_run_id = str(run_id).strip() if run_id else uuid.uuid4().hex
     previous_hash = provenance_group.attrs.get("latest_hash")
     run_count = int(provenance_group.attrs.get("run_count", 0))
     run_index = run_count + 1
@@ -1064,7 +1071,7 @@ def persist_run_provenance(
 
     run_record: Dict[str, Any] = {
         "schema": "clearex.provenance.v1",
-        "run_id": run_id,
+        "run_id": resolved_run_id,
         "run_index": run_index,
         "status": status,
         "timestamps": {
@@ -1096,24 +1103,91 @@ def persist_run_provenance(
             "analysis_outputs": "latest_only",
         },
     }
+    if audit_log is not None:
+        run_record["audit_log"] = _to_jsonable(dict(audit_log))
 
     record_to_hash = _to_jsonable(run_record)
     self_hash = _sha256_text(_canonical_json(record_to_hash))
     run_record["hash_chain"]["self_hash"] = self_hash
 
-    run_group = runs_group.require_group(run_id)
+    run_group = runs_group.require_group(resolved_run_id)
     run_group.attrs.update({"record": _to_jsonable(run_record)})
 
     provenance_group.attrs.update(
         {
             "schema": "clearex.provenance.v1",
-            "latest_run_id": run_id,
+            "latest_run_id": resolved_run_id,
             "latest_hash": self_hash,
             "run_count": run_index,
             "latest_updated_utc": ended.isoformat(),
         }
     )
-    return run_id
+    return resolved_run_id
+
+
+def attach_audit_log_manifest_to_latest_run(
+    zarr_path: Union[str, Path],
+    run_id: str,
+    audit_log: Mapping[str, Any],
+) -> None:
+    """Attach an audit-log manifest to the latest provenance run.
+
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Path to Zarr/N5 store.
+    run_id : str
+        Latest provenance run identifier to update.
+    audit_log : mapping
+        Structured audit-log manifest.
+
+    Returns
+    -------
+    None
+        The latest run record and provenance hash are updated in-place.
+
+    Raises
+    ------
+    ValueError
+        If ``zarr_path`` is not a Zarr/N5 path, the run is missing, or the
+        requested run is no longer the latest run.
+    """
+    if not is_zarr_store_path(zarr_path):
+        raise ValueError(f"Path is not a Zarr/N5 store: {zarr_path}")
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    provenance_group = _provenance_group(root)
+    if str(provenance_group.attrs.get("latest_run_id", "")) != str(run_id):
+        raise ValueError(
+            "Audit log manifests can only be attached to the latest provenance run."
+        )
+    runs_group = provenance_group.require_group("runs")
+    if str(run_id) not in runs_group:
+        raise ValueError(f"Provenance run not found: {run_id}")
+
+    run_group = runs_group[str(run_id)]
+    record_attr = run_group.attrs.get("record", {})
+    if not isinstance(record_attr, Mapping):
+        raise ValueError(f"Provenance run record is invalid: {run_id}")
+    record: Dict[str, Any] = dict(record_attr)
+    if not record:
+        raise ValueError(f"Provenance run record is empty: {run_id}")
+
+    record["audit_log"] = _to_jsonable(dict(audit_log))
+    hash_chain_attr = record.get("hash_chain", {})
+    hash_chain = dict(hash_chain_attr) if isinstance(hash_chain_attr, Mapping) else {}
+    hash_chain.pop("self_hash", None)
+    record["hash_chain"] = hash_chain
+    self_hash = _sha256_text(_canonical_json(_to_jsonable(record)))
+    record["hash_chain"]["self_hash"] = self_hash
+
+    run_group.attrs.update({"record": _to_jsonable(record)})
+    provenance_group.attrs.update(
+        {
+            "latest_hash": self_hash,
+            "latest_updated_utc": datetime.now(tz=timezone.utc).isoformat(),
+        }
+    )
 
 
 def verify_provenance_chain(zarr_path: Union[str, Path]) -> tuple[bool, list[str]]:

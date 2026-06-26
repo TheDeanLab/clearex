@@ -52,6 +52,11 @@ from clearex.io.experiment import (
     save_store_spatial_calibration,
 )
 from clearex.io.cli import create_parser, display_logo
+from clearex.io.audit import (
+    AuditEventWriter,
+    audit_log_path_for_logger,
+    persist_audit_log_file_to_store,
+)
 from clearex.io.log import initiate_logger
 from clearex.io.ome_store import (
     LEGACY_STORE_MIGRATION_HINT,
@@ -65,6 +70,7 @@ from clearex.io.ome_store import (
     publish_analysis_collection_from_cache,
 )
 from clearex.io.provenance import (
+    attach_audit_log_manifest_to_latest_run,
     is_zarr_store_path,
     persist_run_provenance,
     register_latest_output_reference,
@@ -1334,6 +1340,79 @@ def _run_workflow(
         If no reader can open the configured file.
     """
 
+    run_started_at = datetime.now(tz=timezone.utc)
+    image_info: Optional[ImageInfo] = None
+    output_records: Dict[str, Dict[str, object]] = {}
+    input_path = workflow.file
+    provenance_store_path: Optional[str] = None
+    run_status = "completed"
+    cancellation_exc: Optional[WorkflowExecutionCancelled] = None
+    failure_exc: Optional[Exception] = None
+    runtime_analysis_parameters = normalize_analysis_operation_parameters(
+        workflow.analysis_parameters
+    )
+    runtime_spatial_calibration = workflow.spatial_calibration
+    run_id: Optional[str] = None
+    current_operation_name: Optional[str] = None
+    current_requested_source = "data"
+    current_resolved_source = "data"
+    current_operation_parameters: Dict[str, Any] = {}
+    current_operation_started_at: Optional[datetime] = None
+    current_operation_progress_last = -5
+
+    audit_writer: Optional[AuditEventWriter] = None
+    try:
+        audit_log_path = audit_log_path_for_logger(logger)
+        if audit_log_path is not None:
+            audit_writer = AuditEventWriter(audit_log_path)
+            logger.info("Structured audit event log: %s", audit_log_path)
+    except Exception as exc:
+        logger.warning(
+            "Failed to initialize structured audit event logging: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        audit_writer = None
+
+    def _emit_audit_event(
+        event_type: str,
+        *,
+        level: str = "INFO",
+        operation: Optional[str] = None,
+        status: Optional[str] = None,
+        percent: Optional[int] = None,
+        message: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        error: Optional[BaseException | Mapping[str, Any] | str] = None,
+    ) -> None:
+        """Emit a best-effort structured audit event."""
+        nonlocal audit_writer
+        if audit_writer is None:
+            return
+        try:
+            audit_writer.emit(
+                event_type,
+                level=level,
+                operation=operation,
+                status=status,
+                percent=percent,
+                message=message,
+                metadata=metadata,
+                error=error,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Structured audit event logging failed for %s: %s: %s",
+                event_type,
+                type(exc).__name__,
+                exc,
+            )
+            try:
+                audit_writer.close()
+            except Exception:
+                pass
+            audit_writer = None
+
     def _emit_analysis_progress(percent: int, message: str) -> None:
         """Emit analysis progress callback updates when configured.
 
@@ -1349,28 +1428,110 @@ def _run_workflow(
         None
             Callback side effects only.
         """
-        if analysis_progress_callback is None:
-            return
+        nonlocal current_operation_progress_last
         clamped = max(0, min(100, int(percent)))
-        analysis_progress_callback(clamped, str(message))
+        text = str(message)
+        if analysis_progress_callback is not None:
+            analysis_progress_callback(clamped, text)
+        if current_operation_name is None:
+            return
+        if clamped < 100 and clamped - current_operation_progress_last < 5:
+            return
+        current_operation_progress_last = clamped
+        _emit_audit_event(
+            "analysis.step.progress",
+            operation=current_operation_name,
+            status="running",
+            percent=clamped,
+            message=text,
+            metadata={
+                "requested_input": current_requested_source,
+                "resolved_input": current_resolved_source,
+            },
+        )
+
+    def _operation_duration_ms() -> Optional[int]:
+        """Return the active operation duration in milliseconds."""
+        if current_operation_started_at is None:
+            return None
+        elapsed = datetime.now(tz=timezone.utc) - current_operation_started_at
+        return max(0, int(elapsed.total_seconds() * 1000))
+
+    class _AuditStepRecords(list[Dict[str, object]]):
+        """Step-record list that mirrors operation terminal records to audit."""
+
+        def append(self, record: Dict[str, object]) -> None:
+            super().append(record)
+            name = str(record.get("name", ""))
+            if current_operation_name is None or name != current_operation_name:
+                return
+            parameters = record.get("parameters")
+            metadata: Dict[str, Any] = {
+                "parameters": parameters if isinstance(parameters, Mapping) else {},
+                "requested_input": current_requested_source,
+                "resolved_input": current_resolved_source,
+            }
+            duration_ms = _operation_duration_ms()
+            if duration_ms is not None:
+                metadata["duration_ms"] = duration_ms
+            status_value = ""
+            if isinstance(parameters, Mapping):
+                status_value = str(parameters.get("status", "")).strip().lower()
+            if status_value == "skipped":
+                _emit_audit_event(
+                    "analysis.step.skipped",
+                    operation=current_operation_name,
+                    status="skipped",
+                    message=f"{current_operation_name} skipped.",
+                    metadata=metadata,
+                )
+            elif status_value == "failed":
+                _emit_audit_event(
+                    "analysis.step.failed",
+                    level="ERROR",
+                    operation=current_operation_name,
+                    status="failed",
+                    message=f"{current_operation_name} failed.",
+                    metadata=metadata,
+                    error=(
+                        str(parameters.get("error"))
+                        if isinstance(parameters, Mapping)
+                        and parameters.get("error") is not None
+                        else None
+                    ),
+                )
+            elif status_value == "cancelled":
+                _emit_audit_event(
+                    "analysis.step.cancelled",
+                    operation=current_operation_name,
+                    status="cancelled",
+                    message=f"{current_operation_name} cancelled.",
+                    metadata=metadata,
+                )
+            else:
+                _emit_audit_event(
+                    "analysis.step.completed",
+                    operation=current_operation_name,
+                    status="completed",
+                    message=f"{current_operation_name} completed.",
+                    metadata=metadata,
+                )
+
+    step_records: list[Dict[str, object]] = _AuditStepRecords()
+
+    _emit_audit_event(
+        "workflow.started",
+        status="started",
+        message="Workflow execution started.",
+        metadata={
+            "input_path": workflow.file,
+            "prefer_dask": workflow.prefer_dask,
+            "dask_backend": dask_backend_to_dict(workflow.dask_backend),
+            "analysis_parameters": runtime_analysis_parameters,
+        },
+    )
 
     _emit_analysis_progress(1, "Preparing workflow execution.")
-
-    # TODO: Persist workflow configuration for provenance/replay support.
-    run_started_at = datetime.now(tz=timezone.utc)
-    image_info: Optional[ImageInfo] = None
-    step_records: list[Dict[str, object]] = []
-    output_records: Dict[str, Dict[str, object]] = {}
-    input_path = workflow.file
-    provenance_store_path: Optional[str] = None
-    run_status = "completed"
-    cancellation_exc: Optional[WorkflowExecutionCancelled] = None
-    failure_exc: Optional[Exception] = None
-    runtime_analysis_parameters = normalize_analysis_operation_parameters(
-        workflow.analysis_parameters
-    )
-    runtime_spatial_calibration = workflow.spatial_calibration
-    run_id: Optional[str] = None
 
     def _configure_backend(
         *,
@@ -1426,6 +1587,20 @@ def _run_workflow(
                     "zarr_pyramid_ptczyx="
                     f"{format_zarr_pyramid_ptczyx(workflow.zarr_save.pyramid_ptczyx)}."
                 )
+                _emit_audit_event(
+                    "input.resolved",
+                    status="resolved",
+                    message="Navigate experiment metadata loaded.",
+                    metadata={
+                        "experiment_path": workflow.file,
+                        "resolved_data_path": str(resolved_data_path),
+                        "file_type": experiment.file_type,
+                        "timepoints": experiment.timepoints,
+                        "positions": experiment.multiposition_count,
+                        "channels": experiment.channel_count,
+                        "z_steps": experiment.number_z_steps,
+                    },
+                )
                 step_records.append(
                     {
                         "name": "load_experiment",
@@ -1472,6 +1647,21 @@ def _run_workflow(
                     "spatial_calibration="
                     f"{format_spatial_calibration(runtime_spatial_calibration)})."
                 )
+                _emit_audit_event(
+                    "store.materialized",
+                    status="completed",
+                    message="Source data materialized to canonical OME-Zarr store.",
+                    metadata={
+                        "source_path": str(materialized.source_path),
+                        "store_path": str(materialized.store_path),
+                        "source_component": materialized.source_component,
+                        "target_component": SOURCE_CACHE_COMPONENT,
+                        "chunks_tpczyx": list(materialized.chunks_tpczyx),
+                        "spatial_calibration": format_spatial_calibration(
+                            runtime_spatial_calibration
+                        ),
+                    },
+                )
                 step_records.append(
                     {
                         "name": "materialize_data_store",
@@ -1514,6 +1704,21 @@ def _run_workflow(
                 )
                 image_info = info
                 _log_loaded_image(info, logger)
+                _emit_audit_event(
+                    "input.resolved",
+                    status="resolved",
+                    message="Input image metadata loaded.",
+                    metadata={
+                        "input_path": input_path,
+                        "shape": list(info.shape),
+                        "dtype": str(info.dtype),
+                        "axes": (
+                            list(info.axes)
+                            if isinstance(info.axes, (list, tuple))
+                            else info.axes
+                        ),
+                    },
+                )
 
                 if input_path and is_zarr_store_path(input_path):
                     provenance_store_path = input_path
@@ -1538,6 +1743,18 @@ def _run_workflow(
                     ),
                 },
             }
+        )
+        _emit_audit_event(
+            "input.loaded",
+            status="completed",
+            message="Source data and metadata loaded.",
+            metadata={
+                "source_path": input_path,
+                "store_path": provenance_store_path,
+                "spatial_calibration": format_spatial_calibration(
+                    runtime_spatial_calibration
+                ),
+            },
         )
         _emit_analysis_progress(5, "Loaded source data and metadata.")
 
@@ -1564,17 +1781,29 @@ def _run_workflow(
                 "Analysis execution sequence: %s",
                 " -> ".join(execution_sequence),
             )
+            _emit_audit_event(
+                "analysis.sequence.resolved",
+                status="resolved",
+                message="Analysis execution sequence resolved.",
+                metadata={"execution_sequence": list(execution_sequence)},
+            )
             _emit_analysis_progress(
                 10,
                 "Analysis sequence: " + " -> ".join(execution_sequence),
             )
         else:
+            _emit_audit_event(
+                "analysis.sequence.resolved",
+                status="resolved",
+                message="No analysis operations selected.",
+                metadata={"execution_sequence": []},
+            )
             _emit_analysis_progress(100, "No analysis operations selected.")
 
-        current_operation_name: Optional[str] = None
+        current_operation_name = None
         current_requested_source = "data"
         current_resolved_source = "data"
-        current_operation_parameters: Dict[str, Any] = {}
+        current_operation_parameters = {}
         dependency_issues = []
         if provenance_store_path and is_zarr_store_path(provenance_store_path):
             references = collect_analysis_input_references(
@@ -1648,6 +1877,8 @@ def _run_workflow(
                 current_requested_source = "data"
                 current_resolved_source = "data"
                 current_operation_parameters = {}
+                current_operation_started_at = datetime.now(tz=timezone.utc)
+                current_operation_progress_last = -5
                 operation_start = 10 + int((operation_index / total_operations) * 85)
                 operation_end = 10 + int(
                     ((operation_index + 1) / total_operations) * 85
@@ -1675,6 +1906,21 @@ def _run_workflow(
                     requested_source,
                     resolved_source,
                     provenance_store_path,
+                )
+                _emit_audit_event(
+                    "analysis.step.started",
+                    operation=str(operation_name),
+                    status="started",
+                    percent=operation_start,
+                    message=f"Starting {operation_name} analysis.",
+                    metadata={
+                        "operation_index": int(operation_index) + 1,
+                        "operation_count": int(total_operations),
+                        "requested_input": requested_source,
+                        "resolved_input": resolved_source,
+                        "store_path": provenance_store_path,
+                        "parameters": operation_parameters,
+                    },
                 )
 
                 force_rerun = bool(operation_parameters.get("force_rerun", False))
@@ -3575,6 +3821,18 @@ def _run_workflow(
                 f"Persisted provenance run to store {provenance_store_path} "
                 f"with run_id={run_id}."
             )
+            if audit_writer is not None:
+                audit_writer.set_run_id(run_id)
+            _emit_audit_event(
+                "provenance.persisted",
+                status="completed",
+                message="Provenance run persisted.",
+                metadata={
+                    "store_path": provenance_store_path,
+                    "run_id": run_id,
+                    "status": run_status,
+                },
+            )
 
             for analysis_name, metadata in output_records.items():
                 try:
@@ -3596,6 +3854,72 @@ def _run_workflow(
                 f"Failed to persist provenance in Zarr store "
                 f"{provenance_store_path}: {exc}"
             )
+            _emit_audit_event(
+                "provenance.failed",
+                level="WARNING",
+                status="failed",
+                message="Failed to persist provenance run.",
+                metadata={"store_path": provenance_store_path},
+                error=exc,
+            )
+
+    terminal_event_type = {
+        "completed": "workflow.completed",
+        "failed": "workflow.failed",
+        "cancelled": "workflow.cancelled",
+    }.get(run_status, "workflow.finished")
+    terminal_level = "ERROR" if run_status == "failed" else "INFO"
+    terminal_error: Optional[BaseException] = failure_exc
+    if cancellation_exc is not None:
+        terminal_error = cancellation_exc
+    _emit_audit_event(
+        terminal_event_type,
+        level=terminal_level,
+        status=run_status,
+        message=f"Workflow execution {run_status}.",
+        metadata={
+            "store_path": provenance_store_path,
+            "run_id": run_id,
+            "steps_recorded": len(step_records),
+            "outputs_recorded": list(output_records.keys()),
+        },
+        error=terminal_error,
+    )
+
+    if audit_writer is not None:
+        try:
+            audit_manifest = audit_writer.finish(run_id=run_id)
+            if (
+                run_id
+                and provenance_store_path
+                and is_zarr_store_path(provenance_store_path)
+            ):
+                audit_manifest = persist_audit_log_file_to_store(
+                    zarr_path=provenance_store_path,
+                    audit_log_path=audit_writer.path,
+                    run_id=run_id,
+                    execution_id=audit_writer.execution_id,
+                )
+                attach_audit_log_manifest_to_latest_run(
+                    zarr_path=provenance_store_path,
+                    run_id=run_id,
+                    audit_log=audit_manifest,
+                )
+                logger.info(
+                    "Structured audit event log persisted to store %s "
+                    "(run_id=%s, events=%s).",
+                    provenance_store_path,
+                    run_id,
+                    audit_manifest.get("event_count"),
+                )
+        except Exception as exc:
+            logger.warning(
+                "Failed to finalize structured audit event log: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+        finally:
+            audit_writer = None
 
     if cancellation_exc is not None:
         raise cancellation_exc

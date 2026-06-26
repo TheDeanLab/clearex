@@ -9,6 +9,7 @@ from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+import json
 import logging
 import sys
 
@@ -1115,6 +1116,122 @@ def test_run_workflow_logs_operation_context_on_flatfield_failure(
     assert "Analysis operation 'flatfield' failed" in captured_messages[0]
     assert str(store_path) in captured_messages[0]
     assert "requested_input=data" in captured_messages[0]
+
+
+def test_run_workflow_emits_structured_audit_events_for_analysis_step(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store_path = tmp_path / "analysis_store_audit.ome.zarr"
+    root = main_module.zarr.open_group(str(store_path), mode="w")
+    root.create_dataset(
+        name="data",
+        shape=(1, 1, 1, 2, 2, 2),
+        chunks=(1, 1, 1, 2, 2, 2),
+        dtype="uint16",
+        overwrite=True,
+    )
+
+    class _DummyOpener:
+        def open(self, path, *, prefer_dask, chunks):
+            del prefer_dask, chunks
+            return None, ImageInfo(
+                path=Path(path),
+                shape=(1, 1, 1, 2, 2, 2),
+                dtype=np.uint16,
+                axes=["t", "p", "c", "z", "y", "x"],
+            )
+
+    def _fake_flatfield(*, zarr_path, parameters, client, progress_callback):
+        del zarr_path, parameters, client
+        progress_callback(0, "reading source")
+        progress_callback(50, "estimating illumination")
+        progress_callback(100, "writing corrected image")
+        return SimpleNamespace(
+            component=main_module.analysis_auxiliary_root("flatfield"),
+            data_component=_FLATFIELD_CACHE_DATA,
+            flatfield_component=f"{main_module.analysis_auxiliary_root('flatfield')}/flatfield",
+            darkfield_component=f"{main_module.analysis_auxiliary_root('flatfield')}/darkfield",
+            baseline_component=f"{main_module.analysis_auxiliary_root('flatfield')}/baseline",
+            source_component="data",
+            profile_count=1,
+            transformed_volumes=1,
+            output_chunks_tpczyx=(1, 1, 1, 2, 2, 2),
+            output_dtype="uint16",
+            basicpy_version="test",
+        )
+
+    log_path = tmp_path / "workflow.log"
+    logger = logging.getLogger("clearex.test.main.audit_events")
+    logger.handlers = []
+    handler = logging.FileHandler(log_path)
+    logger.addHandler(handler)
+    logger.propagate = False
+
+    monkeypatch.setattr(main_module, "ImageOpener", _DummyOpener)
+    monkeypatch.setattr(main_module, "run_flatfield_analysis", _fake_flatfield)
+    monkeypatch.setattr(
+        main_module,
+        "publish_analysis_collection_from_cache",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(main_module, "is_navigate_experiment_file", lambda path: False)
+    monkeypatch.setattr(
+        main_module,
+        "_configure_dask_backend",
+        lambda *, workflow, logger, exit_stack, workload="io": None,
+    )
+
+    workflow = WorkflowConfig(
+        file=str(store_path),
+        prefer_dask=False,
+        flatfield=True,
+        analysis_parameters={
+            "flatfield": {
+                "input_source": "data",
+                "secret_token": "do-not-write",
+            }
+        },
+    )
+
+    try:
+        main_module._run_workflow(workflow=workflow, logger=logger)
+    finally:
+        handler.close()
+        logger.removeHandler(handler)
+
+    event_path = tmp_path / "workflow.events.jsonl"
+    records = [
+        json.loads(line) for line in event_path.read_text().splitlines() if line.strip()
+    ]
+    event_types = [str(record["event_type"]) for record in records]
+
+    assert event_types[0] == "workflow.started"
+    assert "analysis.sequence.resolved" in event_types
+    assert "analysis.step.started" in event_types
+    assert "analysis.step.progress" in event_types
+    assert "analysis.step.completed" in event_types
+    assert "provenance.persisted" in event_types
+    assert event_types[-1] == "workflow.completed"
+    assert "do-not-write" not in event_path.read_text()
+
+    started = next(
+        record for record in records if record["event_type"] == "analysis.step.started"
+    )
+    assert started["operation"] == "flatfield"
+    metadata = started["metadata"]
+    assert isinstance(metadata, dict)
+    parameters = metadata["parameters"]
+    assert isinstance(parameters, dict)
+    assert parameters["secret_token"] == "[REDACTED]"
+
+    provenance = root["clearex/provenance"]
+    run_id = provenance.attrs["latest_run_id"]
+    run_record = dict(provenance["runs"][run_id].attrs["record"])
+    assert run_record["audit_log"]["event_count"] == len(records)
+    copied_log = (
+        store_path / "clearex" / "provenance" / "event_logs" / f"{run_id}.jsonl"
+    )
+    assert copied_log.exists()
 
 
 def test_run_workflow_persists_cancelled_provenance_status(

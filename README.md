@@ -126,6 +126,7 @@ transform application, and chunked registration.
   - compile-movie metadata (`clearex/results/compile_movie/latest`) with external MP4 / ProRes files
   - MIP export metadata (`clearex/results/mip_export/latest`) with external OME-TIFF / OME-Zarr files
 - FAIR-style provenance records are persisted in `clearex/provenance/runs` with append-only run history and hash chaining.
+- Each logged workflow also writes a structured JSONL audit event log beside the text log, records analysis step start/progress/skip/complete/failure events, redacts sensitive credential-like fields, and links the final log manifest into provenance.
 
 ## Canonical Store Contract
 - `data_store.ome.zarr` is the canonical materialized store beside `experiment.yml`.
@@ -143,6 +144,9 @@ transform application, and chunked registration.
   - `clearex/provenance`
   - `clearex/gui_state`
   - `clearex/results/<analysis>/latest`
+- Structured audit-event logs copied into a canonical store live under
+  `clearex/provenance/event_logs/<run_id>.jsonl`; the run record stores the
+  manifest, event count, checksum, and redaction policy.
 - Legacy root `data`, root `data_pyramid`, and `results/<analysis>/latest/data` layouts are migration-only and are no longer the canonical public contract.
 
 ## Installation
@@ -575,6 +579,7 @@ clearex --migrate-store /path/to/legacy_store.zarr
   - `clearex/metadata`
   - `clearex/provenance/runs/<run_id>`
   - `clearex/provenance/latest_outputs/<analysis>`
+  - `clearex/provenance/event_logs/<run_id>.jsonl`
   - `clearex/gui_state`
   - `clearex/results/registration/latest`
     - required affine/layout arrays such as `affines_tpx44` and `transformed_bboxes_tpx6`

@@ -8,6 +8,7 @@ This folder contains ingestion, CLI, logging, and provenance logic.
 - `ome_store.py`: OME-Zarr v3 path helpers, publication helpers, metadata namespace helpers, and legacy-store migration.
 - `stage_metadata.py`: Shared parsing for Navigate multiposition stage rows.
 - `stage_metadata_repair.py`: Metadata-only repair for relocated multiposition stores.
+- `audit.py`: structured JSONL audit-event writer and store-copy helpers.
 - `provenance.py`: run record persistence and latest-output references.
 - `cli.py`: headless flags and parser behavior.
 - `log.py`: logger setup and output location.
@@ -152,10 +153,18 @@ This folder contains ingestion, CLI, logging, and provenance logic.
 - Persist effective spatial calibration in workflow provenance so historical
   runs preserve the placement rule they used.
 - Register `latest` output references for discoverability.
+- Link structured audit-log manifests into run records when an audit log exists.
 
 ## Logging Rules
 
 - Runtime logs should initialize in the canonical store directory context.
+- File-backed workflow runs write a sibling `*.events.jsonl` audit log. The log
+  records chronological workflow/input/operation/provenance events and is copied
+  into canonical stores at `clearex/provenance/event_logs/<run_id>.jsonl` after
+  provenance is persisted.
+- Audit metadata must remain search-friendly but safe: record paths,
+  parameters, access scheme, status, durations, and checksums where useful, but
+  redact credential-like keys before writing.
 - Keep failure messages explicit (source path, component, reason).
 - GUI/runtime metadata introspection should resolve dataset shape, voxel size,
   and pyramid levels from `clearex/runtime_cache/source/data` plus

@@ -18,6 +18,8 @@ Within a canonical OME-Zarr store:
 
 - run records: ``clearex/provenance/runs/<run_id>``
 - latest output references: ``clearex/provenance/latest_outputs/<analysis>``
+- structured audit logs:
+  ``clearex/provenance/event_logs/<run_id>.jsonl``
 - public image collections: root source HCS collection and
   ``results/<analysis>/latest`` for image-producing analyses
 - internal image outputs:
@@ -42,6 +44,27 @@ Run Record Content
 - ordered step records and output references,
 - software metadata (package version, git commit/branch/dirty),
 - environment fingerprint (Python/platform/lockfile hash/argv).
+- structured audit-log manifest when a file-backed audit log was written.
+
+Structured Audit Events
+-----------------------
+
+For file-backed workflow runs, ClearEx writes a sibling ``*.events.jsonl`` file
+next to the plain text log. Each JSONL record contains a schema/version,
+sequence number, UTC timestamp, execution id, optional run id, event type,
+status, operation, progress, message, and redacted metadata.
+
+The workflow dispatcher emits events for workflow start/end, input resolution,
+store materialization, analysis sequence resolution, per-analysis
+start/progress/skip/complete/failure/cancel states, and provenance persistence.
+Sensitive credential-like keys such as tokens, passwords, secrets, API keys,
+private keys, and authorization headers are replaced with ``[REDACTED]`` before
+the record is written.
+
+After provenance persistence succeeds, the final JSONL file is copied into the
+canonical store under ``clearex/provenance/event_logs/<run_id>.jsonl``. The
+latest run record is updated with the audit manifest and its hash is recomputed
+so ``verify_provenance_chain`` still validates the run history.
 
 Hash Chain Integrity
 --------------------

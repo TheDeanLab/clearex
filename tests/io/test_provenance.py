@@ -142,6 +142,36 @@ def test_persist_run_provenance_records_spatial_calibration(tmp_path: Path) -> N
     assert record["workflow"]["spatial_calibration_text"] == "z=+x,y=none,x=+y"
 
 
+def test_persist_run_provenance_records_audit_log_manifest(tmp_path: Path) -> None:
+    store_path = tmp_path / "audit_provenance.zarr"
+    zarr.open_group(str(store_path), mode="w")
+    workflow = WorkflowConfig(file=str(store_path), visualization=True)
+    audit_manifest = {
+        "schema": "clearex.audit_log_manifest.v1",
+        "execution_id": "exec-1",
+        "run_id": "run-1",
+        "event_log_path": str(tmp_path / "run.events.jsonl"),
+        "event_count": 4,
+        "sha256": "abc123",
+    }
+
+    run_id = persist_run_provenance(
+        zarr_path=store_path,
+        workflow=workflow,
+        image_info=ImageInfo(path=store_path, shape=(2, 2), dtype=np.uint8),
+        audit_log=audit_manifest,
+        repo_root=tmp_path,
+    )
+
+    root = zarr.open_group(str(store_path), mode="r")
+    record = dict(root[f"{_PROVENANCE_ROOT}/runs"][run_id].attrs["record"])
+
+    assert record["audit_log"] == audit_manifest
+    valid, issues = verify_provenance_chain(store_path)
+    assert valid is True
+    assert issues == []
+
+
 def test_verify_provenance_chain_detects_tampering(tmp_path: Path):
     store_path = tmp_path / "tamper_test.zarr"
     zarr.open_group(str(store_path), mode="w")
